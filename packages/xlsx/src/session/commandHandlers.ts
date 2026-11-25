@@ -415,8 +415,7 @@ export interface WorkbookStructuralRefusalResult {
 }
 
 function isTableHeaderRefusal(message: string): boolean {
-  return message === 'formulas are not supported in Excel table headers' ||
-    message.startsWith('cannot rename table ');
+  return message.startsWith('table header edit is unsupported: ');
 }
 
 /** Reads the cause from a structural refusal the engine raised. */

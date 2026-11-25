@@ -989,7 +989,7 @@ impl Workbook {
                         .map_err(|error| {
                             let message = if matches!(
                                 error,
-                                Error::Operation(OpError::TableHeaderFormulaUnsupported)
+                                Error::Operation(OpError::TableHeaderUnsupported(_))
                             ) {
                                 error.to_string()
                             } else {
@@ -1016,7 +1016,12 @@ impl Workbook {
                     let header =
                         table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let state = CellState {
-                        value: value.clone(),
+                        value: match value {
+                            CellValue::Empty if header => CellValue::Text {
+                                value: String::new(),
+                            },
+                            value => value.clone(),
+                        },
                         formula: None,
                         style: written_cell_style(
                             &self.model,
@@ -1054,7 +1059,7 @@ impl Workbook {
                     .map_err(|error| {
                         let message = if matches!(
                             error,
-                            Error::Operation(OpError::TableHeaderFormulaUnsupported)
+                            Error::Operation(OpError::TableHeaderUnsupported(_))
                         ) {
                             error.to_string()
                         } else {
@@ -1178,14 +1183,8 @@ impl Workbook {
                         continue;
                     }
                     let input = format!("{prefix}{next}");
-                    if input.starts_with('=')
-                        && table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
-                    {
-                        return Err(at(
-                            EditFailureCode::InvalidStep,
-                            OpError::TableHeaderFormulaUnsupported.to_string(),
-                        ));
-                    }
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     *units = units.saturating_add(utf16_units(&input));
                     if *units > MAX_TEXT_UNITS {
                         return Err(at(
@@ -1195,7 +1194,7 @@ impl Workbook {
                             ),
                         ));
                     }
-                    if typed_formula_fails(&self.model, resolved.sheet, cell, &input) {
+                    if !header && typed_formula_fails(&self.model, resolved.sheet, cell, &input) {
                         let reason = format!("{place}: the new formula {input} does not parse");
                         refuse_cell(&mut stats, cell, reason);
                         continue;
@@ -1215,11 +1214,14 @@ impl Workbook {
                             validate_cell_state(&state)
                         });
                     if let Err(error) = stored_as {
+                        if matches!(error, Error::Operation(OpError::TableHeaderUnsupported(_))) {
+                            return Err(at(EditFailureCode::InvalidStep, error.to_string()));
+                        }
                         refuse_cell(&mut stats, cell, format!("{place}: {error}"));
                         continue;
                     }
                     if format.is_some()
-                        || table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
+                        || header
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1364,12 +1366,12 @@ impl Workbook {
             validate_op(&preview, &op)?;
             let formats = preview.styles.cell_xfs.len();
             let staged = (|| -> Result<_> {
+                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
                 if let Op::SetCell { sheet, at, cell } = &op
                     && cell_write_is_unchanged(&preview, *sheet, *at, cell)?
                 {
                     return Ok(None);
                 }
-                self.ensure_table_header_references(&preview, &self.preserved.origins, &op)?;
                 Ok(Some(xlsx_ops::apply_in_place(&mut preview, &op)?.0))
             })();
             let inverse = match staged {
@@ -1378,10 +1380,7 @@ impl Workbook {
                 Err(Error::Operation(
                     error @ (OpError::InvalidStyle(_)
                     | OpError::NumFmtTableFull
-                    | OpError::TableHeaderFormulaUnsupported
-                    | OpError::TableHeaderTextTooLong
-                    | OpError::TableHeaderReferenceUnsupported { .. }
-                    | OpError::MissingTableColumn { .. }),
+                    | OpError::TableHeaderUnsupported(_)),
                 )) => {
                     let code = match error {
                         OpError::NumFmtTableFull => EditFailureCode::LimitExceeded,
@@ -1445,6 +1444,9 @@ impl Workbook {
                     error.to_string(),
                     None,
                 ));
+            }
+            Err(error @ Error::Operation(OpError::TableHeaderUnsupported(_))) => {
+                return refuse(failure(EditFailureCode::InvalidStep, error.to_string(), None));
             }
             Err(error) => return Err(error),
         };

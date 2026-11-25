@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRef, CellValue, EditFailureCode, EditOperation, EditRequest,
-    EditStep, Error, RangeAddress, RangeTarget, SheetId, Workbook, WorkbookModel,
+    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditFailureCode, EditOperation,
+    EditRequest, EditStep, Error, Op, RangeAddress, RangeTarget, SheetId, StylePatch, Workbook,
+    WorkbookModel,
 };
 use xlsx_model::CellProvider;
-use xlsx_ops::OpError;
+use xlsx_ops::{CellState, OpError};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -287,6 +288,43 @@ fn clearing_a_header_generates_a_column_name() {
 }
 
 #[test]
+fn clearing_an_already_empty_header_generates_a_column_name() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="B1" t="s"><v>0</v></c>"#,
+        "",
+    );
+    for raw in [false, true] {
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_eq!(workbook.model().value(SHEET1, at("B1")), CellValue::Empty);
+        if raw {
+            workbook
+                .apply_ops(
+                    vec![Op::SetCell {
+                        sheet: SHEET1,
+                        at: at("B1"),
+                        cell: CellState::default(),
+                    }],
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        } else {
+            edit(&mut workbook, "B1", "");
+        }
+        assert_saved_headers(&workbook.save().unwrap(), ["Name", "Column1", "Rev"]);
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(workbook.model().value(SHEET1, at("B1")), CellValue::Empty);
+        assert_eq!(
+            workbook.model().table("Table1").unwrap().columns[1],
+            "Status"
+        );
+        workbook.redo(CalculationOptions::default()).unwrap();
+        assert_saved_headers(&workbook.save().unwrap(), ["Name", "Column1", "Rev"]);
+    }
+}
+
+#[test]
 fn duplicate_headers_receive_the_lowest_available_suffix() {
     let mut workbook = Workbook::open(&book()).unwrap();
     edit(&mut workbook, "B1", "Name");
@@ -316,16 +354,8 @@ fn changing_only_the_case_of_a_header_preserves_the_typed_name() {
     let before = ooxml_opc::unzip_parts(&source).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     let path = "xl/tables/table1.xml";
-    assert_eq!(part(&after, path), part(&before, path));
-    assert_eq!(
-        Workbook::open(&saved)
-            .unwrap()
-            .model()
-            .value(SHEET1, at("B1")),
-        CellValue::Text {
-            value: "STATUS".into()
-        },
-    );
+    assert_ne!(part(&after, path), part(&before, path));
+    assert_saved_headers(&saved, ["Name", "STATUS", "Rev"]);
 }
 
 #[test]
@@ -355,7 +385,8 @@ fn a_suffix_over_the_cell_text_limit_is_refused_atomically() {
         .unwrap_err();
     assert!(matches!(
         error,
-        Error::Operation(OpError::TableHeaderTextTooLong)
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("length limit")
     ));
     assert_eq!(workbook.version(), version);
     assert_saved_headers(&workbook.save().unwrap(), [&name, "Status", "Rev"]);
@@ -368,8 +399,9 @@ fn a_formula_in_a_header_is_refused_without_changing_it() {
         .edit_cell(SHEET1, at("B1"), "=1+1", CalculationOptions::default())
         .unwrap_err();
     assert!(matches!(
-        error,
-        Error::Operation(OpError::TableHeaderFormulaUnsupported)
+        &error,
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("formulas are not supported")
     ));
     let outcome = workbook
         .apply_edits(&EditRequest {
@@ -442,7 +474,7 @@ fn a_data_cell_edit_preserves_the_table_part_byte_for_byte() {
 }
 
 #[test]
-fn saving_heals_an_existing_header_mismatch_and_preserves_other_tables() {
+fn an_unrelated_edit_preserves_a_preexisting_header_mismatch() {
     let source = replace_part(
         &book(),
         "xl/sharedStrings.xml",
@@ -456,12 +488,84 @@ fn saving_heals_an_existing_header_mismatch_and_preserves_other_tables() {
     );
     edit(&mut workbook, "B3", "Reviewed");
     let saved = workbook.save().unwrap();
-    assert_saved_headers(&saved, ["Name", "State", "Rev"]);
     let before = ooxml_opc::unzip_parts(&source).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
-    for path in ["xl/tables/table2.xml", "xl/tables/table3.xml"] {
+    let path = "xl/tables/table1.xml";
+    assert_eq!(part(&after, path), part(&before, path));
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
+    assert_eq!(
+        reopened.model().value(SHEET1, at("B1")),
+        CellValue::Text {
+            value: "State".into(),
+        }
+    );
+}
+
+#[test]
+fn styling_header_cells_preserves_the_table_parts() {
+    let source = replace_part(&book(), "xl/sharedStrings.xml", "Status", "_x0001_");
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="C1" t="inlineStr"><is><t>Rev</t></is></c>"#,
+        "",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .patch_range_style(
+            SHEET1,
+            CellRange::parse_a1("A1:F1").unwrap(),
+            StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    for path in [
+        "xl/tables/table1.xml",
+        "xl/tables/table2.xml",
+        "xl/tables/table3.xml",
+    ] {
         assert_eq!(part(&after, path), part(&before, path), "{path}");
     }
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().value(SHEET1, at("B1")),
+        CellValue::Text {
+            value: "\u{1}".into(),
+        }
+    );
+    assert_eq!(reopened.model().value(SHEET1, at("C1")), CellValue::Empty);
+}
+
+#[test]
+fn an_unrelated_edit_preserves_tables_with_duplicate_display_names_on_separate_sheets() {
+    let path = "xl/tables/table3.xml";
+    let source = replace_part(
+        &book(),
+        path,
+        r#"displayName="Table3""#,
+        r#"displayName="Table1""#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B3", "Reviewed");
+    let saved = workbook.save().unwrap();
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    for path in ["xl/tables/table1.xml", path] {
+        assert_eq!(part(&after, path), part(&before, path), "{path}");
+    }
+    edit(&mut workbook, "B1", "State");
+    let error = workbook.save().unwrap_err();
+    assert!(error.to_string().contains("duplicate display name"));
 }
 
 #[test]
@@ -508,13 +612,14 @@ fn a_table_with_totals_uses_its_first_row_as_headers() {
 #[test]
 fn a_header_with_xml_special_characters_and_a_line_break_round_trips() {
     let mut workbook = Workbook::open(&book()).unwrap();
-    let name = "A<B & \"C\"\nNext";
+    let name = "A<B & \"C\"\nNext\u{1}";
     edit(&mut workbook, "B1", name);
     let saved = workbook.save().unwrap();
     assert_saved_headers(&saved, ["Name", name, "Rev"]);
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let xml = std::str::from_utf8(part(&parts, "xl/tables/table1.xml")).unwrap();
     assert!(xml.contains("_x000A_"), "{xml}");
+    assert!(xml.contains("_x0001_"), "{xml}");
 }
 
 #[test]
@@ -583,30 +688,66 @@ fn another_sheets_formula_and_a_defined_name_follow_a_header_rename() {
 }
 
 #[test]
-fn a_peer_receives_the_header_and_its_rewritten_formula() {
+fn a_collaborative_session_refuses_a_header_edit() {
     let source = book();
-    let mut writer = Workbook::open_collaborative(&source, 77).unwrap();
+    let mut workbook = Workbook::open_collaborative(&source, 77).unwrap();
+    let version = workbook.version();
+    let error = workbook
+        .edit_cell(SHEET1, at("B1"), "State", CalculationOptions::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("shared session")
+    ));
+    assert_eq!(workbook.version(), version);
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
+
     let mut peer = Workbook::open_collaborative(&source, 78).unwrap();
-    edit(&mut writer, "H1", "=COUNTA(Table1[Status])");
-    edit(&mut writer, "B1", "State");
-    let update = writer
+    workbook
+        .patch_range_style(
+            SHEET1,
+            CellRange::parse_a1("A1:C1").unwrap(),
+            StylePatch {
+                bold: Some(true),
+                ..StylePatch::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let update = workbook
         .encode_diff_v1(&peer.encode_state_vector_v1())
         .unwrap();
-    peer.apply_update_v1(&update, CalculationOptions::default())
+    let result = peer
+        .apply_update_v1(&update, CalculationOptions::default())
         .unwrap();
+    assert!(result.applied);
+    assert_saved_headers(&peer.save().unwrap(), ["Name", "Status", "Rev"]);
+}
+
+#[test]
+fn a_control_character_in_a_referenced_caption_is_refused() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    edit(&mut workbook, "H1", "=COUNTA(Table1[Status])");
+    let version = workbook.version();
+    let error = workbook
+        .edit_cell(SHEET1, at("B1"), "State\u{1}", CalculationOptions::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("character XML cannot carry")
+    ));
+    assert_eq!(workbook.version(), version);
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
     assert_eq!(
-        peer.model().sheets[0]
+        reopened.model().sheets[0]
             .cell(at("H1"))
             .unwrap()
             .formula
             .as_deref(),
-        Some("COUNTA(Table1[State])")
+        Some("COUNTA(Table1[Status])")
     );
-    assert_eq!(
-        peer.model().value(SHEET1, at("H1")),
-        CellValue::Number { value: 3.0 }
-    );
-    assert_saved_headers(&peer.save().unwrap(), ["Name", "State", "Rev"]);
 }
 
 #[test]
@@ -623,7 +764,8 @@ fn a_reference_in_a_preserved_table_formula_refuses_the_rename() {
         .unwrap_err();
     assert!(matches!(
         error,
-        Error::Operation(OpError::TableHeaderReferenceUnsupported { .. })
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("xl/tables/table1.xml")
     ));
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
 }
@@ -645,6 +787,7 @@ fn a_reference_in_a_data_validation_refuses_the_rename() {
         .unwrap_err();
     assert!(matches!(
         error,
-        Error::Operation(OpError::TableHeaderReferenceUnsupported { .. })
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("xl/worksheets/sheet2.xml")
     ));
 }

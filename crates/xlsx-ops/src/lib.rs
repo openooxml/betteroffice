@@ -35,5 +35,7 @@ pub use op::OracleOp;
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::{ProposalSheets, insertion_keeps_chart_anchor_on_grid, remap_proposal_formula};
-pub use table_header::{normalize_table_header, references_table_column, table_header_at};
+pub use table_header::{
+    normalize_table_header, references_table_column, table_header_at, table_header_write_at,
+};
 pub use undo::UndoStack;

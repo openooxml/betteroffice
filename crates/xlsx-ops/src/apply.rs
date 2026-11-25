@@ -33,17 +33,7 @@ pub enum OpError {
         sheet: SheetId,
         cell: CellRef,
     },
-    TableHeaderFormulaUnsupported,
-    TableHeaderTextTooLong,
-    TableHeaderReferenceUnsupported {
-        table: String,
-        column: String,
-        location: String,
-    },
-    MissingTableColumn {
-        sheet: SheetId,
-        cell: CellRef,
-    },
+    TableHeaderUnsupported(String),
     DefinedNameNotRewritable {
         name: String,
     },
@@ -99,22 +89,8 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
-            OpError::TableHeaderFormulaUnsupported => {
-                f.write_str("formulas are not supported in Excel table headers")
-            }
-            OpError::TableHeaderTextTooLong => {
-                f.write_str("cell text exceeds Excel's length limit")
-            }
-            OpError::TableHeaderReferenceUnsupported {
-                table,
-                column,
-                location,
-            } => write!(
-                f,
-                "cannot rename table {table} column {column}: a reference in {location} cannot be safely rewritten"
-            ),
-            OpError::MissingTableColumn { sheet, cell } => {
-                write!(f, "no table column for sheet {}, {}", sheet.0, cell.to_a1())
+            OpError::TableHeaderUnsupported(reason) => {
+                write!(f, "table header edit is unsupported: {reason}")
             }
             OpError::SheetNameNotWritable => write!(
                 f,
@@ -213,25 +189,53 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .cell(*at)
                 .map(CellState::from)
                 .unwrap_or_default();
-            let mut inverse = vec![Op::SetCell {
-                sheet: *sheet,
-                at: *at,
-                cell: old,
-            }];
-            let state = if let Some((table, column, name)) =
+            let (state, inverse) = if let Some((table, column, name)) =
                 normalize_table_header(wb, *sheet, *at, cell)?
             {
+                let mut restores = vec![(*sheet, *at, old)];
+                let mut inverse = Vec::new();
                 if wb.tables[table].columns[column] != name {
-                    rename_table_column(wb, table, column, *at, &name, &mut inverse)?;
+                    if wb.tables[table].columns[column].to_lowercase() != name.to_lowercase() {
+                        rename_table_column(
+                            wb,
+                            table,
+                            column,
+                            *at,
+                            &name,
+                            &mut restores,
+                            &mut inverse,
+                        )?;
+                    }
+                    inverse.push(Op::SetTables {
+                        tables: wb.tables.clone(),
+                    });
                     wb.tables[table].columns[column] = name.clone();
                 }
-                CellState {
-                    value: CellValue::Text { value: name },
-                    formula: None,
-                    style: cell.style,
-                }
+                inverse.insert(
+                    0,
+                    Op::RestoreSheet {
+                        sheet: *sheet,
+                        name: wb.sheets[sheet.0 as usize].name.clone(),
+                        formulas: restores,
+                    },
+                );
+                (
+                    CellState {
+                        value: CellValue::Text { value: name },
+                        formula: None,
+                        style: cell.style,
+                    },
+                    inverse,
+                )
             } else {
-                cell.clone()
+                (
+                    cell.clone(),
+                    vec![Op::SetCell {
+                        sheet: *sheet,
+                        at: *at,
+                        cell: old,
+                    }],
+                )
             };
             wb.styles.preserve_style_identity();
             wb.sheets[sheet.0 as usize].set_cell(*at, state.into());
@@ -860,8 +864,13 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }
             // names are left as they are: the rename's inverse restores its
             // saved table, and rewriting it here could pass the byte bound
-            let charts = rename_chart_refs(wb, &old_name, name);
-            sheet_mut(wb, *sheet)?.name = name.clone();
+            let charts = if old_name == *name {
+                Vec::new()
+            } else {
+                let charts = rename_chart_refs(wb, &old_name, name);
+                sheet_mut(wb, *sheet)?.name = name.clone();
+                charts
+            };
             for (formula_sheet, cell, state) in formulas {
                 sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
             }

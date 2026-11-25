@@ -2,7 +2,7 @@
 //! are both staged off the live state, and only then is either adopted.
 
 use xlsx_model::Workbook as WorkbookModel;
-use xlsx_ops::Op;
+use xlsx_ops::{Op, OpError};
 
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
@@ -58,7 +58,8 @@ impl Workbook {
         history: CommitHistory,
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
-        if staged.model.defined_names != self.model.defined_names
+        if staged.model.tables != self.model.tables
+            && staged.model.defined_names != self.model.defined_names
             && ops.iter().any(|op| matches!(op, Op::SetCell { .. }))
             && !ops.iter().any(|op| {
                 matches!(
@@ -72,7 +73,8 @@ impl Workbook {
                 &staged.model,
                 package.materialize()?,
                 &self.preserved.origins,
-            )?;
+            )
+            .map_err(|error| OpError::TableHeaderUnsupported(error.to_string()))?;
         }
         if baseline.is_none() && self.defers_staging() {
             return Ok(PreparedCommit {

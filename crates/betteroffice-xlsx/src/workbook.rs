@@ -1407,6 +1407,7 @@ impl Workbook {
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
         retain_array_formulas(&self.model, &mut model);
+        self.ensure_shared_table_headers_unchanged(&model)?;
         let dormant = candidate
             .dormant_defined_names(&structure.sheet_keys)
             .map_err(authority_error)?;
@@ -1467,9 +1468,21 @@ impl Workbook {
         if !frozen.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        self.ensure_shared_table_headers_unchanged(&staged.model)?;
         self.gate_incoming(&staged.model, &staged.dormant_names)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
+    }
+
+    fn ensure_shared_table_headers_unchanged(&self, staged: &WorkbookModel) -> Result<()> {
+        if !self
+            .authority()?
+            .keeps_table_headers(staged)
+            .map_err(Error::CollaborativeState)?
+        {
+            return Err(shared_table_header_edit());
+        }
+        Ok(())
     }
 
     /// Everything a model arriving from outside must satisfy before this
@@ -2513,8 +2526,8 @@ impl Workbook {
         }];
         ops.extend(format);
         let (update, tables_changed) = if header {
+            self.ensure_table_header_write(&self.model, &self.preserved.origins, &ops[0])?;
             let mut preview = self.model.clone();
-            self.ensure_table_header_references(&preview, &self.preserved.origins, &ops[0])?;
             let inverse = xlsx_ops::apply_in_place(&mut preview, &ops[0])?.0;
             let prepared = self.prepare_commit(
                 ops,
@@ -2638,7 +2651,7 @@ impl Workbook {
                 at: edit.cell,
                 cell: state,
             };
-            self.ensure_table_header_references(&preview, &self.preserved.origins, &op)?;
+            self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
             let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
             rewrote_references |= inverse.len() > 1;
             per_op.push(inverse);
@@ -2883,6 +2896,7 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut axes = self.preserved.axes.clone();
         let mut drawings_move = false;
+        let mut rewrote_table_names = false;
         let mut names = self.sheet_names();
         let defined = DefinedFunctionNames::new(&preview.defined_names);
         let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
@@ -2902,10 +2916,15 @@ impl Workbook {
             drawings_move |= self.ensure_drawings_follow(&origins, &axes, op)?;
 
             self.ensure_move_keeps_inline_text(&origins, op)?;
-            self.ensure_table_header_references(staged, &origins, op)?;
+            self.ensure_table_header_write(staged, &origins, op)?;
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
-            batch.apply(op)?;
+            batch.apply_with_inverse(op, |inverse| {
+                rewrote_table_names |= matches!(op, Op::SetCell { .. })
+                    && inverse
+                        .iter()
+                        .any(|op| matches!(op, Op::SetDefinedNames { .. }));
+            })?;
             match *op {
                 Op::AddSheet { index, .. } => {
                     origins.insert(index, None);
@@ -2957,7 +2976,15 @@ impl Workbook {
         if preview.defined_names != self.model.defined_names
             && let Some(package) = &self.source_package
         {
-            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+            let validation =
+                xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins);
+            if let Err(error) = validation {
+                return Err(if rewrote_table_names {
+                    xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()).into()
+                } else {
+                    error.into()
+                });
+            }
         }
         let proposals_changed = self
             .rebased_proposals(&ops)
@@ -3300,7 +3327,7 @@ impl Workbook {
                     at: edit.cell,
                     cell: state,
                 };
-                self.ensure_table_header_references(&preview, &self.preserved.origins, &op)?;
+                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
                 xlsx_ops::apply_in_place(&mut preview, &op)?;
             }
             if let Some(format) = format {
@@ -3417,7 +3444,7 @@ impl Workbook {
                     at: cell,
                     cell: state,
                 };
-                self.ensure_table_header_references(&preview, &self.preserved.origins, &op)?;
+                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
                 let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
                 rewrote_references |= inverse.len() > 1;
                 per_op.push(inverse);
@@ -4346,13 +4373,21 @@ impl Workbook {
         Ok(())
     }
 
-    fn ensure_table_header_references(
+    fn ensure_table_header_write(
         &self,
         model: &WorkbookModel,
         origins: &[Option<usize>],
         op: &Op,
     ) -> Result<()> {
-        let (Some(package), Op::SetCell { sheet, at, cell }) = (&self.source_package, op) else {
+        let Op::SetCell { sheet, at, cell } = op else {
+            return Ok(());
+        };
+        if self.is_collaborative()
+            && xlsx_ops::table_header_write_at(model, *sheet, *at, cell).is_some()
+        {
+            return Err(shared_table_header_edit());
+        }
+        let Some(package) = &self.source_package else {
             return Ok(());
         };
         let Some((table, column, name)) =
@@ -4366,16 +4401,18 @@ impl Workbook {
             return Ok(());
         }
         let origin = origins.get(sheet.0 as usize).copied().flatten();
-        if let Some(location) = package.materialize()?.table_header_reference(
-            origin,
-            &table.name,
-            |formula, local| xlsx_ops::references_table_column(formula, &table.name, local, old),
-        )? {
-            return Err(xlsx_ops::OpError::TableHeaderReferenceUnsupported {
-                table: table.name.clone(),
-                column: old.clone(),
-                location: location.to_owned(),
-            }
+        let location = package
+            .materialize()?
+            .table_header_reference(origin, &table.name, |formula, local| {
+                xlsx_ops::references_table_column(formula, &table.name, local, old)
+            })
+            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+        if let Some(location) = location {
+            return Err(xlsx_ops::OpError::TableHeaderUnsupported(format!(
+                "cannot rename table {} column {old}: a reference in {location} \
+                 cannot be safely rewritten",
+                table.name
+            ))
             .into());
         }
         Ok(())
@@ -6411,7 +6448,10 @@ pub(crate) fn entered_formula(
     formula: Option<String>,
 ) -> Result<Option<String>> {
     if formula.is_some() && xlsx_ops::table_header_at(&model.tables, sheet, at).is_some() {
-        return Err(xlsx_ops::OpError::TableHeaderFormulaUnsupported.into());
+        return Err(xlsx_ops::OpError::TableHeaderUnsupported(
+            "formulas are not supported in Excel table headers".into(),
+        )
+        .into());
     }
     match formula {
         Some(formula) if stored_formula(model, sheet, at) != Some(formula.as_str()) => {
@@ -6620,6 +6660,13 @@ fn cell_states_semantically_equal(left: &CellState, right: &CellState) -> bool {
         }
         _ => left == right,
     }
+}
+
+fn shared_table_header_edit() -> Error {
+    xlsx_ops::OpError::TableHeaderUnsupported(
+        "table header edits are not supported in a shared session".into(),
+    )
+    .into()
 }
 
 fn cell_write_is_unchanged(

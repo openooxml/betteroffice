@@ -16,32 +16,44 @@ pub fn table_header_at(tables: &[Table], sheet: SheetId, at: CellRef) -> Option<
     })
 }
 
+pub fn table_header_write_at(
+    workbook: &Workbook,
+    sheet: SheetId,
+    at: CellRef,
+    cell: &CellState,
+) -> Option<(usize, usize)> {
+    let header = table_header_at(&workbook.tables, sheet, at)?;
+    let old = workbook.sheet(sheet).and_then(|sheet| sheet.cell(at));
+    let same_content = cell.formula.as_deref() == old.and_then(|cell| cell.formula.as_deref())
+        && (cell.formula.is_some()
+            || &cell.value == old.map_or(&CellValue::Empty, |cell| &cell.value));
+    let clear = cell.formula.is_none()
+        && (matches!(&cell.value, CellValue::Empty)
+            || matches!(&cell.value, CellValue::Text { value } if value.is_empty()));
+    (!same_content || clear && cell.style == old.and_then(|cell| cell.style)).then_some(header)
+}
+
 pub fn normalize_table_header(
     workbook: &Workbook,
     sheet: SheetId,
     at: CellRef,
     cell: &CellState,
 ) -> Result<Option<(usize, usize, String)>, OpError> {
-    if workbook.tables.is_empty() {
-        return Ok(None);
-    }
-    let old = workbook.sheet(sheet).and_then(|sheet| sheet.cell(at));
-    if cell.formula.as_deref() == old.and_then(|cell| cell.formula.as_deref())
-        && (cell.formula.is_some()
-            || &cell.value == old.map_or(&CellValue::Empty, |cell| &cell.value))
-    {
-        return Ok(None);
-    }
-    let tables = &workbook.tables;
-    let Some((table, column)) = table_header_at(tables, sheet, at) else {
+    let Some((table, column)) = table_header_write_at(workbook, sheet, at, cell) else {
         return Ok(None);
     };
     if cell.formula.is_some() {
-        return Err(OpError::TableHeaderFormulaUnsupported);
+        return Err(OpError::TableHeaderUnsupported(
+            "formulas are not supported in Excel table headers".into(),
+        ));
     }
-    let columns = &tables[table].columns;
+    let columns = &workbook.tables[table].columns;
     if column >= columns.len() {
-        return Err(OpError::MissingTableColumn { sheet, cell: at });
+        return Err(OpError::TableHeaderUnsupported(format!(
+            "no table column for sheet {}, {}",
+            sheet.0,
+            at.to_a1()
+        )));
     }
     let base = match &cell.value {
         CellValue::Empty => String::new(),
@@ -71,7 +83,9 @@ pub fn normalize_table_header(
         base
     };
     if name.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS {
-        return Err(OpError::TableHeaderTextTooLong);
+        return Err(OpError::TableHeaderUnsupported(
+            "cell text exceeds Excel's length limit".into(),
+        ));
     }
     Ok(Some((table, column, name)))
 }
@@ -99,16 +113,19 @@ pub(crate) fn rename_table_column(
     column: usize,
     at: CellRef,
     new: &str,
+    restores: &mut Vec<(SheetId, CellRef, CellState)>,
     inverse: &mut Vec<Op>,
 ) -> Result<(), OpError> {
     let table = &workbook.tables[table];
     let old = &table.columns[column];
-    let changes_lookup = old.to_lowercase() != new.to_lowercase();
-    let unsupported = |location| OpError::TableHeaderReferenceUnsupported {
-        table: table.name.clone(),
-        column: old.clone(),
-        location,
+    let unsupported = |location: String| {
+        OpError::TableHeaderUnsupported(format!(
+            "cannot rename table {} column {old}: a reference in {location} \
+             cannot be safely rewritten",
+            table.name
+        ))
     };
+    let writable = new.chars().all(formula_xml_char);
     let rewrite =
         |formula: &str, local: bool, location: &dyn Fn() -> String| match rewrite_table_column(
             formula,
@@ -117,40 +134,40 @@ pub(crate) fn rename_table_column(
             old,
             new,
         ) {
-            Ok(Some(text)) if !text.contains('\0') => Ok(Some(text)),
+            Ok(Some(text)) if writable => Ok(Some(text)),
+            Ok(Some(_)) => Err(OpError::TableHeaderUnsupported(format!(
+                "the new caption contains a character XML cannot carry in a formula in {}",
+                location()
+            ))),
             Ok(None) => Ok(None),
             Err(_) if !may_reference_column(formula, &table.name, local, old) => Ok(None),
             _ => Err(unsupported(location())),
         };
     let mut edits = Vec::new();
-    let mut restores = Vec::new();
     for (index, sheet) in workbook.sheets.iter().enumerate() {
         let id = SheetId(index as u32);
-        if changes_lookup {
-            for group in &sheet.conditional_formats {
-                let local = id == table.sheet
-                    && group.sqref.split_ascii_whitespace().any(|text| {
-                        CellRange::parse_a1(text)
-                            .is_ok_and(|range| table.range.contains(range.start))
-                    });
-                if group
-                    .rules
-                    .iter()
-                    .flat_map(|rule| &rule.formulas)
-                    .any(|text| references_table_column(text, &table.name, local, old))
-                {
-                    return Err(unsupported(format!(
-                        "conditional formats on sheet '{}'",
-                        sheet.name
-                    )));
-                }
+        for group in &sheet.conditional_formats {
+            let local = id == table.sheet
+                && group.sqref.split_ascii_whitespace().any(|text| {
+                    CellRange::parse_a1(text).is_ok_and(|range| table.range.contains(range.start))
+                });
+            if group
+                .rules
+                .iter()
+                .flat_map(|rule| &rule.formulas)
+                .any(|text| references_table_column(text, &table.name, local, old))
+            {
+                return Err(unsupported(format!(
+                    "conditional formats on sheet '{}'",
+                    sheet.name
+                )));
             }
-            for chart in &sheet.charts {
-                if chart.refs.iter().any(|reference| {
-                    references_table_column(&reference.formula, &table.name, false, old)
-                }) {
-                    return Err(unsupported(chart.part.clone()));
-                }
+        }
+        for chart in &sheet.charts {
+            if chart.refs.iter().any(|reference| {
+                references_table_column(&reference.formula, &table.name, false, old)
+            }) {
+                return Err(unsupported(chart.part.clone()));
             }
         }
         for (cell_ref, cell) in sheet.iter_cells() {
@@ -166,47 +183,34 @@ pub(crate) fn rename_table_column(
             if updated.is_some() && table_header_at(&workbook.tables, id, cell_ref).is_some() {
                 return Err(unsupported(location()));
             }
-            if updated.is_some()
-                || (changes_lookup && references_table_column(formula, &table.name, local, new))
-            {
-                restores.push(Op::SetCell {
-                    sheet: id,
-                    at: cell_ref,
-                    cell: CellState::from(cell),
-                });
-            }
             if let Some(updated) = updated {
+                restores.push((id, cell_ref, CellState::from(cell)));
                 edits.push((index, cell_ref, updated));
             }
         }
     }
     let mut names = None;
-    let mut restore_names = false;
     for (index, name) in workbook.defined_names.iter().enumerate() {
         let location = || format!("defined name '{}'", name.name);
         if let Some(updated) = rewrite(&name.formula, false, &location)? {
             crate::validate_defined_name_formula(&updated).map_err(|_| unsupported(location()))?;
             names.get_or_insert_with(|| workbook.defined_names.clone())[index].formula = updated;
-        } else if changes_lookup && references_table_column(&name.formula, &table.name, false, new)
-        {
-            restore_names = true;
         }
     }
     if let Some(names) = names {
         if defined_names_bytes(&names) > MAX_DEFINED_NAME_BYTES {
-            return Err(OpError::TooManyDefinedNames);
+            return Err(unsupported("defined names".into()));
         }
         inverse.push(Op::SetDefinedNames {
             defined_names: std::mem::replace(&mut workbook.defined_names, names),
         });
-    } else if restore_names {
-        inverse.push(Op::SetDefinedNames {
-            defined_names: workbook.defined_names.clone(),
-        });
     }
-    inverse.extend(restores);
     for (sheet, at, formula) in edits {
         workbook.sheets[sheet].cell_mut(at).unwrap().formula = Some(formula);
     }
     Ok(())
+}
+
+fn formula_xml_char(ch: char) -> bool {
+    matches!(ch, '\t' | '\n' | '\r') || (ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}')
 }

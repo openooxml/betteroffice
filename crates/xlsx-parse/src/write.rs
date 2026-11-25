@@ -507,8 +507,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             "sheet origin count does not match workbook".to_owned(),
         ));
     }
-    let edited = edits.changed;
     let claimed = claimed_origins(package, origins);
+    let changed_tables = tables::changed_tables(wb, package, &claimed);
+    let edited = edits.changed || !changed_tables.is_empty();
     let view_plan = views::ViewPlan::new(package, &claimed, active_sheet)?;
     if !edited
         && origins.len() == package.sheets.len()
@@ -518,11 +519,6 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             .all(|(index, origin)| *origin == Some(index))
         && active_sheet == package.active_sheet
     {
-        if !wb.tables.is_empty() {
-            let mut parts = PartStore::new(&package.parts);
-            tables::patch_table_parts(wb, package, &claimed, &mut parts)?;
-            return Ok(parts.finish());
-        }
         return Ok(package
             .parts
             .iter()
@@ -647,7 +643,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         }
     }
     let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
-    tables::patch_table_parts(wb, package, &claimed, &mut parts)?;
+    tables::patch_table_parts(wb, package, &changed_tables, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;

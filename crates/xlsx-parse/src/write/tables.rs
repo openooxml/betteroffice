@@ -10,124 +10,144 @@ use crate::xml::{xml_err, xstring_attribute_value};
 
 use super::PartStore;
 
+pub(super) fn changed_tables<'a>(
+    workbook: &'a Workbook,
+    package: &'a PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<(&'a Table, &'a Table, &'a str)> {
+    let originals = &package.original_workbook.tables;
+    if originals.is_empty()
+        || workbook.tables.is_empty()
+        || (workbook.tables.len() == originals.len()
+            && workbook.tables.iter().zip(originals).all(|(table, source)| {
+                origins.get(table.sheet.0 as usize).copied().flatten()
+                    == Some(source.sheet.0 as usize)
+                    && table.name == source.name
+                    && table.columns == source.columns
+            }))
+    {
+        return Vec::new();
+    }
+    let mut sources = HashMap::<_, Vec<_>>::new();
+    for (source, path) in originals.iter().zip(&package.table_parts).rev() {
+        sources
+            .entry((source.sheet.0 as usize, source.name.to_lowercase()))
+            .or_default()
+            .push((source, path.as_str()));
+    }
+    workbook
+        .tables
+        .iter()
+        .filter_map(|table| {
+            let origin = origins.get(table.sheet.0 as usize).copied().flatten()?;
+            let matches = sources.get_mut(&(origin, table.name.to_lowercase()))?;
+            let same_range = matches
+                .iter()
+                .rposition(|(source, _)| source.range == table.range);
+            let (source, path) = match same_range {
+                Some(index) => matches.remove(index),
+                None => matches.pop()?,
+            };
+            (table.columns != source.columns).then_some((table, source, path))
+        })
+        .collect()
+}
+
 pub(super) fn patch_table_parts(
     workbook: &Workbook,
     package: &PreservedPackage,
-    origins: &[Option<usize>],
+    changes: &[(&Table, &Table, &str)],
     parts: &mut PartStore<'_>,
 ) -> Result<(), ParseError> {
-    if package.table_parts.is_empty() || workbook.tables.is_empty() {
+    if changes.is_empty() {
         return Ok(());
     }
-    let key = |origin, table: &Table| (origin, table.name.to_lowercase());
-    let mut tables = HashMap::new();
-    let mut ambiguous = HashSet::new();
-    for table in &workbook.tables {
-        if let Some(origin) = origins.get(table.sheet.0 as usize).copied().flatten() {
-            let key = key(origin, table);
-            if tables.insert(key.clone(), table).is_some() {
-                ambiguous.insert(key);
-            }
-        }
+    let mut destinations = HashMap::new();
+    for (path, bytes) in &package.parts {
+        destinations
+            .entry(normalized_part_name(path))
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some((path, bytes)));
     }
-    let mut source_keys = HashSet::new();
-    let mut part_counts = HashMap::new();
-    let originals = package
-        .original_workbook
-        .tables
-        .iter()
-        .zip(&package.table_parts);
-    for (original, path) in originals.clone() {
-        let key = key(original.sheet.0 as usize, original);
-        if !source_keys.insert(key.clone()) {
-            ambiguous.insert(key);
-        }
-        *part_counts.entry(normalized_part_name(path)).or_insert(0) += 1;
-    }
-    for (original, path) in originals {
-        let key = key(original.sheet.0 as usize, original);
-        let Some(table) = tables.get(&key) else {
-            continue;
+    let originals = &package.original_workbook.tables;
+    for &(table, source, path) in changes {
+        let name = table.name.to_lowercase();
+        let duplicate = |tables: &[Table]| {
+            tables
+                .iter()
+                .filter(|table| table.name.to_lowercase() == name)
+                .nth(1)
+                .is_some()
         };
-        if original.header_rows == 0 || table.header_rows == 0 {
-            continue;
-        }
-        if ambiguous.contains(&key) {
+        if duplicate(originals) || duplicate(&workbook.tables) {
             return Err(ParseError::UnsupportedEdit(format!(
-                "cannot identify the source part for table {} on sheet {}: duplicate display name",
-                table.name, table.sheet.0
+                "cannot patch table {} in {path}: duplicate display name",
+                table.name
             )));
         }
-        if table.columns.len() != original.columns.len() {
+        if table.columns.len() != source.columns.len() {
             return Err(column_count_error(path));
         }
-        let Some(names) = header_names(workbook, table, original)? else {
-            continue;
-        };
-        if names
+        let normalized = normalized_part_name(path);
+        if package
+            .table_parts
             .iter()
-            .zip(&original.columns)
-            .all(|(name, old)| names_equal(name, old))
+            .filter(|path| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized))
+            .nth(1)
+            .is_some()
         {
-            continue;
-        }
-        if part_counts[&normalized_part_name(path)] > 1 {
             return Err(ParseError::UnsupportedEdit(format!(
                 "cannot patch table {}: table part {path} is shared",
                 table.name
             )));
         }
-        let source = package
-            .part_bytes(path)
-            .ok_or_else(|| ParseError::MissingPart(path.clone()))?;
-        let changed = patch_names(path, source, &original.columns, &names)?;
-        parts.set(path.clone(), changed)?;
+        let destination = destinations
+            .get(&normalized)
+            .ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
+        let Some((destination, bytes)) = destination else {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "cannot patch table {}: table part {path} has multiple destinations",
+                table.name
+            )));
+        };
+        validate_headers(workbook, table)?;
+        parts.set(
+            (*destination).clone(),
+            patch_names(path, bytes, &source.columns, &table.columns)?,
+        )?;
     }
     Ok(())
 }
 
-fn names_equal(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-        || ((!left.is_ascii() || !right.is_ascii()) && left.to_lowercase() == right.to_lowercase())
-}
-
-fn header_names<'a>(
-    workbook: &'a Workbook,
-    table: &Table,
-    original: &Table,
-) -> Result<Option<Vec<&'a str>>, ParseError> {
+fn validate_headers(workbook: &Workbook, table: &Table) -> Result<(), ParseError> {
     let sheet = &workbook.sheets[table.sheet.0 as usize];
     let start = table.range.start;
+    let width = table.range.end.col - start.col + 1;
+    if table.header_rows == 0 || table.columns.len() != width as usize {
+        return Err(ParseError::UnsupportedEdit(format!(
+            "table {} does not have a header cell for each column",
+            table.name
+        )));
+    }
     let mut seen = HashSet::new();
-    let mut names = Vec::with_capacity(table.columns.len());
-    for col in start.col..=table.range.end.col {
+    for (col, caption) in (start.col..=table.range.end.col).zip(&table.columns) {
         let at = CellRef::new(start.row, col);
-        let name = sheet.cell(at).and_then(|cell| match &cell.value {
-            CellValue::Text { value } if cell.formula.is_none() && !value.is_empty() => {
-                Some(value.as_str())
-            }
-            _ => None,
-        });
-        if let Some(name) = name
-            && seen.insert(name.to_lowercase())
+        if caption.is_empty()
+            || !seen.insert(caption.to_lowercase())
+            || !sheet.cell(at).is_some_and(|cell| {
+                cell.formula.is_none()
+                    && matches!(&cell.value, CellValue::Text { value } if value == caption)
+            })
         {
-            names.push(name);
-        } else {
-            if table.columns == original.columns {
-                return Ok(None);
-            }
             return Err(ParseError::UnsupportedEdit(format!(
-                "table {} column {} ({}) must have a non-empty, unique text header",
+                "table {} column {} ({}) needs non-empty, unique text matching its caption",
                 table.name,
                 col - start.col + 1,
                 at.to_a1()
             )));
         }
     }
-    if names.len() != table.columns.len() {
-        return Err(column_count_error(&table.name));
-    }
-    Ok(Some(names))
+    Ok(())
 }
 
 fn column_count_error(path: &str) -> ParseError {
@@ -138,7 +158,7 @@ fn patch_names(
     path: &str,
     source: &[u8],
     original: &[String],
-    names: &[&str],
+    names: &[String],
 ) -> Result<Vec<u8>, ParseError> {
     let mut reader = Reader::from_reader(source);
     let mut output = Vec::with_capacity(source.len());
@@ -182,7 +202,7 @@ fn patch_names(
             return Err(column_count_error(path));
         };
         ordinal += 1;
-        if names_equal(old, new) {
+        if old == new {
             continue;
         }
         let name = element
@@ -216,8 +236,6 @@ fn patch_names(
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
     use xlsx_model::{Cell, SheetId};
 
@@ -233,7 +251,7 @@ mod tests {
             </tableColumns><extLst><tableColumns><tableColumn name='Outside columns'/>\
             </tableColumns></extLst></table>";
         let original = vec!["Old".into(), "Other & name".into()];
-        let renamed = ["A&'\t_x0041_", "other & Name"];
+        let renamed = ["A&'\t_x0041_".into(), "Other & name".into()];
         let expected = b"\xEF\xBB\xBF<table xmlns:m='urn:test'><tableColumns>\n  \
             <m:tableColumn id='1' name='A&amp;&apos;_x0009__x005F_x0041_'/>\n  \
             <tableColumn name=\"Other &amp; name\" id=\"2\"><ext/></tableColumn>\n\
@@ -261,41 +279,58 @@ mod tests {
         let package = &mut parsed.package;
         let mut shared = package.original_workbook.tables[0].clone();
         shared.sheet = SheetId(1);
+        shared.name = "Other".into();
         package.original_workbook.tables.push(shared);
         package.table_parts.push(PATH.to_owned());
-        parsed.workbook.sheets[0].set_cell(
-            CellRef::new(0, 0),
-            Cell {
-                value: CellValue::Text {
-                    value: "New".into(),
-                },
-                ..Cell::default()
-            },
-        );
+        parsed.workbook.tables[0].columns[0] = "New".into();
         let mut parts = PartStore::new(&package.parts);
-        let error =
-            patch_table_parts(&parsed.workbook, package, &[Some(0)], &mut parts).unwrap_err();
+        let changes = changed_tables(&parsed.workbook, package, &[Some(0)]);
+        let error = patch_table_parts(&parsed.workbook, package, &changes, &mut parts).unwrap_err();
         assert!(error.to_string().contains("is shared"));
         assert_eq!(parts.get(PATH), Some(TABLE.as_bytes()));
     }
 
     #[test]
-    fn an_invalid_unedited_header_leaves_the_part_byte_identical() {
+    fn case_variant_parts_are_ambiguous_only_if_patched() {
         let mut parsed =
             crate::parse_workbook_with_owned_package(crate::tests::package_with_table(TABLE))
                 .unwrap();
-        let package = &parsed.package;
+        let package = &mut parsed.package;
+        package
+            .parts
+            .push((PATH.to_ascii_uppercase(), TABLE.as_bytes().to_vec()));
+        assert!(changed_tables(&parsed.workbook, package, &[Some(0)]).is_empty());
+        parsed.workbook.tables[0].columns[0] = "New".into();
+        let mut parts = PartStore::new(&package.parts);
+        let changes = changed_tables(&parsed.workbook, package, &[Some(0)]);
+        let error = patch_table_parts(&parsed.workbook, package, &changes, &mut parts).unwrap_err();
+        assert!(error.to_string().contains("multiple destinations"));
+    }
+
+    #[test]
+    fn a_changed_caption_requires_an_exact_match_in_the_header_cell() {
+        let mut parsed =
+            crate::parse_workbook_with_owned_package(crate::tests::package_with_table(TABLE))
+                .unwrap();
+        parsed.workbook.tables[0].columns[0] = "New".into();
         parsed.workbook.sheets[0].set_cell(
-            CellRef::new(1, 0),
+            CellRef::new(0, 0),
             Cell {
-                value: CellValue::Number { value: 7.0 },
+                value: CellValue::Text {
+                    value: "new".into(),
+                },
                 ..Cell::default()
             },
         );
-        let mut parts = PartStore::new(&package.parts);
-        patch_table_parts(&parsed.workbook, package, &[Some(0)], &mut parts).unwrap();
-        assert!(parts.finish().iter().any(|(path, bytes)| {
-            path == PATH && matches!(bytes, Cow::Borrowed(bytes) if *bytes == TABLE.as_bytes())
-        }));
+        let package = &parsed.package;
+        let changes = changed_tables(&parsed.workbook, package, &[Some(0)]);
+        let error = patch_table_parts(
+            &parsed.workbook,
+            package,
+            &changes,
+            &mut PartStore::new(&package.parts),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("matching its caption"));
     }
 }

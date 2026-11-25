@@ -1448,6 +1448,40 @@ impl WorkbookAuthority {
         self.base.auto_filters.get(index)?.as_ref()
     }
 
+    pub(crate) fn keeps_table_headers(&self, model: &WorkbookModel) -> Result<bool, String> {
+        if self.base.tables.iter().all(|table| table.header_rows == 0) {
+            return Ok(true);
+        }
+        let txn = self.doc.transact();
+        let order = txn.get_array(SHEET_ORDER).ok_or("missing sheet order")?;
+        let keys = sheet_keys(&order, &txn)?;
+        let sheets = txn.get_map(SHEETS).ok_or("missing sheet map")?;
+        for table in self.base.tables.iter().filter(|table| table.header_rows != 0) {
+            let sheet = keys
+                .get(table.sheet.0 as usize)
+                .and_then(|key| sheets.get(&txn, key))
+                .and_then(|sheet| sheet.cast::<MapRef>().ok())
+                .ok_or("missing table worksheet")?;
+            let contents = nested_map(&sheet, &txn, CONTENTS)?;
+            let projected = model.sheet(table.sheet).ok_or("missing table worksheet")?;
+            for col in table.range.start.col..=table.range.end.col {
+                let at = CellRef::new(table.range.start.row, col);
+                let before = match contents.get(&txn, &cell_key(at)) {
+                    Some(Out::Any(value)) => Some(content_from_any(&value)?),
+                    Some(_) => return Err("table header content is not an atomic value".into()),
+                    None => None,
+                };
+                let after = projected
+                    .cell(at)
+                    .filter(|cell| cell.formula.is_some() || cell.value != CellValue::Empty);
+                if !authored_content_equal(before.as_ref(), after) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// What a sheet's rules read as with no overlay.
     fn baseline_rules<T: ReadTxn>(
         &self,
@@ -1717,11 +1751,12 @@ impl WorkbookAuthority {
         for op in ops {
             batch
                 .apply_with_inverse(op, |inverse| {
-                    if matches!(op, Op::SetCell { .. }) {
-                        rewritten.extend(inverse.iter().skip(1).filter_map(|op| match op {
-                            Op::SetCell { sheet, at, .. } => Some((*sheet, *at)),
-                            _ => None,
-                        }));
+                    if matches!(op, Op::SetCell { .. })
+                        && let Some(Op::RestoreSheet { formulas, .. }) = inverse.first()
+                    {
+                        rewritten.extend(
+                            formulas.iter().skip(1).map(|(sheet, at, _)| (*sheet, *at)),
+                        );
                     }
                 })
                 .map_err(|error| {
@@ -3267,7 +3302,6 @@ impl WorkbookAuthority {
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         if self.collaborative {
             project_filter_names(&mut model, &keys, &self.base)?;
-            project_table_headers(&mut model);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
@@ -5954,30 +5988,6 @@ impl Default for SheetFallbacks<'_> {
     }
 }
 
-fn project_table_headers(model: &mut WorkbookModel) {
-    for table in &mut model.tables {
-        if table.header_rows == 0 {
-            continue;
-        }
-        let Some(sheet) = model.sheets.get(table.sheet.0 as usize) else {
-            continue;
-        };
-        let start = table.range.start;
-        for (col, name) in (start.col..=table.range.end.col).zip(&mut table.columns) {
-            if let Some(Cell {
-                formula: None,
-                value: CellValue::Text { value },
-                ..
-            }) = sheet.cell(CellRef::new(start.row, col))
-                && !value.is_empty()
-                && value != name
-            {
-                name.clone_from(value);
-            }
-        }
-    }
-}
-
 fn materialize_sheet<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
@@ -7871,7 +7881,6 @@ impl WorkbookAuthority {
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         if self.collaborative {
             project_filter_names(&mut model, &keys, &self.base)?;
-            project_table_headers(&mut model);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
