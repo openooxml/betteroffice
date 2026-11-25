@@ -260,6 +260,34 @@ fn standalone_open_refuses_fifty_thousand_long_hyperlinks() {
 }
 
 #[test]
+fn every_standalone_open_refuses_fifty_thousand_long_hyperlinks() {
+    let bytes = long_hyperlink_package(50_000, 300);
+    let options = CalculationOptions::default;
+    let opens = [
+        ("open_for_read", Workbook::open_for_read(&bytes).err()),
+        (
+            "open_recalculated",
+            Workbook::open_recalculated(&bytes, options()).err(),
+        ),
+        (
+            "open_recalculated_with_seed",
+            Workbook::open_recalculated_with_seed(&bytes, options(), Some(7)).err(),
+        ),
+        (
+            "open_recalculating_stale",
+            Workbook::open_recalculating_stale(&bytes, options(), Some(7)).err(),
+        ),
+    ];
+    for (name, error) in opens {
+        assert_eq!(
+            error.map(|error| error.to_string()).as_deref(),
+            Some(HYPERLINK_ERROR),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn hyperlink_state_boundary_matches_authority_build() {
     let mut links = Vec::new();
     let mut encoded_len = serde_json::to_string(&links).unwrap().len();
