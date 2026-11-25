@@ -134,6 +134,7 @@ describe('release wiring', () => {
   test('the plan selects unpublished versions from both registries', () => {
     expect(step.run).toContain('scripts/native-bindings.mjs --pending');
     expect(step.run).toContain('scripts/python-bindings.mjs --pending');
+    expect(step.run).not.toContain(',,}');
 
     const directory = mkdtempSync(join(tmpdir(), 'registry-'));
     const outputs = join(directory, 'outputs');
@@ -161,6 +162,8 @@ globalThis.fetch = async (url) => {
         ...process.env,
         REHEARSE: 'false',
         PUBLISHING: 'true',
+        RELEASE_SKIP_NATIVE: '',
+        RELEASE_SKIP_PYTHON: 'false',
         GITHUB_OUTPUT: outputs,
         NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(pypi).href}`
       }
@@ -168,8 +171,56 @@ globalThis.fetch = async (url) => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(readFileSync(outputs, 'utf8')).toBe(
-      `native=${JSON.stringify(NATIVE_FORMATS)}\npython=${JSON.stringify([...FONT_PACK_NAMES, ...unserved])}\n`
+      `native=${JSON.stringify(NATIVE_FORMATS)}\npython=${JSON.stringify([...FONT_PACK_NAMES, ...unserved])}\nskip_native=false\nskip_python=false\n`
     );
+  });
+
+  test.each([
+    ['TrUe', 'false', 'true', 'false'],
+    ['false', 'TRUE', 'false', 'true'],
+    ['TRUE', 'True', 'true', 'true']
+  ] as const)('the release plan bypasses pending lookups with native=%s and python=%s', (native, python, skipNative, skipPython) => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-plan-'));
+    try {
+      const outputs = join(directory, 'outputs');
+      writeFileSync(join(directory, 'node'), [
+        '#!/bin/sh',
+        'printf "%s\\n" "$*" >&2',
+        'case "$*" in',
+        '  "scripts/native-bindings.mjs --pending") echo \'["native"]\' ;;',
+        '  "scripts/python-bindings.mjs --pending") echo \'["python"]\' ;;',
+        '  *) exit 1 ;;',
+        'esac',
+        ''
+      ].join('\n'), { mode: 0o755 });
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        cwd: repository,
+        env: {
+          ...process.env,
+          REHEARSE: 'false',
+          PUBLISHING: 'true',
+          RELEASE_SKIP_NATIVE: native,
+          RELEASE_SKIP_PYTHON: python,
+          PATH: `${directory}:${process.env.PATH}`,
+          GITHUB_OUTPUT: outputs
+        }
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe([
+        skipNative === 'false' ? 'scripts/native-bindings.mjs --pending\n' : '',
+        skipPython === 'false' ? 'scripts/python-bindings.mjs --pending\n' : ''
+      ].join(''));
+      expect(readFileSync(outputs, 'utf8')).toBe([
+        `native=${skipNative === 'true' ? '[]' : '["native"]'}`,
+        `python=${skipPython === 'true' ? '[]' : '["python"]'}`,
+        `skip_native=${skipNative}`,
+        `skip_python=${skipPython}`,
+        ''
+      ].join('\n'));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test('a registry lookup failure fails the step instead of publishing nothing', () => {
@@ -184,6 +235,8 @@ globalThis.fetch = async (url) => {
         ...process.env,
         REHEARSE: 'false',
         PUBLISHING: 'true',
+        RELEASE_SKIP_NATIVE: 'false',
+        RELEASE_SKIP_PYTHON: 'false',
         PATH: `${directory}:${process.env.PATH}`,
         GITHUB_OUTPUT: join(directory, 'outputs')
       }
@@ -193,20 +246,27 @@ globalThis.fetch = async (url) => {
   });
 
   test.each([
-    ['false', [], []],
-    ['true', NATIVE_FORMATS, [...FONT_PACK_NAMES, ...PYTHON_BINDING_NAMES]]
-  ] as const)('plans the release PR or rehearsal with REHEARSE=%s', (rehearse, native, python) => {
+    ['false', [], [], 'true'],
+    ['true', NATIVE_FORMATS, [...FONT_PACK_NAMES, ...PYTHON_BINDING_NAMES], 'false']
+  ] as const)('plans the release PR or rehearsal with REHEARSE=%s', (rehearse, native, python, skip) => {
     const directory = mkdtempSync(join(tmpdir(), 'release-plan-'));
     try {
       const outputs = join(directory, 'outputs');
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
         encoding: 'utf8',
         cwd: repository,
-        env: { ...process.env, REHEARSE: rehearse, PUBLISHING: 'false', GITHUB_OUTPUT: outputs }
+        env: {
+          ...process.env,
+          REHEARSE: rehearse,
+          PUBLISHING: 'false',
+          RELEASE_SKIP_NATIVE: 'TRUE',
+          RELEASE_SKIP_PYTHON: 'True',
+          GITHUB_OUTPUT: outputs
+        }
       });
       expect(result.status, result.stderr).toBe(0);
       expect(readFileSync(outputs, 'utf8')).toBe(
-        `native=${JSON.stringify(native)}\npython=${JSON.stringify(python)}\n`
+        `native=${JSON.stringify(native)}\npython=${JSON.stringify(python)}\nskip_native=${skip}\nskip_python=${skip}\n`
       );
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -217,7 +277,7 @@ globalThis.fetch = async (url) => {
     const job = release.jobs['python-build'];
     expect(job.needs).toBe('plan');
     expect(job.if).toBe(
-      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_PYTHON != 'true')"
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && needs.plan.outputs.skip_python != 'true'"
     );
     expect(job.strategy).toEqual({
       'fail-fast': false,
@@ -229,19 +289,28 @@ globalThis.fetch = async (url) => {
     expect(job['continue-on-error']).toBeUndefined();
   });
 
-  test('release retries the whole Python build matrix once after failure', () => {
+  test('release retries the whole Python build matrix once after failure or cancellation', () => {
     const job = release.jobs['python-build'];
     const retry = release.jobs['python-build-retry'];
     expect(retry.needs).toEqual(['plan', 'python-build']);
-    expect(retry.if).toBe("${{ !cancelled() && needs.python-build.result == 'failure' }}");
+    expect(retry.if).toBe("${{ !cancelled() && (needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') }}");
     for (const key of ['strategy', 'uses', 'with', 'permissions', 'secrets']) {
       expect(retry[key]).toEqual(job[key]);
     }
     expect(retry['continue-on-error']).toBeUndefined();
   });
 
-  test('the release train exposes the publish list', () => {
-    expect(release.jobs['python-bindings'].outputs).toEqual({
+  test('the release train exposes the publish list after the Python gate passes', () => {
+    const job = release.jobs['python-bindings'];
+    expect(job.needs).toEqual(['plan', 'release', 'python-build', 'python-build-retry']);
+    expect(job.if).toBe([
+      "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&",
+      "needs.plan.outputs.skip_python != 'true' &&",
+      "(needs.python-build.result == 'success' ||",
+      "((needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') && needs.python-build-retry.result == 'success') ||",
+      "(needs.python-build.result == 'skipped' && needs.plan.outputs.python == '[]')) }}"
+    ].join(' '));
+    expect(job.outputs).toEqual({
       publish: '${{ needs.release.outputs.python }}'
     });
     expect(release.jobs.release.outputs.python).toBe('${{ needs.plan.outputs.python }}');
@@ -411,11 +480,13 @@ globalThis.fetch = async (url) => {
     }
     const pack = dist.jobs['font-pack'];
     expect(pack.if).toBe("${{ startsWith(inputs.binding, 'fonts-') }}");
+    expect(pack['continue-on-error']).toBeUndefined();
     const build = pack.steps.find((step: any) => step.name === 'Build the wheel');
     expect(build.run).toBe('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
     const smoke = pack.steps[pack.steps.indexOf(build) + 1];
     expect(smoke.name).toBe('Test the installed font pack');
     expect(smoke.if).toBeUndefined();
+    expect(smoke['continue-on-error']).toBeUndefined();
     expect(smoke.env).toEqual({ BINDING: '${{ inputs.binding }}' });
     expect(smoke.run).toBe([
       'python -m pip install --no-index --only-binary :all: dist/*.whl',
@@ -444,6 +515,7 @@ globalThis.fetch = async (url) => {
   test('loads each native wheel from its exact artifact and tests the installed binding', () => {
     const load = dist.jobs.load;
     expect(load.needs).toBe('wheels');
+    expect(load['continue-on-error']).toBeUndefined();
     expect(load['runs-on']).toBe('${{ matrix.platform.os }}');
     expect(load.defaults.run.shell).toBe('bash');
     expect(load.strategy).toEqual({
@@ -470,9 +542,11 @@ globalThis.fetch = async (url) => {
     expect(download.uses).toBe('actions/download-artifact@v8');
     expect(download.with).toEqual({ name: 'python-${{ inputs.binding }}.${{ matrix.platform.artifact }}', path: 'wheel' });
     expect(install.if).toBeUndefined();
+    expect(install['continue-on-error']).toBeUndefined();
     expect(install.run).toContain('python -I scripts/python_font_packs.py --out font-packs');
     expect(install.run).toContain('python -m pip install --only-binary :all: --find-links font-packs wheel/*.whl');
     expect(pytest.if).toBeUndefined();
+    expect(pytest['continue-on-error']).toBeUndefined();
     expect(pytest['working-directory']).toBe('${{ runner.temp }}');
     expect(pytest.env.BINDING).toBe('${{ inputs.binding }}');
     expect(pytest.run).toBe('python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"');

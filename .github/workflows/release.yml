@@ -32,6 +32,8 @@ jobs:
       publishing: ${{ inputs.rehearse == true && 'true' || steps.pending.outputs.publishing }}
       native: ${{ steps.bindings.outputs.native }}
       python: ${{ steps.bindings.outputs.python }}
+      skip_native: ${{ steps.bindings.outputs.skip_native }}
+      skip_python: ${{ steps.bindings.outputs.skip_python }}
     steps:
       - name: Check the release ref
         env:
@@ -61,7 +63,7 @@ jobs:
           PUBLISHING: ${{ steps.pending.outputs.publishing }}
           REHEARSE: ${{ inputs.rehearse == true }}
         run: |
-          if [ "${SKIP_TESTS,,}" = true ] && [ "$PUBLISHING" = true ] && [ "$REHEARSE" != true ]; then
+          if [ "$(printf '%s' "$SKIP_TESTS" | tr '[:upper:]' '[:lower:]')" = true ] && [ "$PUBLISHING" = true ] && [ "$REHEARSE" != true ]; then
             printf '::warning::RELEASE_SKIP_%s is true, so this release skips its type check and tests.\n' TESTS
           fi
 
@@ -70,18 +72,32 @@ jobs:
         env:
           REHEARSE: ${{ inputs.rehearse == true }}
           PUBLISHING: ${{ steps.pending.outputs.publishing }}
+          RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
+          RELEASE_SKIP_PYTHON: ${{ vars.RELEASE_SKIP_PYTHON }}
         run: |
           native='[]'
           python='[]'
+          skip_native=false
+          skip_python=false
           if [ "$REHEARSE" = true ]; then
             native=$(node --input-type=module -e 'import { NATIVE_FORMATS } from "./scripts/native-bindings.mjs"; console.log(JSON.stringify(NATIVE_FORMATS))')
             python=$(node --input-type=module -e 'import { FONT_PACK_NAMES, PYTHON_BINDING_NAMES } from "./scripts/python-bindings.mjs"; console.log(JSON.stringify([...FONT_PACK_NAMES, ...PYTHON_BINDING_NAMES]))')
-          elif [ "$PUBLISHING" = true ]; then
-            native=$(node scripts/native-bindings.mjs --pending)
-            python=$(node scripts/python-bindings.mjs --pending)
+          else
+            if [ "$(printf '%s' "$RELEASE_SKIP_NATIVE" | tr '[:upper:]' '[:lower:]')" = true ]; then
+              skip_native=true
+            elif [ "$PUBLISHING" = true ]; then
+              native=$(node scripts/native-bindings.mjs --pending)
+            fi
+            if [ "$(printf '%s' "$RELEASE_SKIP_PYTHON" | tr '[:upper:]' '[:lower:]')" = true ]; then
+              skip_python=true
+            elif [ "$PUBLISHING" = true ]; then
+              python=$(node scripts/python-bindings.mjs --pending)
+            fi
           fi
           echo "native=$native" >> "$GITHUB_OUTPUT"
           echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "skip_native=$skip_native" >> "$GITHUB_OUTPUT"
+          echo "skip_python=$skip_python" >> "$GITHUB_OUTPUT"
 
   test:
     name: Test release
@@ -126,7 +142,7 @@ jobs:
   native-build:
     name: Build native ${{ matrix.binding }}
     needs: plan
-    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_NATIVE != 'true')
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && needs.plan.outputs.skip_native != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -141,7 +157,7 @@ jobs:
   native-build-retry:
     name: Retry native ${{ matrix.binding }}
     needs: [plan, native-build]
-    if: ${{ !cancelled() && needs.native-build.result == 'failure' }}
+    if: ${{ !cancelled() && (needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') }}
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +172,7 @@ jobs:
   python-build:
     name: Build Python ${{ matrix.binding }}
     needs: plan
-    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_PYTHON != 'true')
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && needs.plan.outputs.skip_python != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +187,7 @@ jobs:
   python-build-retry:
     name: Retry Python ${{ matrix.binding }}
     needs: [plan, python-build]
-    if: ${{ !cancelled() && needs.python-build.result == 'failure' }}
+    if: ${{ !cancelled() && (needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') }}
     strategy:
       fail-fast: false
       matrix:
@@ -190,10 +206,10 @@ jobs:
       needs.plan.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.native-build.result == 'success' ||
-      (needs.native-build.result == 'failure' && needs.native-build-retry.result == 'success') ||
+      ((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||
       needs.native-build.result == 'skipped') &&
       (needs.python-build.result == 'success' ||
-      (needs.python-build.result == 'failure' && needs.python-build-retry.result == 'success') ||
+      ((needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') && needs.python-build-retry.result == 'success') ||
       needs.python-build.result == 'skipped') }}
     name: Release
     runs-on: ubuntu-latest
@@ -330,7 +346,7 @@ jobs:
         id: npm-targets
         if: needs.plan.outputs.publishing == 'true'
         env:
-          RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
+          RELEASE_SKIP_NATIVE: ${{ needs.plan.outputs.skip_native }}
         run: node scripts/check-publish-targets.mjs --npm
 
       # A peer range a bump leaves turns its dependents major, and a fixed group
@@ -410,8 +426,13 @@ jobs:
 
   python-bindings:
     name: Python release train
-    needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_PYTHON != 'true'
+    needs: [plan, release, python-build, python-build-retry]
+    if: >-
+      ${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&
+      needs.plan.outputs.skip_python != 'true' &&
+      (needs.python-build.result == 'success' ||
+      ((needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') && needs.python-build-retry.result == 'success') ||
+      (needs.python-build.result == 'skipped' && needs.plan.outputs.python == '[]')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -512,8 +533,13 @@ jobs:
   # them to that workflow.
   native-npm:
     name: Publish native packages
-    needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
+    needs: [plan, release, native-build, native-build-retry]
+    if: >-
+      ${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&
+      needs.plan.outputs.skip_native != 'true' &&
+      (needs.native-build.result == 'success' ||
+      ((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||
+      (needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}
     runs-on: ubuntu-latest
     # Covers native-dist (45 minutes + 15 for smoke tests) and publishing (15 minutes).
     timeout-minutes: 90
@@ -565,12 +591,13 @@ jobs:
 
   held-npm:
     name: Publish packages that need the native packages
-    needs: [release, native-npm]
-    # The registry check also covers a native job skipped with RELEASE_SKIP_NATIVE.
+    needs: [plan, release, native-npm]
+    # If the plan skipped native publishing, check npm for the required versions.
     if: >-
       !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&
       needs.release.outputs.held != '' && needs.release.outputs.held != '[]' &&
-      (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')
+      (needs.native-npm.result == 'success' ||
+      (needs.native-npm.result == 'skipped' && needs.plan.outputs.skip_native == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:

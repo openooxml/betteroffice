@@ -121,7 +121,7 @@ export async function auditNpmPackages(packages, registry = NPM_REGISTRY, timeou
   return auditPackages(packages, npmPackages(registry, timeoutMs));
 }
 
-/** Whether release.yml skips its native job: Actions compares `vars.RELEASE_SKIP_NATIVE != 'true'` ignoring case. */
+/** Whether the release plan skipped native publishing. */
 function skipsNative(env = process.env) {
   return env.RELEASE_SKIP_NATIVE?.toLowerCase() === 'true';
 }

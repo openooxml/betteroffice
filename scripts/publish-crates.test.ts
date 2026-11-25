@@ -1035,6 +1035,7 @@ describe('release workflow crates auth', () => {
       PUBLISHING: '${{ steps.pending.outputs.publishing }}',
       REHEARSE: '${{ inputs.rehearse == true }}'
     });
+    expect(note.run).toContain("tr '[:upper:]' '[:lower:]'");
     expect(release.jobs.test.if).toContain('RELEASE_SKIP_TESTS');
     for (const [id, job] of Object.entries<any>(release.jobs)) {
       if (id !== 'test') expect(job.if ?? '', id).not.toContain('RELEASE_SKIP_TESTS');

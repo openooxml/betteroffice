@@ -224,7 +224,7 @@ describe('native package release wiring', () => {
   test('keeps native publishing outside the main release job', () => {
     const job = structuredClone(release.jobs.release);
     const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
-    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
+    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ needs.plan.outputs.skip_native }}' });
     delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(180);
     expect(job.steps.some((step: any) => step.run?.includes('publish-native.yml/dispatches'))).toBe(false);
@@ -243,7 +243,7 @@ describe('native package release wiring', () => {
     const job = release.jobs['native-build'];
     expect(job.needs).toBe('plan');
     expect(job.if).toBe(
-      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_NATIVE != 'true')"
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && needs.plan.outputs.skip_native != 'true'"
     );
     expect(job.strategy).toEqual({
       'fail-fast': false,
@@ -255,11 +255,11 @@ describe('native package release wiring', () => {
     expect(job['continue-on-error']).toBeUndefined();
   });
 
-  test('release retries the whole native build matrix once after failure', () => {
+  test('release retries the whole native build matrix once after failure or cancellation', () => {
     const job = release.jobs['native-build'];
     const retry = release.jobs['native-build-retry'];
     expect(retry.needs).toEqual(['plan', 'native-build']);
-    expect(retry.if).toBe("${{ !cancelled() && needs.native-build.result == 'failure' }}");
+    expect(retry.if).toBe("${{ !cancelled() && (needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') }}");
     for (const key of ['strategy', 'uses', 'with', 'permissions', 'secrets']) {
       expect(retry[key]).toEqual(job[key]);
     }
@@ -268,17 +268,21 @@ describe('native package release wiring', () => {
 
   test('publishes held packages after the release and native publishing', () => {
     const job = release.jobs['held-npm'];
-    expect(job.needs).toEqual(['release', 'native-npm']);
+    expect(job.needs).toEqual(['plan', 'release', 'native-npm']);
     expect(job.permissions['id-token']).toBe('write');
-    expect(job.if).toContain("&& (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')");
+    expect(job.if).toContain("(needs.native-npm.result == 'skipped' && needs.plan.outputs.skip_native == 'true')");
   });
 
-  test('release dispatches and waits for the dedicated publisher', () => {
+  test('release dispatches and waits for the dedicated publisher after the native gate passes', () => {
     const job = release.jobs['native-npm'];
-    expect(job.needs).toBe('release');
-    expect(job.if).toBe(
-      "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
-    );
+    expect(job.needs).toEqual(['plan', 'release', 'native-build', 'native-build-retry']);
+    expect(job.if).toBe([
+      "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&",
+      "needs.plan.outputs.skip_native != 'true' &&",
+      "(needs.native-build.result == 'success' ||",
+      "((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||",
+      "(needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}"
+    ].join(' '));
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job['timeout-minutes']).toBe(90);
     expect(job.permissions).toEqual({ actions: 'write' });
@@ -474,6 +478,7 @@ describe('native package release wiring', () => {
   test('dist loads each musl binary in Node on Alpine', () => {
     const job = dist.jobs['musl-smoke'];
     expect(job.needs).toBe('bindings');
+    expect(job['continue-on-error']).toBeUndefined();
     expect(job.strategy.matrix.include).toEqual([
       { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-musl' },
       { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-musl' }
@@ -485,6 +490,7 @@ describe('native package release wiring', () => {
     expect(binary.with.path).toBe('bindings/${{ inputs.binding }}-native');
     expect(loader.with.path).toBe('bindings/${{ inputs.binding }}-native');
     const smoke = steps.find((step: any) => step.name === 'Smoke test on Alpine');
+    expect(smoke['continue-on-error']).toBeUndefined();
     expect(smoke.run).toContain('node:24-alpine');
     expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
   });
@@ -495,6 +501,7 @@ describe('native package release wiring', () => {
     expect(job.needs).toBe(musl.needs);
     expect(job.if).toBeUndefined();
     expect(musl.if).toBeUndefined();
+    expect(job['continue-on-error']).toBeUndefined();
     expect(job['runs-on']).toBe('windows-11-arm');
     expect(job['timeout-minutes']).toBe(15);
     expect(job.defaults.run.shell).toBe('bash');
