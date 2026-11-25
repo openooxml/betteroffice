@@ -74,8 +74,17 @@ pub fn normalize_table_header(
     let base = match &cell.value {
         CellValue::Empty => String::new(),
         CellValue::Text { value } => value.clone(),
-        CellValue::Number { .. } => {
-            xlsx_model::numfmt::format_value(&cell.value, "General", workbook.date_system).text
+        CellValue::Number { value } => {
+            let mut text = value.to_string();
+            if text.len() > MAX_TABLE_HEADER_CHARS {
+                text = format!("{value:E}");
+                if let Some(exponent) = text.find('E')
+                    && !text[exponent + 1..].starts_with('-')
+                {
+                    text.insert(exponent + 1, '+');
+                }
+            }
+            text
         }
         CellValue::Bool { value: true } => "TRUE".to_owned(),
         CellValue::Bool { value: false } => "FALSE".to_owned(),

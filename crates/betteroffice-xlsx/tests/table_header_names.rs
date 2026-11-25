@@ -431,22 +431,29 @@ fn numeric_input_in_a_header_is_stored_as_text() {
 }
 
 #[test]
-fn a_large_numeric_value_in_a_header_uses_general_formatting() {
+fn numeric_values_in_headers_round_trip_as_text() {
     let mut workbook = Workbook::open(&book()).unwrap();
-    workbook
-        .apply_ops(
-            vec![Op::SetCell {
-                sheet: SHEET1,
-                at: at("B1"),
-                cell: CellState {
-                    value: CellValue::Number { value: 1e300 },
-                    ..CellState::default()
-                },
-            }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_saved_headers(&workbook.save().unwrap(), ["Name", "1E+300", "Rev"]);
+    for (value, expected) in [
+        (1_234_567_890_123.0, "1234567890123"),
+        (0.1, "0.1"),
+        (1e300, "1E+300"),
+        (1e-300, "1E-300"),
+    ] {
+        workbook
+            .apply_ops(
+                vec![Op::SetCell {
+                    sheet: SHEET1,
+                    at: at("B1"),
+                    cell: CellState {
+                        value: CellValue::Number { value },
+                        ..CellState::default()
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_saved_headers(&workbook.save().unwrap(), ["Name", expected, "Rev"]);
+    }
 }
 
 #[test]
@@ -551,6 +558,47 @@ fn undo_and_redo_restore_the_header_cell_and_column_name() {
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
     workbook.redo(CalculationOptions::default()).unwrap();
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+}
+
+#[test]
+fn undo_of_header_row_deletion_restores_the_cell_and_preserves_the_table_part() {
+    let source = replace_part(
+        &book(),
+        "xl/sharedStrings.xml",
+        "<t>Status</t>",
+        "<t>STATUS</t>",
+    );
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let path = "xl/tables/table1.xml";
+    for build_authority in [false, true] {
+        let mut workbook = Workbook::open(&source).unwrap();
+        if build_authority {
+            workbook.try_client_id().unwrap();
+        }
+        let deleted = workbook
+            .apply_ops(
+                vec![Op::DeleteRows {
+                    sheet: SHEET1,
+                    at: 0,
+                    count: 1,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert!(deleted.applied);
+
+        workbook.undo(CalculationOptions::default()).unwrap();
+        let saved = workbook.save().unwrap();
+        let after = ooxml_opc::unzip_parts(&saved).unwrap();
+        assert_eq!(part(&after, path), part(&before, path));
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened.model().value(SHEET1, at("B1")),
+            CellValue::Text {
+                value: "STATUS".into()
+            }
+        );
+    }
 }
 
 #[test]
@@ -1841,6 +1889,34 @@ fn a_formula_in_alternate_content_refuses_the_rename() {
     );
     let mut workbook = Workbook::open(&source).unwrap();
     assert_refused_header(&mut workbook, "B1", "State", sheet);
+}
+
+#[test]
+fn a_header_cell_inside_alternate_content_refuses_a_content_edit() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="B1" t="s"><v>0</v></c>"#,
+        concat!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x"><c r="B1" t="s"><v>0</v></c></mc:Choice>"#,
+            r#"<mc:Fallback><c r="B1" t="s"><v>0</v></c></mc:Fallback>"#,
+            "</mc:AlternateContent>",
+        ),
+    );
+    let mismatched = replace_part(
+        &source,
+        "xl/sharedStrings.xml",
+        "<t>Status</t>",
+        "<t>STATUS</t>",
+    );
+    for (source, input) in [(source, "State"), (mismatched, "Status")] {
+        let mut workbook = Workbook::open(&source).unwrap();
+        let before = workbook.save().unwrap();
+        assert_refused_header(&mut workbook, "B1", input, "AlternateContent");
+        assert!(!workbook.can_undo());
+        assert_eq!(workbook.save().unwrap(), before);
+    }
 }
 
 #[test]

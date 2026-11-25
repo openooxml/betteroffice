@@ -1752,7 +1752,8 @@ impl WorkbookAuthority {
             })
             .collect::<HashMap<_, _>>();
         let mut rewritten = HashSet::new();
-        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model);
+        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model)
+            .with_cell_restoration(matches!(origin, SyncOrigin::Undo | SyncOrigin::Redo));
         for op in ops {
             batch
                 .apply_with_inverse(op, |inverse| {

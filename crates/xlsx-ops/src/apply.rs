@@ -179,6 +179,14 @@ pub fn ensure_op_available(op: &Op) -> Result<(), OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    apply_in_place_with_cell_restoration(wb, op, false)
+}
+
+fn apply_in_place_with_cell_restoration(
+    wb: &mut Workbook,
+    op: &Op,
+    restore_cells: bool,
+) -> Result<InvertedOp, OpError> {
     ensure_op_available(op)?;
     crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
@@ -189,8 +197,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .cell(*at)
                 .map(CellState::from)
                 .unwrap_or_default();
-            let (state, inverse) = if let Some((table, column, name)) =
-                normalize_table_header(wb, *sheet, *at, cell)?
+            let (state, inverse) = if !restore_cells
+                && let Some((table, column, name)) = normalize_table_header(wb, *sheet, *at, cell)?
             {
                 let inverse = rename_table_column(wb, table, column, *at, &name, old)?;
                 (
@@ -1395,14 +1403,23 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    apply_batch(wb, ops, false)
+}
+
+pub(crate) fn apply_history_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    apply_batch(wb, ops, true)
+}
+
+fn apply_batch(wb: &mut Workbook, ops: &[Op], restore_cells: bool) -> Result<Vec<Op>, OpError> {
     if let [op @ Op::SetCell { .. }] = ops {
         #[cfg(test)]
         if FORCE_CLONE_ROLLBACK.get() {
-            return apply_ops_cloned(wb, ops);
+            return apply_ops_cloned(wb, ops, restore_cells);
         }
-        return apply_in_place(wb, op).map(|inverse| inverse.0);
+        let inverse = apply_in_place_with_cell_restoration(wb, op, restore_cells)?;
+        return Ok(inverse.0);
     }
-    apply_ops_cloned(wb, ops)
+    apply_ops_cloned(wb, ops, restore_cells)
 }
 
 #[cfg(test)]
@@ -1410,19 +1427,19 @@ thread_local! {
     static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+fn apply_ops_cloned(
+    wb: &mut Workbook,
+    ops: &[Op],
+    restore_cells: bool,
+) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
-    let inverse = apply_ops_in_place(&mut next, ops)?;
-    *wb = next;
-    Ok(inverse)
-}
-
-fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
-    let mut batch = InPlaceBatch::new(wb);
+    let mut batch = InPlaceBatch::new(&mut next).with_cell_restoration(restore_cells);
     for op in ops {
         batch.apply(op)?;
     }
-    Ok(batch.finish())
+    let inverse = batch.finish();
+    *wb = next;
+    Ok(inverse)
 }
 
 /// Ops applied in sequence to one workbook as [`apply_in_place`] applies each, with no rollback
@@ -1436,6 +1453,7 @@ pub struct InPlaceBatch<'a> {
     wb: &'a mut Workbook,
     per_op: Option<Vec<Vec<Op>>>,
     names: Option<NameIndex>,
+    restore_cells: bool,
     /// the defined-name edits just applied started from a table their inverse restores
     in_name_run: bool,
 }
@@ -1475,6 +1493,7 @@ impl<'a> InPlaceBatch<'a> {
             wb,
             per_op: Some(Vec::new()),
             names: None,
+            restore_cells: false,
             in_name_run: false,
         }
     }
@@ -1485,6 +1504,11 @@ impl<'a> InPlaceBatch<'a> {
             per_op: None,
             ..Self::new(wb)
         }
+    }
+
+    pub fn with_cell_restoration(mut self, restore_cells: bool) -> Self {
+        self.restore_cells = restore_cells;
+        self
     }
 
     pub fn workbook(&self) -> &Workbook {
@@ -1569,7 +1593,7 @@ impl<'a> InPlaceBatch<'a> {
             _ => {
                 self.names = None;
                 self.in_name_run = false;
-                apply_in_place(self.wb, op)?
+                apply_in_place_with_cell_restoration(self.wb, op, self.restore_cells)?
             }
         };
         visit(&inverse.0);
@@ -3215,7 +3239,7 @@ mod tests {
                 let mut fast = initial.clone();
                 let mut oracle = initial.clone();
                 let result = apply_ops(&mut fast, std::slice::from_ref(&op));
-                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op), false);
                 assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
                 assert_eq!(result, expected);
                 assert_eq!(fast, initial);

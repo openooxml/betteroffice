@@ -4395,7 +4395,7 @@ impl Workbook {
         origins: &[Option<usize>],
         op: &Op,
     ) -> Result<()> {
-        let (sheet, table, column, name) = match op {
+        let (sheet, at, table, column, name) = match op {
             Op::SetCell { sheet, at, cell } => {
                 if self.is_collaborative()
                     && xlsx_ops::table_header_write_at(model, *sheet, *at, cell).is_some()
@@ -4407,7 +4407,7 @@ impl Workbook {
                 else {
                     return Ok(());
                 };
-                (*sheet, table, column, Cow::Owned(name))
+                (*sheet, *at, table, column, Cow::Owned(name))
             }
             Op::RestoreTableColumn {
                 sheet,
@@ -4424,31 +4424,36 @@ impl Workbook {
                 else {
                     return Ok(());
                 };
-                (*sheet, index, column, Cow::Borrowed(caption.as_str()))
+                (*sheet, *at, index, column, Cow::Borrowed(caption.as_str()))
             }
             _ => return Ok(()),
         };
         let Some(package) = &self.source_package else {
             return Ok(());
         };
-        let table = &model.tables[table];
-        let old = &table.columns[column];
-        if old == name.as_ref() {
-            return Ok(());
-        }
         let unsupported = |error: xlsx_parse::ParseError| {
             xlsx_ops::OpError::TableHeaderUnsupported(error.to_string())
         };
         let package = package
             .materialize()
             .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+        let origin = origins.get(sheet.0 as usize).copied().flatten();
+        if let Some(origin) = origin {
+            package
+                .validate_table_header_cell(origin, at)
+                .map_err(unsupported)?;
+        }
+        let table = &model.tables[table];
+        let old = &table.columns[column];
+        if old == name.as_ref() {
+            return Ok(());
+        }
         package
             .validate_table_column_rename(model, origins, table, column, &name)
             .map_err(unsupported)?;
         if old.to_lowercase() == name.to_lowercase() {
             return Ok(());
         }
-        let origin = origins.get(sheet.0 as usize).copied().flatten();
         let source_sheet = origin
             .and_then(|index| package.source_sheet_name(index))
             .unwrap_or(&model.sheets[sheet.0 as usize].name);
@@ -4512,9 +4517,12 @@ impl Workbook {
         }
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
-        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut preview);
+        let mut batch =
+            xlsx_ops::InPlaceBatch::without_inverse(&mut preview).with_cell_restoration(true);
         for op in ops {
-            self.ensure_table_header_write(batch.workbook(), &origins, op)?;
+            if matches!(op, Op::RestoreTableColumn { .. }) {
+                self.ensure_table_header_write(batch.workbook(), &origins, op)?;
+            }
             batch.apply(op)?;
             match *op {
                 Op::AddSheet { index, .. } => {

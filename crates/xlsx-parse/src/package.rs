@@ -459,6 +459,20 @@ impl PreservedPackage {
     }
 
     #[doc(hidden)]
+    pub fn validate_table_header_cell(&self, origin: usize, at: CellRef) -> Result<(), ParseError> {
+        if let Some(sheet) = self.sheets.get(origin)
+            && sheet.cell_facts.alternate_cells.contains(&(at.row, at.col))
+        {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "table header {} in {} is inside AlternateContent",
+                at.to_a1(),
+                sheet.path
+            )));
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
     pub fn table_header_reference(
         &self,
         origin: Option<usize>,

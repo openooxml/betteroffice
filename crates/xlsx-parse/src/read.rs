@@ -733,6 +733,7 @@ pub struct SourceCellFacts {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorksheetCellFacts {
     pub(crate) source: SourceCellFacts,
+    pub(crate) alternate_cells: BTreeSet<(u32, u32)>,
     // The XML and model disagree about whether these cells hold a cache.
     cache_presence_overrides: BTreeSet<(u32, u32)>,
 }
@@ -878,6 +879,9 @@ fn parse_worksheet(
                             .map_err(|_| ParseError::Malformed(format!("bad cell ref {v:?}")))?,
                         None => CellRef::new(cur_row.unwrap_or(0), col_cursor),
                     };
+                    if alternate_depth > 0 {
+                        facts.alternate_cells.insert((addr.row, addr.col));
+                    }
                     col_cursor = addr.col;
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
