@@ -1446,9 +1446,15 @@ impl Workbook {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        if self.has_alternate_content() && let Some(prepared) = &mut plan.staged {
+        if self.has_alternate_content()
+            && let Some(prepared) = &mut plan.staged
+        {
             let seeds = edit_seeds(&plan.steps, &plan.changed);
-            self.recalculate_edit_preview(&mut prepared.model, &seeds, request.calculation.now_serial);
+            self.recalculate_edit_preview(
+                &mut prepared.model,
+                &seeds,
+                request.calculation.now_serial,
+            );
             match self.validate_alternate_preview(&prepared.model, &self.preserved) {
                 Ok(()) => {}
                 Err(error @ Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
@@ -1531,7 +1537,9 @@ impl Workbook {
         };
         let seeds = edit_seeds(&steps, &changed);
         let (graph, recalculated) = self.recalculate_edit_preview(
-            &mut prepared.model, &seeds, request.calculation.now_serial,
+            &mut prepared.model,
+            &seeds,
+            request.calculation.now_serial,
         );
         let changed_sheets = steps
             .iter()
@@ -1608,13 +1616,8 @@ impl Workbook {
             Some(previous) => graph.adopt_unevaluated(previous),
             None => super::assume_unevaluated(&graph, &self.last_calculation),
         }
-        let recalculated = recalc_after_with_seed(
-            model,
-            &mut graph,
-            seeds,
-            now_serial,
-            self.rand_seed,
-        );
+        let recalculated =
+            recalc_after_with_seed(model, &mut graph, seeds, now_serial, self.rand_seed);
         (graph, recalculated)
     }
 
@@ -1734,7 +1737,8 @@ fn encode<T: Serialize>(outcome: &std::result::Result<T, EditRefusal>) -> Result
 
 /// Calculation diagnostics beyond the written `seeds`, each list capped.
 fn edit_seeds(steps: &[Planned], changed: &[Vec<CellRef>]) -> Vec<(SheetId, CellRef)> {
-    steps.iter()
+    steps
+        .iter()
         .zip(changed)
         .filter(|(planned, _)| planned.claims.content)
         .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))

@@ -921,7 +921,9 @@ pub fn worksheet_has_alternate_content(bytes: &[u8]) -> Result<bool, ParseError>
                     return Err(ParseError::DepthExceeded);
                 }
             }
-            Event::Empty(element) if grid && element.local_name().as_ref() == b"AlternateContent" => {
+            Event::Empty(element)
+                if grid && element.local_name().as_ref() == b"AlternateContent" =>
+            {
                 return Ok(true);
             }
             Event::End(_) => {
@@ -1033,7 +1035,9 @@ impl XmlTemplate {
             xlsx_model::progress::tick();
             let namespace = resolved_namespace(namespace);
             let after = bom + reader.buffer_position() as usize - context_len;
-            if active_child.as_ref().is_some_and(|(_, name, _)| name == "sheetData")
+            if active_child
+                .as_ref()
+                .is_some_and(|(_, name, _)| name == "sheetData")
                 && matches!(&event, Event::Start(element) | Event::Empty(element)
                     if element.local_name().as_ref() == b"AlternateContent")
             {
@@ -1159,7 +1163,11 @@ impl XmlTemplate {
         facts: &mut SourceCellFacts,
     ) -> Result<(), ParseError> {
         if self.has_sheet_data_alternates {
-            crate::patch::scan_alternate_content(bytes, self.sheet_data_namespace_stable()?, facts)?;
+            crate::patch::scan_alternate_content(
+                bytes,
+                self.sheet_data_namespace_stable()?,
+                facts,
+            )?;
             if !facts.non_inert_alternate {
                 facts.non_inert_alternate = match self.child("sheetData") {
                     Some(child) => !crate::patch::patchable_alternate_grid(

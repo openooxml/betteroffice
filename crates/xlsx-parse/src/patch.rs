@@ -186,15 +186,22 @@ impl AlternateBlock {
             min.zip(max).map_or(0..0, |(min, max)| min..max + 1)
         };
         let rows = self.parent_row.map_or_else(
-            || span(self.all_rows.first().copied(), self.all_rows.last().copied()),
+            || {
+                span(
+                    self.all_rows.first().copied(),
+                    self.all_rows.last().copied(),
+                )
+            },
             |row| row..row + 1,
         );
         let cols = span(
             self.all_cells.iter().map(|&(_, col)| col).min(),
             self.all_cells.iter().map(|&(_, col)| col).max(),
         );
-        facts.non_inert_alternate |=
-            !self.inert || !self.has_choice || rows.is_empty() || (self.parent_row.is_some() && cols.is_empty());
+        facts.non_inert_alternate |= !self.inert
+            || !self.has_choice
+            || rows.is_empty()
+            || (self.parent_row.is_some() && cols.is_empty());
         facts.alternate_cells.extend(self.all_cells);
         facts.alternate_rows.extend(self.all_rows);
         facts.alternate_spans.push(AlternateSpan {
@@ -230,7 +237,8 @@ pub(crate) fn scan_alternate_content(
                     ResolveResult::Unbound => None,
                     ResolveResult::Unknown(_) => Some(Vec::new()),
                 };
-                let mc = namespace.as_deref() == Some(crate::drawing_anchors::NS_MARKUP_COMPATIBILITY.as_bytes());
+                let mc = namespace.as_deref()
+                    == Some(crate::drawing_anchors::NS_MARKUP_COMPATIBILITY.as_bytes());
                 if let Some(block) = &mut block {
                     if namespace.as_deref().is_some_and(<[u8]>::is_empty) {
                         block.inert = false;
@@ -298,8 +306,10 @@ pub(crate) fn scan_alternate_content(
                             all_cells: BTreeSet::new(),
                             all_rows: BTreeSet::new(),
                             active_row: None,
-                            inert: mc && namespace_stable
-                                && (depth == 2 || (depth == 3 && row.is_some() && row_namespace_stable)),
+                            inert: mc
+                                && namespace_stable
+                                && (depth == 2
+                                    || (depth == 3 && row.is_some() && row_namespace_stable)),
                             has_choice: false,
                             has_fallback: false,
                         });
@@ -508,9 +518,7 @@ impl SheetPatch<'_> {
         let tail = rows
             .last()
             .map_or(element.content.start, |row| row.span.end);
-        let tail = alternates
-            .last()
-            .map_or(tail, |block| tail.max(block.end));
+        let tail = alternates.last().map_or(tail, |block| tail.max(block.end));
         out.extend_from_slice(&source[tail..element.content.end]);
         out.extend_from_slice(&element.suffix);
         Ok(Some(out))
@@ -686,7 +694,10 @@ impl SheetPatch<'_> {
         let mut alternates = source.alternates.iter().peekable();
         let mut columns: Option<(u32, u32)> = None;
         let mapped = source.cells.iter().filter_map(|cell| {
-            self.axes.cols.current(cell.at.col).map(|current| (current, cell))
+            self.axes
+                .cols
+                .current(cell.at.col)
+                .map(|current| (current, cell))
         });
         let mut sorted = Vec::new();
         let mut streaming = None;
@@ -1876,7 +1887,9 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<SourceSheetData>, ParseError> {
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
                 if let Some((_, indices)) = alternate.take_if(|(opened, _)| *opened == depth) {
-                    let Some(indices) = indices else { return Ok(None) };
+                    let Some(indices) = indices else {
+                        return Ok(None);
+                    };
                     match &mut row {
                         Some(row) => row.alternates.push(SourceAlternate {
                             before: row.content_start(),
@@ -1929,26 +1942,57 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<SourceSheetData>, ParseError> {
     }
 }
 
-pub(crate) fn patchable_alternate_grid(data: &[u8], wrapper_count: usize) -> Result<bool, ParseError> {
-    let Some(grid) = scan_sheet_data(data)? else { return Ok(false) };
-    let blocks = grid.alternates.len() + grid.rows.iter().map(|row| row.alternates.len()).sum::<usize>();
+pub(crate) fn patchable_alternate_grid(
+    data: &[u8],
+    wrapper_count: usize,
+) -> Result<bool, ParseError> {
+    let Some(grid) = scan_sheet_data(data)? else {
+        return Ok(false);
+    };
+    let blocks = grid.alternates.len()
+        + grid
+            .rows
+            .iter()
+            .map(|row| row.alternates.len())
+            .sum::<usize>();
     let ordered = |mut positions: Vec<_>| {
         positions.sort_unstable_by_key(|(offset, _)| *offset);
-        positions.windows(2).all(|pair: &[(usize, RangeInclusive<u32>)]| pair[0].1.end() < pair[1].1.start())
+        positions
+            .windows(2)
+            .all(|pair: &[(usize, RangeInclusive<u32>)]| pair[0].1.end() < pair[1].1.start())
     };
-    if blocks != wrapper_count || !ordered(grid.rows.iter()
-        .map(|row| (row.span.start, row.index..=row.index))
-        .chain(grid.alternates.iter().map(|block| (block.before, block.indices.clone())))
-        .collect())
+    if blocks != wrapper_count
+        || !ordered(
+            grid.rows
+                .iter()
+                .map(|row| (row.span.start, row.index..=row.index))
+                .chain(
+                    grid.alternates
+                        .iter()
+                        .map(|block| (block.before, block.indices.clone())),
+                )
+                .collect(),
+        )
     {
         return Ok(false);
     }
-    Ok(grid.rows.iter().filter(|row| !row.alternates.is_empty()).all(|row| {
-        ordered(row.cells.iter()
-            .map(|cell| (cell.span.start, cell.at.col..=cell.at.col))
-            .chain(row.alternates.iter().map(|block| (block.before, block.indices.clone())))
-            .collect())
-    }))
+    Ok(grid
+        .rows
+        .iter()
+        .filter(|row| !row.alternates.is_empty())
+        .all(|row| {
+            ordered(
+                row.cells
+                    .iter()
+                    .map(|cell| (cell.span.start, cell.at.col..=cell.at.col))
+                    .chain(
+                        row.alternates
+                            .iter()
+                            .map(|block| (block.before, block.indices.clone())),
+                    )
+                    .collect(),
+            )
+        }))
 }
 
 fn row_index(
@@ -1997,8 +2041,11 @@ fn alternate_branches_stay_in_place_when_the_following_cell_is_removed() {
 
     let saved = style_match_tests::save(&parsed, &workbook, Some(SheetAxes::default()));
     assert_eq!(saved.matches(alternate).count(), 1, "{saved}");
-    parts.iter_mut().find(|(path, _)| path == "xl/worksheets/sheet1.xml").unwrap().1 =
-        saved.into_bytes();
+    parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1 = saved.into_bytes();
     let reopened = crate::parse_workbook(&parts).unwrap();
     assert!(reopened.sheets[0].cell(CellRef::new(0, 3)).is_none());
     assert_eq!(
@@ -2012,12 +2059,16 @@ fn alternate_branches_stay_in_place_when_the_following_cell_is_removed() {
 fn alternate_grid_facts_record_both_ends_of_cell_and_row_spans() {
     let cells = r#"<c r="B1"><v>2</v></c><c r="D1"><v>4</v></c>"#;
     let rows = r#"<row r="2"><c r="B2"><v>2</v></c></row><row r="4"><c r="D4"><v>4</v></c></row>"#;
-    let wrapper = |xml| format!(
-        r#"<mc:AlternateContent><mc:Choice Requires="x">{xml}</mc:Choice><mc:Fallback>{xml}</mc:Fallback></mc:AlternateContent>"#,
-    );
+    let wrapper = |xml| {
+        format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="x">{xml}</mc:Choice><mc:Fallback>{xml}</mc:Fallback></mc:AlternateContent>"#,
+        )
+    };
     let xml = format!(
         r#"<worksheet xmlns:mc="{}" xmlns:x="urn:test:ext"><sheetData><row r="1">{}</row>{}</sheetData></worksheet>"#,
-        crate::drawing_anchors::NS_MARKUP_COMPATIBILITY, wrapper(cells), wrapper(rows),
+        crate::drawing_anchors::NS_MARKUP_COMPATIBILITY,
+        wrapper(cells),
+        wrapper(rows),
     );
     let mut facts = SourceCellFacts::default();
     scan_alternate_content(xml.as_bytes(), true, &mut facts).unwrap();
@@ -2025,8 +2076,16 @@ fn alternate_grid_facts_record_both_ends_of_cell_and_row_spans() {
     assert_eq!(
         facts.alternate_spans,
         [
-            AlternateSpan { rows: 0..1, cols: 1..4, wraps_rows: false },
-            AlternateSpan { rows: 1..4, cols: 1..4, wraps_rows: true },
+            AlternateSpan {
+                rows: 0..1,
+                cols: 1..4,
+                wraps_rows: false
+            },
+            AlternateSpan {
+                rows: 1..4,
+                cols: 1..4,
+                wraps_rows: true
+            },
         ],
     );
 }
@@ -2038,7 +2097,12 @@ fn alternate_grid_facts_detect_empty_wrappers_and_unmodeled_formulas() {
     let choice = r#"<c r="A1"><f t="shared" si="0"/><v>2</v></c>"#;
     for (xml, formula) in [
         ("<mc:AlternateContent/>".to_owned(), false),
-        (format!(r#"<mc:AlternateContent><mc:Choice Requires="x">{choice}</mc:Choice><mc:Fallback>{cell}</mc:Fallback></mc:AlternateContent>"#), true),
+        (
+            format!(
+                r#"<mc:AlternateContent><mc:Choice Requires="x">{choice}</mc:Choice><mc:Fallback>{cell}</mc:Fallback></mc:AlternateContent>"#
+            ),
+            true,
+        ),
     ] {
         let source = format!(
             r#"<worksheet xmlns:mc="{}" xmlns:x="urn:test:ext"><sheetData><row r="1">{xml}</row></sheetData></worksheet>"#,

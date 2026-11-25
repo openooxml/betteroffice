@@ -118,7 +118,11 @@ impl Workbook {
         Self::rebase_graph_answers(graph, before, ops);
     }
 
-    pub(super) fn rebase_graph_answers(graph: &xlsx_calc::graph::DepGraph, before: &[String], ops: &[Op]) {
+    pub(super) fn rebase_graph_answers(
+        graph: &xlsx_calc::graph::DepGraph,
+        before: &[String],
+        ops: &[Op],
+    ) {
         if !ops.iter().any(rebases_proposals) {
             return;
         }

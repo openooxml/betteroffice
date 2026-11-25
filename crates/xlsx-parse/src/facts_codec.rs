@@ -726,7 +726,8 @@ mod tests {
                 "<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter></worksheet>",
             )
             .into_bytes();
-        let sheet = parts.iter_mut()
+        let sheet = parts
+            .iter_mut()
             .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
             .unwrap();
         sheet.1 = concat!(

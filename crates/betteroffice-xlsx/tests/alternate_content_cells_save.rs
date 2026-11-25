@@ -1,7 +1,7 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellValue, EditFailureCode, EditOperation,
-    EditRequest, EditStep, Error, NumberFormatMutation, ProposalEditInput, ProposalRequest,
-    RangeAddress, RangeTarget, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
+    CalculationOptions, CellRange, CellRef, CellValue, EditFailureCode, EditOperation, EditRequest,
+    EditStep, Error, NumberFormatMutation, ProposalEditInput, ProposalRequest, RangeAddress,
+    RangeTarget, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
     WorkbookSnapshotEncoder,
 };
 use xlsx_model::CellProvider;
@@ -118,7 +118,12 @@ fn number(value: f64) -> CellValue {
 fn edit(workbook: &mut Workbook, sheet: u32, at: &str, input: &str) {
     assert!(
         workbook
-            .edit_cell(SheetId(sheet), cell_ref(at), input, CalculationOptions::default())
+            .edit_cell(
+                SheetId(sheet),
+                cell_ref(at),
+                input,
+                CalculationOptions::default()
+            )
             .unwrap()
             .applied
     );
@@ -196,7 +201,12 @@ fn untouched_sheet_keeps_wrapper_bytes() {
 fn edit_of_wrapped_cell_is_refused() {
     let mut workbook = Workbook::open(&package()).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("A1"), "updated", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("A1"),
+            "updated",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -220,7 +230,12 @@ fn changing_precedent_of_wrapped_formula_is_refused() {
     let bytes = package_with_wrapped_a1(&wrapper(formula, formula));
     let mut workbook = Workbook::open(&bytes).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(0), cell_ref("A1"), "15", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(0),
+            cell_ref("A1"),
+            "15",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -264,7 +279,12 @@ fn replacing_unwrapped_shared_formula_master_is_refused() {
     let body = in_row(&format!("{master}{}", wrapper(follower, follower)));
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("A1"), "7", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("A1"),
+            "7",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -277,7 +297,12 @@ fn clearing_cell_before_implicit_wrapped_cell_is_refused() {
         ));
         let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
         assert_refused(&mut workbook, |workbook| {
-            workbook.edit_cell(SheetId(1), cell_ref("A1"), "", CalculationOptions::default())
+            workbook.edit_cell(
+                SheetId(1),
+                cell_ref("A1"),
+                "",
+                CalculationOptions::default(),
+            )
         });
     }
 }
@@ -295,7 +320,12 @@ fn editing_beside_a_wrapper_with_an_unstable_default_namespace_is_refused() {
     );
     let mut workbook = Workbook::open(&package_with_sheet2_xml(&source)).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("B1"), "3", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("B1"),
+            "3",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -309,7 +339,10 @@ fn renaming_a_sheet_referenced_only_in_choice_is_refused() {
     let mut workbook = Workbook::open(&bytes).unwrap();
     assert_refused(&mut workbook, |workbook| {
         workbook.apply_ops(
-            vec![Op::RenameSheet { sheet: SheetId(0), name: "Inputs".into() }],
+            vec![Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Inputs".into(),
+            }],
             CalculationOptions::default(),
         )
     });
@@ -317,10 +350,18 @@ fn renaming_a_sheet_referenced_only_in_choice_is_refused() {
 
 #[test]
 fn inserting_between_disagreeing_branches_is_refused() {
-    let body = in_row(&wrapper(r#"<c r="B1"><v>2</v></c>"#, r#"<c r="D1"><v>4</v></c>"#));
+    let body = in_row(&wrapper(
+        r#"<c r="B1"><v>2</v></c>"#,
+        r#"<c r="D1"><v>4</v></c>"#,
+    ));
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("C1"), "3", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("C1"),
+            "3",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -330,11 +371,19 @@ fn inserting_into_matching_wrapper_cell_or_row_gaps_is_refused() {
     let rows = r#"<row r="2"><c r="A2"><v>2</v></c></row><row r="4"><c r="A4"><v>4</v></c></row>"#;
     for (body, gap) in [
         (in_row(&wrapper(cells, cells)), "C1"),
-        (format!("<sheetData>{}</sheetData>", wrapper(rows, rows)), "A3"),
+        (
+            format!("<sheetData>{}</sheetData>", wrapper(rows, rows)),
+            "A3",
+        ),
     ] {
         let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
         assert_refused(&mut workbook, |workbook| {
-            workbook.edit_cell(SheetId(1), cell_ref(gap), "3", CalculationOptions::default())
+            workbook.edit_cell(
+                SheetId(1),
+                cell_ref(gap),
+                "3",
+                CalculationOptions::default(),
+            )
         });
     }
 }
@@ -345,7 +394,12 @@ fn inserting_beside_an_implicit_wrapped_row_is_refused() {
     let body = format!("<sheetData>{}</sheetData>", wrapper(row, row));
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("A2"), "99", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("A2"),
+            "99",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -353,7 +407,11 @@ fn set_cell(sheet: SheetId, at: &str, value: f64) -> Op {
     Op::SetCell {
         sheet,
         at: cell_ref(at),
-        cell: CellState { value: number(value), formula: None, style: None },
+        cell: CellState {
+            value: number(value),
+            formula: None,
+            style: None,
+        },
     }
 }
 
@@ -365,12 +423,36 @@ fn structural_and_dimension_batches_are_refused_atomically() {
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     let options = CalculationOptions::default();
     for op in [
-        Op::InsertRows { sheet, at: 0, count: 1 },
-        Op::DeleteRows { sheet, at: 0, count: 1 },
-        Op::InsertCols { sheet, at: 0, count: 1 },
-        Op::DeleteCols { sheet, at: 0, count: 1 },
-        Op::SetRowHeight { sheet, row: 1, height: Some(30.0) },
-        Op::SetRowVisibility { sheet, row: 1, hidden: true },
+        Op::InsertRows {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::InsertCols {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteCols {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::SetRowHeight {
+            sheet,
+            row: 1,
+            height: Some(30.0),
+        },
+        Op::SetRowVisibility {
+            sheet,
+            row: 1,
+            hidden: true,
+        },
     ] {
         assert_refused(&mut workbook, |workbook| {
             workbook.apply_ops(vec![set_cell(SheetId(0), "A1", 7.0), op], options)
@@ -381,10 +463,18 @@ fn structural_and_dimension_batches_are_refused_atomically() {
 #[test]
 fn structural_rewrites_on_a_different_sheet_are_refused() {
     let formula = r#"<c r="A1"><f>Sheet1!A1*2</f><v>20</v></c>"#;
-    let mut workbook = Workbook::open(&package_with_wrapped_a1(&wrapper(formula, formula))).unwrap();
+    let mut workbook =
+        Workbook::open(&package_with_wrapped_a1(&wrapper(formula, formula))).unwrap();
     for op in [
-        Op::RenameSheet { sheet: SheetId(0), name: "Inputs".into() },
-        Op::InsertRows { sheet: SheetId(0), at: 0, count: 1 },
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Inputs".into(),
+        },
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
     ] {
         assert_refused(&mut workbook, |workbook| {
             workbook.apply_ops(vec![op], CalculationOptions::default())
@@ -400,11 +490,30 @@ fn move_then_edit_batch_uses_moved_source_coordinates() {
     let body = format!("<sheetData>{}</sheetData>", wrapper(row, row));
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     for (op, at) in [
-        (Op::MoveRows { sheet, row: 2, count: 1, before: 1 }, "C2"),
-        (Op::MoveCols { sheet, col: 2, count: 1, before: 1 }, "B3"),
+        (
+            Op::MoveRows {
+                sheet,
+                row: 2,
+                count: 1,
+                before: 1,
+            },
+            "C2",
+        ),
+        (
+            Op::MoveCols {
+                sheet,
+                col: 2,
+                count: 1,
+                before: 1,
+            },
+            "B3",
+        ),
     ] {
         assert_refused(&mut workbook, |workbook| {
-            workbook.apply_ops(vec![op, set_cell(sheet, at, 7.0)], CalculationOptions::default())
+            workbook.apply_ops(
+                vec![op, set_cell(sheet, at, 7.0)],
+                CalculationOptions::default(),
+            )
         });
     }
 }
@@ -417,8 +526,17 @@ fn visibility_edits_on_wrapped_rows_are_refused() {
     let body = format!("<sheetData>{}</sheetData>", wrapper(row, row));
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     for op in [
-        Op::SetRowVisibility { sheet, row: 1, hidden: true },
-        Op::SetRowsVisibility { sheet, row: 0, count: 2, hidden: true },
+        Op::SetRowVisibility {
+            sheet,
+            row: 1,
+            hidden: true,
+        },
+        Op::SetRowsVisibility {
+            sheet,
+            row: 0,
+            count: 2,
+            hidden: true,
+        },
     ] {
         assert_refused(&mut workbook, |workbook| {
             workbook.apply_ops(vec![op], CalculationOptions::default())
@@ -433,11 +551,15 @@ fn foreign_updates_and_snapshots_cannot_edit_wrapped_cells() {
     let mut receiver = Workbook::open_collaborative(&package(), 2).unwrap();
     edit(&mut sender, 1, "A1", "5");
     let options = CalculationOptions::default();
-    let update = sender.encode_diff_v1(&receiver.encode_state_vector_v1()).unwrap();
+    let update = sender
+        .encode_diff_v1(&receiver.encode_state_vector_v1())
+        .unwrap();
     let snapshot = sender.encode_state_as_update_v1();
     for bytes in [&update, &snapshot] {
         let state = receiver.encode_state_as_update_v1();
-        assert_refused(&mut receiver, |receiver| receiver.apply_update_v1(bytes, options));
+        assert_refused(&mut receiver, |receiver| {
+            receiver.apply_update_v1(bytes, options)
+        });
         assert_eq!(receiver.encode_state_as_update_v1(), state);
     }
 }
@@ -449,7 +571,9 @@ fn foreign_update_cannot_dirty_a_wrapped_formula_cache() {
     let mut sender = Workbook::open_collaborative(&package_with_wrapped_a1(formula), 1).unwrap();
     let mut receiver = Workbook::open_collaborative(&wrapped, 2).unwrap();
     edit(&mut sender, 0, "A1", "15");
-    let update = sender.encode_diff_v1(&receiver.encode_state_vector_v1()).unwrap();
+    let update = sender
+        .encode_diff_v1(&receiver.encode_state_vector_v1())
+        .unwrap();
     assert_refused(&mut receiver, |receiver| {
         receiver.apply_update_v1(&update, CalculationOptions::default())
     });
@@ -464,9 +588,16 @@ fn collaboration_updates_snapshots_and_history_keep_inert_wrappers_saveable() {
     let options = CalculationOptions::default();
     edit(&mut sender, 1, "B1", "=2+2");
     edit(&mut sender, 1, "B1", "=3+3");
-    let update = sender.encode_diff_v1(&receiver.encode_state_vector_v1()).unwrap();
+    let update = sender
+        .encode_diff_v1(&receiver.encode_state_vector_v1())
+        .unwrap();
     assert!(receiver.apply_update_v1(&update, options).unwrap().applied);
-    assert!(restored.apply_update_v1(&sender.encode_state_as_update_v1(), options).unwrap().applied);
+    assert!(
+        restored
+            .apply_update_v1(&sender.encode_state_as_update_v1(), options)
+            .unwrap()
+            .applied
+    );
     for workbook in [&receiver, &restored] {
         assert_wrapped_a1_preserved(&saved(workbook, &[(1, "B1", 6.0), (1, "C1", 8.0)]));
     }
@@ -481,22 +612,38 @@ fn collaborative_history_refuses_recalculation_that_dirties_a_wrapper() {
     let formula = r#"<c r="A1"><f>NOW()</f><v>42</v></c>"#;
     let bytes = package_with_sheet2(&in_row(&wrapper(formula, formula)));
     let mut workbook = Workbook::open_collaborative(&bytes, 1).unwrap();
-    let unchanged_cache = CalculationOptions { now_serial: Some(42.0), ..Default::default() };
-    let changed_cache = CalculationOptions { now_serial: Some(43.0), ..Default::default() };
+    let unchanged_cache = CalculationOptions {
+        now_serial: Some(42.0),
+        ..Default::default()
+    };
+    let changed_cache = CalculationOptions {
+        now_serial: Some(43.0),
+        ..Default::default()
+    };
     for input in ["4", "6"] {
-        assert!(workbook.edit_cell(SheetId(0), cell_ref("H1"), input, unchanged_cache)
-            .unwrap().applied);
+        assert!(
+            workbook
+                .edit_cell(SheetId(0), cell_ref("H1"), input, unchanged_cache)
+                .unwrap()
+                .applied
+        );
     }
     let state = workbook.encode_state_as_update_v1();
     assert_refused(&mut workbook, |workbook| workbook.undo(changed_cache));
     assert_eq!(workbook.encode_state_as_update_v1(), state);
     assert!(workbook.undo(unchanged_cache).unwrap().applied);
-    saved(&workbook, &[(0, "H1", 4.0), (0, "I1", 14.0), (1, "A1", 42.0)]);
+    saved(
+        &workbook,
+        &[(0, "H1", 4.0), (0, "I1", 14.0), (1, "A1", 42.0)],
+    );
     let state = workbook.encode_state_as_update_v1();
     assert_refused(&mut workbook, |workbook| workbook.redo(changed_cache));
     assert_eq!(workbook.encode_state_as_update_v1(), state);
     assert!(workbook.redo(unchanged_cache).unwrap().applied);
-    saved(&workbook, &[(0, "H1", 6.0), (0, "I1", 16.0), (1, "A1", 42.0)]);
+    saved(
+        &workbook,
+        &[(0, "H1", 6.0), (0, "I1", 16.0), (1, "A1", 42.0)],
+    );
 }
 
 #[test]
@@ -532,7 +679,12 @@ fn deferred_sheet_retains_grid_wrappers_and_their_edit_guard() {
     edit(&mut workbook, 1, "B1", "5");
     assert_wrapped_a1_preserved(&saved(&workbook, &[(1, "B1", 5.0), (1, "C1", 7.0)]));
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("A1"), "5", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("A1"),
+            "5",
+            CalculationOptions::default(),
+        )
     });
 }
 
@@ -540,7 +692,10 @@ fn deferred_sheet_retains_grid_wrappers_and_their_edit_guard() {
 fn editing_a_deferred_sheet_with_alternate_content_outside_the_grid() {
     let body = format!(
         "{}<extLst><ext uri=\"urn:test\">{}</ext></extLst>",
-        sheet2_data().replace(WRAPPED_A1, r#"<c r="A1" t="inlineStr"><is><t>AlternateContent</t></is></c>"#),
+        sheet2_data().replace(
+            WRAPPED_A1,
+            r#"<c r="A1" t="inlineStr"><is><t>AlternateContent</t></is></c>"#
+        ),
         wrapper("<x:test/>", ""),
     );
     let workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
@@ -555,7 +710,12 @@ fn clearing_a_cell_after_a_self_closing_wrapper_is_refused() {
     let body = in_row(r#"<mc:AlternateContent/><c r="B1"><v>2</v></c>"#);
     let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
     assert_refused(&mut workbook, |workbook| {
-        workbook.edit_cell(SheetId(1), cell_ref("B1"), "", CalculationOptions::default())
+        workbook.edit_cell(
+            SheetId(1),
+            cell_ref("B1"),
+            "",
+            CalculationOptions::default(),
+        )
     });
 }
 

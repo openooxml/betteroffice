@@ -681,9 +681,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             (sheet.name.as_str(), axes)
         })
         .collect::<Vec<_>>();
-    if claimed.iter().flatten().any(|&origin| package.source_cell_facts(origin)
-        .is_some_and(SourceCellFacts::has_sheet_data_alternates))
-    {
+    if claimed.iter().flatten().any(|&origin| {
+        package
+            .source_cell_facts(origin)
+            .is_some_and(SourceCellFacts::has_sheet_data_alternates)
+    }) {
         validate_alternate_content(wb, package, &claimed, sheet_axes)?;
     }
     let edits = sheet_edits(wb, &package.original_workbook.sheets, &claimed);
@@ -3169,7 +3171,8 @@ impl AlternateContentSources {
         let parsed = crate::read::parse_workbook_indexed_subset(parts, Some(&included))?;
         let mut sources = BTreeMap::new();
         for &(index, path) in sheets {
-            let bytes = find_part(parts, path).ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
+            let bytes =
+                find_part(parts, path).ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
             let template = XmlTemplate::capture(bytes)?;
             let mut facts = SourceCellFacts::default();
             template.capture_sheet_data_alternates(bytes, &mut facts)?;
@@ -3180,7 +3183,10 @@ impl AlternateContentSources {
             };
             sources.insert(index, (facts, original));
         }
-        Ok(Self { workbook: parsed.workbook, sheets: sources })
+        Ok(Self {
+            workbook: parsed.workbook,
+            sheets: sources,
+        })
     }
 
     pub fn validate(
@@ -3190,7 +3196,9 @@ impl AlternateContentSources {
         axes: &[Option<SheetAxes>],
     ) -> Result<(), ParseError> {
         validate_alternate_content_against(workbook, &self.workbook, origins, axes, |origin| {
-            self.sheets.get(&origin).map(|(facts, bytes)| (facts, bytes.as_slice()))
+            self.sheets
+                .get(&origin)
+                .map(|(facts, bytes)| (facts, bytes.as_slice()))
         })
     }
 }
@@ -3202,14 +3210,20 @@ pub fn validate_alternate_content(
     origins: &[Option<usize>],
     axes: &[Option<SheetAxes>],
 ) -> Result<(), ParseError> {
-    validate_alternate_content_against(workbook, &package.original_workbook, origins, axes, |origin| {
-        let source = package.sheets.get(origin)?;
-        let facts = &source.cell_facts.source;
-        if !facts.has_sheet_data_alternates() {
-            return None;
-        }
-        Some((facts, package.part_bytes(&source.path)?))
-    })
+    validate_alternate_content_against(
+        workbook,
+        &package.original_workbook,
+        origins,
+        axes,
+        |origin| {
+            let source = package.sheets.get(origin)?;
+            let facts = &source.cell_facts.source;
+            if !facts.has_sheet_data_alternates() {
+                return None;
+            }
+            Some((facts, package.part_bytes(&source.path)?))
+        },
+    )
 }
 
 fn validate_alternate_content_against<'a>(
@@ -3223,16 +3237,30 @@ fn validate_alternate_content_against<'a>(
     let shared_strings_stable = source_workbook.shared_strings == workbook.shared_strings;
     let edits = sheet_edits(workbook, &source_workbook.sheets, origins);
     let axes_changed = axes.iter().flatten().any(|axes| !axes.is_identity());
-    let names_stable = !edits.moved && edits.is_empty() && workbook.sheets.len() == source_workbook.sheets.len();
-    let reference_axes = workbook.sheets.iter().enumerate().map(|(index, sheet)| {
-        let axes = names_stable.then(|| axes.get(index).and_then(Option::as_ref)).flatten();
-        (sheet.name.as_str(), axes)
-    }).collect::<Vec<_>>();
-    let defined_names = source_workbook.defined_names.iter().chain(&workbook.defined_names)
-        .map(|name| name.name.as_str()).collect::<Vec<_>>();
+    let names_stable =
+        !edits.moved && edits.is_empty() && workbook.sheets.len() == source_workbook.sheets.len();
+    let reference_axes = workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let axes = names_stable
+                .then(|| axes.get(index).and_then(Option::as_ref))
+                .flatten();
+            (sheet.name.as_str(), axes)
+        })
+        .collect::<Vec<_>>();
+    let defined_names = source_workbook
+        .defined_names
+        .iter()
+        .chain(&workbook.defined_names)
+        .map(|name| name.name.as_str())
+        .collect::<Vec<_>>();
     for (index, (sheet, origin)) in workbook.sheets.iter().zip(origins).enumerate() {
         let Some(origin) = *origin else { continue };
-        let (Some((facts, bytes)), Some(original)) = (source_grid(origin), source_workbook.sheets.get(origin)) else {
+        let (Some((facts, bytes)), Some(original)) =
+            (source_grid(origin), source_workbook.sheets.get(origin))
+        else {
             continue;
         };
         let sheet_axes = axes.get(index).and_then(Option::as_ref);
@@ -3241,10 +3269,17 @@ fn validate_alternate_content_against<'a>(
             continue;
         }
         if facts.alternate_formula_texts.iter().any(|formula| {
-            (!edits.is_empty() && edits.apply(formula).is_none_or(|(rewritten, _)| rewritten != *formula))
-                || (axes_changed && source_coordinates::formula(
-                    formula, sheet_axes, &reference_axes, Some(&defined_names),
-                ) != crate::formula::ReferenceStatus::Unmoved)
+            (!edits.is_empty()
+                && edits
+                    .apply(formula)
+                    .is_none_or(|(rewritten, _)| rewritten != *formula))
+                || (axes_changed
+                    && source_coordinates::formula(
+                        formula,
+                        sheet_axes,
+                        &reference_axes,
+                        Some(&defined_names),
+                    ) != crate::formula::ReferenceStatus::Unmoved)
         }) {
             return Err(alternate_content_error(sheet));
         }
@@ -3252,8 +3287,14 @@ fn validate_alternate_content_against<'a>(
             && sheet.hidden_row_heights == original.hidden_row_heights
             && sheet.hidden_col_widths == original.hidden_col_widths
             && sheet_body_matches(
-                sheet, original, bytes, sheet_axes, &reference_axes, axes_changed,
-                Some(&defined_names), &styles,
+                sheet,
+                original,
+                bytes,
+                sheet_axes,
+                &reference_axes,
+                axes_changed,
+                Some(&defined_names),
+                &styles,
             )
         {
             continue;
@@ -3276,7 +3317,11 @@ fn validate_alternate_cells(
         return Ok(());
     }
     for span in &facts.alternate_spans {
-        let cols = if span.wraps_rows { 0..MAX_COLS } else { span.cols.clone() };
+        let cols = if span.wraps_rows {
+            0..MAX_COLS
+        } else {
+            span.cols.clone()
+        };
         let range = CellRange::new(
             CellRef::new(span.rows.start, cols.start),
             CellRef::new(span.rows.end - 1, cols.end - 1),
@@ -3284,27 +3329,40 @@ fn validate_alternate_cells(
         let mut current_cells = sheet.cells_in_range(range);
         let same_cells = original.cells_in_range(range).all(|(at, source)| {
             current_cells.next().is_some_and(|(current, cell)| {
-                at == current && styles.same_cell(source, cell)
+                at == current
+                    && styles.same_cell(source, cell)
                     && styles.equivalent(original.effective_style(at), sheet.effective_style(at))
             })
         }) && current_cells.next().is_none();
         let same_arrays = original
             .array_formulas()
             .filter(|(_, array)| range.overlaps(array))
-            .eq(sheet.array_formulas().filter(|(_, array)| range.overlaps(array)));
-        let same_rows = !span.wraps_rows || (
-            original.row_heights.range(span.rows.clone()).eq(sheet.row_heights.range(span.rows.clone()))
-            && original.hidden_row_heights.range(span.rows.clone()).eq(sheet.hidden_row_heights.range(span.rows.clone()))
-            && original.row_styles.range(span.rows.clone()).eq(sheet.row_styles.range(span.rows.clone()))
-        );
+            .eq(sheet
+                .array_formulas()
+                .filter(|(_, array)| range.overlaps(array)));
+        let same_rows = !span.wraps_rows
+            || (original
+                .row_heights
+                .range(span.rows.clone())
+                .eq(sheet.row_heights.range(span.rows.clone()))
+                && original
+                    .hidden_row_heights
+                    .range(span.rows.clone())
+                    .eq(sheet.hidden_row_heights.range(span.rows.clone()))
+                && original
+                    .row_styles
+                    .range(span.rows.clone())
+                    .eq(sheet.row_styles.range(span.rows.clone())));
         let moved = axes.is_some_and(|axes| {
             axes.rows.current_ranges_bounded(span.rows.clone()) != [span.rows.clone()]
-                || (!span.cols.is_empty() && axes.cols.current_ranges_bounded(span.cols.clone()) != [span.cols.clone()])
+                || (!span.cols.is_empty()
+                    && axes.cols.current_ranges_bounded(span.cols.clone()) != [span.cols.clone()])
         });
         if moved || !same_cells || !same_arrays || !same_rows {
             return Err(ParseError::UnsupportedEdit(format!(
                 "sheet {} range {} is inside mc:AlternateContent",
-                sheet.name, range.to_a1()
+                sheet.name,
+                range.to_a1()
             )));
         }
     }
@@ -3438,7 +3496,9 @@ fn worksheet_xml_with_template(
 ) -> Result<WorksheetOutput, ParseError> {
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
-    if original.is_some_and(|original| filter_only_change(sheet, wb, original, &package.original_workbook, sheet_axes)) {
+    if original.is_some_and(|original| {
+        filter_only_change(sheet, wb, original, &package.original_workbook, sheet_axes)
+    }) {
         let replacements = vec![("autoFilter", auto_filter_bytes(sheet)?)];
         return Ok(WorksheetOutput {
             bytes: render_auto_filter(template, replacements, sheet)?,

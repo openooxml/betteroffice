@@ -80,8 +80,11 @@ pub(crate) fn sheet_facts(package: &PreservedPackage, index: usize) -> SheetFact
         worksheet: package.source_sheet_is_worksheet(index),
         protected: package.source_sheet_is_protected(index),
         format_cells: package.source_sheet_allows_format_cells(index),
-        sheet_data_alternates: Some(package.source_cell_facts(index)
-            .is_some_and(|facts| facts.has_sheet_data_alternates())),
+        sheet_data_alternates: Some(
+            package
+                .source_cell_facts(index)
+                .is_some_and(|facts| facts.has_sheet_data_alternates()),
+        ),
     }
 }
 
@@ -167,8 +170,11 @@ impl<'a> PackageFactsView<'a> {
 
     pub fn source_sheet_has_alternate_content(&self, index: usize) -> Option<bool> {
         match self.0 {
-            FactsSource::Package(package) => Some(package.source_cell_facts(index)
-                .is_some_and(|facts| facts.has_sheet_data_alternates())),
+            FactsSource::Package(package) => Some(
+                package
+                    .source_cell_facts(index)
+                    .is_some_and(|facts| facts.has_sheet_data_alternates()),
+            ),
             FactsSource::Facts(facts) => facts.sheets.get(index)?.sheet_data_alternates,
         }
     }

@@ -6,8 +6,8 @@ use xlsx_ops::Op;
 
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
-    retain_array_formulas, retain_formula_caches, retain_hidden_row_heights, validate_collaboration_size,
-    validate_collaboration_state,
+    retain_array_formulas, retain_formula_caches, retain_hidden_row_heights,
+    validate_collaboration_size, validate_collaboration_state,
 };
 use crate::Result;
 use crate::authority::{LocalHistory, RangeFormatSync, StagedLocalUpdate, SyncOrigin};

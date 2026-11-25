@@ -2714,7 +2714,8 @@ impl WorkbookAuthority {
         hydrate_local_doc(&doc, &self.encode_state_as_update_v1())
             .map_err(AuthorityError::InvalidState)?;
         let mut fork = self.hydrated_alike(doc);
-        fork.snapshot_revision.store(self.snapshot_revision(), Ordering::Relaxed);
+        fork.snapshot_revision
+            .store(self.snapshot_revision(), Ordering::Relaxed);
         fork.history = self.history.clone();
         fork.undo_stack = self.undo_stack.clone();
         fork.redo_stack = self.redo_stack.clone();
