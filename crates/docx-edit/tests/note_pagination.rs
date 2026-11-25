@@ -220,14 +220,14 @@ fn floating_table(id: u32) -> String {
 }
 
 #[test]
-fn a_body_edit_beside_floats_remeasures_only_its_flow_segment_as_a_fresh_layout_would() {
+fn a_same_height_body_edit_beside_floats_remeasures_only_the_edited_block() {
     let words = "wrapped words beside a floating table ".repeat(8);
     let mut body = String::new();
     let mut id = 0x1000_u32;
     for segment in 0..3 {
         id += 1;
         let first = if segment == 0 {
-            fixture::r(&words)
+            fixture::r("Text before the floating table")
         } else {
             format!("<w:pPr><w:pageBreakBefore/></w:pPr>{}", fixture::r(&words))
         };
@@ -245,24 +245,17 @@ fn a_body_edit_beside_floats_remeasures_only_its_flow_segment_as_a_fresh_layout_
 
     engine
         .doc()
-        .insert_text(
+        .replace_range(
             &EditCtx::local("", ""),
-            Position::new("body", 3),
-            "longer ",
-            FormatPolicy::Inherit,
+            StoryRange::new("body", 3, 4),
+            "x",
         )
         .unwrap();
     let before = engine.stats();
     let edited = engine.layout_document_with_regions_json(&request).unwrap();
     let after = engine.stats();
-    let blocks = serde_json::from_str::<Value>(&edited).unwrap()["measured"]
-        .as_array()
-        .unwrap()
-        .len() as u64;
     let remeasured = after.resident_measure_calls - before.resident_measure_calls;
-    // The edited paragraph, and the blocks after it until the flow beside the
-    // floating table stands as it stood, within the first segment.
-    assert!((1..=6).contains(&remeasured), "{remeasured} of {blocks}");
+    assert_eq!(remeasured, 1);
 
     let fresh = EngineSession::new(9304);
     fresh

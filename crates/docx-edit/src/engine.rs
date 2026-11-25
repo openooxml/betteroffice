@@ -21941,6 +21941,96 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 let measured = key.type_text(&engine, &request, paragraph, text);
                 assert_certified_float_cold(&engine, &request, &mut retained);
                 assert!(measured.contains(&slot), "{key:?} {paragraph} {measured:?}");
+    #[test]
+    fn resident_float_flow_remeasures_the_prefix_when_section_grid_changes() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="7200" w:h="8640"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300"/></w:sectPr>"#;
+        let mut body = preview_fixture::paragraph(
+            1,
+            &format!(
+                r#"<w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>{}"#,
+                preview_fixture::run("Before the picture")
+            ),
+        );
+        body += &preview_fixture::paragraph(
+            2,
+            &(preview_fixture::run("Picture anchor") + &float_flow_picture(2, 1828800, 914400)),
+        );
+        body += &preview_fixture::paragraph(3, &preview_fixture::run("Editable paragraph"));
+        body += &preview_fixture::paragraph(
+            4,
+            &format!("<w:pPr>{section}</w:pPr>{}", preview_fixture::run("Section end")),
+        );
+        body += &preview_fixture::paragraph(5, &preview_fixture::run("Next section"));
+        body += section;
+        let bytes = preview_fixture::document(&body);
+        for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
+            let engine = EngineSession::new(9635);
+            crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+            let mut request = lowering_pages::region_request(&engine, &bytes, font);
+            assert_eq!(request["regions"]["sections"].as_array().unwrap().len(), 2);
+            certified_float_layout(&engine, &request.to_string(), trigger);
+            let prefix = float_flow_slot(&engine, 0);
+            {
+                let pagination = engine.pagination.borrow();
+                assert!(pagination.float_flow[prefix].as_ref().unwrap().starts());
+                assert_eq!(
+                    engine.render.borrow().stories["body"].blocks.get(prefix),
+                    Some(&pagination.input.as_ref().unwrap().measured[prefix].block),
+                );
+            }
+
+            let offset = certified_float_offset(&engine, 2);
+            engine
+                .doc()
+                .replace_range(
+                    &crate::EditCtx::local("", ""),
+                    crate::StoryRange::new("body", offset, offset + 1),
+                    "x",
+                )
+                .unwrap();
+            request["regions"]["sections"][0]["properties"]["docGrid"] =
+                json!({"type": "lines", "linePitch": 480});
+            let request = request.to_string();
+            let (measured, full) = certified_float_layout(&engine, &request, trigger);
+            assert_eq!(full, 0, "{trigger:?}");
+            assert!(measured.contains(&prefix), "{trigger:?} {measured:?}");
+            assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+        }
+    }
+
+    #[test]
+    fn clearing_region_retention_with_moved_blocks_discards_float_replay() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, _) = float_flow_engine(
+            font,
+            2,
+            &[],
+            |_| String::new(),
+            |index| match index {
+                0 => float_flow_picture(1, 457200, 95250),
+                _ => String::new(),
+            },
+            RelayoutTrigger::Bulk,
+        );
+        {
+            let mut pagination = engine.pagination.borrow_mut();
+            assert!(pagination.input.is_some());
+            assert!(pagination.float_flow[0].is_some());
+            pagination.moved_blocks.insert(0);
+        }
+
+        engine.clear_region_retention();
+
+        let pagination = engine.pagination.borrow();
+        assert!(pagination.input.is_none());
+        assert!(pagination.float_flow.is_empty());
+    }
+
                 assert!(
                     measured.windows(2).all(|pair| pair[0] < pair[1]),
                     "{key:?} {paragraph} {measured:?}"

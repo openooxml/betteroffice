@@ -5810,6 +5810,94 @@ mod tests {
                     "runs": [
                         {"kind": "text", "text": format!("Paragraph {index} wraps beside its image.")},
                         {"kind": "image", "src": "image", "width": 120,
+    #[test]
+    fn float_flow_does_not_record_replay_steps_by_default() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+            "kind": "paragraph", "id": "p", "runs": [{"kind": "text", "text": "Plain text"}]
+        }]))
+        .unwrap();
+        let widths = [400.0];
+        let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
+        flow.measure_until(&mut blocks, &widths, &config, 1).unwrap();
+        assert_eq!(flow.measured(), 1);
+        assert!(flow.steps().is_none());
+    }
+
+    #[test]
+    fn float_segment_flow_resumed_from_empty_replay_starts_a_segment() {
+        let mut block = serde_json::from_value(json!({
+            "kind": "paragraph", "id": "mark", "runs": []
+        }))
+        .unwrap();
+        let config = MeasurementConfig::default();
+        let mut measure = |replay: &FloatFlowReplay| {
+            let (_, _, step) = FloatSegmentFlow::resume(replay)
+                .measure(
+                    &mut block,
+                    400.0,
+                    400.0,
+                    FloatWidthPolicy::FirstBlock,
+                    false,
+                    &config,
+                    None,
+                    true,
+                )
+                .unwrap()
+                .unwrap();
+            step
+        };
+        let mut replay = FloatFlowReplay::default();
+        let first = measure(&replay);
+        assert!(first.starts());
+        replay.advance(&first);
+        assert!(!measure(&replay).starts());
+    }
+
+    #[test]
+    fn margin_relative_float_disables_replay_and_leaves_segment_unchanged() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+            "kind": "paragraph", "id": "p",
+            "runs": [{"kind": "image", "src": "image", "width": 120, "height": 60,
+                      "wrapType": "square",
+                      "position": {"horizontal": {"relativeTo": "column", "align": "left"},
+                                   "vertical": {"relativeTo": "margin", "posOffset": 0}}}]
+        }]))
+        .unwrap();
+        let width = 400.0;
+        let mut flow = FloatFlow::new(&blocks, &[width], &config, None)
+            .unwrap()
+            .record_steps();
+        let mut segment = FloatSegmentFlow::new();
+        let original = blocks[0].clone();
+        assert!(
+            segment
+                .measure(
+                    &mut blocks[0],
+                    width,
+                    width,
+                    FloatWidthPolicy::FirstBlock,
+                    false,
+                    &config,
+                    None,
+                    false,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(blocks[0], original);
+        assert!(segment.matches(&FloatFlowReplay::default()));
+        assert!(!segment.started);
+        flow.measure_until(&mut blocks, &[width], &config, 1).unwrap();
+        assert_eq!(flow.measured(), 1);
+        assert!(flow.steps().is_none());
+    }
+
                          "height": if index % 7 == 0 { 60 } else { 8 },
                          "wrapType": "square", "distLeft": 12, "distRight": 12,
                          "position": {"horizontal": {"relativeTo": "column", "align": "left"},
@@ -5826,10 +5914,11 @@ mod tests {
         let mut whole = blocks.clone();
         let mut flow =
             FloatFlow::with_width_policy(&whole, &widths, policy, &[] as &[bool], &config, None)
-                .unwrap();
+                .unwrap()
+                .record_steps();
         flow.measure_until(&mut whole, &widths, &config, blocks.len())
             .unwrap();
-        let steps = flow.steps().unwrap().to_vec();
+        let steps = flow.take_steps().unwrap();
         let extents = flow.into_extents();
         let (segment, _) = measure_float_segment_with_width_policy(
             &mut blocks.clone(),
@@ -5855,11 +5944,7 @@ mod tests {
             if start > 200 {
                 assert_eq!(replay.state.active_zones.len(), start - 200);
             }
-            let mut resumed = if start == 0 {
-                FloatSegmentFlow::new()
-            } else {
-                FloatSegmentFlow::resume(&replay)
-            };
+            let mut resumed = FloatSegmentFlow::resume(&replay);
             for (index, expected) in extents.iter().enumerate().skip(start) {
                 let mut block = blocks[index].clone();
                 let (extent, _, step) = resumed
