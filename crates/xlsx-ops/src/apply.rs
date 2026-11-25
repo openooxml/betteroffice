@@ -192,15 +192,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             let (state, inverse) = if let Some((table, column, name)) =
                 normalize_table_header(wb, *sheet, *at, cell)?
             {
-                let inverse = if wb.tables[table].columns[column] == name {
-                    Op::RestoreSheet {
-                        sheet: *sheet,
-                        name: wb.sheets[sheet.0 as usize].name.clone(),
-                        formulas: vec![(*sheet, *at, old)],
-                    }
-                } else {
-                    rename_table_column(wb, table, column, *at, &name, old)?
-                };
+                let inverse = rename_table_column(wb, table, column, *at, &name, old)?;
                 (
                     CellState {
                         value: CellValue::Text { value: name },

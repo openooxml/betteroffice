@@ -82,8 +82,7 @@ impl Workbook {
         history: CommitHistory,
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
-        if staged.model.tables != self.model.tables
-            && staged.model.defined_names != self.model.defined_names
+        if staged.model.defined_names != self.model.defined_names
             && ops.iter().any(|op| matches!(op, Op::SetCell { .. }))
             && !ops.iter().any(|op| {
                 matches!(

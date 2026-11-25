@@ -465,6 +465,33 @@ fn undo_and_redo_restore_the_header_cell_and_column_name() {
 }
 
 #[test]
+fn undo_restores_the_caption_after_a_header_normalization_and_unrecorded_rename() {
+    let source = replace_part(
+        &book(),
+        "xl/sharedStrings.xml",
+        "<t>Status</t>",
+        "<t>STATUS</t>",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "Status");
+    edit_without_history(&mut workbook, "B1", "State");
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().table("Table1").unwrap().columns[1], "Status");
+    assert_eq!(
+        reopened.model().value(SHEET1, at("B1")),
+        CellValue::Text {
+            value: "STATUS".into()
+        }
+    );
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+}
+
+#[test]
 fn history_refuses_a_caption_taken_by_a_sibling_without_history() {
     for (redo, caption) in [(false, "status"), (true, "state")] {
         let mut workbook = Workbook::open(&book()).unwrap();
@@ -586,6 +613,40 @@ fn a_formula_entered_between_two_header_renames_uses_the_final_caption() {
             );
         }
     }
+}
+
+#[test]
+fn a_batch_with_unchanged_captions_refuses_an_unsavable_defined_name_rewrite() {
+    let source = replace_part(
+        &book(),
+        "xl/workbook.xml",
+        "</workbook>",
+        concat!(
+            r#"<definedNames><definedName name="Statuses">Table1[status]</definedName>"#,
+            r#"<definedName name="STATUSES">1</definedName></definedNames></workbook>"#,
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    let before = workbook.save().unwrap();
+    let version = workbook.version();
+    let history = workbook.history_state();
+    assert_eq!(workbook.model().defined_names[0].formula, "Table1[status]");
+    let edits = ["State", "Status"].map(|input| CellInput {
+        cell: at("B1"),
+        input: input.into(),
+    });
+    let error = workbook
+        .edit_cells(SHEET1, &edits, CalculationOptions::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Operation(OpError::TableHeaderUnsupported(reason))
+            if reason.contains("ambiguous defined name source layout")
+    ));
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.history_state(), history);
+    assert_eq!(workbook.model().defined_names[0].formula, "Table1[status]");
+    assert_eq!(workbook.save().unwrap(), before);
 }
 
 #[test]
@@ -1382,7 +1443,40 @@ fn a_header_rename_rewrites_every_cell_in_a_shared_formula_group() {
 }
 
 #[test]
-fn rewriting_an_array_formula_preserves_its_source_metadata() {
+fn an_ordinary_formula_edit_regenerates_a_shared_string_cache_as_text() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let source = replace_part(
+        &book(),
+        sheet,
+        r#"<c r="E2">"#,
+        r#"<c r="D2" t="s"><f>IF(C2=1,B1,Table1[@Status])</f><v>0</v></c><c r="E2">"#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(
+        workbook.model().value(SHEET1, at("D2")),
+        CellValue::Text {
+            value: "Status".into()
+        }
+    );
+    edit(&mut workbook, "D2", "=Table1[@Status]&C2");
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = std::str::from_utf8(part(&parts, sheet)).unwrap();
+    assert!(
+        xml.contains(r#"<c r="D2" t="str"><f>Table1[@Status]&amp;C2</f><v>Open1</v></c>"#),
+        "{xml}"
+    );
+    let reopened = assert_saved_headers(&saved, ["Name", "Status", "Rev"]);
+    assert_eq!(
+        reopened.model().value(SHEET1, at("D2")),
+        CellValue::Text {
+            value: "Open1".into()
+        }
+    );
+}
+
+#[test]
+fn an_array_formula_with_source_metadata_refuses_the_rename() {
     const METADATA: &str = "xl/metadata.xml";
     let source = replace_part(
         &book(),
@@ -1417,20 +1511,75 @@ fn rewriting_an_array_formula_preserves_its_source_metadata() {
     parts.push((METADATA.into(), metadata.as_bytes().to_vec()));
     let source = ooxml_opc::rezip_parts(&parts).unwrap();
     let mut workbook = Workbook::open(&source).unwrap();
-    edit(&mut workbook, "B1", "State");
-    let saved = workbook.save().unwrap();
-    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    let xml = std::str::from_utf8(part(&parts, sheet)).unwrap();
-    assert!(
-        xml.contains(r#"<c r="D2" cm="1"><f t="array" ref="D2" aca="1">SUM(Table1[State])</f><v>0.00</v></c>"#),
-        "{xml}"
-    );
-    assert_eq!(part(&parts, METADATA), metadata.as_bytes());
-    let reopened = assert_saved_headers(&saved, ["Name", "State", "Rev"]);
     assert_eq!(
-        reopened.model().sheets[0].array_formula(at("D2")),
+        workbook.model().sheets[0].array_formula(at("D2")),
         Some(CellRange::new(at("D2"), at("D2")))
     );
+    let before = workbook.save().unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", sheet);
+    assert_eq!(workbook.save().unwrap(), before);
+}
+
+#[test]
+fn formula_markup_that_cannot_be_regenerated_refuses_the_rename() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let source = replace_part(
+        &book(),
+        sheet,
+        "<worksheet ",
+        r#"<worksheet xmlns:x="urn:extension" "#,
+    );
+    for (cell_attrs, formula_attrs, child) in [
+        (r#" ph="1""#, "", ""),
+        (r#" x:r="D2""#, "", ""),
+        ("", r#" ca="1""#, ""),
+        ("", r#" t="array" ref="G2""#, ""),
+        ("", "", r#"<extLst><ext uri="extension"/></extLst>"#),
+    ] {
+        let source = replace_part(
+            &source,
+            sheet,
+            r#"<c r="E2">"#,
+            &format!(
+                r#"<c r="D2"{cell_attrs}><f{formula_attrs}>SUM(Table1[Status])</f><v>0</v>{child}</c><c r="E2">"#
+            ),
+        );
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_refused_header(&mut workbook, "B1", "State", sheet);
+    }
+}
+
+#[test]
+fn markup_on_a_shared_formula_follower_refuses_the_rename() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let follower = r#"<c r="C5" t="str"><f t="shared" si="0"/><v>Pending</v></c>"#;
+    let source = replace_part(
+        &book(),
+        sheet,
+        r#"<c r="C4"><v>3</v></c></row>"#,
+        &format!(
+            concat!(
+                r#"<c r="C4" t="str"><f t="shared" ref="C4:C5" si="0">[@Status]</f>"#,
+                r#"<v>Pending</v></c></row><row r="5">{}</row>"#,
+            ),
+            follower,
+        ),
+    );
+    for markup in [
+        follower.replace(r#"r="C5""#, r#"r="C5" ph="1""#),
+        format!(
+            concat!(
+                r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+                r#"<mc:Choice Requires="x">{0}</mc:Choice><mc:Fallback>{0}</mc:Fallback>"#,
+                "</mc:AlternateContent>",
+            ),
+            follower,
+        ),
+    ] {
+        let source = replace_part(&source, sheet, follower, &markup);
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_refused_header(&mut workbook, "B1", "State", sheet);
+    }
 }
 
 #[test]
@@ -1445,6 +1594,24 @@ fn a_formula_in_alternate_content_refuses_the_rename() {
             r#"<mc:Choice Requires="x"><x:f>SUM(Table1[Status])</x:f></mc:Choice>"#,
             r#"<mc:Fallback><f>SUM(Table1[Status])</f><v>0</v></mc:Fallback>"#,
             r#"</mc:AlternateContent></c><c r="E2">"#,
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", sheet);
+}
+
+#[test]
+fn a_formula_cell_inside_alternate_content_refuses_the_rename() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let source = replace_part(
+        &book(),
+        sheet,
+        r#"<c r="E2">"#,
+        concat!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x"><c r="D2"><f>SUM(Table1[Status])</f><v>0</v></c></mc:Choice>"#,
+            r#"<mc:Fallback><c r="D2"><f>SUM(Table1[Status])</f><v>0</v></c></mc:Fallback>"#,
+            r#"</mc:AlternateContent><c r="E2">"#,
         ),
     );
     let mut workbook = Workbook::open(&source).unwrap();
@@ -1507,6 +1674,37 @@ fn a_reference_in_a_modeled_charts_extension_refuses_the_rename() {
     assert_eq!(charts[0].refs.len(), 1);
     assert_eq!(charts[0].refs[0].formula, "Sheet1!$C$2:$C$4");
     assert_refused_header(&mut workbook, "B1", "State", chart);
+}
+
+#[test]
+fn a_reference_in_a_chartex_part_outside_the_charts_directory_refuses_the_rename() {
+    let chart = "xl/extensions/series.chartx";
+    let kind = "application/vnd.ms-office.chartex+xml";
+    for entry in [
+        format!(r#"<Default Extension="chartx" ContentType="{kind}"/>"#),
+        format!(r#"<Override PartName="/{chart}" ContentType="{kind}"/>"#),
+    ] {
+        let source = replace_part(
+            &book(),
+            "[Content_Types].xml",
+            "</Types>",
+            &format!("{entry}</Types>"),
+        );
+        let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+        parts.push((
+            chart.into(),
+            concat!(
+                r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex">"#,
+                "<cx:chartData><cx:data><cx:numDim><cx:f>Table1[Status]</cx:f>",
+                "</cx:numDim></cx:data></cx:chartData></cx:chartSpace>",
+            )
+            .as_bytes()
+            .to_vec(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_refused_header(&mut workbook, "B1", "State", chart);
+    }
 }
 
 #[test]

@@ -481,10 +481,11 @@ impl PreservedPackage {
                             Some(alternate),
                             |formula| matches(formula, local),
                         )?)
-                        || crate::patch::unpatchable_table_formula(
+                        || crate::patch::table_formula_rename_unsupported(
                             &child.bytes,
                             &self.original_workbook.sheets[index],
                             sheet.cell_facts.source.dropped_array_ranges,
+                            has_alternate,
                             |formula, at| matches(formula, local && range.contains(at)),
                         )?
                     {
@@ -518,19 +519,15 @@ impl PreservedPackage {
             let kind = kind.to_ascii_lowercase();
             kind.ends_with(".chart+xml") || kind.ends_with(".chartex+xml")
         };
-        let chart_parts = self
-            .content_types
-            .iter()
-            .filter(|entry| entry.attribute("ContentType").is_some_and(is_chart))
-            .filter_map(|entry| entry.attribute("PartName").map(normalized_part_name))
-            .collect::<HashSet<_>>();
         for (path, bytes) in &self.parts {
             let normalized = normalized_part_name(path);
             let affected = |formula: &str| matches(formula, false);
             let referenced = if model_charts.contains(&normalized) {
                 crate::chart::extension_formula_reference(bytes, affected)?
             } else {
-                (chart_parts.contains(&normalized) || normalized.starts_with("xl/charts/"))
+                (normalized.starts_with("xl/charts/")
+                    || effective_content_type(&self.content_types, path)
+                        .is_some_and(|resolved| is_chart(resolved.value)))
                     && contains_formula(bytes, &[b"f", b"formula", b"sqref"], affected)?
             };
             if referenced {
