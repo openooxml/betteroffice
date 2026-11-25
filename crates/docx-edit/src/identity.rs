@@ -58,7 +58,7 @@ pub(crate) const PARAGRAPH_IDS: &str = "paragraphIds";
 pub(crate) const SOURCE_PARAGRAPH_IDS: &str = "sourceParagraphIds";
 /// Root map holding the opening generation.
 pub(crate) const SESSION: &str = "session";
-const GENERATION: &str = "generation";
+pub(crate) const GENERATION: &str = "generation";
 
 /// A new opening generation: 128 bits, unique per call.
 fn fresh_generation() -> String {
@@ -3188,6 +3188,7 @@ impl EditingDoc {
     /// shared seed needs, and is otherwise freshly minted. System-origin and
     /// outside undo.
     pub fn begin_opening(&self, generation: Option<&str>) {
+        self.clear_edit_provenance();
         self.save_story_states.lock().unwrap().clear();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
@@ -4359,6 +4360,7 @@ impl EditingDoc {
             touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
+        let mut provenance = self.provenance.lock().unwrap();
         let seeded = if let Some(ready) = ready {
             ready
         } else {
@@ -4376,7 +4378,8 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            if let Some((mut spliced, stale)) =
+                spliced_part(&source, index, seeded, &live, &by_key, &provenance)
             {
                 let same_stories = part_stories(seeded, part)
                     .keys()
@@ -4385,7 +4388,25 @@ impl EditingDoc {
                     for &ordinal in &spliced.changed {
                         let key = &part.backed[&ordinal][0];
                         let (story, was) = seeded_units[key.as_str()];
-                        let (_, now) = live_units[key.as_str()];
+                        let (live_story, now) = live_units[key.as_str()];
+                        let legacy = || crate::paragraph_patch_plan::unproven_paragraph(ordinal);
+                        if provenance.unproven(key) {
+                            spliced.legacy_paragraphs.push(legacy());
+                            continue;
+                        }
+                        let proof = if provenance.has_entry(key) {
+                            let Some(proof) = provenance
+                                .prove(self, &txn, live_story, key)
+                                .filter(|_| story == live_story)
+                            else {
+                                provenance.mark(key.clone());
+                                spliced.legacy_paragraphs.push(legacy());
+                                continue;
+                            };
+                            Some(proof)
+                        } else {
+                            None
+                        };
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
@@ -4400,14 +4421,26 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
-                        if same_stories && formatting_alone(was, now) {
+                        if same_stories && proof.is_none() && formatting_alone(was, now) {
                             spliced.format_only.push(ordinal);
                         }
-                        match crate::paragraph_patch_plan::diff_paragraph_v1(
-                            was.segments.as_deref().expect("seeded segments retained"),
-                            now.segments.as_deref().expect("changed segments retained"),
-                            context,
-                        ) {
+                        let seeded = was.segments.as_deref().expect("seeded segments retained");
+                        let live = if proof.is_some() && was.same_projection(now) {
+                            now.segments.as_deref().unwrap_or(seeded)
+                        } else {
+                            now.segments.as_deref().expect("changed segments retained")
+                        };
+                        let patch = if let Some(proof) = proof.as_ref() {
+                            crate::paragraph_patch_plan::diff_paragraph_with_proof(
+                                seeded,
+                                live,
+                                context,
+                                Some(proof),
+                            )
+                        } else {
+                            crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
+                        };
+                        match patch {
                             Ok(mut patch) => {
                                 if stale.iter().any(|cell| {
                                     story.strip_prefix(cell.as_str()).is_some_and(|rest| {
@@ -4462,7 +4495,9 @@ impl EditingDoc {
                         let key = &part.backed[ordinal][0];
                         let (_, was) = seeded_units[key.as_str()];
                         let (_, now) = live_units[key.as_str()];
-                        formatting_alone(was, now)
+                        !provenance.unproven(key)
+                            && !provenance.has_entry(key)
+                            && formatting_alone(was, now)
                     });
                     if formatting && same_stories {
                         spliced.format_only = formatted;
@@ -4481,7 +4516,9 @@ impl EditingDoc {
                     }
                 }
             }
-            if stories_of(seeded, part) != stories_of(&live, part) {
+            if stories_of(seeded, part) != stories_of(&live, part)
+                || part.backed.values().flatten().any(|key| provenance.has_entry(key))
+            {
                 let mut touched: Vec<u32> = part
                     .backed
                     .iter()
@@ -4489,9 +4526,13 @@ impl EditingDoc {
                         keys.iter().any(|key| {
                             seeded_units.get(key.as_str()).is_some_and(|(story, was)| {
                                 live_units.get(key.as_str()).is_none_or(|(now_story, now)| {
-                                    story != now_story
+                                    let content_change = was.digest != now.digest
+                                        && (provenance.unproven(key)
+                                            || !formatting_alone(was, now));
+                                    provenance.has_entry(key)
+                                        || story != now_story
                                         || was.blocks != now.blocks
-                                        || (was.digest != now.digest && !formatting_alone(was, now))
+                                        || content_change
                                 })
                             })
                         })
@@ -4889,6 +4930,7 @@ fn spliced_part(
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
+    provenance: &crate::provenance::Provenance,
 ) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
@@ -5032,9 +5074,10 @@ fn spliced_part(
                 {
                     let origin = seeded_by_key.get(key)?;
                     paragraphs.push((ordinal, key.to_owned()));
-                    if origin.content_digest != is.content_digest {
+                    let recorded = provenance.has_entry(key);
+                    if recorded || origin.content_digest != is.content_digest {
                         changed.push(ordinal);
-                        if origin.section_digest == is.section_digest {
+                        if !recorded && origin.section_digest == is.section_digest {
                             section_only.push(ordinal);
                         }
                     }
@@ -5055,13 +5098,14 @@ fn spliced_part(
                 }
                 continue;
             };
-            let same = was.content_digest == is.content_digest;
+            let recorded = provenance.has_entry(key);
+            let same = !recorded && was.content_digest == is.content_digest;
             match source.view_of(key) {
                 Some(((part_index, ordinal), 0)) if part_index == index => {
                     paragraphs.push((ordinal, key.to_owned()));
                     if !same {
                         changed.push(ordinal);
-                        if was.section_digest == is.section_digest {
+                        if !recorded && was.section_digest == is.section_digest {
                             section_only.push(ordinal);
                         }
                     }

@@ -5,7 +5,7 @@ use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
     Patch, Position, StoryRange, StrikePatch, StyleResolver, UnderlinePatch, UndoSession,
-    seed_from_docx,
+    seed_from_docx, seed_from_docx_with_generation,
 };
 use docx_parse::paragraph_patch::{
     Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256, unit_sha256,
@@ -312,6 +312,23 @@ fn save_planned(
     bytes: &[u8],
     edit_model: impl FnOnce(&mut serde_json::Value),
 ) -> (String, Vec<String>) {
+    let (saved, warnings) = save_planned_bytes(plan, part, bytes, |source| {
+        save_document(source, |document| edit_model(&mut document["content"][0]))
+    });
+    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    (String::from_utf8(xml).unwrap(), warnings)
+}
+
+fn save_planned_bytes(
+    plan: &docx_edit::ParagraphSavePlan,
+    part: Option<&docx_edit::SplicedPart>,
+    bytes: &[u8],
+    document: impl FnOnce(&docx_parse::S9DocumentBodyWire) -> serde_json::Value,
+) -> (Vec<u8>, Vec<String>) {
     let package = docx_parse::parse_docx_s9_wire(
         bytes,
         docx_parse::S9ParseOptions {
@@ -322,14 +339,26 @@ fn save_planned(
     .unwrap()
     .document
     .package;
-    let document = save_document(&package.document, |document| {
-        edit_model(&mut document["content"][0]);
-    });
+    let document = document(&package.document);
     let mut spliced = Vec::new();
     if let Some(part) = part {
+        let paragraphs: Vec<_> = part.paragraphs.iter().map(|(ordinal, _)| ordinal).collect();
+        let inserted: Vec<_> = part
+            .inserted
+            .iter()
+            .map(|anchor| {
+                let (ordinal, after) = anchor.position();
+                if after {
+                    json!({"after": ordinal})
+                } else {
+                    json!({"before": ordinal})
+                }
+            })
+            .collect();
         spliced.push(json!({
             "part": part.part, "sha256": part.sha256,
-            "paragraphs": [0], "changed": part.changed,
+            "paragraphs": paragraphs, "changed": part.changed,
+            "inserted": inserted, "removed": part.removed,
             "paragraphPatches": part.paragraph_patches,
             "legacyParagraphs": part.legacy_paragraphs
         }));
@@ -353,12 +382,7 @@ fn save_planned(
             .1
     };
     assert_eq!(styles(&saved), styles(bytes));
-    let (_, xml) = ooxml_opc::unzip_parts(&saved)
-        .unwrap()
-        .into_iter()
-        .find(|(path, _)| path == "word/document.xml")
-        .unwrap();
-    (String::from_utf8(xml).unwrap(), warnings)
+    (saved, warnings)
 }
 
 fn replace(doc: &EditingDoc, from: u32, to: u32, value: &str) {
@@ -2031,15 +2055,15 @@ fn typing_outside_a_nested_field_keeps_both_fields() {
 }
 
 #[test]
-fn repeated_text_alignment_is_legacy() {
+fn repeated_text_deletes_the_recorded_unit() {
     let doc = open(&text("aaaa"));
     doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
         .unwrap();
-    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+    assert_splices(&doc, &[(1, 2, 1, "")]);
 }
 
 #[test]
-fn a_deletion_beside_a_shared_prefix_with_other_formatting_is_legacy() {
+fn a_deletion_beside_a_shared_prefix_removes_only_its_source_run() {
     let doc = open(concat!(
         "<w:r><w:rPr><w:i/><w:noProof/></w:rPr><w:t>a</w:t></w:r><w:r><w:t>a</w:t></w:r>",
         "<w:r><w:t xml:space=\"preserve\"> and </w:t></w:r><w:r><w:t>xx</w:t></w:r>",
@@ -2047,11 +2071,11 @@ fn a_deletion_beside_a_shared_prefix_with_other_formatting_is_legacy() {
     replace(&doc, 7, 9, "yy");
     doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
         .unwrap();
-    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+    assert_splices(&doc, &[(0, 1, 0, ""), (7, 9, 7, "yy")]);
 }
 
 #[test]
-fn a_whole_run_anchor_beside_a_deleted_tail_is_legacy() {
+fn a_whole_run_anchor_in_inserted_text_keeps_the_three_recorded_spans() {
     let doc = open(concat!(
         "<w:r><w:t>qp</w:t></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>BBBB</w:t></w:r>",
         "<w:r><w:rPr><w:bCs/></w:rPr><w:t>MMMyy</w:t></w:r>",
@@ -2059,17 +2083,17 @@ fn a_whole_run_anchor_beside_a_deleted_tail_is_legacy() {
     replace(&doc, 9, 11, "wyBBBB");
     replace(&doc, 2, 6, "z");
     replace(&doc, 0, 1, "r");
-    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+    assert_splices(&doc, &[(0, 1, 0, "r"), (2, 6, 2, "z"), (9, 11, 9, "wyBBBB")]);
 }
 
 #[test]
-fn one_replacement_across_a_one_character_run_is_legacy() {
+fn one_replacement_across_a_one_character_run_uses_the_first_donor() {
     let doc = open(concat!(
         "<w:r><w:t>aaaa</w:t></w:r><w:r><w:t>-</w:t></w:r>",
         "<w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:t>bbbb</w:t></w:r>",
     ));
     replace(&doc, 0, 9, "a-x");
-    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+    assert_splices(&doc, &[(0, 9, 0, "a-x")]);
 }
 
 #[test]
@@ -2087,11 +2111,11 @@ fn one_replacement_over_runs_with_unmodelled_properties_keeps_no_middle_donor() 
         .iter()
         .find(|part| part.part == "word/document.xml")
         .unwrap();
-    if part.legacy_paragraphs.is_empty() {
-        let (saved, _) = save_paragraph(&doc, content, |_| {});
-        assert!(!saved.contains("<w:noProof/>"), "{saved}");
-        assert!(!saved.contains("<w:bCs/>"), "{saved}");
-    }
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_splices(&doc, &[(0, 6, 0, "r1s2MM34")]);
+    let (saved, _) = save_paragraph(&doc, content, |_| {});
+    assert!(!saved.contains("<w:noProof/>"), "{saved}");
+    assert!(!saved.contains("<w:bCs/>"), "{saved}");
 }
 
 #[test]
@@ -2114,26 +2138,26 @@ fn a_shared_edge_across_unmodelled_properties_keeps_the_untouched_run() {
         .iter()
         .find(|part| part.part == "word/document.xml")
         .unwrap();
-    if part.legacy_paragraphs.is_empty() {
-        let (saved, _) = save_paragraph(&doc, &content, |_| {});
-        assert!(saved.contains(untouched), "{saved}");
-        assert!(!saved.contains("<w:bdr "), "{saved}");
-        assert!(
-            saved.contains(r#"<w:lang w:val="fr-FR"/></w:rPr><w:t>ay</w:t>"#),
-            "{saved}"
-        );
-    }
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_splices(&doc, &[(0, 1, 0, ""), (2, 3, 2, "y"), (8, 10, 8, "qq")]);
+    let (saved, _) = save_paragraph(&doc, &content, |_| {});
+    assert!(saved.contains(untouched), "{saved}");
+    assert!(!saved.contains("<w:bdr "), "{saved}");
+    assert!(
+        saved.contains(r#"<w:lang w:val="fr-FR"/></w:rPr><w:t>ay</w:t>"#),
+        "{saved}"
+    );
 }
 
 #[test]
-fn an_anchor_inside_a_replaced_run_is_legacy() {
+fn an_anchor_inside_a_replaced_run_does_not_move_inserted_text() {
     let doc = open(concat!(
         "<w:r><w:t>xxAAA</w:t></w:r><w:r><w:t>!</w:t></w:r>",
         "<w:r><w:rPr><w:noProof/></w:rPr><w:t>y</w:t></w:r>",
     ));
     replace(&doc, 6, 7, "wAAAv");
     replace(&doc, 0, 5, "xz");
-    assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+    assert_splices(&doc, &[(0, 5, 0, "xz"), (6, 7, 6, "wAAAv")]);
 }
 
 #[test]
@@ -2287,6 +2311,15 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
             matches!(part.paragraph_patches.as_slice(), [patch] if patch.ordinal == 0),
             "missing paragraph patch\n{case_info}"
         );
+        let patch = &part.paragraph_patches[0];
+        let exact: Vec<_> = edits
+            .iter()
+            .map(|(_, span, value)| {
+                (span.start as u32, span.end as u32, span.start as u32, value.as_str())
+            })
+            .collect();
+        assert_eq!(splice_summary(patch), owned_splices(&exact), "{case_info}");
+        assert!(patch.run_edits.is_empty(), "{case_info}");
         minimal += 1;
 
         let (saved, _) = save_paragraph(&doc, &content, |_| {});
@@ -2321,7 +2354,7 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
         completed > CASES / 2,
         "seed {SEED:#x}, completed {completed}/{CASES}"
     );
-    assert!(minimal > 0, "seed {SEED:#x}, no minimal patches");
+    assert_eq!(minimal, completed, "seed {SEED:#x}, recordable cases fell back");
 }
 
 #[test]
@@ -2358,19 +2391,26 @@ fn ambiguous_replacements_within_one_source_run_keep_other_run_properties() {
 }
 
 #[test]
-fn successive_save_plans_keep_the_opening_seed() {
-    let doc = open(&text("abc"));
+fn successive_saves_keep_records_against_the_opening_seed() {
+    let content = text("abc");
+    let doc = open(&content);
     replace(&doc, 1, 2, "X");
     let first = patch(&doc);
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(saved.contains(">aXc</w:t>"), "{saved}");
     assert!(
         doc.record_saved_paragraph_ids(&[(first.session_key.clone(), "00000001".to_owned())])
             .is_empty()
     );
-    replace(&doc, 1, 2, "Y");
+    replace(&doc, 2, 3, "Y");
     let second = patch(&doc);
     assert_eq!(first.seed, second.seed);
     assert!(matches!(&second.seed.units[0], UnitV1::Text { text, .. } if text == "abc"));
-    assert_text_edit(&doc, 1, 2, "Y", 1, target("aYc"));
+    assert_splices(&doc, &[(1, 2, 1, "X"), (2, 3, 2, "Y")]);
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(saved.contains(">aXY</w:t>"), "{saved}");
 }
 
 #[test]
@@ -2984,4 +3024,488 @@ fn text_beside_a_retained_drawing_has_a_precise_patch() {
     assert!(xml.contains(drawing));
     assert!(xml.contains("aXc"));
     assert!(warnings.is_empty());
+}
+
+fn splice_summary(patch: &ParagraphPatchV1) -> Vec<(u32, u32, DonorV1, String)> {
+    patch
+        .text_edits
+        .iter()
+        .map(|edit| {
+            let insert = edit.insert.iter().map(|run| run.text.as_str()).collect();
+            (edit.from, edit.to, edit.donor.clone(), insert)
+        })
+        .collect()
+}
+
+fn owned_splices(expected: &[(u32, u32, u32, &str)]) -> Vec<(u32, u32, DonorV1, String)> {
+    expected
+        .iter()
+        .map(|&(from, to, at, value)| (from, to, DonorV1::At { at }, value.to_owned()))
+        .collect()
+}
+
+fn assert_splices(doc: &EditingDoc, expected: &[(u32, u32, u32, &str)]) {
+    let patch = patch(doc);
+    assert_eq!(splice_summary(&patch), owned_splices(expected));
+    assert!(patch.run_edits.is_empty());
+}
+
+fn body_plan(plan: &docx_edit::ParagraphSavePlan) -> &docx_edit::SplicedPart {
+    plan.spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap()
+}
+
+fn assert_unproven(doc: &EditingDoc) {
+    assert_ambiguous(doc, "ambiguous: unproven edit provenance");
+}
+
+fn open_for_transfer(content: &str, generation: &str) -> EditingDoc {
+    let doc = EditingDoc::new(71);
+    seed_from_docx_with_generation(&doc, &package(content), generation).unwrap();
+    doc
+}
+
+fn transfer(sender: &EditingDoc, base: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let update = sender.encode_diff_v1(base).unwrap();
+    let sidecar = sender.encode_edit_provenance();
+    assert!(!sidecar.is_empty());
+    (update, sidecar)
+}
+
+const ADJACENT_SOURCE: &str = concat!(
+    r#"<w:r w:rsidR="00000001"><w:rPr><w:noProof/></w:rPr><w:t>abc</w:t></w:r>"#,
+    r#"<w:r w:rsidR="00000002"><w:rPr><w:bCs/></w:rPr><w:t>def</w:t></w:r>"#,
+    r#"<w:r w:rsidR="00000003"><w:t>&#x67;hi</w:t></w:r>"#,
+);
+
+#[test]
+fn one_update_carries_adjacent_replacements_with_distinct_source_donors() {
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "adjacent");
+    let sender = open_for_transfer(ADJACENT_SOURCE, "adjacent");
+    let base = receiver.encode_state_vector_v1();
+    replace(&sender, 3, 6, "YZ");
+    replace(&sender, 0, 3, "X");
+    let (update, sidecar) = transfer(&sender, &base);
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    let expected = [(0, 3, 0, "X"), (3, 6, 3, "YZ")];
+    assert_splices(&sender, &expected);
+    assert_splices(&receiver, &expected);
+
+    let (saved, warnings) = save_paragraph(&receiver, ADJACENT_SOURCE, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let expected = ADJACENT_SOURCE.replace(">abc<", ">X<").replace(">def<", ">YZ<");
+    assert!(saved.contains(&expected), "{saved}");
+}
+
+#[test]
+fn three_adjacent_replacements_keep_their_boundaries_with_only_rsid_differences() {
+    let content = concat!(
+        r#"<w:r w:rsidR="00000001"><w:t>a</w:t></w:r>"#,
+        r#"<w:r w:rsidR="00000002"><w:t>b</w:t></w:r>"#,
+        r#"<w:r w:rsidR="00000003"><w:t>c</w:t></w:r>"#,
+        r#"<w:r w:rsidR="00000004"><w:t>&#x64;</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    replace(&doc, 2, 3, "ZZ");
+    replace(&doc, 1, 2, "Y");
+    replace(&doc, 0, 1, "X");
+    assert_splices(&doc, &[(0, 1, 0, "X"), (1, 2, 1, "Y"), (2, 3, 2, "ZZ")]);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(saved.contains(r#"<w:r w:rsidR="00000004"><w:t>&#x64;</w:t></w:r>"#));
+}
+
+#[test]
+fn swapping_equal_text_keeps_each_source_donor() {
+    let content = concat!(
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>echo</w:t></w:r>",
+        "<w:r><w:rPr><w:bCs/></w:rPr><w:t>echo</w:t></w:r>",
+    );
+    let doc = open(content);
+    replace(&doc, 4, 8, "echo");
+    replace(&doc, 0, 4, "echo");
+    assert_splices(&doc, &[(0, 4, 0, "echo"), (4, 8, 4, "echo")]);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(saved.contains(content), "{saved}");
+}
+
+#[test]
+fn undoing_a_replacement_saves_the_whole_paragraph() {
+    let content = text("abc");
+    let doc = open(&content);
+    let mut history = doc.undo_manager();
+    replace(&doc, 1, 2, "XYZ");
+    assert!(history.undo());
+    assert_unproven(&doc);
+    let (saved, _) = save_paragraph(&doc, &content, |_| {});
+    assert!(saved.contains(">abc</w:t>"), "{saved}");
+}
+
+#[test]
+fn redoing_a_deletion_saves_the_whole_paragraph() {
+    let content = text("abc");
+    let doc = open(&content);
+    let mut history = doc.undo_manager();
+    doc
+        .delete_range(&ctx(), StoryRange::new("body", 1, 2))
+        .unwrap();
+    assert!(history.undo());
+    assert!(history.redo());
+    assert_unproven(&doc);
+    let (saved, _) = save_paragraph(&doc, &content, |p| {
+        p["content"][0]["content"][0]["text"] = json!("ac");
+    });
+    assert!(saved.contains(">ac</w:t>"), "{saved}");
+}
+
+#[test]
+fn undo_of_equal_output_is_checked_before_the_digest_gate() {
+    let doc = open(&text("abc"));
+    let mut history = doc.undo_manager();
+    replace(&doc, 1, 2, "b");
+    assert_splices(&doc, &[(1, 2, 1, "b")]);
+    assert!(history.undo());
+    assert_unproven(&doc);
+}
+
+#[test]
+fn format_only_undo_and_pilcrow_undo_mark_the_occurrence() {
+    for pilcrow in [false, true] {
+        let doc = open(&text("abc"));
+        let mut history = doc.undo_manager();
+        if pilcrow {
+            let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
+            doc
+                .set_paragraph_attr(&key, "alignment", Any::from("right"))
+                .unwrap();
+        } else {
+            format(
+                &doc,
+                1,
+                2,
+                InlineFormatDelta {
+                    bold: Patch::Set(true),
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(history.undo());
+        assert_unproven(&doc);
+    }
+}
+
+#[test]
+fn split_uses_the_whole_paragraph_path_for_the_source_occurrence() {
+    let content = text("abcd");
+    let doc = open(&content);
+    replace(&doc, 0, 1, "X");
+    doc.split_paragraph(&ctx(), Position::new("body", 2), None)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = body_plan(&plan);
+    assert_eq!(part.changed, [0]);
+    assert_eq!(part.inserted.len(), 1);
+    assert!(part.paragraph_patches.is_empty());
+    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
+    let (saved, _) = save_planned_bytes(&plan, Some(part), &package(&content), |source| {
+        let mut document = save_document(source, |document| {
+            document["content"][0]["content"][0]["content"][0]["text"] = json!("Xb");
+        });
+        let mut second = document["content"][0].clone();
+        let paragraph = second.as_object_mut().unwrap();
+        paragraph.remove("sourceOrdinal");
+        paragraph.remove("paraId");
+        second["content"][0]["content"][0]["text"] = json!("cd");
+        document["content"].as_array_mut().unwrap().push(second.clone());
+        if let Some(sections) = document["sections"].as_array_mut() {
+            sections[0]["content"].as_array_mut().unwrap().push(second);
+        }
+        document
+    });
+    let saved = ooxml_opc::unzip_parts(&saved).unwrap();
+    let (_, body) = saved
+        .iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    let body = std::str::from_utf8(body).unwrap();
+    assert!(body.contains(">Xb</w:t>"), "{body}");
+    assert!(body.contains(">cd</w:t>"), "{body}");
+}
+
+#[test]
+fn replacing_inside_a_previous_insertion_uses_the_whole_paragraph_path() {
+    let doc = open(&text("abc"));
+    replace(&doc, 1, 2, "XYZ");
+    replace(&doc, 2, 3, "Q");
+    assert_unproven(&doc);
+}
+
+#[test]
+fn reopening_saved_bytes_starts_without_records() {
+    let source = package(&text("abc"));
+    let doc = EditingDoc::new(71);
+    seed_from_docx(&doc, &source).unwrap();
+    replace(&doc, 1, 2, "X");
+    let plan = doc.paragraph_save_plan();
+    let (saved, warnings) = save_planned_bytes(&plan, Some(body_plan(&plan)), &source, |source| {
+        save_document(source, |_| {})
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let reopened = EditingDoc::new(71);
+    seed_from_docx(&reopened, &saved).unwrap();
+    reopened.encode_diff_v1(&reopened.encode_state_vector_v1()).unwrap();
+    assert!(reopened.encode_edit_provenance().is_empty());
+    replace(&reopened, 1, 2, "Y");
+    assert_text_edit(&reopened, 1, 2, "Y", 1, target("aYc"));
+}
+
+#[test]
+fn occurrence_byte_cap_only_invalidates_that_occurrence() {
+    let content = format!(
+        r#"{}</w:p><w:p w14:paraId="00000003">{}"#,
+        text(&"a".repeat(160)),
+        text("xyz"),
+    );
+    let doc = open(&content);
+    for at in (0..160).rev() {
+        replace(&doc, at, at + 1, "b");
+    }
+    replace(&doc, 161, 162, "X");
+    let plan = doc.paragraph_save_plan();
+    let part = body_plan(&plan);
+    assert_eq!(part.changed, [0, 1]);
+    assert_eq!(part.legacy_paragraphs.len(), 1);
+    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
+    assert_eq!(part.paragraph_patches.len(), 1);
+    assert_eq!(part.paragraph_patches[0].ordinal, 1);
+}
+
+#[test]
+fn opening_byte_cap_is_sticky_for_newly_changed_occurrences() {
+    const PARAGRAPHS: u32 = 48;
+    const WIDTH: u32 = 54;
+    let mut content = text(&"a".repeat(WIDTH as usize));
+    for index in 1..=PARAGRAPHS {
+        content.push_str(&format!("</w:p><w:p w14:paraId=\"{:08X}\">", index + 10));
+        content.push_str(&text(&"a".repeat(WIDTH as usize)));
+    }
+    let doc = open(&content);
+    for paragraph in 0..PARAGRAPHS {
+        let start = paragraph * (WIDTH + 1);
+        for at in (start..start + WIDTH).rev() {
+            replace(&doc, at, at + 1, "b");
+        }
+    }
+    let last = PARAGRAPHS * (WIDTH + 1);
+    replace(&doc, last, last + 1, "x");
+    let plan = doc.paragraph_save_plan();
+    let part = body_plan(&plan);
+    assert_eq!(part.changed.len(), PARAGRAPHS as usize + 1);
+    assert_eq!(part.legacy_paragraphs.len(), part.changed.len());
+    assert!(part.paragraph_patches.is_empty());
+}
+
+#[test]
+fn swapped_sidecar_from_the_same_client_marks_the_update_unproven() {
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "swap");
+    let a = open_for_transfer(ADJACENT_SOURCE, "swap");
+    let b = open_for_transfer(ADJACENT_SOURCE, "swap");
+    let base = receiver.encode_state_vector_v1();
+    replace(&a, 3, 6, "YZ");
+    replace(&a, 0, 3, "X");
+    replace(&b, 3, 6, "Z");
+    replace(&b, 0, 3, "XY");
+    let (update, _) = transfer(&a, &base);
+    let (other, swapped) = transfer(&b, &base);
+    assert_ne!(update, other);
+    receiver
+        .apply_local_update_with_provenance(&update, &swapped)
+        .unwrap();
+    assert_unproven(&receiver);
+}
+
+#[test]
+fn stale_garbled_missing_or_overbound_sidecars_mark_the_update_unproven() {
+    for bad in ["generation", "base", "version", "garbled", "missing", "overbound"] {
+        let receiver = open_for_transfer(ADJACENT_SOURCE, "current");
+        let sender = open_for_transfer(ADJACENT_SOURCE, "current");
+        let base = receiver.encode_state_vector_v1();
+        replace(&sender, 3, 6, "Z");
+        let (update, mut sidecar) = transfer(&sender, &base);
+        match bad {
+            "generation" => {
+                let stale = open_for_transfer(ADJACENT_SOURCE, "previous");
+                let stale_base = stale.encode_state_vector_v1();
+                replace(&stale, 3, 6, "Z");
+                let (stale_update, stale_sidecar) = transfer(&stale, &stale_base);
+                assert_eq!(update, stale_update);
+                sidecar = stale_sidecar;
+            }
+            "base" => {
+                let header = receiver
+                    .paragraph_identities()
+                    .paragraphs
+                    .into_iter()
+                    .find_map(|identity| match identity.paragraph {
+                        ParagraphRef::Session { story, .. } if story != "body" => Some(story),
+                        _ => None,
+                    })
+                    .unwrap();
+                let other = EditingDoc::new(72);
+                other
+                    .apply_update_v1(&receiver.encode_state_as_update_v1())
+                    .unwrap();
+                other
+                    .replace_range(&ctx(), StoryRange::new(header, 1, 2), "Q")
+                    .unwrap();
+                receiver
+                    .apply_update_v1(&other.encode_diff_v1(&base).unwrap())
+                    .unwrap();
+                assert_ne!(receiver.encode_state_vector_v1(), base);
+            }
+            "version" => sidecar[0] = u8::MAX,
+            "garbled" => sidecar[2] ^= 1,
+            "missing" => sidecar.clear(),
+            "overbound" => sidecar.resize(256 * 1024 + 1, 0),
+            _ => unreachable!(),
+        }
+        receiver
+            .apply_local_update_with_provenance(&update, &sidecar)
+            .unwrap();
+        assert_unproven(&receiver);
+    }
+}
+
+#[test]
+fn unpaired_update_touching_existing_records_invalidates_them() {
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "unpaired");
+    let sender = open_for_transfer(ADJACENT_SOURCE, "unpaired");
+    let base = receiver.encode_state_vector_v1();
+    replace(&sender, 3, 6, "Z");
+    let (update, sidecar) = transfer(&sender, &base);
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    assert_splices(&receiver, &[(3, 6, 3, "Z")]);
+    let base = receiver.encode_state_vector_v1();
+    replace(&sender, 0, 3, "X");
+    let update = sender.encode_diff_v1(&base).unwrap();
+    receiver.apply_local_update_v1(&update).unwrap();
+    assert_unproven(&receiver);
+    let (update, sidecar) = transfer(&sender, &receiver.encode_state_vector_v1());
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    assert_unproven(&receiver);
+}
+
+#[test]
+fn delete_only_sidecar_is_bound_to_the_exact_delete_set() {
+    let content = text("aaaa");
+    let receiver = open_for_transfer(&content, "delete");
+    let correct = open_for_transfer(&content, "delete");
+    let wrong = open_for_transfer(&content, "delete");
+    let base = receiver.encode_state_vector_v1();
+    correct
+        .delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    wrong
+        .delete_range(&ctx(), StoryRange::new("body", 2, 3))
+        .unwrap();
+    for doc in [&correct, &wrong] {
+        use yrs::StateVector;
+        use yrs::updates::decoder::Decode;
+
+        assert_eq!(
+            StateVector::decode_v1(&doc.encode_state_vector_v1()).unwrap(),
+            StateVector::decode_v1(&base).unwrap(),
+        );
+    }
+    let (update, _) = transfer(&correct, &base);
+    let (other, swapped) = transfer(&wrong, &base);
+    assert_ne!(update, other);
+    receiver
+        .apply_local_update_with_provenance(&update, &swapped)
+        .unwrap();
+    assert_unproven(&receiver);
+}
+
+#[test]
+fn invalid_sidecar_leaves_another_occurrences_records_intact() {
+    let content = format!(
+        r#"{}</w:p><w:p w14:paraId="00000003">{}"#,
+        text("abc"),
+        text("aaaa"),
+    );
+    let receiver = open_for_transfer(&content, "siblings");
+    let sender = open_for_transfer(&content, "siblings");
+    let base = receiver.encode_state_vector_v1();
+    sender
+        .delete_range(&ctx(), StoryRange::new("body", 5, 6))
+        .unwrap();
+    let (update, sidecar) = transfer(&sender, &base);
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    replace(&sender, 0, 1, "X");
+    let (update, mut sidecar) = transfer(&sender, &receiver.encode_state_vector_v1());
+    sidecar[1] ^= 1;
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    let plan = receiver.paragraph_save_plan();
+    let part = body_plan(&plan);
+    assert_eq!(part.changed, [0, 1]);
+    assert_eq!(part.legacy_paragraphs.len(), 1);
+    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
+    assert_eq!(part.paragraph_patches.len(), 1);
+    assert_eq!(part.paragraph_patches[0].ordinal, 1);
+    assert_eq!(
+        splice_summary(&part.paragraph_patches[0]),
+        owned_splices(&[(1, 2, 1, "")]),
+    );
+}
+
+#[test]
+fn insertion_abutting_a_deletion_keeps_the_occurrence_unproven() {
+    for (from, to) in [(0, 2), (1, 3), (2, 4)] {
+        let doc = open(&text("aaaa"));
+        doc
+            .delete_range(&ctx(), StoryRange::new("body", from, to))
+            .unwrap();
+        doc.insert_text(&ctx(), Position::new("body", from), "b", FormatPolicy::Inherit)
+            .unwrap();
+        assert_unproven(&doc);
+    }
+}
+
+#[test]
+fn supplementary_plane_identities_keep_both_units_in_the_splice() {
+    let doc = open(&text("a😀bc"));
+    replace(&doc, 1, 3, "😃");
+    replace(&doc, 3, 4, "X");
+    assert_splices(&doc, &[(1, 3, 1, "😃"), (3, 4, 3, "X")]);
+}
+
+#[test]
+fn matching_sidecar_can_carry_records_for_an_already_loaded_state() {
+    let content = text("aaaa");
+    let receiver = open_for_transfer(&content, "loaded");
+    let sender = open_for_transfer(&content, "loaded");
+    replace(&sender, 1, 2, "X");
+    let base = receiver.encode_state_vector_v1();
+    receiver
+        .apply_local_update_v1(&sender.encode_diff_v1(&base).unwrap())
+        .unwrap();
+    let (update, sidecar) = transfer(&sender, &receiver.encode_state_vector_v1());
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    assert_splices(&receiver, &[(1, 2, 1, "X")]);
 }

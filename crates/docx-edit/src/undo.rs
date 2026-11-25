@@ -121,6 +121,7 @@ pub struct DocUndoManager {
     _popped: Subscription,
     doc: Doc,
     identities: IdentityRepair,
+    provenance: Arc<Mutex<crate::provenance::Provenance>>,
     anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: [Subscription; 2],
     _removals: Subscription,
@@ -301,6 +302,7 @@ impl DocUndoManager {
         Self {
             doc: doc.doc.clone(),
             identities: doc.identity_repair(),
+            provenance: Arc::clone(&doc.provenance),
             anchor_state,
             _anchors: anchors,
             _removals: removals,
@@ -406,12 +408,17 @@ impl DocUndoManager {
             })
         };
         let identities = IdentityWatch::new(&self.doc);
+        let provenance = crate::provenance::Watch::new(
+            &self.doc,
+            &self.provenance,
+            crate::provenance::WatchKind::All,
+        );
         let applied = if undoing {
             self.inner.undo_blocking()
         } else {
             self.inner.redo_blocking()
         };
-        drop((restored, popped));
+        drop((restored, popped, provenance));
         if applied {
             let mut txn = self.doc.transact_mut_with("system");
             let removed = txn
