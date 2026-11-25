@@ -4,4 +4,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Typing in a long document no longer slows the frame's object and selection geometry: paragraph handles, the page layout input and header and footer text reuse what earlier keystrokes already worked out.
+Reduces repeated work when updating selections, page objects, headers and footers while typing in long DOCX documents.
