@@ -81,6 +81,8 @@ jobs:
             artifact: ubuntu-latest.aarch64
           - os: macos-latest
             artifact: macos-latest.aarch64
+          - os: macos-15-intel
+            artifact: macos-latest.x86_64
           - os: windows-latest
             artifact: windows-latest.x64
     steps:
@@ -156,6 +158,24 @@ jobs:
         env:
           BINDING: ${{ inputs.binding }}
         run: python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"
+
+      - name: Test the installed font pack
+        env:
+          BINDING: ${{ inputs.binding }}
+        run: |
+          python -m pip install --no-index --only-binary :all: dist/*.whl
+          python -I - "$BINDING" <<'PY'
+          import json
+          import sys
+          from importlib.resources import files
+          from pathlib import Path
+
+          source = Path("packages", sys.argv[1], "assets", "manifest.json")
+          data = json.loads(source.read_text(encoding="utf-8"))
+          pack = files("betteroffice_fonts_packs").joinpath(data["pack"], data["version"])
+          for name in ["manifest.json", *(face["file"] for face in data["faces"])]:
+              assert pack.joinpath(name).is_file(), name
+          PY
 
       - uses: actions/upload-artifact@v7
         with:

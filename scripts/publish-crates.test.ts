@@ -1047,6 +1047,8 @@ describe('release workflow crates auth', () => {
 
   test.each([
     ['true', 'true', 'false', true],
+    ['TRUE', 'true', 'false', true],
+    ['True', 'true', 'false', true],
     ['false', 'true', 'false', false],
     ['true', 'false', 'false', false],
     ['true', 'true', 'true', false]

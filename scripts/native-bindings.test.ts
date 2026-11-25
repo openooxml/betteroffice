@@ -243,7 +243,7 @@ describe('native package release wiring', () => {
     const job = release.jobs['native-build'];
     expect(job.needs).toBe('plan');
     expect(job.if).toBe(
-      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && vars.RELEASE_SKIP_NATIVE != 'true'"
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_NATIVE != 'true')"
     );
     expect(job.strategy).toEqual({
       'fail-fast': false,
@@ -422,6 +422,12 @@ describe('native package release wiring', () => {
     expect(publish.jobs.publish.steps[0].with.ref).toBe('${{ inputs.sha }}');
     const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
     expect(toolchain.with.targets).toBe('${{ matrix.platform.target }}');
+    const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
+    expect(cache.with).toEqual({
+      workspaces: 'bindings',
+      key: "${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}",
+      'save-if': "${{ github.ref == 'refs/heads/main' }}"
+    });
     const build = job.steps.find((step: any) => step.name === 'Build binding');
     expect(build.run).toBe(
       "bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked"
@@ -481,6 +487,38 @@ describe('native package release wiring', () => {
     const smoke = steps.find((step: any) => step.name === 'Smoke test on Alpine');
     expect(smoke.run).toContain('node:24-alpine');
     expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
+  });
+
+  test('dist loads the Windows arm64 binary in Node on Windows arm64', () => {
+    const job = dist.jobs['windows-arm64-smoke'];
+    const musl = dist.jobs['musl-smoke'];
+    expect(job.needs).toBe(musl.needs);
+    expect(job.if).toBeUndefined();
+    expect(musl.if).toBeUndefined();
+    expect(job['runs-on']).toBe('windows-11-arm');
+    expect(job['timeout-minutes']).toBe(15);
+    expect(job.defaults.run.shell).toBe('bash');
+    expect(job.steps).toEqual([
+      { uses: 'actions/checkout@v7.0.1', with: { ref: '${{ inputs.sha }}' } },
+      {
+        uses: 'actions/download-artifact@v8',
+        with: {
+          name: '${{ inputs.binding }}-native.aarch64-pc-windows-msvc',
+          path: 'bindings/${{ inputs.binding }}-native'
+        }
+      },
+      {
+        uses: 'actions/download-artifact@v8',
+        with: {
+          name: '${{ inputs.binding }}-native-loader',
+          path: 'bindings/${{ inputs.binding }}-native'
+        }
+      },
+      { uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24', architecture: 'arm64' } },
+      { name: 'Smoke test on Windows ARM64', run: 'node scripts/native-raw-smoke.mjs ${{ inputs.binding }}' }
+    ]);
+    for (const step of job.steps) expect(step.if).toBeUndefined();
+    expect(publish.jobs.publish.needs).toBe('dist');
   });
 
   test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {

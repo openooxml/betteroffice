@@ -59,6 +59,7 @@ jobs:
         with:
           workspaces: bindings
           key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig
@@ -151,3 +152,34 @@ jobs:
 
       - name: Smoke test on Alpine
         run: docker run --rm -v "$PWD:/work" -w /work node:24-alpine node scripts/native-raw-smoke.mjs ${{ inputs.binding }}
+
+  windows-arm64-smoke:
+    name: Smoke test on Windows ARM64
+    needs: bindings
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.binding }}-native.aarch64-pc-windows-msvc
+          path: bindings/${{ inputs.binding }}-native
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.binding }}-native-loader
+          path: bindings/${{ inputs.binding }}-native
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+          architecture: arm64
+
+      - name: Smoke test on Windows ARM64
+        run: node scripts/native-raw-smoke.mjs ${{ inputs.binding }}

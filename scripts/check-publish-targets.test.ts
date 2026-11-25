@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -870,9 +871,9 @@ describe('release wiring', () => {
     step.run?.includes('check-publish-targets.mjs')
   );
 
-  test('dispatch rehearsals use a separate concurrency group per ref', () => {
+  test('rehearsals and refs that fail the main comparison use a separate concurrency group per ref', () => {
     expect(release.concurrency).toEqual({
-      group: "${{ inputs.rehearse == true && format('release-rehearsal-{0}', github.ref) || 'release' }}",
+      group: "${{ github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref) }}",
       'cancel-in-progress': false
     });
     expect(release.on.workflow_dispatch.inputs.rehearse).toEqual({
@@ -888,13 +889,13 @@ describe('release wiring', () => {
     expect(plan['runs-on']).toBe('ubuntu-latest');
     expect(plan['timeout-minutes']).toBe(10);
     expect(plan.permissions).toEqual({ contents: 'read' });
-    expect(plan.steps[0].uses).toBe('actions/checkout@v7.0.1');
-    expect(plan.steps[1]).toEqual({ uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24' } });
-    expect(plan.steps.slice(2).map((step: any) => step.id ?? step.name)).toEqual([
+    expect(plan.steps[1].uses).toBe('actions/checkout@v7.0.1');
+    expect(plan.steps[2]).toEqual({ uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24' } });
+    expect(plan.steps.slice(3).map((step: any) => step.id ?? step.name)).toEqual([
       'pending', 'Note skipped tests', 'bindings'
     ]);
-    expect(plan.steps[2].run).toContain("find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md'");
-    expect(plan.steps[4].env).toEqual({
+    expect(plan.steps[3].run).toContain("find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md'");
+    expect(plan.steps[5].env).toEqual({
       REHEARSE: '${{ inputs.rehearse == true }}',
       PUBLISHING: '${{ steps.pending.outputs.publishing }}'
     });
@@ -905,6 +906,28 @@ describe('release wiring', () => {
     });
     expect(release.jobs.release.outputs.publishing).toBe('${{ needs.plan.outputs.publishing }}');
     expect(steps).not.toContain('Detect pending changesets');
+  });
+
+  test.each([
+    ['false', 'refs/heads/main', 0],
+    ['false', 'refs/heads/Main', 1],
+    ['false', 'refs/heads/topic', 1],
+    ['false', 'refs/tags/main', 1],
+    ['true', 'refs/heads/Main', 0],
+    ['true', 'refs/heads/topic', 0]
+  ] as const)('plan ref guard with rehearse=%s and ref=%s', (rehearse, ref, status) => {
+    const guard = release.jobs.plan.steps[0];
+    expect(guard.name).toBe('Check the release ref');
+    expect(guard.if).toBeUndefined();
+    expect(guard.env).toEqual({ REHEARSE: '${{ inputs.rehearse == true }}' });
+    expect(guard.run).toContain('[ "$GITHUB_REF" = refs/heads/main ]');
+    expect(guard.run).not.toContain('${{');
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', guard.run], {
+      encoding: 'utf8',
+      env: { ...process.env, REHEARSE: rehearse, GITHUB_REF: ref }
+    });
+    expect(result.status, result.stderr).toBe(status);
+    if (status !== 0) expect(result.stdout).toContain('::error::');
   });
 
   test('release requires a successful plan and accepts a failed build only after a successful retry', () => {
@@ -931,7 +954,6 @@ describe('release wiring', () => {
   test('rehearsals cannot reach a job that publishes or dispatches', () => {
     const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|twine\b|docker\s+push\b|pypi\/)/i;
     const publishAction = /^(?:changesets\/action@|pypa\/gh-action-pypi-publish@|pypi\/)/i;
-    const publishPermissions = ['id-token', 'actions', 'contents', 'packages'];
 
     function hasPublishingStep(job: any) {
       return (job.steps ?? []).some((step: any) =>
@@ -940,11 +962,12 @@ describe('release wiring', () => {
       );
     }
 
+    function hasWritePermission(permissions: unknown) {
+      return permissions === 'write-all' || Object.values(permissions ?? {}).includes('write');
+    }
+
     function canPublish(job: any) {
-      const permissions = job.permissions ?? release.permissions;
-      return permissions === 'write-all' ||
-        publishPermissions.some((scope) => permissions?.[scope] === 'write') ||
-        hasPublishingStep(job);
+      return hasWritePermission(job.permissions ?? release.permissions) || hasPublishingStep(job);
     }
 
     function requiresRelease(id: string, visited = new Set<string>()): boolean {
@@ -982,8 +1005,7 @@ describe('release wiring', () => {
         readFileSync(new URL(file, new URL('../.github/workflows/', import.meta.url)), 'utf8')
       ) as any;
       for (const { permissions } of [dist, ...Object.values(dist.jobs)]) {
-        expect(permissions, file).not.toBe('write-all');
-        expect(Object.values(permissions ?? {}), file).not.toContain('write');
+        expect(hasWritePermission(permissions), file).toBe(false);
       }
       for (const [id, job] of Object.entries(dist.jobs)) {
         expect(hasPublishingStep(job), `${file}: ${id}`).toBe(false);

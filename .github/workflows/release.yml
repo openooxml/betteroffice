@@ -13,7 +13,7 @@ on:
         default: false
 
 concurrency:
-  group: ${{ inputs.rehearse == true && format('release-rehearsal-{0}', github.ref) || 'release' }}
+  group: ${{ github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref) }}
   cancel-in-progress: false
 
 defaults:
@@ -33,6 +33,16 @@ jobs:
       native: ${{ steps.bindings.outputs.native }}
       python: ${{ steps.bindings.outputs.python }}
     steps:
+      - name: Check the release ref
+        env:
+          REHEARSE: ${{ inputs.rehearse == true }}
+        run: |
+          if [ "$REHEARSE" = true ] || [ "$GITHUB_REF" = refs/heads/main ]; then
+            exit 0
+          fi
+          echo "::error::A release must run from refs/heads/main."
+          exit 1
+
       - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-node@v7.1.0
@@ -51,7 +61,7 @@ jobs:
           PUBLISHING: ${{ steps.pending.outputs.publishing }}
           REHEARSE: ${{ inputs.rehearse == true }}
         run: |
-          if [ "$SKIP_TESTS" = true ] && [ "$PUBLISHING" = true ] && [ "$REHEARSE" != true ]; then
+          if [ "${SKIP_TESTS,,}" = true ] && [ "$PUBLISHING" = true ] && [ "$REHEARSE" != true ]; then
             printf '::warning::RELEASE_SKIP_%s is true, so this release skips its type check and tests.\n' TESTS
           fi
 
@@ -116,7 +126,7 @@ jobs:
   native-build:
     name: Build native ${{ matrix.binding }}
     needs: plan
-    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && vars.RELEASE_SKIP_NATIVE != 'true'
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_NATIVE != 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +156,7 @@ jobs:
   python-build:
     name: Build Python ${{ matrix.binding }}
     needs: plan
-    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && vars.RELEASE_SKIP_PYTHON != 'true'
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_PYTHON != 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -505,7 +515,7 @@ jobs:
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes + 15 for Alpine) and publishing (15 minutes).
+    # Covers native-dist (45 minutes + 15 for smoke tests) and publishing (15 minutes).
     timeout-minutes: 90
     permissions:
       actions: write

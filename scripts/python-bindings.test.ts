@@ -217,7 +217,7 @@ globalThis.fetch = async (url) => {
     const job = release.jobs['python-build'];
     expect(job.needs).toBe('plan');
     expect(job.if).toBe(
-      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && vars.RELEASE_SKIP_PYTHON != 'true'"
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && (inputs.rehearse == true || vars.RELEASE_SKIP_PYTHON != 'true')"
     );
     expect(job.strategy).toEqual({
       'fail-fast': false,
@@ -405,18 +405,40 @@ globalThis.fetch = async (url) => {
     expect(dispatched).toEqual(FONT_PACK_NAMES);
   });
 
-  test('a font pack builds one pure wheel from the committed assets, and no Rust', () => {
+  test('a font pack builds and checks one pure wheel from the committed assets, and no Rust', () => {
     for (const job of ['wheels', 'sdist', 'load']) {
       expect(dist.jobs[job].if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
     }
     const pack = dist.jobs['font-pack'];
     expect(pack.if).toBe("${{ startsWith(inputs.binding, 'fonts-') }}");
-    const run = pack.steps.map((step: any) => step.run ?? '').join('\n');
-    expect(run).toContain('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
+    const build = pack.steps.find((step: any) => step.name === 'Build the wheel');
+    expect(build.run).toBe('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
+    const smoke = pack.steps[pack.steps.indexOf(build) + 1];
+    expect(smoke.name).toBe('Test the installed font pack');
+    expect(smoke.if).toBeUndefined();
+    expect(smoke.env).toEqual({ BINDING: '${{ inputs.binding }}' });
+    expect(smoke.run).toBe([
+      'python -m pip install --no-index --only-binary :all: dist/*.whl',
+      'python -I - "$BINDING" <<\'PY\'',
+      'import json',
+      'import sys',
+      'from importlib.resources import files',
+      'from pathlib import Path',
+      '',
+      'source = Path("packages", sys.argv[1], "assets", "manifest.json")',
+      'data = json.loads(source.read_text(encoding="utf-8"))',
+      'pack = files("betteroffice_fonts_packs").joinpath(data["pack"], data["version"])',
+      'for name in ["manifest.json", *(face["file"] for face in data["faces"])]:',
+      '    assert pack.joinpath(name).is_file(), name',
+      'PY',
+      ''
+    ].join('\n'));
     const upload = pack.steps.find((step: any) => String(step.uses).startsWith('actions/upload-artifact'));
+    expect(pack.steps.indexOf(upload)).toBeGreaterThan(pack.steps.indexOf(smoke));
     expect(upload.with.name).toBe('python-${{ inputs.binding }}.wheel');
     expect(dist.jobs.built.needs).toEqual(['wheels', 'sdist', 'font-pack', 'load']);
     expect(dist.jobs.built.if).toContain("!contains(needs.*.result, 'failure')");
+    expect(dist.jobs.built.if).toContain("needs.font-pack.result == 'success'");
   });
 
   test('loads each native wheel from its exact artifact and tests the installed binding', () => {
@@ -430,20 +452,27 @@ globalThis.fetch = async (url) => {
         { os: 'ubuntu-24.04', artifact: 'ubuntu-latest.x86_64' },
         { os: 'ubuntu-24.04-arm', artifact: 'ubuntu-latest.aarch64' },
         { os: 'macos-latest', artifact: 'macos-latest.aarch64' },
+        { os: 'macos-15-intel', artifact: 'macos-latest.x86_64' },
         { os: 'windows-latest', artifact: 'windows-latest.x64' }
       ] }
     });
-    const wheelArtifacts = dist.jobs.wheels.strategy.matrix.platform.map(
+    const wheels = dist.jobs.wheels;
+    const upload = wheels.steps.find((step: any) => step.uses === 'actions/upload-artifact@v7');
+    expect(upload.with.name).toBe('python-${{ inputs.binding }}.${{ matrix.platform.os }}.${{ matrix.platform.target }}');
+    const wheelArtifacts = wheels.strategy.matrix.platform.map(
       (platform: any) => `${platform.os}.${platform.target}`
     );
-    for (const leg of load.strategy.matrix.platform) expect(wheelArtifacts).toContain(leg.artifact);
+    const loadArtifacts = load.strategy.matrix.platform.map((platform: any) => platform.artifact);
+    expect(loadArtifacts.sort()).toEqual(wheelArtifacts.sort());
     const [, python, download, install, pytest] = load.steps;
     expect(python.uses).toBe('actions/setup-python@v7.1.0');
     expect(python.with['python-version']).toBe('3.13');
     expect(download.uses).toBe('actions/download-artifact@v8');
     expect(download.with).toEqual({ name: 'python-${{ inputs.binding }}.${{ matrix.platform.artifact }}', path: 'wheel' });
+    expect(install.if).toBeUndefined();
     expect(install.run).toContain('python -I scripts/python_font_packs.py --out font-packs');
     expect(install.run).toContain('python -m pip install --only-binary :all: --find-links font-packs wheel/*.whl');
+    expect(pytest.if).toBeUndefined();
     expect(pytest['working-directory']).toBe('${{ runner.temp }}');
     expect(pytest.env.BINDING).toBe('${{ inputs.binding }}');
     expect(pytest.run).toBe('python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"');
