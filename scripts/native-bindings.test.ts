@@ -225,7 +225,7 @@ describe('native package release wiring', () => {
     const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
     expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
     delete npmCheck.env;
-    expect(job['timeout-minutes']).toBe(90);
+    expect(job['timeout-minutes']).toBe(180);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');

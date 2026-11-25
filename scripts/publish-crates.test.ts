@@ -1,14 +1,17 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  NEW_CRATE_WAIT_BUDGET_MS,
   attemptPublishWithFallback,
   cargoNoAuthEnv,
   cargoPublishEnv,
   formatBootstrapSummary,
+  newCrateRateLimitRetryAt,
   publishOneCrate,
+  runWithTee,
   selectPublishToken
 } from './publish-crates.mjs';
 import { run } from './rust-crates.mjs';
@@ -17,8 +20,32 @@ const FAKE_OIDC = 'fake-oidc-token-aaa';
 const FAKE_BOOTSTRAP = 'fake-bootstrap-token-bbb';
 const FAKE_CONFLICT = 'fake-conflicting-token-ccc';
 const FAKE_SELECTED = 'fake-selected-token-ddd';
+const START_MS = Date.parse('2026-11-25T09:12:00Z');
+const RETRY_MS = Date.parse('2026-11-25T09:20:00Z');
+const NEW_CRATE_REFUSAL =
+  'error: failed to publish to registry at https://crates.io\n' +
+  'Caused by:\n' +
+  '  the remote server responded with an error (status 429 Too Many Requests): ' +
+  'You have published too many new crates in a short period of time.';
 
-function publishTracker(script: Array<{ token: string; status: number }>) {
+function newCrateRefusal(retryAt: number) {
+  return `${NEW_CRATE_REFUSAL} Please try again after ${new Date(retryAt).toUTCString()} and see https://crates.io/docs/rate-limits for more details.`;
+}
+
+function fakeClock() {
+  let nowMs = START_MS;
+  const waits: number[] = [];
+  return {
+    now: () => nowMs,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      nowMs += ms;
+    },
+    waits
+  };
+}
+
+function publishTracker(script: Array<{ token: string; status: number; output?: string; stdout?: string }>) {
   const calls: Array<{ token: string; source: string }> = [];
   let index = 0;
   return {
@@ -27,10 +54,38 @@ function publishTracker(script: Array<{ token: string; status: number }>) {
       calls.push({ token, source });
       const step = script[Math.min(index, script.length - 1)]!;
       index += 1;
-      return { status: step.status };
+      return { status: step.status, stdout: step.stdout ?? '', stderr: step.output ?? '' };
     }
   };
 }
+
+describe('newCrateRateLimitRetryAt', () => {
+  const cases: Array<[string, string, number | null]> = [
+    ['a retry date', newCrateRefusal(RETRY_MS), RETRY_MS],
+    ['a past retry date', newCrateRefusal(START_MS - 60_000), START_MS - 60_000],
+    ['a missing retry date', NEW_CRATE_REFUSAL, START_MS + 600_000],
+    ['an invalid retry date', `${NEW_CRATE_REFUSAL} Please try again after an invalid date GMT`, START_MS + 600_000],
+    ['the phrase without the 429 status line', 'HTTP 429: too many new crates', null],
+    ['the status and the phrase on different lines', `status 429 Too Many Requests\nwarning: too many new crates`, null],
+    ['a different status', NEW_CRATE_REFUSAL.replace('status 429', 'status 500'), null],
+    ['the update limit', NEW_CRATE_REFUSAL.replace('new crates', 'updates'), null],
+    ['a generic 429', 'HTTP 429: Too Many Requests', null],
+    ['unrelated text on a 429 line', 'warning: status 429 seen; too many new crates in this workspace', null],
+    ['the refusal quoted inside another line', `note: ${NEW_CRATE_REFUSAL.split('\n')[2].trim()}`, null],
+    ['the refusal line without cargo\'s registry error above it', NEW_CRATE_REFUSAL.split('\n')[2], null],
+    [
+      'a coloured refusal',
+      newCrateRefusal(RETRY_MS)
+        .replace('error:', '\u001b[1m\u001b[31merror\u001b[0m\u001b[1m:\u001b[0m')
+        .replace('Caused by:', '\u001b[1mCaused by:\u001b[0m'),
+      RETRY_MS
+    ],
+    ['an unauthorized error', 'error: unauthorized', null]
+  ];
+  test.each(cases)('handles %s', (_label, output, expected) => {
+    expect(newCrateRateLimitRetryAt(output, START_MS)).toBe(expected);
+  });
+});
 
 describe('selectPublishToken', () => {
   test('a crate on crates.io publishes with the OIDC token', () => {
@@ -320,6 +375,306 @@ describe('attemptPublishWithFallback', () => {
   });
 });
 
+describe('new-crate rate limit', () => {
+  test('retries the sixth and later crates with the same token after each refill', async () => {
+    const clock = fakeClock();
+    const names = Array.from({ length: 11 }, (_, index) => `new-crate-${index + 1}`);
+    const rateLimitBudget = { waitedMs: 0, newCratesLeft: names.length };
+    const calls: Array<{ name: string; token: string; source: string }> = [];
+    let published = 0;
+    let refillAt = RETRY_MS;
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      for (const name of names) {
+        await publishOneCrate({
+          name,
+          version: '0.1.0',
+          exists: false,
+          oidcToken: FAKE_OIDC,
+          bootstrapToken: FAKE_BOOTSTRAP,
+          checkVersion: async () => null,
+          runPublish: (token: string, source: string) => {
+            calls.push({ name, token, source });
+            if (published >= 5) {
+              if (clock.now() < refillAt) return { status: 101, stderr: newCrateRefusal(refillAt) };
+              refillAt += 600_000;
+            }
+            published += 1;
+            return { status: 0, stderr: '' };
+          },
+          recordUse: () => {},
+          waitRegistry: async () => {},
+          rateLimitBudget,
+          now: clock.now,
+          sleep: clock.sleep
+        });
+      }
+      expect(clock.waits).toEqual([495_000, 600_000, 600_000, 600_000, 600_000, 600_000]);
+      expect(log.mock.calls.map(([line]) => line).filter((line) => line.startsWith('waiting ')))
+        .toEqual([
+          'waiting 495 s for the new-crate rate limit, 6 new crates left',
+          'waiting 600 s for the new-crate rate limit, 5 new crates left',
+          'waiting 600 s for the new-crate rate limit, 4 new crates left',
+          'waiting 600 s for the new-crate rate limit, 3 new crates left',
+          'waiting 600 s for the new-crate rate limit, 2 new crates left',
+          'waiting 600 s for the new-crate rate limit, 1 new crates left'
+        ]);
+      expect(calls).toEqual(names.flatMap((name, index) => {
+        const call = { name, token: FAKE_BOOTSTRAP, source: 'bootstrap' };
+        return index < 5 ? [call] : [call, call];
+      }));
+      expect(rateLimitBudget.newCratesLeft).toBe(0);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  const marginCases: Array<[string, string, number]> = [
+    ['a missing date', NEW_CRATE_REFUSAL, 615_000],
+    ['a past date', newCrateRefusal(START_MS - 60_000), 15_000]
+  ];
+  test.each(marginCases)('applies the retry margin for %s', async (_label, output, waitMs) => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_BOOTSTRAP, status: 101, output },
+      { token: FAKE_BOOTSTRAP, status: 0 }
+    ]);
+    const result = await attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: tracker.runPublish,
+      now: clock.now,
+      sleep: clock.sleep
+    });
+    expect(result).toEqual({ source: 'bootstrap' });
+    expect(clock.waits).toEqual([waitMs]);
+    expect(tracker.calls).toEqual([
+      { token: FAKE_BOOTSTRAP, source: 'bootstrap' },
+      { token: FAKE_BOOTSTRAP, source: 'bootstrap' }
+    ]);
+  });
+
+  test('a cargo killed by a signal never waits, even after printing the refusal', async () => {
+    const clock = fakeClock();
+    await expect(attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: () => ({ status: null, signal: 'SIGKILL', stderr: newCrateRefusal(START_MS + 60_000) }),
+      now: clock.now,
+      sleep: clock.sleep
+    })).rejects.toThrow('Failed to publish betteroffice-fonts-latin@0.1.0 with the bootstrap token');
+    expect(clock.waits).toEqual([]);
+  });
+
+  test('a refusal printed on stdout never waits', async () => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_BOOTSTRAP, status: 101, stdout: newCrateRefusal(START_MS + 60_000), output: 'error: something else' }
+    ]);
+    await expect(attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: tracker.runPublish,
+      now: clock.now,
+      sleep: clock.sleep
+    })).rejects.toThrow('Failed to publish betteroffice-fonts-latin@0.1.0 with the bootstrap token');
+    expect(clock.waits).toEqual([]);
+  });
+
+  test('an existing crate never waits on the new-crate refusal text', async () => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_OIDC, status: 101, output: newCrateRefusal(START_MS + 60_000) },
+      { token: FAKE_BOOTSTRAP, status: 0 }
+    ]);
+    const result = await attemptPublishWithFallback({
+      name: 'betteroffice-xlsx',
+      version: '0.1.0',
+      exists: true,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: tracker.runPublish,
+      now: clock.now,
+      sleep: clock.sleep
+    });
+    expect(result).toEqual({ source: 'bootstrap-fallback' });
+    expect(clock.waits).toEqual([]);
+  });
+
+  const otherFailures: Array<[string, string]> = [
+    ['the update limit', NEW_CRATE_REFUSAL.replace('new crates', 'updates')],
+    ['a generic 429', 'HTTP 429: Too Many Requests'],
+    ['an unauthorized error', 'error: unauthorized']
+  ];
+  test.each(otherFailures)('checks the version and falls back or fails without waiting for %s', async (_label, output) => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_OIDC, status: 101, output },
+      { token: FAKE_BOOTSTRAP, status: 0 }
+    ]);
+    let checks = 0;
+    const options = {
+      name: 'crate-a',
+      version: '0.1.0',
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => {
+        checks += 1;
+        return null;
+      },
+      now: clock.now,
+      sleep: clock.sleep
+    };
+    expect(await attemptPublishWithFallback({
+      ...options,
+      exists: true,
+      runPublish: tracker.runPublish
+    })).toEqual({ source: 'bootstrap-fallback' });
+    expect(tracker.calls).toEqual([
+      { token: FAKE_OIDC, source: 'oidc' },
+      { token: FAKE_BOOTSTRAP, source: 'bootstrap-fallback' }
+    ]);
+    await expect(attemptPublishWithFallback({
+      ...options,
+      exists: false,
+      runPublish: () => ({ status: 101, stderr: output })
+    })).rejects.toThrow('Failed to publish crate-a@0.1.0 with the bootstrap token');
+    expect(checks).toBe(2);
+    expect(clock.waits).toEqual([]);
+  });
+
+  test('shares the 100-minute cap across crates and stops repeated refusals', async () => {
+    const clock = fakeClock();
+    const rateLimitBudget = { waitedMs: 0, newCratesLeft: 2 };
+    const first = publishTracker([
+      { token: FAKE_BOOTSTRAP, status: 101, output: newCrateRefusal(START_MS + 5_970_000) },
+      { token: FAKE_BOOTSTRAP, status: 0 }
+    ]);
+    const options = {
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      recordUse: () => {},
+      waitRegistry: async () => {},
+      rateLimitBudget,
+      now: clock.now,
+      sleep: clock.sleep
+    };
+    await publishOneCrate({ ...options, name: 'first-crate', runPublish: first.runPublish });
+
+    const second = publishTracker([
+      { token: FAKE_BOOTSTRAP, status: 101, output: newCrateRefusal(START_MS + 5_985_000) },
+      { token: FAKE_BOOTSTRAP, status: 101, output: newCrateRefusal(START_MS + 6_600_000) }
+    ]);
+    await expect(publishOneCrate({ ...options, name: 'second-crate', runPublish: second.runPublish }))
+      .rejects.toThrow(
+        /second-crate.*100 minutes.*1 new crates left.*2026-11-25T11:02:00\.000Z.*release job.*re-run.*published versions are skipped/i
+      );
+    expect(NEW_CRATE_WAIT_BUDGET_MS).toBe(6_000_000);
+    expect(clock.waits).toEqual([5_985_000, 15_000]);
+    expect(rateLimitBudget.waitedMs).toBe(NEW_CRATE_WAIT_BUDGET_MS);
+    expect(second.calls).toHaveLength(2);
+  });
+
+  test('an OIDC token that expires during earlier waits falls back to bootstrap', async () => {
+    const clock = fakeClock();
+    const rateLimitBudget = { waitedMs: 0, newCratesLeft: 1 };
+    const options = {
+      version: '0.1.0',
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      recordUse: () => {},
+      waitRegistry: async () => {},
+      rateLimitBudget,
+      now: clock.now,
+      sleep: clock.sleep
+    };
+    await publishOneCrate({
+      ...options,
+      name: 'new-crate',
+      exists: false,
+      checkVersion: async () => null,
+      runPublish: () => clock.now() < RETRY_MS
+        ? { status: 101, stderr: newCrateRefusal(RETRY_MS) }
+        : { status: 0, stderr: '' }
+    });
+
+    const tokens: string[] = [];
+    let checks = 0;
+    const result = await publishOneCrate({
+      ...options,
+      name: 'existing-crate',
+      exists: true,
+      checkVersion: async () => {
+        checks += 1;
+        return null;
+      },
+      runPublish: (token: string) => {
+        tokens.push(token);
+        return token === FAKE_OIDC && clock.now() >= RETRY_MS
+          ? { status: 101, stderr: 'error: unauthorized, token expired' }
+          : { status: 0, stderr: '' };
+      }
+    });
+    expect(result).toEqual({ source: 'bootstrap-fallback' });
+    expect(tokens).toEqual([FAKE_OIDC, FAKE_BOOTSTRAP]);
+    expect(checks).toBe(1);
+    expect(clock.waits).toEqual([495_000]);
+  });
+});
+
+describe('runWithTee', () => {
+  test('returns within the drain time when a grandchild keeps the pipes open', async () => {
+    const stdout = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const started = Date.now();
+      const result = await runWithTee('node', [
+        '-e',
+        "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'inherit', detached: true }).unref(); process.stdout.write('parent done\\n'); process.exitCode = 7;"
+      ], { drainMs: 500 });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(result.status).toBe(7);
+      expect(result.stdout).toContain('parent done');
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
+  test('tees stdout and stderr and returns the output and nonzero exit status', async () => {
+    const stdout = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const result = await runWithTee('node', [
+        '-e',
+        "process.stdout.write('publish stdout\\n'); process.stderr.write('publish stderr\\n'); process.exitCode = 101;"
+      ]);
+      expect(result.status).toBe(101);
+      expect(result.stdout).toContain('publish stdout\n');
+      expect(result.stderr).toContain('publish stderr\n');
+      expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('publish stdout\n');
+      expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('publish stderr\n');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+});
+
 describe('formatBootstrapSummary', () => {
   test('lists the created crates and the Trusted Publisher step', () => {
     const summary = formatBootstrapSummary(['betteroffice-pptx-raster', 'betteroffice-pptx']);
@@ -478,7 +833,7 @@ describe('publishOneCrate', () => {
 });
 
 describe('cargo child environment isolation', () => {
-  test('the publish child carries only the selected token under both aliases', () => {
+  test('the publish child carries only the selected token under both aliases', async () => {
     const saved = {
       bootstrap: process.env.CRATES_IO_BOOTSTRAP_TOKEN,
       reg: process.env.CARGO_REGISTRY_TOKEN,
@@ -488,18 +843,19 @@ describe('cargo child environment isolation', () => {
     process.env.CARGO_REGISTRY_TOKEN = FAKE_OIDC;
     process.env.CARGO_REGISTRIES_CRATES_IO_TOKEN = FAKE_CONFLICT;
     try {
-      const result = run(
+      const result = await runWithTee(
         'node',
         [
           '-e',
-          'process.stdout.write(JSON.stringify({bootstrap: process.env.CRATES_IO_BOOTSTRAP_TOKEN ?? null, reg: process.env.CARGO_REGISTRY_TOKEN ?? null, named: process.env.CARGO_REGISTRIES_CRATES_IO_TOKEN ?? null}))'
+          'const token = process.argv[1];' +
+            'process.exitCode = process.env.CRATES_IO_BOOTSTRAP_TOKEN === undefined &&' +
+            ' process.env.CARGO_REGISTRY_TOKEN === token &&' +
+            ' process.env.CARGO_REGISTRIES_CRATES_IO_TOKEN === token ? 0 : 1;',
+          FAKE_SELECTED
         ],
-        { capture: true, env: cargoPublishEnv(FAKE_SELECTED) }
+        { env: cargoPublishEnv(FAKE_SELECTED) }
       );
-      const child = JSON.parse(result.stdout as string);
-      expect(child.bootstrap).toBeNull();
-      expect(child.reg).toBe(FAKE_SELECTED);
-      expect(child.named).toBe(FAKE_SELECTED);
+      expect(result.status).toBe(0);
     } finally {
       if (saved.bootstrap === undefined) delete process.env.CRATES_IO_BOOTSTRAP_TOKEN;
       else process.env.CRATES_IO_BOOTSTRAP_TOKEN = saved.bootstrap;
@@ -571,6 +927,10 @@ describe('release workflow crates auth', () => {
   const releaseSource = readFileSync(releaseWorkflow, 'utf8');
   const release = Bun.YAML.parse(releaseSource) as any;
   const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
+
+  test('the release timeout has room for rate-limit waits', () => {
+    expect(release.jobs.release['timeout-minutes']).toBeGreaterThanOrEqual(160);
+  });
 
   test('the OIDC action is pinned to a full commit of the official v1 release line', () => {
     const auth = named.get('Authenticate to crates.io');

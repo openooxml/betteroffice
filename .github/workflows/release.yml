@@ -20,7 +20,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
       published: ${{ steps.changesets.outputs.published }}

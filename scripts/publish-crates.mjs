@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { appendFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { FONT_PACK_CRATES, prepareFontPacks } from './rust-font-packs.mjs';
@@ -13,6 +15,12 @@ const USER_AGENT = 'betteroffice-release (https://github.com/openooxml/betteroff
 const EXPECTED_OWNER = process.env.CRATES_IO_OWNER ?? 'eliahilse';
 const WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const WAIT_INTERVAL_MS = 10 * 1000;
+const NEW_CRATE_REFILL_MS = 600_000;
+const NEW_CRATE_RETRY_MARGIN_MS = 15_000;
+const CAPTURED_OUTPUT_BYTES = 64 * 1024;
+const PIPE_DRAIN_MS = 5_000;
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -\/]*[@-~]/g;
+export const NEW_CRATE_WAIT_BUDGET_MS = 100 * 60_000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,6 +82,51 @@ export function cargoNoAuthEnv() {
   };
 }
 
+export async function runWithTee(command, args, { env = {}, drainMs = PIPE_DRAIN_MS } = {}) {
+  const childEnv = { ...process.env };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete childEnv[key];
+    else childEnv[key] = value;
+  }
+
+  const child = spawn(command, args, { stdio: ['inherit', 'pipe', 'pipe'], env: childEnv });
+  const captured = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  const keepTail = (stream) => (chunk) => {
+    const joined = Buffer.concat([captured[stream], chunk]);
+    captured[stream] = joined.subarray(Math.max(joined.length - CAPTURED_OUTPUT_BYTES, 0));
+  };
+  child.stdout.on('data', keepTail('stdout'));
+  child.stderr.on('data', keepTail('stderr'));
+  child.stdout.pipe(process.stdout, { end: false });
+  child.stderr.pipe(process.stderr, { end: false });
+
+  const closed = once(child, 'close').catch(() => {});
+  const [status, signal] = await once(child, 'exit');
+  let timer;
+  await Promise.race([closed, new Promise((resolve) => { timer = setTimeout(resolve, drainMs); })]);
+  clearTimeout(timer);
+  child.stdout.destroy();
+  child.stderr.destroy();
+  return { status, signal, stdout: captured.stdout.toString('utf8'), stderr: captured.stderr.toString('utf8') };
+}
+
+export function newCrateRateLimitRetryAt(output, nowMs) {
+  const lines = output.replace(ANSI_ESCAPE, '').split(/\r?\n/).filter((line) => line.trim());
+  const index = lines.findIndex((line) =>
+    /^\s*the remote server responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
+  if (
+    index < 2 ||
+    !/^\s*Caused by:\s*$/.test(lines[index - 1]) ||
+    !/^error: failed to publish to registry at https:\/\/crates\.io\b/.test(lines[index - 2])
+  ) {
+    return null;
+  }
+  const refusal = lines[index];
+  const retryDate = refusal.match(/\btry again after\s+(.*?\bGMT\b)/i)?.[1];
+  const retryAt = Date.parse(retryDate ?? '');
+  return Number.isNaN(retryAt) ? nowMs + NEW_CRATE_REFILL_MS : retryAt;
+}
+
 function appendStepSummary(text) {
   console.log(text);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
@@ -110,7 +163,10 @@ export async function attemptPublishWithFallback({
   oidcToken,
   bootstrapToken,
   checkVersion,
-  runPublish
+  runPublish,
+  rateLimitBudget = { waitedMs: 0, newCratesLeft: Number(!exists) },
+  now = Date.now,
+  sleep: wait = sleep
 }) {
   const selected = selectPublishToken({ name, exists, oidcToken, bootstrapToken });
   const attempts = [selected];
@@ -120,9 +176,27 @@ export async function attemptPublishWithFallback({
   for (let index = 0; index < attempts.length; index++) {
     const attempt = attempts[index];
     const last = index === attempts.length - 1;
-    console.log(`${name}: publishing with ${attempt.source}.`);
-    const result = await runPublish(attempt.token, attempt.source);
-    if (result.status === 0) return { source: attempt.source };
+    while (true) {
+      console.log(`${name}: publishing with ${attempt.source}.`);
+      const result = await runPublish(attempt.token, attempt.source);
+      if (result.status === 0) return { source: attempt.source };
+
+      const nowMs = now();
+      const retryAt = exists || result.signal ? null : newCrateRateLimitRetryAt(result.stderr ?? '', nowMs);
+      if (retryAt === null) break;
+      const waitMs = Math.max(retryAt - nowMs, 0) + NEW_CRATE_RETRY_MARGIN_MS;
+      if (rateLimitBudget.waitedMs + waitMs > NEW_CRATE_WAIT_BUDGET_MS) {
+        throw new Error(
+          `Publishing ${name} would exceed the new-crate rate-limit wait budget of ${NEW_CRATE_WAIT_BUDGET_MS / 60_000} minutes with ${rateLimitBudget.newCratesLeft} new crates left. ` +
+            `The retry time is ${new Date(retryAt).toISOString()}. The release job can be re-run after that time (published versions are skipped).`
+        );
+      }
+      console.log(
+        `waiting ${Math.ceil(waitMs / 1000)} s for the new-crate rate limit, ${rateLimitBudget.newCratesLeft} new crates left`
+      );
+      rateLimitBudget.waitedMs += waitMs;
+      await wait(waitMs);
+    }
     const found = await checkVersion();
     if (found) {
       if (found.yanked) throw new Error(`${name}@${version} is yanked`);
@@ -157,7 +231,10 @@ export async function publishOneCrate({
   checkVersion,
   runPublish,
   recordUse = recordBootstrapUse,
-  waitRegistry
+  waitRegistry,
+  rateLimitBudget = undefined,
+  now = undefined,
+  sleep = undefined
 }) {
   const { source } = await attemptPublishWithFallback({
     name,
@@ -166,7 +243,10 @@ export async function publishOneCrate({
     oidcToken,
     bootstrapToken,
     checkVersion,
-    runPublish
+    runPublish,
+    rateLimitBudget,
+    now,
+    sleep
   });
   if (source === 'bootstrap') recordUse(name, 'bootstrap');
   else if (source === 'bootstrap-fallback') recordUse(name, 'bootstrap-fallback');
@@ -176,6 +256,7 @@ export async function publishOneCrate({
     );
   }
   await waitRegistry();
+  if (rateLimitBudget && !exists) rateLimitBudget.newCratesLeft = Math.max(rateLimitBudget.newCratesLeft - 1, 0);
   return { source };
 }
 
@@ -279,17 +360,29 @@ async function publish() {
     return;
   }
 
-  for (const crate of RUST_PUBLISH_CRATES) {
-    const existing = await crateVersion(crate.name, version);
+  const rateLimitBudget = { waitedMs: 0, newCratesLeft: 0 };
+  for (const { name } of RUST_PUBLISH_CRATES) {
+    try {
+      const response = await fetch(`https://crates.io/api/v1/crates/${encodeURIComponent(name)}`, {
+        headers: { 'User-Agent': USER_AGENT },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (response.status === 404) rateLimitBudget.newCratesLeft += 1;
+    } catch {}
+  }
+
+  for (const { name } of RUST_PUBLISH_CRATES) {
+    const existing = await crateVersion(name, version);
     if (existing) {
-      if (existing.yanked) throw new Error(`${crate.name}@${version} is yanked`);
-      console.log(`${crate.name}@${version} is already published.`);
-      await waitForRegistry(crate.name, version);
+      if (existing.yanked) throw new Error(`${name}@${version} is yanked`);
+      console.log(`${name}@${version} is already published.`);
+      await waitForRegistry(name, version);
       continue;
     }
 
     const internalDependencies = packages
-      .get(crate.name)
+      .get(name)
       .dependencies.filter((dependency) =>
         RUST_PUBLISH_CRATES.some((crate) => crate.name === dependency.name)
       );
@@ -297,24 +390,24 @@ async function publish() {
       await waitForRegistry(dependency.name, version);
     }
 
-    const exists = await crateExists(crate.name);
+    const exists = await crateExists(name);
     await publishOneCrate({
-      name: crate.name,
+      name,
       version,
       exists,
       oidcToken,
       bootstrapToken,
-      checkVersion: () => crateVersion(crate.name, version),
+      checkVersion: () => crateVersion(name, version),
       runPublish: (token) =>
-        run('cargo', [
+        runWithTee('cargo', [
           'publish', '--locked', '--registry', 'crates-io',
-          ...(FONT_PACK_CRATES.some((pack) => pack.name === crate.name) ? ['--allow-dirty'] : []),
-          '-p', crate.name
+          ...(FONT_PACK_CRATES.some((pack) => pack.name === name) ? ['--allow-dirty'] : []),
+          '-p', name
         ], {
-          allowFailure: true,
           env: cargoPublishEnv(token)
         }),
-      waitRegistry: () => waitForRegistry(crate.name, version)
+      waitRegistry: () => waitForRegistry(name, version),
+      rateLimitBudget
     });
   }
 }
