@@ -453,9 +453,10 @@ test.each([
 ] as const)('prepared CJK coverage follows editor opening in %s', async (_, userAgent, slicedFonts, useSlices) => {
   const wire = connection(['target']);
   setBrowser(userAgent);
+  let canvasChecks = 0;
   if (slicedFonts === undefined) {
     const canvas = Object.getOwnPropertyDescriptor(globalThis, 'HTMLCanvasElement');
-    Object.defineProperty(globalThis, 'HTMLCanvasElement', { configurable: true, value: undefined });
+    Object.defineProperty(globalThis, 'HTMLCanvasElement', { configurable: true, get() { canvasChecks++; return undefined; } });
     restorers.push(() => {
       if (canvas) Object.defineProperty(globalThis, 'HTMLCanvasElement', canvas);
       else Reflect.deleteProperty(globalThis, 'HTMLCanvasElement');
@@ -484,6 +485,7 @@ test.each([
   await withinTestBudget(requested.promise, 'prepared CJK coverage');
   const prefetched = open.mock.calls.length ? 'sliced' : 'whole';
   const { client } = await openWith(wire, { slicedFonts });
+  expect(canvasChecks).toBe(0);
   expect(wire.registered).toEqual(['Noto Sans SC']);
   expect({
     prefetched,

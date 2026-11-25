@@ -190,6 +190,22 @@ test('prepared workers follow browser support and preserve an explicit whole-fac
   }
 });
 
+test.each([
+  ['default slicing', undefined, undefined],
+  ['without createImageBitmap', 'createImageBitmap', true],
+  ['without canvas transfer', 'HTMLCanvasElement', true],
+] as const)('adopting a prepared worker uses the same font mode %s', (_, missing, slicedFonts) => {
+  setWorkerRendering();
+  if (missing) Reflect.deleteProperty(globalThis, missing);
+  const h = factory();
+  const source = new Uint8Array();
+  const options = slicedFonts === undefined ? undefined : { slicedFonts };
+  const prepared = h.client.preparePresentationFontDecoder(source, options);
+  try {
+    expect(h.client.takePresentationFontWorker(source, options) as unknown).toBe(h.workers[0]);
+  } finally { prepared.release(); h.workers[0]?.terminate(); }
+});
+
 test('preparing one file in different font modes keeps the workers and prefetches separate', async () => {
   setWorkerRendering();
   const h = factory();
@@ -204,8 +220,8 @@ test('preparing one file in different font modes keeps the workers and prefetche
     }
     expect(h.workers.map((_, index) => prefetches(h, index).map(message => message.args)))
       .toEqual([[], [[['cjk-jp'], false]], [[['cjk-jp'], true]]]);
-    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[1]);
-    expect(sliced.take() as unknown).toBe(h.workers[2]);
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[2]);
+    expect(h.client.takePresentationFontWorker(source, { slicedFonts: false }) as unknown).toBe(h.workers[1]);
   } finally {
     disabled.release(); whole.release(); sliced.release();
     for (const worker of h.workers) worker.terminate();

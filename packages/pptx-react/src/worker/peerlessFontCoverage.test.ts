@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, beforeEach, expect, mock, test } from 'bun:test';
+import { paintSlide, type SlideDisplayList } from '@betteroffice/pptx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -93,6 +94,50 @@ test('a family the worker stops slicing drops its page faces, so nothing draws f
   expect(await coverage.prepare('Noto Sans JP', '日')).toBe('Noto Sans JP');
   expect(removed).toEqual([first]);
   expect(coverage.latest!('Noto Sans JP')).toBeUndefined();
+});
+
+test('a page paint uses the base family for a null reply or a removed revision', async () => {
+  const family = 'Noto Sans JP';
+  const state = { slicedFamilies: [family] } as PresentationCommandClient['state'];
+  let started!: (have: number | null) => void;
+  let reply!: (value: { revision: number }) => void;
+  const requested = new Promise<number | null>((resolve) => { started = resolve; });
+  const pending = new Promise<{ revision: number }>((resolve) => { reply = resolve; });
+  const coverage = createPeerlessFontCoverage({ state, async readCoverageFont(_, text, have) {
+    if (text === '日') return have === 2 ? { revision: 2 } : { revision: 2, bytes: new ArrayBuffer(8) };
+    if (text === '語') return null;
+    started(have);
+    return pending;
+  } }, () => true);
+  const drawn: [string, string][] = [];
+  const context = { font: '', fillText: (text: string) => drawn.push([text, context.font]) };
+  const ctx = new Proxy(context, {
+    get(target, key) { return Reflect.get(target, key) ?? (() => {}); },
+  }) as unknown as CanvasRenderingContext2D;
+  const slide = (text: string): SlideDisplayList => ({
+    contractVersion: 1, width: 100, height: 50,
+    primitives: [{ kind: 'textBox', objectId: 1, x: 0, y: 0, w: 100, h: 50, anchor: 'top', paragraphs: [],
+      lines: [{ x: 0, y: 0, width: 20, height: 20, baseline: 20, start: 0, end: text.length, caretStops: [],
+        runs: [{ text, start: 0, end: text.length, fontId: 0, fontFamily: family, fontSizePx: 20,
+          x: 0, width: 20, bold: false, italic: false, underline: false, color: '#000', glyphs: [] }] }] }],
+  });
+  try {
+    await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: coverage });
+    const [revision] = added;
+    expect(revision).toMatch(/ r2$/);
+    await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: coverage });
+    await paintSlide(ctx, slide('語'), 1, 1, { fontCoverage: coverage });
+    const painting = paintSlide(ctx, slide('本'), 1, 1, { fontCoverage: coverage });
+    const have = await requested;
+    state.slicedFamilies = [];
+    await coverage.thumbnails.prepare(family, '本');
+    reply({ revision: 2 });
+    await painting;
+    expect(have).toBe(2);
+    expect(removed).toEqual([revision]);
+    expect(drawn).toEqual([['日', `20px "${revision}"`], ['日', `20px "${revision}"`],
+      ['語', `20px "${family}"`], ['本', `20px "${family}"`]]);
+  } finally { coverage.dispose(); }
 });
 
 test('the slide being edited never waits for a chunk only a thumbnail needs', async () => {
