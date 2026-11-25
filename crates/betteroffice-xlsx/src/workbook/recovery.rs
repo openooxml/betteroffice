@@ -783,7 +783,7 @@ impl Workbook {
         }
         pulse();
         let source_workbook = source
-            .map(|source| Self::open_internal(source, false, None))
+            .map(|source| Self::open_source(source, false, None, AuthorityBuild::RecoverySource))
             .transpose()?;
         let source_model = source_workbook.as_ref().map(Self::model);
         let full_precision = authority
