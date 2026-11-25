@@ -19,12 +19,16 @@ pub(super) fn changed_tables<'a>(
     if originals.is_empty()
         || workbook.tables.is_empty()
         || (workbook.tables.len() == originals.len()
-            && workbook.tables.iter().zip(originals).all(|(table, source)| {
-                origins.get(table.sheet.0 as usize).copied().flatten()
-                    == Some(source.sheet.0 as usize)
-                    && table.name == source.name
-                    && table.columns == source.columns
-            }))
+            && workbook
+                .tables
+                .iter()
+                .zip(originals)
+                .all(|(table, source)| {
+                    origins.get(table.sheet.0 as usize).copied().flatten()
+                        == Some(source.sheet.0 as usize)
+                        && table.name == source.name
+                        && table.columns == source.columns
+                }))
     {
         return Vec::new();
     }
@@ -92,7 +96,10 @@ pub(super) fn patch_table_parts(
         if package
             .table_parts
             .iter()
-            .filter(|path| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized))
+            .filter(|path| {
+                path.trim_start_matches('/')
+                    .eq_ignore_ascii_case(&normalized)
+            })
             .nth(1)
             .is_some()
         {

@@ -731,7 +731,12 @@ fn a_control_character_in_a_referenced_caption_is_refused() {
     edit(&mut workbook, "H1", "=COUNTA(Table1[Status])");
     let version = workbook.version();
     let error = workbook
-        .edit_cell(SHEET1, at("B1"), "State\u{1}", CalculationOptions::default())
+        .edit_cell(
+            SHEET1,
+            at("B1"),
+            "State\u{1}",
+            CalculationOptions::default(),
+        )
         .unwrap_err();
     assert!(matches!(
         error,

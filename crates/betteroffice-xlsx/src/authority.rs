@@ -1456,7 +1456,12 @@ impl WorkbookAuthority {
         let order = txn.get_array(SHEET_ORDER).ok_or("missing sheet order")?;
         let keys = sheet_keys(&order, &txn)?;
         let sheets = txn.get_map(SHEETS).ok_or("missing sheet map")?;
-        for table in self.base.tables.iter().filter(|table| table.header_rows != 0) {
+        for table in self
+            .base
+            .tables
+            .iter()
+            .filter(|table| table.header_rows != 0)
+        {
             let sheet = keys
                 .get(table.sheet.0 as usize)
                 .and_then(|key| sheets.get(&txn, key))
@@ -1754,9 +1759,8 @@ impl WorkbookAuthority {
                     if matches!(op, Op::SetCell { .. })
                         && let Some(Op::RestoreSheet { formulas, .. }) = inverse.first()
                     {
-                        rewritten.extend(
-                            formulas.iter().skip(1).map(|(sheet, at, _)| (*sheet, *at)),
-                        );
+                        rewritten
+                            .extend(formulas.iter().skip(1).map(|(sheet, at, _)| (*sheet, *at)));
                     }
                 })
                 .map_err(|error| {

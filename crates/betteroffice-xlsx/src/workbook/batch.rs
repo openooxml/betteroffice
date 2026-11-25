@@ -1446,7 +1446,11 @@ impl Workbook {
                 ));
             }
             Err(error @ Error::Operation(OpError::TableHeaderUnsupported(_))) => {
-                return refuse(failure(EditFailureCode::InvalidStep, error.to_string(), None));
+                return refuse(failure(
+                    EditFailureCode::InvalidStep,
+                    error.to_string(),
+                    None,
+                ));
             }
             Err(error) => return Err(error),
         };
