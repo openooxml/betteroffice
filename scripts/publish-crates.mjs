@@ -18,6 +18,8 @@ const WAIT_INTERVAL_MS = 10 * 1000;
 const NEW_CRATE_REFILL_MS = 600_000;
 const NEW_CRATE_RETRY_MARGIN_MS = 15_000;
 const CAPTURED_OUTPUT_BYTES = 64 * 1024;
+const PIPE_DRAIN_MS = 5_000;
+const ANSI_ESCAPE = /\u001b\[[0-9;?]*[ -\/]*[@-~]/g;
 export const NEW_CRATE_WAIT_BUDGET_MS = 100 * 60_000;
 
 function sleep(ms) {
@@ -80,7 +82,7 @@ export function cargoNoAuthEnv() {
   };
 }
 
-export async function runWithTee(command, args, { env = {} } = {}) {
+export async function runWithTee(command, args, { env = {}, drainMs = PIPE_DRAIN_MS } = {}) {
   const childEnv = { ...process.env };
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) delete childEnv[key];
@@ -98,16 +100,18 @@ export async function runWithTee(command, args, { env = {} } = {}) {
   child.stdout.pipe(process.stdout, { end: false });
   child.stderr.pipe(process.stderr, { end: false });
 
-  const [status, signal] = await once(child, 'close');
-  const output = [captured.stdout, captured.stderr]
-    .map((buffer) => buffer.toString('utf8'))
-    .filter(Boolean)
-    .join('\n');
-  return { status, signal, output };
+  const closed = once(child, 'close').catch(() => {});
+  const [status, signal] = await once(child, 'exit');
+  let timer;
+  await Promise.race([closed, new Promise((resolve) => { timer = setTimeout(resolve, drainMs); })]);
+  clearTimeout(timer);
+  child.stdout.destroy();
+  child.stderr.destroy();
+  return { status, signal, stdout: captured.stdout.toString('utf8'), stderr: captured.stderr.toString('utf8') };
 }
 
 export function newCrateRateLimitRetryAt(output, nowMs) {
-  const lines = output.split(/\r?\n/).filter((line) => line.trim());
+  const lines = output.replace(ANSI_ESCAPE, '').split(/\r?\n/).filter((line) => line.trim());
   const index = lines.findIndex((line) =>
     /^\s*the remote server responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
   if (
@@ -178,7 +182,7 @@ export async function attemptPublishWithFallback({
       if (result.status === 0) return { source: attempt.source };
 
       const nowMs = now();
-      const retryAt = exists || result.signal ? null : newCrateRateLimitRetryAt(result.output ?? '', nowMs);
+      const retryAt = exists || result.signal ? null : newCrateRateLimitRetryAt(result.stderr ?? '', nowMs);
       if (retryAt === null) break;
       const waitMs = Math.max(retryAt - nowMs, 0) + NEW_CRATE_RETRY_MARGIN_MS;
       if (rateLimitBudget.waitedMs + waitMs > NEW_CRATE_WAIT_BUDGET_MS) {

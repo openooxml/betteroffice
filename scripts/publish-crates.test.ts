@@ -45,7 +45,7 @@ function fakeClock() {
   };
 }
 
-function publishTracker(script: Array<{ token: string; status: number; output?: string }>) {
+function publishTracker(script: Array<{ token: string; status: number; output?: string; stdout?: string }>) {
   const calls: Array<{ token: string; source: string }> = [];
   let index = 0;
   return {
@@ -54,7 +54,7 @@ function publishTracker(script: Array<{ token: string; status: number; output?: 
       calls.push({ token, source });
       const step = script[Math.min(index, script.length - 1)]!;
       index += 1;
-      return { status: step.status, output: step.output ?? '' };
+      return { status: step.status, stdout: step.stdout ?? '', stderr: step.output ?? '' };
     }
   };
 }
@@ -73,6 +73,13 @@ describe('newCrateRateLimitRetryAt', () => {
     ['unrelated text on a 429 line', 'warning: status 429 seen; too many new crates in this workspace', null],
     ['the refusal quoted inside another line', `note: ${NEW_CRATE_REFUSAL.split('\n')[2].trim()}`, null],
     ['the refusal line without cargo\'s registry error above it', NEW_CRATE_REFUSAL.split('\n')[2], null],
+    [
+      'a coloured refusal',
+      newCrateRefusal(RETRY_MS)
+        .replace('error:', '\u001b[1m\u001b[31merror\u001b[0m\u001b[1m:\u001b[0m')
+        .replace('Caused by:', '\u001b[1mCaused by:\u001b[0m'),
+      RETRY_MS
+    ],
     ['an unauthorized error', 'error: unauthorized', null]
   ];
   test.each(cases)('handles %s', (_label, output, expected) => {
@@ -389,11 +396,11 @@ describe('new-crate rate limit', () => {
           runPublish: (token: string, source: string) => {
             calls.push({ name, token, source });
             if (published >= 5) {
-              if (clock.now() < refillAt) return { status: 101, output: newCrateRefusal(refillAt) };
+              if (clock.now() < refillAt) return { status: 101, stderr: newCrateRefusal(refillAt) };
               refillAt += 600_000;
             }
             published += 1;
-            return { status: 0, output: '' };
+            return { status: 0, stderr: '' };
           },
           recordUse: () => {},
           waitRegistry: async () => {},
@@ -460,7 +467,26 @@ describe('new-crate rate limit', () => {
       oidcToken: FAKE_OIDC,
       bootstrapToken: FAKE_BOOTSTRAP,
       checkVersion: async () => null,
-      runPublish: () => ({ status: null, signal: 'SIGKILL', output: newCrateRefusal(START_MS + 60_000) }),
+      runPublish: () => ({ status: null, signal: 'SIGKILL', stderr: newCrateRefusal(START_MS + 60_000) }),
+      now: clock.now,
+      sleep: clock.sleep
+    })).rejects.toThrow('Failed to publish betteroffice-fonts-latin@0.1.0 with the bootstrap token');
+    expect(clock.waits).toEqual([]);
+  });
+
+  test('a refusal printed on stdout never waits', async () => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_BOOTSTRAP, status: 101, stdout: newCrateRefusal(START_MS + 60_000), output: 'error: something else' }
+    ]);
+    await expect(attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: tracker.runPublish,
       now: clock.now,
       sleep: clock.sleep
     })).rejects.toThrow('Failed to publish betteroffice-fonts-latin@0.1.0 with the bootstrap token');
@@ -524,7 +550,7 @@ describe('new-crate rate limit', () => {
     await expect(attemptPublishWithFallback({
       ...options,
       exists: false,
-      runPublish: () => ({ status: 101, output })
+      runPublish: () => ({ status: 101, stderr: output })
     })).rejects.toThrow('Failed to publish crate-a@0.1.0 with the bootstrap token');
     expect(checks).toBe(2);
     expect(clock.waits).toEqual([]);
@@ -584,8 +610,8 @@ describe('new-crate rate limit', () => {
       exists: false,
       checkVersion: async () => null,
       runPublish: () => clock.now() < RETRY_MS
-        ? { status: 101, output: newCrateRefusal(RETRY_MS) }
-        : { status: 0, output: '' }
+        ? { status: 101, stderr: newCrateRefusal(RETRY_MS) }
+        : { status: 0, stderr: '' }
     });
 
     const tokens: string[] = [];
@@ -601,8 +627,8 @@ describe('new-crate rate limit', () => {
       runPublish: (token: string) => {
         tokens.push(token);
         return token === FAKE_OIDC && clock.now() >= RETRY_MS
-          ? { status: 101, output: 'error: unauthorized, token expired' }
-          : { status: 0, output: '' };
+          ? { status: 101, stderr: 'error: unauthorized, token expired' }
+          : { status: 0, stderr: '' };
       }
     });
     expect(result).toEqual({ source: 'bootstrap-fallback' });
@@ -613,6 +639,22 @@ describe('new-crate rate limit', () => {
 });
 
 describe('runWithTee', () => {
+  test('returns within the drain time when a grandchild keeps the pipes open', async () => {
+    const stdout = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      const started = Date.now();
+      const result = await runWithTee('node', [
+        '-e',
+        "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { stdio: 'inherit', detached: true }).unref(); process.stdout.write('parent done\\n'); process.exitCode = 7;"
+      ], { drainMs: 500 });
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(result.status).toBe(7);
+      expect(result.stdout).toContain('parent done');
+    } finally {
+      stdout.mockRestore();
+    }
+  });
+
   test('tees stdout and stderr and returns the output and nonzero exit status', async () => {
     const stdout = spyOn(process.stdout, 'write').mockImplementation(() => true);
     const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -622,8 +664,8 @@ describe('runWithTee', () => {
         "process.stdout.write('publish stdout\\n'); process.stderr.write('publish stderr\\n'); process.exitCode = 101;"
       ]);
       expect(result.status).toBe(101);
-      expect(result.output).toContain('publish stdout\n');
-      expect(result.output).toContain('publish stderr\n');
+      expect(result.stdout).toContain('publish stdout\n');
+      expect(result.stderr).toContain('publish stderr\n');
       expect(stdout.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('publish stdout\n');
       expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('publish stderr\n');
     } finally {
