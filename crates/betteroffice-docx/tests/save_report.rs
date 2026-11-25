@@ -194,7 +194,7 @@ fn a_whole_write_with_options_reports_the_bytes_save_with_options_writes() {
     assert_whole_model_write(&report);
 }
 
-/// A body whose text edit to 0000000D leaves it out of the save plan, written whole.
+/// Replacing newly inserted text in 0000000D forces a whole-part write.
 const STRUCTURE_DROPPED_DOCUMENT: &str = concat!(
     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n",
     r#"<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14"><w:body>"#,
@@ -209,6 +209,7 @@ const STRUCTURE_DROPPED_DOCUMENT: &str = concat!(
 #[test]
 fn a_whole_write_in_the_save_plan_reports_the_structure_it_drops() {
     let mut document = Document::open(&docx(STRUCTURE_DROPPED_DOCUMENT)).unwrap();
+    document.replace_paragraph_text("0000000D", "b").unwrap();
     document.replace_paragraph_text("0000000D", "aaa").unwrap();
     let report = report_of(&document);
     assert!(
