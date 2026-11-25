@@ -224,15 +224,21 @@ test('editor PNG exports use a private, range-limited copy of the same script fa
   const { scriptLoads } = provider();
   const decode = decoder();
   const painter = createDefaultFontPainter(decode, () => {});
-  const frame = cells(cellText('مرحبا'), cellText('שלום', { fontFamily: undefined }));
+  const frame = cells(
+    cellText('مرحبا', { bold: true, italic: true }),
+    cellText('שלום', { fontFamily: undefined }),
+    cellText('ไทย กับ', { runs: [{ start: 4, end: 7, bold: true, italic: true }] }),
+  );
   try {
     await painter.load(frame);
     painter.paint(frame, (list = frame) => paintDisplayList(context, list, 1));
     const editorFaces = [...added];
-    const editorFamily = (name: string) => editorFaces.find(({ family }) => family.endsWith(name))?.family;
+    const editorFamily = (name: string) => `bo-xlsx-editor-${name}`;
     expect(painted.map(({ font }) => font)).toEqual([
-      `16px "Calibri", "${editorFamily('Noto Sans Arabic')}", sans-serif`,
+      `italic bold 16px "Calibri", "${editorFamily('Noto Sans Arabic')}", sans-serif`,
       `16px "${editorFamily('Noto Sans Hebrew')}", sans-serif`,
+      `16px "Calibri", "${editorFamily('Noto Sans Thai')}", sans-serif`,
+      `italic bold 16px "Calibri", "${editorFamily('Noto Sans Thai')}", sans-serif`,
     ]);
     painted.length = 0;
 
@@ -241,26 +247,40 @@ test('editor PNG exports use a private, range-limited copy of the same script fa
     const png = renderPng({
       onSheet: (_sheet, read) => read(),
       doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
-    }, { sheet: 0, range: 'A1:B1' }, { fonts: structuredClone(faces) });
+    }, { sheet: 0, range: 'A1:C1' }, { fonts: structuredClone(faces) });
     expect(await Promise.race([beforeScriptPaint.promise.then(() => true), png.then(() => false)])).toBe(true);
     expect(painted).toEqual([]);
     allowScriptPaint.resolve();
     await png;
 
-    expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual([
-      'Noto Sans Arabic', 'Noto Sans Hebrew', 'Noto Sans Arabic', 'Noto Sans Hebrew',
-    ]);
+    const scriptStyles = [
+      ['Noto Sans Arabic', 700, 'normal'], ['Noto Sans Hebrew', 400, 'normal'],
+      ['Noto Sans Thai', 400, 'normal'], ['Noto Sans Thai', 700, 'normal'],
+    ];
+    const loadedStyles = scriptLoads.mock.calls.map(([{ family, weight, style }]) => [family, weight, style]);
+    expect(loadedStyles.slice(0, scriptStyles.length).sort()).toEqual(scriptStyles);
+    expect(loadedStyles.slice(scriptStyles.length).sort()).toEqual(scriptStyles);
     const released = remove.mock.calls.map(([face]) => face);
-    const privateAlias = (family: string) => released.find(({ descriptors }) =>
-      descriptors.unicodeRange === editorFaces.find((face) => face.family === editorFamily(family))?.descriptors.unicodeRange
-      && descriptors.unicodeRange !== undefined)?.family;
-    const arabic = privateAlias('Noto Sans Arabic');
-    const hebrew = privateAlias('Noto Sans Hebrew');
-    expect(arabic).toMatch(/^bo-xlsx-png-/);
-    expect(hebrew).toMatch(/^bo-xlsx-png-/);
+    const privateAlias = (family: string, weight: number, style: string) => {
+      const exported = faces?.find((face) => face.family === family && face.bold === (weight === 700) && face.italic === (style === 'italic'));
+      expect(exported).toBeDefined();
+      const saved = editorFaces.find((face) => face.family === (family === 'Calibri' ? family : editorFamily(family))
+        && face.descriptors.weight === String(weight) && face.descriptors.style === style);
+      expect(saved).toBeDefined();
+      if (saved?.descriptors.unicodeRange) expect(exported).toHaveProperty('unicodeRange', saved.descriptors.unicodeRange);
+      const alias = released.find(({ descriptors, bytes }) => descriptors.weight === String(weight)
+        && descriptors.style === style && descriptors.unicodeRange === saved?.descriptors.unicodeRange
+        && bytes.byteLength === exported?.bytes.byteLength)?.family;
+      expect(alias).toMatch(/^bo-xlsx-png-/);
+      return alias;
+    };
+    const calibri = privateAlias('Calibri', 400, 'normal');
+    const calibriBoldItalic = privateAlias('Calibri', 700, 'italic');
     expect(painted.map(({ font }) => font)).toEqual([
-      `16px "${released[0]?.family}", "${arabic}", sans-serif`,
-      `16px "${hebrew}", sans-serif`,
+      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Arabic', 700, 'normal')}", sans-serif`,
+      `16px "${privateAlias('Noto Sans Hebrew', 400, 'normal')}", sans-serif`,
+      `16px "${calibri}", "${privateAlias('Noto Sans Thai', 400, 'normal')}", sans-serif`,
+      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Thai', 700, 'normal')}", sans-serif`,
     ]);
     expect(added).toEqual(editorFaces);
   } finally { allowScriptPaint.resolve(); painter.dispose(); }
@@ -324,6 +344,68 @@ test('recreated rich-text pieces reuse script detection for their text', async (
     expect(detect).not.toHaveBeenCalled();
   } finally { painter.dispose(); detect.mockRestore(); }
 });
+
+test('painting more distinct script cells than the text cache scans each cell at most once', async () => {
+  browser();
+  provider();
+  const detect = spyOn(scripts, 'textScripts');
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const { context, painted } = canvasText();
+  try {
+    await painter.load(cells(cellText('नमस्ते')));
+    detect.mockClear();
+    const frame = cells(...Array.from({ length: 1_100 }, (_, i) => cellText(`नमस्ते ${i}`)));
+    expect(painter.paint(frame, (list) => paintDisplayList(context, list, 1))).toBe(true);
+    expect(painted).toHaveLength(frame.commands.length);
+    expect(painted.every(({ font }) => font.includes('bo-xlsx-editor-Noto Sans Devanagari'))).toBe(true);
+    const scans = detect.mock.calls.map(([text]) => text);
+    expect(scans).toHaveLength(frame.commands.length);
+    expect(scans.length).toBe(new Set(scans).size);
+  } finally { painter.dispose(); detect.mockRestore(); }
+});
+
+for (const cdn of ['disabled', 'implicit', 'explicit'] as const) {
+  test(`editor PNG preserves the workbook family with an unavailable intl pack and ${cdn} CDN`, async () => {
+    const { added } = browser();
+    const { context, painted } = canvasText();
+    const previous = getFontCdnConfiguration();
+    const restore = withBrowserFontGlobals();
+    const runtime = fontRuntimeWithoutPacks();
+    const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+    const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const decode = decoder();
+    const painter = createDefaultFontPainter(decode, () => {}, { remoteFonts: 'off' });
+    const frame = cells(cellText('ภาษาไทย', { fontFamily: 'Aptos' }));
+    try {
+      if (cdn === 'implicit') setFontCdnConfiguration(undefined);
+      else configureFontCdn({ baseUrl: cdn === 'disabled' ? false : 'https://blocked-export.example/' });
+      await painter.load(frame);
+      expect(painter.paint(frame, (list) => paintDisplayList(context, list, 1))).toBe(true);
+      const editor = painted.splice(0);
+      expect(editor).toEqual([{ text: 'ภาษาไทย', font: '16px "Aptos", sans-serif' }]);
+
+      const faces = editorExportFaces(sheetFonts(frame, true), decode, undefined);
+      await expect(faces).resolves.toEqual([]);
+      const readFrame = () => JSON.stringify(frame);
+      await renderPng({
+        onSheet: (_sheet, read) => read(),
+        doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
+      }, { sheet: 0, range: 'A1' }, { fonts: structuredClone(await faces) });
+      expect(painted).toEqual(editor);
+      expect(added).toEqual([]);
+      if (cdn === 'disabled') expect(fetch).not.toHaveBeenCalled();
+      else expect(fetch).toHaveBeenCalled();
+    } finally {
+      painter.dispose();
+      warn.mockRestore();
+      fetch.mockRestore();
+      manager.mockRestore();
+      restore();
+      setFontCdnConfiguration(previous);
+    }
+  });
+}
 
 test('CJK punctuation in Calibri makes no script pack request', async () => {
   const { added } = browser();
@@ -985,6 +1067,46 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
     fetch.mockRestore();
     manager.mockRestore();
     resolve.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('a blocked explicit CDN backs off script face requests across repaints', async () => {
+  browser();
+  const previous = getFontCdnConfiguration();
+  const runtime = fontRuntimeWithoutPacks();
+  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'off' });
+  const frame = cells(cellText('ภาษาไทย', { fontFamily: 'Aptos' }));
+  try {
+    configureFontCdn({ baseUrl: 'https://blocked-editor.example/' });
+    await painter.load(frame);
+    const initialRequests = fetch.mock.calls.length;
+    expect(initialRequests).toBeGreaterThan(0);
+    clock.mockReturnValue(now + 59_999);
+    for (let i = 0; i < 2; i++) {
+      expect(painter.paint(frame, () => {})).toBe(true);
+      await new Promise((done) => setTimeout(done, 0));
+    }
+    expect(fetch).toHaveBeenCalledTimes(initialRequests);
+    expect(repaint).not.toHaveBeenCalled();
+
+    clock.mockReturnValue(now + 60_000);
+    await painter.load(frame);
+    expect(fetch).toHaveBeenCalledTimes(initialRequests * 2);
+
+    configureFontCdn({ baseUrl: 'https://replacement-editor.example/' });
+    await painter.load(frame);
+    expect(fetch.mock.calls.some(([url]) => String(url).startsWith('https://replacement-editor.example/'))).toBe(true);
+  } finally {
+    painter.dispose();
+    clock.mockRestore();
+    fetch.mockRestore();
+    manager.mockRestore();
     setFontCdnConfiguration(previous);
   }
 });
