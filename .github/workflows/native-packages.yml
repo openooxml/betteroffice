@@ -8,6 +8,7 @@ on:
       - 'scripts/native-bindings.mjs'
       - 'scripts/native-bindings-smoke.mjs'
       - 'scripts/native-raw-smoke.mjs'
+      - 'scripts/glibc-floor.mjs'
       - 'scripts/native-engine.ts'
       - 'packages/xlsx/src/**'
       - 'packages/xlsx/package.json'
