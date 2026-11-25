@@ -54,6 +54,13 @@ fn styles(size: &str) -> String {
     )
 }
 
+fn outcome<T: std::fmt::Debug>(run: impl FnOnce() -> T) -> (bool, String) {
+    match catch_unwind(AssertUnwindSafe(run)) {
+        Ok(value) => (true, format!("{value:?}")),
+        Err(_) => (false, "PANIC".to_owned()),
+    }
+}
+
 fn probe(name: &str, bytes: &[u8]) {
     let workbook = match Workbook::open(bytes) {
         Ok(workbook) => workbook,
@@ -62,24 +69,27 @@ fn probe(name: &str, bytes: &[u8]) {
             return;
         }
     };
-    let client = catch_unwind(AssertUnwindSafe(|| workbook.client_id()));
-    let update = catch_unwind(AssertUnwindSafe(|| {
-        workbook.encode_state_as_update_v1().len()
-    }));
-    println!(
-        "F7 {name} open=ok client_id={} state_update={}",
-        match &client {
-            Ok(id) => format!("ok({id})"),
-            Err(_) => "PANIC".to_owned(),
-        },
-        match &update {
-            Ok(len) => format!("ok({len} bytes)"),
-            Err(_) => "PANIC".to_owned(),
-        }
-    );
+    let results = [
+        ("can_undo", outcome(|| workbook.can_undo())),
+        ("can_redo", outcome(|| workbook.can_redo())),
+        (
+            "history_undo_depth",
+            outcome(|| workbook.history_state().undo_depth),
+        ),
+        ("client_id", outcome(|| workbook.client_id())),
+        (
+            "state_update_bytes",
+            outcome(|| workbook.encode_state_as_update_v1().len()),
+        ),
+    ];
+    let line: Vec<String> = results
+        .iter()
+        .map(|(label, (_, value))| format!("{label}={value}"))
+        .collect();
+    println!("F7 {name} open=ok {}", line.join(" "));
     assert!(
-        client.is_ok() && update.is_ok(),
-        "{name}: a collaboration accessor panicked"
+        results.iter().all(|(_, (ok, _))| *ok),
+        "{name}: an accessor panicked"
     );
 }
 
