@@ -98,19 +98,26 @@ export async function runWithTee(command, args, { env = {} } = {}) {
   child.stdout.pipe(process.stdout, { end: false });
   child.stderr.pipe(process.stderr, { end: false });
 
-  const [status] = await once(child, 'close');
+  const [status, signal] = await once(child, 'close');
   const output = [captured.stdout, captured.stderr]
     .map((buffer) => buffer.toString('utf8'))
     .filter(Boolean)
     .join('\n');
-  return { status, output };
+  return { status, signal, output };
 }
 
 export function newCrateRateLimitRetryAt(output, nowMs) {
-  const refusal = output
-    .split(/\r?\n/)
-    .find((line) => /^\s*the remote server responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
-  if (!refusal) return null;
+  const lines = output.split(/\r?\n/).filter((line) => line.trim());
+  const index = lines.findIndex((line) =>
+    /^\s*the remote server responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
+  if (
+    index < 2 ||
+    !/^\s*Caused by:\s*$/.test(lines[index - 1]) ||
+    !/^error: failed to publish to registry at https:\/\/crates\.io\b/.test(lines[index - 2])
+  ) {
+    return null;
+  }
+  const refusal = lines[index];
   const retryDate = refusal.match(/\btry again after\s+(.*?\bGMT\b)/i)?.[1];
   const retryAt = Date.parse(retryDate ?? '');
   return Number.isNaN(retryAt) ? nowMs + NEW_CRATE_REFILL_MS : retryAt;
@@ -171,7 +178,7 @@ export async function attemptPublishWithFallback({
       if (result.status === 0) return { source: attempt.source };
 
       const nowMs = now();
-      const retryAt = exists ? null : newCrateRateLimitRetryAt(result.output ?? '', nowMs);
+      const retryAt = exists || result.signal ? null : newCrateRateLimitRetryAt(result.output ?? '', nowMs);
       if (retryAt === null) break;
       const waitMs = Math.max(retryAt - nowMs, 0) + NEW_CRATE_RETRY_MARGIN_MS;
       if (rateLimitBudget.waitedMs + waitMs > NEW_CRATE_WAIT_BUDGET_MS) {

@@ -72,6 +72,7 @@ describe('newCrateRateLimitRetryAt', () => {
     ['a generic 429', 'HTTP 429: Too Many Requests', null],
     ['unrelated text on a 429 line', 'warning: status 429 seen; too many new crates in this workspace', null],
     ['the refusal quoted inside another line', `note: ${NEW_CRATE_REFUSAL.split('\n')[2].trim()}`, null],
+    ['the refusal line without cargo\'s registry error above it', NEW_CRATE_REFUSAL.split('\n')[2], null],
     ['an unauthorized error', 'error: unauthorized', null]
   ];
   test.each(cases)('handles %s', (_label, output, expected) => {
@@ -448,6 +449,22 @@ describe('new-crate rate limit', () => {
       { token: FAKE_BOOTSTRAP, source: 'bootstrap' },
       { token: FAKE_BOOTSTRAP, source: 'bootstrap' }
     ]);
+  });
+
+  test('a cargo killed by a signal never waits, even after printing the refusal', async () => {
+    const clock = fakeClock();
+    await expect(attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: () => ({ status: null, signal: 'SIGKILL', output: newCrateRefusal(START_MS + 60_000) }),
+      now: clock.now,
+      sleep: clock.sleep
+    })).rejects.toThrow('Failed to publish betteroffice-fonts-latin@0.1.0 with the bootstrap token');
+    expect(clock.waits).toEqual([]);
   });
 
   test('an existing crate never waits on the new-crate refusal text', async () => {
