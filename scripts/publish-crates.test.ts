@@ -28,6 +28,8 @@ const NEW_CRATE_REFUSAL =
   '  the remote server responded with an error (status 429 Too Many Requests): ' +
   'You have published too many new crates in a short period of time.';
 
+const CARGO_NEW_CRATE_REFUSAL = readFileSync(fileURLToPath(new URL('./publish-crates-429.log.txt', import.meta.url)), 'utf8');
+
 function newCrateRefusal(retryAt: number) {
   return `${NEW_CRATE_REFUSAL} Please try again after ${new Date(retryAt).toUTCString()} and see https://crates.io/docs/rate-limits for more details.`;
 }
@@ -64,6 +66,7 @@ describe('newCrateRateLimitRetryAt', () => {
     ['a retry date', newCrateRefusal(RETRY_MS), RETRY_MS],
     ['a past retry date', newCrateRefusal(START_MS - 60_000), START_MS - 60_000],
     ['a missing retry date', NEW_CRATE_REFUSAL, START_MS + 600_000],
+    ['cargo\'s refusal naming the crate and version', CARGO_NEW_CRATE_REFUSAL, Date.parse('2026-11-25T16:06:03Z')],
     ['an invalid retry date', `${NEW_CRATE_REFUSAL} Please try again after an invalid date GMT`, START_MS + 600_000],
     ['the phrase without the 429 status line', 'HTTP 429: too many new crates', null],
     ['the status and the phrase on different lines', `status 429 Too Many Requests\nwarning: too many new crates`, null],
@@ -635,6 +638,35 @@ describe('new-crate rate limit', () => {
     expect(tokens).toEqual([FAKE_OIDC, FAKE_BOOTSTRAP]);
     expect(checks).toBe(1);
     expect(clock.waits).toEqual([495_000]);
+  });
+  test('cargo\'s real new-crate refusal waits until its retry time, then publishes', async () => {
+    let nowMs = Date.parse('2026-11-25T16:05:24Z');
+    const retryMs = Date.parse('2026-11-25T16:06:03Z');
+    const waits: number[] = [];
+    const attempts: string[] = [];
+    const result = await publishOneCrate({
+      name: 'betteroffice-fonts-cjk-kr',
+      version: '0.6.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      recordUse: () => {},
+      waitRegistry: async () => {},
+      rateLimitBudget: { waitedMs: 0, newCratesLeft: 6 },
+      now: () => nowMs,
+      sleep: async (ms: number) => {
+        waits.push(ms);
+        nowMs += ms;
+      },
+      checkVersion: async () => null,
+      runPublish: (token: string) => {
+        attempts.push(token);
+        return nowMs < retryMs ? { status: 101, stderr: CARGO_NEW_CRATE_REFUSAL } : { status: 0, stderr: '' };
+      }
+    });
+    expect(result).toEqual({ source: 'bootstrap' });
+    expect(attempts).toEqual([FAKE_BOOTSTRAP, FAKE_BOOTSTRAP]);
+    expect(waits).toEqual([retryMs - Date.parse('2026-11-25T16:05:24Z') + 15_000]);
   });
 });
 
