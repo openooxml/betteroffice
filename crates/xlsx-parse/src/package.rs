@@ -5,7 +5,7 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::sort::sort_by_shared;
-use xlsx_model::{CellRef, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
 use crate::read::{IndexedWorkbook, SharedStringCells, SourceCellFacts, WorksheetCellFacts};
 use crate::reference::UnpatchableReference;
@@ -462,10 +462,35 @@ impl PreservedPackage {
     pub fn table_header_reference(
         &self,
         origin: Option<usize>,
+        range: CellRange,
         matches: impl Fn(&str, bool) -> bool,
     ) -> Result<Option<&str>, ParseError> {
         for (index, sheet) in self.sheets.iter().enumerate() {
             for child in &sheet.template.children {
+                if child.local_name == "sheetData" {
+                    let local = origin == Some(index);
+                    let alternate = b"AlternateContent";
+                    let has_alternate = child
+                        .bytes
+                        .windows(alternate.len())
+                        .any(|bytes| bytes == alternate);
+                    if (has_alternate
+                        && contains_formula_in(
+                            &child.bytes,
+                            &[b"f", b"formula"],
+                            Some(alternate),
+                            |formula| matches(formula, local),
+                        )?)
+                        || crate::patch::unpatchable_table_formula(
+                            &child.bytes,
+                            &self.original_workbook.sheets[index],
+                            |formula, at| matches(formula, local && range.contains(at)),
+                        )?
+                    {
+                        return Ok(Some(&sheet.path));
+                    }
+                    continue;
+                }
                 if !matches!(
                     child.local_name.as_str(),
                     "dataValidations" | "extLst" | "AlternateContent"
@@ -486,7 +511,7 @@ impl PreservedPackage {
             .sheets
             .iter()
             .flat_map(|sheet| &sheet.charts)
-            .map(|chart| chart.part.as_str())
+            .map(|chart| normalized_part_name(&chart.part))
             .collect::<HashSet<_>>();
         let is_chart = |kind: &str| {
             let kind = kind.to_ascii_lowercase();
@@ -500,12 +525,14 @@ impl PreservedPackage {
             .collect::<HashSet<_>>();
         for (path, bytes) in &self.parts {
             let normalized = normalized_part_name(path);
-            if !model_charts.contains(path.as_str())
-                && (chart_parts.contains(&normalized) || normalized.starts_with("xl/charts/"))
-                && contains_formula(bytes, &[b"f", b"formula"], |formula| {
-                    matches(formula, false)
-                })?
-            {
+            let affected = |formula: &str| matches(formula, false);
+            let referenced = if model_charts.contains(&normalized) {
+                crate::chart::extension_formula_reference(bytes, affected)?
+            } else {
+                (chart_parts.contains(&normalized) || normalized.starts_with("xl/charts/"))
+                    && contains_formula(bytes, &[b"f", b"formula", b"sqref"], affected)?
+            };
+            if referenced {
                 return Ok(Some(path));
             }
         }
@@ -720,20 +747,42 @@ fn contains_formula(
     elements: &[&[u8]],
     affected: impl Fn(&str) -> bool,
 ) -> Result<bool, ParseError> {
+    contains_formula_in(bytes, elements, None, affected)
+}
+
+fn contains_formula_in(
+    bytes: &[u8],
+    elements: &[&[u8]],
+    ancestor: Option<&[u8]>,
+    affected: impl Fn(&str) -> bool,
+) -> Result<bool, ParseError> {
     let mut xml = reader(bytes);
     let mut buffer = Vec::new();
     let mut depth = 0;
+    let mut ancestor_depth = None;
     loop {
         match next_event(&mut xml, &mut buffer, &mut depth)? {
             Event::Start(start)
-                if elements.contains(&b"formula".as_slice())
+                if ancestor_depth.is_none() && ancestor == Some(start.local_name().as_ref()) =>
+            {
+                ancestor_depth = Some(depth);
+            }
+            Event::End(_) if ancestor_depth.is_some_and(|start| depth < start) => {
+                ancestor_depth = None;
+            }
+            Event::Start(start)
+                if (ancestor.is_none() || ancestor_depth.is_some())
+                    && elements.contains(&b"formula".as_slice())
                     && start.local_name().as_ref() == b"cfvo"
                     && attr(&start, b"type")?.as_deref() == Some("formula")
                     && attr(&start, b"val")?.as_deref().is_some_and(&affected) =>
             {
                 return Ok(true);
             }
-            Event::Start(start) if elements.contains(&start.local_name().as_ref()) => {
+            Event::Start(start)
+                if (ancestor.is_none() || ancestor_depth.is_some())
+                    && elements.contains(&start.local_name().as_ref()) =>
+            {
                 let formula = collect_text(&mut xml, &mut buffer, &mut depth)?;
                 if affected(&formula) {
                     return Ok(true);

@@ -2628,7 +2628,6 @@ impl Workbook {
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
-        let mut rewrote_references = false;
         for (index, edit) in edits.iter().enumerate() {
             let (mut state, format) = edit_cell_state(
                 &preview,
@@ -2654,7 +2653,6 @@ impl Workbook {
             };
             self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
             let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
-            rewrote_references |= inverse.len() > 1;
             per_op.push(inverse);
             ops.push(op);
             if let Some(format) = format {
@@ -2678,7 +2676,8 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        let tables_changed = rewrote_references || self.model.tables != prepared.model.tables;
+        let tables_changed =
+            prepared.table_references_rewritten() || self.model.tables != prepared.model.tables;
         let update = self.commit_prepared_cell_inputs(prepared)?;
         let seeds: Vec<_> = touched
             .iter()
@@ -2924,7 +2923,13 @@ impl Workbook {
                 rewrote_table_names |= matches!(op, Op::SetCell { .. })
                     && inverse
                         .iter()
-                        .any(|op| matches!(op, Op::SetDefinedNames { .. }));
+                        .any(|op| {
+                            matches!(
+                                op,
+                                Op::RestoreTableColumn { defined_names, .. }
+                                    if !defined_names.is_empty()
+                            )
+                        });
             })?;
             match *op {
                 Op::AddSheet { index, .. } => {
@@ -3099,6 +3104,7 @@ impl Workbook {
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        self.ensure_table_header_history(&ops)?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
@@ -3164,6 +3170,7 @@ impl Workbook {
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        self.ensure_table_header_history(&ops)?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
@@ -3423,7 +3430,6 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
         let names = DefinedFunctionNames::new(&preview.defined_names);
-        let mut rewrote_references = false;
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
@@ -3452,7 +3458,6 @@ impl Workbook {
                 };
                 self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
                 let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
-                rewrote_references |= inverse.len() > 1;
                 per_op.push(inverse);
                 ops.push(op);
             }
@@ -3515,7 +3520,8 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        let tables_changed = rewrote_references || self.model.tables != prepared.model.tables;
+        let tables_changed =
+            prepared.table_references_rewritten() || self.model.tables != prepared.model.tables;
         let update = self.commit_prepared(prepared)?;
         let seeds: Vec<_> = touched
             .iter()
@@ -4385,25 +4391,45 @@ impl Workbook {
         origins: &[Option<usize>],
         op: &Op,
     ) -> Result<()> {
-        let Op::SetCell { sheet, at, cell } = op else {
-            return Ok(());
+        let (sheet, table, column, name) = match op {
+            Op::SetCell { sheet, at, cell } => {
+                if self.is_collaborative()
+                    && xlsx_ops::table_header_write_at(model, *sheet, *at, cell).is_some()
+                {
+                    return Err(shared_table_header_edit());
+                }
+                let Some((table, column, name)) =
+                    xlsx_ops::normalize_table_header(model, *sheet, *at, cell)?
+                else {
+                    return Ok(());
+                };
+                (*sheet, table, column, Cow::Owned(name))
+            }
+            Op::RestoreTableColumn {
+                sheet,
+                at,
+                table,
+                caption,
+                ..
+            } => {
+                let Some((index, column)) = xlsx_ops::table_header_at(&model.tables, *sheet, *at)
+                    .filter(|(index, column)| {
+                        let found = &model.tables[*index];
+                        found.name == *table && *column < found.columns.len()
+                    })
+                else {
+                    return Ok(());
+                };
+                (*sheet, index, column, Cow::Borrowed(caption.as_str()))
+            }
+            _ => return Ok(()),
         };
-        if self.is_collaborative()
-            && xlsx_ops::table_header_write_at(model, *sheet, *at, cell).is_some()
-        {
-            return Err(shared_table_header_edit());
-        }
         let Some(package) = &self.source_package else {
-            return Ok(());
-        };
-        let Some((table, column, name)) =
-            xlsx_ops::normalize_table_header(model, *sheet, *at, cell)?
-        else {
             return Ok(());
         };
         let table = &model.tables[table];
         let old = &table.columns[column];
-        if *old == name {
+        if old == name.as_ref() {
             return Ok(());
         }
         let unsupported = |error: xlsx_parse::ParseError| {
@@ -4422,8 +4448,12 @@ impl Workbook {
         let source_sheet = origin
             .and_then(|index| package.source_sheet_name(index))
             .unwrap_or(&model.sheets[sheet.0 as usize].name);
+        let source_range = package
+            .original_workbook()
+            .table(&table.name)
+            .map_or(table.range, |table| table.range);
         let location = package
-            .table_header_reference(origin, |formula, local| {
+            .table_header_reference(origin, source_range, |formula, local| {
                 xlsx_ops::references_table_column(formula, &table.name, source_sheet, local, old)
             })
             .map_err(unsupported)?;
@@ -4434,6 +4464,40 @@ impl Workbook {
                 table.name
             ))
             .into());
+        }
+        Ok(())
+    }
+
+    fn ensure_table_header_history(&self, ops: &[Op]) -> Result<()> {
+        if !ops
+            .iter()
+            .any(|op| matches!(op, Op::RestoreTableColumn { .. }))
+        {
+            return Ok(());
+        }
+        let mut preview = self.model.clone();
+        let mut origins = self.preserved.origins.clone();
+        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut preview);
+        for op in ops {
+            self.ensure_table_header_write(batch.workbook(), &origins, op)?;
+            batch.apply(op)?;
+            match *op {
+                Op::AddSheet { index, .. } => origins.insert(index, None),
+                Op::RemoveSheet { index } => {
+                    origins.remove(index);
+                }
+                Op::MoveSheet { from, to } => {
+                    let origin = origins.remove(from);
+                    origins.insert(to, origin);
+                }
+                _ => {}
+            }
+        }
+        if preview.defined_names != self.model.defined_names
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)
+                .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
         }
         Ok(())
     }

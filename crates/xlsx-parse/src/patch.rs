@@ -10,14 +10,14 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, CellValue, ColId, ColStyle, Sheet, Workbook};
 
 use crate::axis::SheetAxes;
-use crate::future_functions::FormulaNames;
+use crate::future_functions::{FormulaNames, excel_formula};
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::{SharedStringCells, WorksheetCellFacts, is_truthy};
 use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, text_attribute, xml_err};
+use crate::xml::{attr, formula_text, text_attribute, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -93,9 +93,11 @@ struct SourceCell {
 /// The `<f>` attributes that tie a formula to where it sits.
 struct FormulaMarkup {
     tag: Range<usize>,
+    text_end: Option<usize>,
     empty: bool,
     group: Option<u32>,
     reference: Option<CellRange>,
+    text_rewritable: bool,
     /// carries `r1`/`r2` or something else this crate cannot move.
     positional: bool,
 }
@@ -642,13 +644,33 @@ impl SheetPatch<'_> {
         let (Some(formula), Some(original)) = (&source.formula, original) else {
             return Ok(false);
         };
-        if cell.formula.is_none()
-            || cell.formula != original.formula
-            || !self.formula_clean(source, at, formula, dirty)
-        {
+        let Some(text) = cell.formula.as_deref() else {
             return Ok(false);
-        }
-        let Some(slot) = self.cache_patch_slot(data, source, at)? else {
+        };
+        let (text_slot, value_slot) = if cell.formula == original.formula {
+            if !self.formula_clean(source, at, formula, dirty) {
+                return Ok(false);
+            }
+            (None, self.cache_patch_slot(data, source, at)?)
+        } else {
+            let range = self.original.array_formula(source.at);
+            if self.workbook.tables.is_empty()
+                || !original
+                    .formula
+                    .as_deref()
+                    .is_some_and(|formula| formula.contains('['))
+                || !text.contains('[')
+                || range != formula.reference
+                || range.and_then(|range| self.remap_range(range)) != self.sheet.array_formula(at)
+            {
+                return Ok(false);
+            }
+            let Some(text_slot) = formula_text_slot(data, source)? else {
+                return Ok(false);
+            };
+            (Some(text_slot), cached_value_slot(data, source)?)
+        };
+        let Some(slot) = value_slot else {
             return Ok(false);
         };
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
@@ -656,6 +678,9 @@ impl SheetPatch<'_> {
             set_attribute(&mut attributes, "r", "r", at.to_a1());
         }
         let style = self.styles.written(original.style, cell.style);
+        let rewrite_cache = text_slot.is_none() || original.value != cell.value;
+        let rewrite_type = text_slot.is_none()
+            || std::mem::discriminant(&original.value) != std::mem::discriminant(&cell.value);
         if style != original.style {
             attributes.retain(|attribute| attribute.name != "s");
             if let Some(style) = style {
@@ -665,26 +690,30 @@ impl SheetPatch<'_> {
                 });
             }
         }
-        let markup = cell_value_markup(cell, self.sst_index, None);
-        match markup.ty {
-            Some(ty) => {
-                if let Some(attribute) = attributes
-                    .iter_mut()
-                    .find(|attribute| attribute.name == "t")
-                {
-                    attribute.value = ty.to_owned();
-                } else {
-                    attributes.push(XmlAttribute {
-                        name: "t".to_owned(),
-                        value: ty.to_owned(),
-                    });
-                }
+        let markup = rewrite_cache.then(|| cell_value_markup(cell, self.sst_index, None));
+        if rewrite_type
+            && let Some(markup) = &markup
+        {
+            match markup.ty {
+                Some(ty) => set_attribute(&mut attributes, "t", "t", ty.to_owned()),
+                None => remove_attribute(&mut attributes, "t"),
             }
-            None => attributes.retain(|attribute| attribute.name != "t"),
         }
-        write_start_tag(out, &name, &attributes, false)?;
-        self.emit_source_cell_content(out, data, source, at, slot.start)?;
-        if let Some(value) = markup.value {
+        if !rewrite_type && at == source.at && style == original.style {
+            out.extend_from_slice(&data[source.tag.clone()]);
+        } else {
+            write_start_tag(out, &name, &attributes, false)?;
+        }
+        if let Some(text_slot) = text_slot {
+            self.emit_source_cell_content(out, data, source, at, text_slot.start)?;
+            out.extend_from_slice(formula_text(&excel_formula(text, self.names)).as_bytes());
+            out.extend_from_slice(&data[text_slot.end..slot.start]);
+        } else {
+            self.emit_source_cell_content(out, data, source, at, slot.start)?;
+        }
+        if !rewrite_cache {
+            out.extend_from_slice(&data[slot.clone()]);
+        } else if let Some(value) = markup.and_then(|markup| markup.value) {
             let mut writer = Writer::new(std::mem::take(out));
             writer
                 .create_element("v")
@@ -1044,6 +1073,56 @@ impl SheetPatch<'_> {
             self.axes.cols.source(at.col)?,
         ))
     }
+}
+
+pub(crate) fn unpatchable_table_formula(
+    data: &[u8],
+    original: &Sheet,
+    affected: impl Fn(&str, CellRef) -> bool,
+) -> Result<bool, ParseError> {
+    let mut affected: HashSet<_> = original
+        .iter_cells()
+        .filter_map(|(at, cell)| {
+            cell.formula
+                .as_deref()
+                .is_some_and(|formula| affected(formula, at))
+                .then_some(at)
+        })
+        .collect();
+    if affected.is_empty() {
+        return Ok(false);
+    }
+    let Some((_, rows)) = scan_sheet_data(data)? else {
+        return Ok(true);
+    };
+    for cell in rows.iter().flat_map(|row| &row.cells) {
+        if affected.remove(&cell.at)
+            && (cell.formula.as_ref().and_then(|formula| formula.reference)
+                != original.array_formula(cell.at)
+                || formula_text_slot(data, cell)?.is_none()
+                || cached_value_slot(data, cell)?.is_none())
+        {
+            return Ok(true);
+        }
+    }
+    Ok(!affected.is_empty())
+}
+
+fn formula_text_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
+    let Some(formula) = &cell.formula else {
+        return Ok(None);
+    };
+    let Some(end) = formula.text_end.filter(|_| formula.text_rewritable) else {
+        return Ok(None);
+    };
+    let slot = formula.tag.end..end;
+    let (name, attributes) = start_tag(&data[cell.tag.clone()])?;
+    Ok((name == "c"
+        && attributes
+            .iter()
+            .all(|attribute| !attribute.name.contains(':') && attribute.name != "xmlns")
+        && !data[slot.clone()].contains(&b'<'))
+    .then_some(slot))
 }
 
 fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
@@ -1546,7 +1625,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                 }
                 _ => {}
             },
-            Event::End(_) => {
+            Event::End(element) => {
                 depth = depth.saturating_sub(1);
                 match depth {
                     0 => {
@@ -1570,6 +1649,11 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                         if let (Some(row), Some(mut cell)) = (&mut row, cell.take()) {
                             cell.span.end = after;
                             row.cells.push(cell);
+                        }
+                    }
+                    3 if element.name().local_name().as_ref() == b"f" => {
+                        if let Some(formula) = cell.as_mut().and_then(|cell| cell.formula.as_mut()) {
+                            formula.text_end = Some(before);
                         }
                     }
                     _ => {}
@@ -1610,7 +1694,8 @@ fn formula_markup(
     tag: Range<usize>,
     empty: bool,
 ) -> Result<FormulaMarkup, ParseError> {
-    let shared = attr(element, b"t")?.as_deref() == Some("shared");
+    let ty = attr(element, b"t")?;
+    let shared = ty.as_deref() == Some("shared");
     let group = shared
         .then(|| attr(element, b"si"))
         .transpose()?
@@ -1620,15 +1705,22 @@ fn formula_markup(
     let parsed = reference
         .as_deref()
         .map(|value| CellRange::parse_a1(value).ok());
+    let positional = attr(element, b"r1")?.is_some()
+        || attr(element, b"r2")?.is_some()
+        || (shared && group.is_none())
+        || parsed == Some(None);
     Ok(FormulaMarkup {
         tag,
+        text_end: None,
         empty,
         group,
         reference: parsed.flatten(),
-        positional: attr(element, b"r1")?.is_some()
-            || attr(element, b"r2")?.is_some()
-            || (shared && group.is_none())
-            || parsed == Some(None),
+        text_rewritable: !positional
+            && matches!(
+                (ty.as_deref(), parsed),
+                (None | Some("normal"), None) | (Some("array"), Some(Some(_)))
+            ),
+        positional,
     })
 }
 

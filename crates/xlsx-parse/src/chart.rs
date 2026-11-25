@@ -943,6 +943,24 @@ fn chart_refs(root: &Element) -> Result<Vec<ChartRef>, ParseError> {
         .collect())
 }
 
+pub(crate) fn extension_formula_reference(
+    part: &[u8],
+    affected: impl Fn(&str) -> bool,
+) -> Result<bool, ParseError> {
+    fn matches(element: &Element, in_extension: bool, affected: &impl Fn(&str) -> bool) -> bool {
+        let name = element.local_name();
+        let in_extension = in_extension || name == "extLst";
+        (matches!(name, "f" | "formula" | "sqref")
+            && (in_extension || !element.is(NS_CHART, "f"))
+            && affected(element.text_content().trim()))
+            || element
+                .child_elements()
+                .any(|child| matches(child, in_extension, affected))
+    }
+
+    Ok(matches(&parse_tree(part)?, false, &affected))
+}
+
 fn ref_sites(root: &Element) -> Result<Vec<RefSite>, ParseError> {
     let mut sites = Vec::new();
     let mut series = Series {

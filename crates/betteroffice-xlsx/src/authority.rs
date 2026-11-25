@@ -1756,10 +1756,10 @@ impl WorkbookAuthority {
         for op in ops {
             batch
                 .apply_with_inverse(op, |inverse| {
-                    if matches!(op, Op::SetCell { .. })
-                        && let Some(Op::RestoreTableColumn { formulas, .. }) = inverse.first()
-                    {
-                        rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                    for restored in inverse {
+                        if let Op::RestoreTableColumn { formulas, .. } = restored {
+                            rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                        }
                     }
                 })
                 .map_err(|error| {

@@ -1584,7 +1584,9 @@ impl Workbook {
             Some(previous) => graph.adopt_unevaluated(previous),
             None => super::assume_unevaluated(&graph, &self.last_calculation),
         }
-        let recalculated = if self.model.tables != prepared.model.tables {
+        let recalculated = if prepared.table_references_rewritten()
+            || self.model.tables != prepared.model.tables
+        {
             xlsx_calc::engine::recalc_all_kept(
                 &mut prepared.model,
                 &mut graph,
@@ -1605,6 +1607,11 @@ impl Workbook {
             .zip(&changed)
             .filter(|(_, cells)| !cells.is_empty())
             .map(|(planned, _)| planned.resolved.sheet)
+            .chain(prepared.rewritten_table_cells().filter_map(|(sheet, at)| {
+                (super::stored_formula(&self.model, sheet, at)
+                    != super::stored_formula(&prepared.model, sheet, at))
+                .then_some(sheet)
+            }))
             .chain(recalculated.changed.iter().map(|(sheet, _)| *sheet))
             .collect::<BTreeSet<_>>()
             .into_iter()

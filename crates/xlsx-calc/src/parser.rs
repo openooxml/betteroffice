@@ -293,7 +293,7 @@ impl Parser<'_> {
             TokKind::RowRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::RowRange { sheet, range }))
             }
-            TokKind::TableRef { table, spec, .. } => {
+            TokKind::TableRef { table, spec } => {
                 Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
             }
             TokKind::LParen => {

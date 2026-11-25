@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditFailureCode, EditHistory,
-    EditOperation, EditRequest, EditStep, Error, Op, RangeAddress, RangeTarget, SheetId,
-    StylePatch, Workbook, WorkbookModel,
+    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditApplication,
+    EditFailureCode, EditHistory, EditOperation, EditRequest, EditStep, Error, Op,
+    ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, SheetId, StylePatch, Workbook,
+    WorkbookModel,
 };
 use xlsx_model::CellProvider;
 use xlsx_ops::{CellState, OpError};
@@ -233,6 +234,27 @@ fn edit(workbook: &mut Workbook, address: &str, input: &str) {
         .unwrap();
 }
 
+fn edit_without_history(workbook: &mut Workbook, address: &str, input: &str) -> EditApplication {
+    let result = workbook
+        .apply_edits(&EditRequest {
+            expect_version: workbook.version(),
+            source: Default::default(),
+            history: EditHistory::None,
+            calculation: Default::default(),
+            steps: vec![EditStep::new(EditOperation::SetCellInputs {
+                target: RangeTarget {
+                    sheet_id: "sheet:0".into(),
+                    range: RangeAddress::A1 { a1: address.into() },
+                },
+                inputs: vec![vec![input.into()]],
+            })],
+        })
+        .unwrap()
+        .unwrap();
+    assert!(result.applied);
+    result
+}
+
 fn assert_refused_header(workbook: &mut Workbook, address: &str, input: &str, message: &str) {
     let version = workbook.version();
     let model = workbook.model().clone();
@@ -440,6 +462,161 @@ fn undo_and_redo_restore_the_header_cell_and_column_name() {
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
     workbook.redo(CalculationOptions::default()).unwrap();
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+}
+
+#[test]
+fn history_refuses_a_caption_taken_by_a_sibling_without_history() {
+    for (redo, caption) in [(false, "status"), (true, "state")] {
+        let mut workbook = Workbook::open(&book()).unwrap();
+        edit(&mut workbook, "B1", "State");
+        if redo {
+            workbook.undo(CalculationOptions::default()).unwrap();
+        }
+        edit_without_history(&mut workbook, "C1", caption);
+        let version = workbook.version();
+        let history = workbook.history_state();
+        let model = workbook.model().clone();
+        let authored = workbook.encode_state_as_update_v1();
+        let error = if redo {
+            workbook.redo(CalculationOptions::default())
+        } else {
+            workbook.undo(CalculationOptions::default())
+        }
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(OpError::TableHeaderUnsupported(_))
+        ));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.history_state(), history);
+        assert_eq!(workbook.model(), &model);
+        assert_eq!(workbook.encode_state_as_update_v1(), authored);
+    }
+}
+
+#[test]
+fn history_rewrites_formulas_entered_since_the_rename_or_undo() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    edit(&mut workbook, "H1", "=COUNTA(Table1[status])");
+    edit(&mut workbook, "B1", "State");
+    edit_without_history(&mut workbook, "H2", "=SUM(Table1[State])");
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let formula = |workbook: &Workbook, address| {
+        workbook.model().sheets[0]
+            .cell(at(address))
+            .unwrap()
+            .formula
+            .clone()
+    };
+    assert_eq!(
+        formula(&workbook, "H1").as_deref(),
+        Some("COUNTA(Table1[status])")
+    );
+    assert_eq!(
+        formula(&workbook, "H2").as_deref(),
+        Some("SUM(Table1[Status])")
+    );
+    edit_without_history(&mut workbook, "H3", "=SUM(Table1[Status])");
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        formula(&workbook, "H1").as_deref(),
+        Some("COUNTA(Table1[State])")
+    );
+    for address in ["H2", "H3"] {
+        assert_eq!(
+            formula(&workbook, address).as_deref(),
+            Some("SUM(Table1[State])")
+        );
+    }
+}
+
+#[test]
+fn a_formula_entered_between_two_header_renames_uses_the_final_caption() {
+    let inputs = [
+        ("B1", "State"),
+        ("H1", "=COUNTA(Table1[State])"),
+        ("B1", "Status"),
+    ];
+    let options = CalculationOptions::default();
+    for proposal in [false, true] {
+        let mut workbook = Workbook::open(&book()).unwrap();
+        if proposal {
+            let proposal = workbook
+                .propose(
+                    ProposalRequest {
+                        agent_id: "agent".into(),
+                        note: None,
+                        edits: inputs
+                            .iter()
+                            .map(|&(address, input)| ProposalEditInput {
+                                sheet: SHEET1,
+                                cell: at(address),
+                                input: input.into(),
+                                number_format: None,
+                            })
+                            .collect(),
+                    },
+                    options,
+                )
+                .unwrap();
+            assert!(
+                workbook
+                    .accept_proposal(&proposal.id, true, options)
+                    .unwrap()
+                    .mutation
+                    .applied
+            );
+        } else {
+            let edits = inputs.map(|(address, input)| CellInput {
+                cell: at(address),
+                input: input.into(),
+            });
+            assert!(workbook.edit_cells(SHEET1, &edits, options).unwrap().applied);
+        }
+        let saved = workbook.save().unwrap();
+        let reopened = assert_saved_headers(&saved, ["Name", "Status", "Rev"]);
+        for model in [workbook.model(), reopened.model()] {
+            assert_eq!(
+                model.sheets[0].cell(at("H1")).unwrap().formula.as_deref(),
+                Some("COUNTA(Table1[Status])")
+            );
+            assert_eq!(
+                model.value(SHEET1, at("H1")),
+                CellValue::Number { value: 3.0 }
+            );
+        }
+    }
+}
+
+#[test]
+fn a_batch_reports_sheets_with_rewritten_formulas_whose_values_stay_the_same() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    let sheet = SheetId(1);
+    workbook
+        .edit_cell(
+            sheet,
+            at("D1"),
+            "=COUNTA(Table1[Status])",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let applied = edit_without_history(&mut workbook, "B1", "State");
+    assert_eq!(applied.changed_sheets, ["sheet:0", "sheet:1"]);
+    assert!(applied.calculation.changed.is_empty());
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+    for model in [workbook.model(), reopened.model()] {
+        assert_eq!(
+            model
+                .sheet(sheet)
+                .unwrap()
+                .cell(at("D1"))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("COUNTA(Table1[State])")
+        );
+        assert_eq!(model.value(sheet, at("D1")), CellValue::Number { value: 3.0 });
+    }
 }
 
 #[test]
@@ -1155,6 +1332,134 @@ fn a_header_rename_patches_local_and_cross_table_formulas() {
             Some(formula)
         );
     }
+}
+
+#[test]
+fn rewriting_an_array_formula_preserves_its_source_metadata() {
+    const METADATA: &str = "xl/metadata.xml";
+    let source = replace_part(
+        &book(),
+        "[Content_Types].xml",
+        "</Types>",
+        &format!(r#"<Override PartName="/{METADATA}" ContentType="{SPREADSHEET}.sheetMetadata+xml"/></Types>"#),
+    );
+    let source = replace_part(
+        &source,
+        "xl/_rels/workbook.xml.rels",
+        "</Relationships>",
+        &format!(r#"<Relationship Id="rId4" Type="{DOC_RELS}/sheetMetadata" Target="metadata.xml"/></Relationships>"#),
+    );
+    let sheet = "xl/worksheets/sheet1.xml";
+    let source = replace_part(
+        &source,
+        sheet,
+        r#"<c r="E2">"#,
+        r#"<c r="D2" cm="1"><f t="array" ref="D2" aca="1">SUM(Table1[Status])</f><v>0.00</v></c><c r="E2">"#,
+    );
+    let metadata = format!(
+        concat!(
+            r#"<metadata xmlns="{}" xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray">"#,
+            r#"<metadataTypes count="1"><metadataType name="XLDAPR" minSupportedVersion="120000" cellMeta="1"/></metadataTypes>"#,
+            r#"<futureMetadata name="XLDAPR" count="1"><bk><extLst><ext uri="{{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}}">"#,
+            r#"<xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/></ext></extLst></bk></futureMetadata>"#,
+            r#"<cellMetadata count="1"><bk><rc t="1" v="0"/></bk></cellMetadata></metadata>"#,
+        ),
+        MAIN
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    parts.push((METADATA.into(), metadata.as_bytes().to_vec()));
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = std::str::from_utf8(part(&parts, sheet)).unwrap();
+    assert!(
+        xml.contains(r#"<c r="D2" cm="1"><f t="array" ref="D2" aca="1">SUM(Table1[State])</f><v>0.00</v></c>"#),
+        "{xml}"
+    );
+    assert_eq!(part(&parts, METADATA), metadata.as_bytes());
+    let reopened = assert_saved_headers(&saved, ["Name", "State", "Rev"]);
+    assert_eq!(
+        reopened.model().sheets[0].array_formula(at("D2")),
+        Some(CellRange::new(at("D2"), at("D2")))
+    );
+}
+
+#[test]
+fn a_formula_in_alternate_content_refuses_the_rename() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let source = replace_part(
+        &book(),
+        sheet,
+        r#"<c r="E2">"#,
+        concat!(
+            r#"<c r="D2"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x"><x:f>SUM(Table1[Status])</x:f></mc:Choice>"#,
+            r#"<mc:Fallback><f>SUM(Table1[Status])</f><v>0</v></mc:Fallback>"#,
+            r#"</mc:AlternateContent></c><c r="E2">"#,
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", sheet);
+}
+
+#[test]
+fn a_reference_in_a_modeled_charts_extension_refuses_the_rename() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        "<tableParts ",
+        r#"<drawing r:id="rIdDrawing"/><tableParts "#,
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        "</Relationships>",
+        &format!(r#"<Relationship Id="rIdDrawing" Type="{DOC_RELS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#),
+    );
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let chart = "xl/charts/chart1.xml";
+    parts.extend([
+        (
+            "xl/drawings/drawing1.xml".into(),
+            concat!(
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing""#,
+                r#" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart""#,
+                r#" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+                "<xdr:twoCellAnchor>",
+                "<xdr:from><xdr:col>7</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>",
+                "<xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>9</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                r#"<xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame>"#,
+                "<xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>",
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".into(),
+            relationships(&[("rIdChart", "chart", "../charts/chart1.xml")]).into_bytes(),
+        ),
+        (
+            chart.into(),
+            concat!(
+                r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:c15="http://schemas.microsoft.com/office/drawing/2012/chart">"#,
+                r#"<c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/>"#,
+                "<c:val><c:numRef><c:f>Sheet1!$C$2:$C$4</c:f></c:numRef></c:val>",
+                r#"<c:extLst><c:ext uri="dataLabelsRange"><c15:datalabelsRange><c15:f>Table1[Status]</c15:f></c15:datalabelsRange></c:ext></c:extLst>"#,
+                "</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>",
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+    ]);
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    let charts = &workbook.model().sheets[0].charts;
+    assert_eq!(charts.len(), 1);
+    assert_eq!(charts[0].refs.len(), 1);
+    assert_eq!(charts[0].refs[0].formula, "Sheet1!$C$2:$C$4");
+    assert_refused_header(&mut workbook, "B1", "State", chart);
 }
 
 #[test]

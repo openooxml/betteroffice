@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use xlsx_calc::lexer::{may_reference_table_column, rewrite_table_column};
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
@@ -118,19 +118,18 @@ pub(crate) fn rename_table_column(
     let old = &table.columns[column];
     let sheet = table.sheet;
     let name = table.name.clone();
-    let mut formulas = Vec::new();
-    let mut defined_names = Vec::new();
-    if old.to_lowercase() != new.to_lowercase() {
+    let (formulas, defined_names) = if old.to_lowercase() != new.to_lowercase() {
         rewrite_table_formulas(
             workbook,
             index,
             column,
             at,
             new,
-            &mut formulas,
-            &mut defined_names,
-        )?;
-    }
+            &FormulaRestores::default(),
+        )?
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(Op::RestoreTableColumn {
         sheet,
         at,
@@ -144,6 +143,13 @@ pub(crate) fn rename_table_column(
 
 type CellFormulaRestore = (SheetId, CellRef, (String, String));
 type NameFormulaRestore = (xlsx_model::DefinedName, String);
+type TableFormulaChanges = (Vec<CellFormulaRestore>, Vec<NameFormulaRestore>);
+
+#[derive(Default)]
+struct FormulaRestores<'a> {
+    cells: HashMap<(SheetId, CellRef), (&'a str, &'a str)>,
+    names: HashMap<usize, (&'a str, &'a str)>,
+}
 
 fn rewrite_table_formulas(
     workbook: &mut Workbook,
@@ -151,11 +157,11 @@ fn rewrite_table_formulas(
     column: usize,
     at: CellRef,
     new: &str,
-    formulas: &mut Vec<CellFormulaRestore>,
-    defined_names: &mut Vec<NameFormulaRestore>,
-) -> Result<(), OpError> {
+    restores: &FormulaRestores<'_>,
+) -> Result<TableFormulaChanges, OpError> {
     let table = &workbook.tables[table];
     let old = &table.columns[column];
+    let caption_changed = old.to_lowercase() != new.to_lowercase();
     let unsupported = |location: String| {
         OpError::TableHeaderUnsupported(format!(
             "cannot rename table {} column {old}: a reference in {location} \
@@ -164,15 +170,19 @@ fn rewrite_table_formulas(
         ))
     };
     let table_sheet = &workbook.sheets[table.sheet.0 as usize].name;
-    let rewrite =
-        |formula: &str, local: bool, location: &dyn Fn() -> String| match rewrite_table_column(
-            formula,
-            &table.name,
-            table_sheet,
-            local,
-            old,
-            new,
-        ) {
+    let rewrite = |formula: &str,
+                   restore: Option<(&str, &str)>,
+                   local: bool,
+                   location: &dyn Fn() -> String| {
+        if let Some((prior, expected)) = restore
+            && formula == expected
+        {
+            return Ok(Some(prior.to_owned()));
+        }
+        if !caption_changed {
+            return Ok(None);
+        }
+        match rewrite_table_column(formula, &table.name, table_sheet, local, old, new) {
             Ok(text) => Ok(text),
             Err(error) => Err(OpError::TableHeaderUnsupported(format!(
                 "cannot rename table {} column {old}: a reference in {} \
@@ -180,7 +190,8 @@ fn rewrite_table_formulas(
                 table.name,
                 location()
             ))),
-        };
+        }
+    };
     let mut edits = Vec::new();
     for (index, sheet) in workbook.sheets.iter().enumerate() {
         let id = SheetId(index as u32);
@@ -189,11 +200,12 @@ fn rewrite_table_formulas(
                 && group.sqref.split_ascii_whitespace().any(|text| {
                     CellRange::parse_a1(text).is_ok_and(|range| table.range.overlaps(&range))
                 });
-            if group
-                .rules
-                .iter()
-                .flat_map(|rule| &rule.formulas)
-                .any(|text| references_table_column(text, &table.name, table_sheet, local, old))
+            if caption_changed
+                && group
+                    .rules
+                    .iter()
+                    .flat_map(|rule| &rule.formulas)
+                    .any(|text| references_table_column(text, &table.name, table_sheet, local, old))
             {
                 return Err(unsupported(format!(
                     "conditional formats on sheet '{}'",
@@ -202,9 +214,11 @@ fn rewrite_table_formulas(
             }
         }
         for chart in &sheet.charts {
-            if chart.refs.iter().any(|reference| {
-                references_table_column(&reference.formula, &table.name, table_sheet, false, old)
-            }) {
+            if caption_changed
+                && chart.refs.iter().any(|reference| {
+                    references_table_column(&reference.formula, &table.name, table_sheet, false, old)
+                })
+            {
                 return Err(unsupported(chart.part.clone()));
             }
         }
@@ -217,7 +231,12 @@ fn rewrite_table_formulas(
             };
             let local = id == table.sheet && table.range.contains(cell_ref);
             let location = || format!("{}!{}", sheet.name, cell_ref.to_a1());
-            let updated = rewrite(formula, local, &location)?;
+            let updated = rewrite(
+                formula,
+                restores.cells.get(&(id, cell_ref)).copied(),
+                local,
+                &location,
+            )?;
             if updated.is_some() && table_header_at(&workbook.tables, id, cell_ref).is_some() {
                 return Err(unsupported(location()));
             }
@@ -230,7 +249,12 @@ fn rewrite_table_formulas(
     let mut name_bytes = defined_names_bytes(&workbook.defined_names);
     for (index, name) in workbook.defined_names.iter().enumerate() {
         let location = || format!("defined name '{}'", name.name);
-        if let Some(updated) = rewrite(&name.formula, false, &location)? {
+        if let Some(updated) = rewrite(
+            &name.formula,
+            restores.names.get(&index).copied(),
+            false,
+            &location,
+        )? {
             crate::validate_defined_name_formula(&updated).map_err(|_| unsupported(location()))?;
             name_bytes = name_bytes - name.formula.len() + updated.len();
             names.push((index, updated));
@@ -239,17 +263,24 @@ fn rewrite_table_formulas(
     if !names.is_empty() && name_bytes > MAX_DEFINED_NAME_BYTES {
         return Err(unsupported("defined names".into()));
     }
-    for (index, formula) in names {
-        let name = &mut workbook.defined_names[index];
-        defined_names.push((name.clone(), formula.clone()));
-        name.formula = formula;
-    }
-    for (sheet, at, formula) in edits {
-        let stored = workbook.sheets[sheet].cell_mut(at).unwrap();
-        let prior = stored.formula.replace(formula.clone()).unwrap();
-        formulas.push((SheetId(sheet as u32), at, (prior, formula)));
-    }
-    Ok(())
+    let defined_names = names
+        .into_iter()
+        .map(|(index, formula)| {
+            let name = &mut workbook.defined_names[index];
+            let prior = name.clone();
+            name.formula = formula.clone();
+            (prior, formula)
+        })
+        .collect();
+    let formulas = edits
+        .into_iter()
+        .map(|(sheet, at, formula)| {
+            let stored = workbook.sheets[sheet].cell_mut(at).unwrap();
+            let prior = stored.formula.replace(formula.clone()).unwrap();
+            (SheetId(sheet as u32), at, (prior, formula))
+        })
+        .collect();
+    Ok((formulas, defined_names))
 }
 
 pub(crate) fn restore_table_column(workbook: &mut Workbook, op: &Op) -> Result<Op, OpError> {
@@ -272,70 +303,45 @@ pub(crate) fn restore_table_column(workbook: &mut Workbook, op: &Op) -> Result<O
         .filter(|(index, _)| workbook.tables[*index].name == *table)
         .ok_or_else(missing)?;
     let definition = &workbook.tables[index];
-    let current = definition.columns.get(column).ok_or_else(missing)?;
-    let sheet_name = &workbook.sheets[sheet.0 as usize].name;
-    let restore = |live: &str, prior: &str, expected: &str, local| {
-        if live == expected {
-            Ok(Some(prior.to_owned()))
-        } else {
-            rewrite_table_column(live, table, sheet_name, local, current, caption)
-                .map_err(|error| OpError::TableHeaderUnsupported(error.to_string()))
-        }
-    };
-    let mut edits = Vec::new();
-    for (owner, at, (prior, expected)) in formulas {
-        let live = workbook
-            .sheet(*owner)
-            .and_then(|sheet| sheet.cell(*at))
-            .and_then(|cell| cell.formula.as_deref());
-        if let Some(live) = live
-            && let Some(formula) = restore(
-                live,
-                prior,
-                expected,
-                *owner == *sheet && definition.range.contains(*at),
-            )?
-        {
-            edits.push((*owner, *at, (live.to_owned(), formula)));
-        }
+    definition.columns.get(column).ok_or_else(missing)?;
+    let folded = caption.to_lowercase();
+    if definition
+        .columns
+        .iter()
+        .enumerate()
+        .any(|(index, name)| index != column && name.to_lowercase() == folded)
+    {
+        return Err(OpError::TableHeaderUnsupported(format!(
+            "table {table} already has a column named {caption}"
+        )));
     }
-    let mut names = Vec::new();
-    let mut seen = HashSet::new();
-    let mut bytes = defined_names_bytes(&workbook.defined_names);
+    let mut restores = FormulaRestores {
+        cells: formulas
+            .iter()
+            .map(|(sheet, at, (prior, expected))| {
+                ((*sheet, *at), (prior.as_str(), expected.as_str()))
+            })
+            .collect(),
+        names: HashMap::new(),
+    };
     for (name, expected) in defined_names {
-        let matched = workbook
+        if let Some((index, _)) = workbook
             .defined_names
             .iter()
             .enumerate()
             .find(|(index, live)| {
                 live.local_sheet == name.local_sheet
                     && live.name == name.name
-                    && !seen.contains(index)
-            });
-        if let Some((index, live)) = matched {
-            seen.insert(index);
-            if let Some(formula) = restore(&live.formula, &name.formula, expected, false)? {
-                bytes = bytes - live.formula.len() + formula.len();
-                names.push((index, live.clone(), formula));
-            }
+                    && !restores.names.contains_key(index)
+            })
+        {
+            restores
+                .names
+                .insert(index, (name.formula.as_str(), expected.as_str()));
         }
     }
-    if !names.is_empty() && bytes > MAX_DEFINED_NAME_BYTES {
-        return Err(OpError::TooManyDefinedNames);
-    }
-    for (owner, at, (_, formula)) in &edits {
-        workbook.sheets[owner.0 as usize]
-            .cell_mut(*at)
-            .unwrap()
-            .formula = Some(formula.clone());
-    }
-    let defined_names = names
-        .into_iter()
-        .map(|(index, prior, formula)| {
-            workbook.defined_names[index].formula = formula.clone();
-            (prior, formula)
-        })
-        .collect();
+    let (formulas, defined_names) =
+        rewrite_table_formulas(workbook, index, column, *at, caption, &restores)?;
     let header = &mut workbook.sheets[sheet.0 as usize];
     let old = header.cell(*at).map(CellState::from).unwrap_or_default();
     header.set_cell(*at, cell.clone().into());
@@ -345,7 +351,74 @@ pub(crate) fn restore_table_column(workbook: &mut Workbook, op: &Op) -> Result<O
         table: table.clone(),
         caption: std::mem::replace(&mut workbook.tables[index].columns[column], caption.clone()),
         cell: old,
-        formulas: edits,
+        formulas,
         defined_names,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UndoStack, apply_in_place};
+    use xlsx_model::Sheet;
+
+    #[test]
+    fn history_rewrites_names_added_after_the_rename_or_undo() {
+        let sheet = SheetId(0);
+        let at = CellRef::new(0, 0);
+        let mut workbook = Workbook {
+            sheets: vec![Sheet::new("Data")],
+            tables: vec![Table {
+                name: "Table1".into(),
+                sheet,
+                range: CellRange::new(at, CellRef::new(2, 0)),
+                header_rows: 1,
+                totals_rows: 0,
+                columns: vec!["Status".into()],
+                style: Vec::new(),
+            }],
+            ..Workbook::default()
+        };
+        let add_name = |workbook: &mut Workbook, name: &str, refers_to: &str| {
+            apply_in_place(
+                workbook,
+                &Op::SetDefinedName {
+                    name: name.into(),
+                    refers_to: refers_to.into(),
+                    scope: None,
+                    hidden: None,
+                },
+            )
+            .unwrap();
+        };
+        add_name(&mut workbook, "Recorded", "Table1[status]");
+        let inverse = apply_in_place(
+            &mut workbook,
+            &Op::SetCell {
+                sheet,
+                at,
+                cell: CellState {
+                    value: CellValue::Text {
+                        value: "State".into(),
+                    },
+                    ..CellState::default()
+                },
+            },
+        )
+        .unwrap();
+        let mut history = UndoStack::new();
+        history.record(inverse.0);
+        add_name(&mut workbook, "AfterRename", "Table1[State]");
+        history.undo(&mut workbook).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "Table1[status]");
+        assert_eq!(workbook.defined_names[1].formula, "Table1[Status]");
+        add_name(&mut workbook, "AfterUndo", "Table1[Status]");
+        history.redo(&mut workbook).unwrap();
+        assert!(
+            workbook
+                .defined_names
+                .iter()
+                .all(|name| name.formula == "Table1[State]")
+        );
+    }
 }

@@ -133,10 +133,8 @@ pub enum TokKind {
     },
     /// `Table[...]`: a structured reference to a table's rows and columns.
     TableRef {
-        sheet: Option<String>,
         table: String,
         spec: TableSpec,
-        selector_start: usize,
     },
     Plus,
     Minus,
@@ -174,7 +172,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
         input,
         pos: 0,
         external_prefixes: false,
-        local_table_refs: false,
+        table_refs: None,
     }
     .run()
 }
@@ -195,7 +193,7 @@ pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
         input,
         pos: 0,
         external_prefixes: true,
-        local_table_refs: false,
+        table_refs: None,
     }
     .run()
 }
@@ -252,20 +250,21 @@ pub fn rewrite_table_columns<'a>(
         input,
         pos: 0,
         external_prefixes: true,
-        local_table_refs: true,
+        table_refs: Some(Vec::new()),
     };
     let tokens = lexer.run()?;
+    let table_refs = lexer.table_refs.take().unwrap();
     let mut spans = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        let TokKind::TableRef {
-            sheet,
-            table,
-            selector_start,
-            ..
-        } = &token.kind
-        else {
-            continue;
-        };
+    let references = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| match &token.kind {
+            TokKind::TableRef { table, .. } => Some((index, token, table)),
+            _ => None,
+        });
+    for ((index, token, table), TableRefRewrite { sheet, selector_start }) in
+        references.zip(table_refs)
+    {
         let external = (index > 0
             && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('[')))
             || sheet.as_deref().is_some_and(|sheet| sheet.starts_with('['));
@@ -281,10 +280,10 @@ pub fn rewrite_table_columns<'a>(
         {
             continue;
         }
-        lexer.pos = *selector_start;
+        lexer.pos = selector_start;
         lexer.read_table_spec(token.start, |column, span| {
             if let Some(new) = caption(sheet.as_deref(), table, column) {
-                let prefix = &input[*selector_start + 1..span.start];
+                let prefix = &input[selector_start + 1..span.start];
                 let needs_brackets = new.contains(TABLE_BRACKET_CHARS);
                 let bare = matches!(prefix, "" | "@");
                 let span =
@@ -348,7 +347,12 @@ struct Lexer<'a> {
     input: &'a str,
     pos: usize,
     external_prefixes: bool,
-    local_table_refs: bool,
+    table_refs: Option<Vec<TableRefRewrite>>,
+}
+
+struct TableRefRewrite {
+    sheet: Option<String>,
+    selector_start: usize,
 }
 
 impl Lexer<'_> {
@@ -366,7 +370,7 @@ impl Lexer<'_> {
                 '\'' => self.lex_quoted_sheet_ref()?,
                 '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
-                '[' if self.local_table_refs => self.lex_table_ref(None, String::new(), start)?,
+                '[' if self.table_refs.is_some() => self.lex_table_ref(None, String::new(), start)?,
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -556,7 +560,7 @@ impl Lexer<'_> {
             return None;
         }
         let bang = usize::from(after.starts_with('!'));
-        if self.local_table_refs
+        if self.table_refs.is_some()
             && bang == 0
             && !after.starts_with(|c: char| c.is_alphabetic() || matches!(c, '\'' | '_' | '\\'))
         {
@@ -654,12 +658,13 @@ impl Lexer<'_> {
     ) -> Result<TokKind, ParseError> {
         let selector_start = self.pos;
         let spec = self.read_table_spec(start, |_, _| {})?;
-        Ok(TokKind::TableRef {
-            sheet,
-            table,
-            spec,
-            selector_start,
-        })
+        if let Some(table_refs) = &mut self.table_refs {
+            table_refs.push(TableRefRewrite {
+                sheet,
+                selector_start,
+            });
+        }
+        Ok(TokKind::TableRef { table, spec })
     }
 
     fn read_table_spec(
@@ -768,7 +773,7 @@ impl Lexer<'_> {
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
         }
-        if self.local_table_refs && self.peek() == Some('[') {
+        if self.table_refs.is_some() && self.peek() == Some('[') {
             return self.lex_table_ref(sheet, word, start);
         }
         if let Some(kind) = self.try_range_token(&sheet, &word) {
@@ -880,6 +885,17 @@ mod tests {
                 .unwrap(),
             r#"T[New]+t[[#This Row], [New]]+T[[New]:[X]]+T[@New]+[@New]+Other[Old]+"T[Old]""#
         );
+    }
+
+    #[test]
+    fn table_ref_tokens_expose_only_the_table_and_spec() {
+        let tokens = lex("Sales[Amount]").unwrap();
+        let TokKind::TableRef { table, spec } = &tokens[0].kind else {
+            panic!("expected a table reference");
+        };
+        assert_eq!(table, "Sales");
+        assert_eq!(spec.first_column.as_deref(), Some("Amount"));
+        assert!(lex("Sheet1!Sales[Amount]").is_err());
     }
 
     #[test]

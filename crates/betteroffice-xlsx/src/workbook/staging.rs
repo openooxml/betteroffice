@@ -1,7 +1,7 @@
 //! The prepared commit every staged mutation shares: the model change and the authority change
 //! are both staged off the live state, and only then is either adopted.
 
-use xlsx_model::Workbook as WorkbookModel;
+use xlsx_model::{CellRef, SheetId, Workbook as WorkbookModel};
 use xlsx_ops::{Op, OpError};
 
 use super::{
@@ -40,6 +40,30 @@ enum PreparedAuthority {
 }
 
 impl PreparedCommit {
+    pub(super) fn table_references_rewritten(&self) -> bool {
+        self.inverse.iter().any(|op| {
+            matches!(
+                op,
+                Op::RestoreTableColumn {
+                    formulas,
+                    defined_names,
+                    ..
+                } if !formulas.is_empty() || !defined_names.is_empty()
+            )
+        })
+    }
+
+    pub(super) fn rewritten_table_cells(&self) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
+        self.inverse
+            .iter()
+            .filter_map(|op| match op {
+                Op::RestoreTableColumn { formulas, .. } => Some(formulas),
+                _ => None,
+            })
+            .flatten()
+            .map(|(sheet, at, _)| (*sheet, *at))
+    }
+
     pub(super) fn update(&self) -> Option<&[u8]> {
         match &self.authority {
             PreparedAuthority::Staged(authority) => Some(&authority.update),
