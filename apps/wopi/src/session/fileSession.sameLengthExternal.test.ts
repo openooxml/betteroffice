@@ -17,7 +17,8 @@ async function run(stripInfoVersion: boolean, seed: number) {
     const sent = put ? (await request.clone().arrayBuffer()).byteLength : 0;
     const response = await real(request);
     if (!put) {
-      if (!stripInfoVersion || !(response.headers.get("content-type") ?? "").includes("json")) return response;
+      const fileInfo = request.method === "GET" && !new URL(request.url).pathname.endsWith("/contents");
+      if (!stripInfoVersion || !fileInfo) return response;
       const info = await response.json();
       delete info.Version;
       const headers = new Headers(response.headers);
