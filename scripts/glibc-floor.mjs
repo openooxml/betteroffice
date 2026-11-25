@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export const GLIBC_FLOOR = '2.35';
+export const GLIBC_FLOOR = '2.17';
 
 const PT_LOAD = 1;
 const PT_DYNAMIC = 2;

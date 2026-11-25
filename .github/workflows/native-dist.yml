@@ -104,6 +104,11 @@ jobs:
         shell: bash
         run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
+      - name: Smoke test on Debian 11
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+
       - name: Test binding
         if: ${{ !matrix.platform.cross }}
         run: bun test bindings/${{ inputs.binding }}-native/index.test.ts ${{ inputs.binding != 'xlsx' && format('bindings/{0}-native/png.test.ts', inputs.binding) || '' }}

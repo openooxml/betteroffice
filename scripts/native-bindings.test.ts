@@ -423,7 +423,7 @@ describe('native package release wiring', () => {
       shell: 'bash',
       run: 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
     });
-    expect(GLIBC_FLOOR).toBe('2.35');
+    expect(GLIBC_FLOOR).toBe('2.17');
   });
 
   test('dist cross-compiles musl with zig and Windows arm64 with MSVC on GitHub-hosted runners', () => {
@@ -465,7 +465,7 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
   });
 
-  test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {
+  test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12 and Debian 11', () => {
     expect(dist.jobs['gnu-smoke']).toBeUndefined();
     const steps = dist.jobs.bindings.steps;
     const entries = steps.findIndex((step: any) => step.name === 'Build the JS entries');
@@ -474,6 +474,12 @@ describe('native package release wiring', () => {
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
       run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+    });
+    expect(steps[entries + 2]).toEqual({
+      name: 'Smoke test on Debian 11',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: `docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
     });
   });
 
