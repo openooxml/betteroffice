@@ -1,5 +1,12 @@
 # @betteroffice/docx-react
 
+## 0.6.1
+
+### Patch Changes
+
+- @betteroffice/docx@0.6.1
+- @betteroffice/docx-i18n@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes
