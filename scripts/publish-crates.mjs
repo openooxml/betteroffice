@@ -109,7 +109,7 @@ export async function runWithTee(command, args, { env = {} } = {}) {
 export function newCrateRateLimitRetryAt(output, nowMs) {
   const refusal = output
     .split(/\r?\n/)
-    .find((line) => /responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
+    .find((line) => /^\s*the remote server responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
   if (!refusal) return null;
   const retryDate = refusal.match(/\btry again after\s+(.*?\bGMT\b)/i)?.[1];
   const retryAt = Date.parse(retryDate ?? '');
@@ -245,7 +245,7 @@ export async function publishOneCrate({
     );
   }
   await waitRegistry();
-  if (rateLimitBudget && !exists) rateLimitBudget.newCratesLeft -= 1;
+  if (rateLimitBudget && !exists) rateLimitBudget.newCratesLeft = Math.max(rateLimitBudget.newCratesLeft - 1, 0);
   return { source };
 }
 
@@ -352,10 +352,13 @@ async function publish() {
   const rateLimitBudget = { waitedMs: 0, newCratesLeft: 0 };
   for (const { name } of RUST_PUBLISH_CRATES) {
     try {
-      if (!(await crateExists(name))) rateLimitBudget.newCratesLeft += 1;
-    } catch (error) {
-      console.log(`Could not count ${name} as new or existing: ${error.message}`);
-    }
+      const response = await fetch(`https://crates.io/api/v1/crates/${encodeURIComponent(name)}`, {
+        headers: { 'User-Agent': USER_AGENT },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(10_000)
+      });
+      if (response.status === 404) rateLimitBudget.newCratesLeft += 1;
+    } catch {}
   }
 
   for (const { name } of RUST_PUBLISH_CRATES) {

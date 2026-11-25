@@ -71,6 +71,7 @@ describe('newCrateRateLimitRetryAt', () => {
     ['the update limit', NEW_CRATE_REFUSAL.replace('new crates', 'updates'), null],
     ['a generic 429', 'HTTP 429: Too Many Requests', null],
     ['unrelated text on a 429 line', 'warning: status 429 seen; too many new crates in this workspace', null],
+    ['the refusal quoted inside another line', `note: ${NEW_CRATE_REFUSAL.split('\n')[2].trim()}`, null],
     ['an unauthorized error', 'error: unauthorized', null]
   ];
   test.each(cases)('handles %s', (_label, output, expected) => {
