@@ -158,14 +158,13 @@ test('preserves untouched runs between replacements when every run has the same 
     expectRuns(paragraph, [runs[0]!, ...runs.slice(2, 6)], contractorExpected.map(([text]): RunText => [text, false])));
 }, 30_000);
 
-test('takes the whole-paragraph path when the replacements cannot be aligned unambiguously', async () => {
-  await checkProposal([run(1, 'ABCD'), run(2, 'X', true), run(3, 'efgh')], [
+test('patches each replaced run when recorded edits resolve ambiguous alignment', async () => {
+  const untouched = run(2, 'X', true);
+  await checkProposal([run(1, 'ABCD'), untouched, run(3, 'efgh')], [
     { query: 'ABCD', newText: 'e-f-g-h' }, { query: 'efgh', newText: 'ABCD' },
-  ], paragraph => {
-    const runs = runsOf(paragraph).map(xml => runText(xml));
-    expect(runs.map(([text]) => text).join('')).toBe('e-f-g-hXABCD');
-    expect(runs.filter(([text]) => text.includes('X'))).toEqual([['X', true]]);
-  }, { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"ambiguous":1}']]);
+  ], paragraph => expectRuns(paragraph, [untouched], [
+    ['e-f-g-h', false], ['X', true], ['ABCD', false],
+  ]));
 }, 30_000);
 
 test('accepts replacements in neighbouring runs one character apart', async () => {

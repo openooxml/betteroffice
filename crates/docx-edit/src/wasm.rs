@@ -819,6 +819,18 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    pub fn bootstrap_peer_with_provenance(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+        sidecar: &[u8],
+    ) -> Result<(), JsValue> {
+        self.core
+            .bootstrap_peer_with_provenance(state, metadata, source, sidecar)
+            .map_err(JsValue::from)
+    }
+
     /// [`EditSession::open_docx`] with seeding always on.
     #[wasm_bindgen(js_name = seed_from_docx)]
     pub fn seed_from_docx_owned(
@@ -1002,6 +1014,16 @@ impl EditSession {
         self.core.encode_state()
     }
 
+    pub fn encode_edit_provenance_for_transfer(
+        &self,
+        bytes: &[u8],
+        base: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, JsValue> {
+        Ok(self
+            .core
+            .encode_edit_provenance_for_transfer(bytes, base.as_deref()))
+    }
+
     /// This replica's yrs v1 state vector — what a peer sends so
     /// [`EditSession::encode_diff`] can compute the update it is missing.
     pub fn encode_state_vector(&self) -> Vec<u8> {
@@ -1085,6 +1107,16 @@ impl EditSession {
     /// the edit; remote/collaboration updates must use `apply_update` instead.
     pub fn apply_local_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.core.apply_local_update(update).map_err(JsValue::from)
+    }
+
+    pub fn apply_local_update_with_provenance(
+        &self,
+        update: &[u8],
+        sidecar: &[u8],
+    ) -> Result<(), JsValue> {
+        self.core
+            .apply_local_update_with_provenance(update, sidecar)
+            .map_err(JsValue::from)
     }
 
     /// Applies an update another replica of this document committed for a host batch.

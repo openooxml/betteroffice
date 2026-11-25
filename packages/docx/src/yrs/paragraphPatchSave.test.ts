@@ -96,13 +96,9 @@ for (const full of [false, true]) {
   });
 }
 
-it('logs replacement counts per source-opened Yrs save alongside a patched neighbour', async () => {
-  await preloadEditWasm(new Uint8Array(readFileSync(
-    new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
-  )));
-  await preloadOpcWasm();
+function bodySource(body: string): Uint8Array {
   const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-  const source = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+  return new Uint8Array(rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
       '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
@@ -117,10 +113,20 @@ it('logs replacement counts per source-opened Yrs save alongside a patched neigh
     )],
     ['word/document.xml', toBytes(
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
-      '<w:p><w:r><w:t xml:space="preserve">Field </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>' +
-      '<w:p><w:r><w:t>Neighbour</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'
+      body + '<w:sectPr/></w:body></w:document>'
     )],
   ])));
+}
+
+it('logs replacement counts per source-opened Yrs save alongside a patched neighbour', async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(
+    new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
+  )));
+  await preloadOpcWasm();
+  const source = bodySource(
+    '<w:p><w:r><w:t xml:space="preserve">Field </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>' +
+    '<w:p><w:r><w:t>Neighbour</w:t></w:r></w:p>'
+  );
   const session = await createYrsSession();
   const diagnostic = spyOn(console, 'debug').mockImplementation(() => {});
   try {
@@ -149,6 +155,99 @@ it('logs replacement counts per source-opened Yrs save alongside a patched neigh
   } finally {
     diagnostic.mockRestore();
     session.destroy();
+  }
+});
+
+it('keeps adjacent replacement patches through paired adoption and bootstrap and falls back for swapped or unpaired updates', async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(
+    new URL('../wasm/generated/edit/docx_edit_bg.wasm', import.meta.url)
+  )));
+  await preloadOpcWasm();
+  const source = bodySource(
+    '<w:p><w:r w:rsidR="00000001"><w:rPr><w:noProof/></w:rPr><w:t>abc</w:t></w:r>' +
+    '<w:r w:rsidR="00000002"><w:rPr><w:bCs/></w:rPr><w:t>def</w:t></w:r>' +
+    '<w:r w:rsidR="00000003"><w:t>ghij</w:t></w:r></w:p>'
+  );
+  const sessions: YrsSession[] = [];
+  const create = async (clientId: number) => {
+    const session = await createYrsSession({ clientId });
+    sessions.push(session);
+    return session;
+  };
+  const fork = async (parent: YrsSession, clientId: number) => {
+    const peer = await create(clientId);
+    const state = parent.encodeState();
+    const sidecar = parent.encodeEditProvenanceForTransfer(state);
+    expect(sidecar.length).toBeGreaterThan(0);
+    peer.bootstrapPeerWithProvenance(
+      state, parent.encodePeerMetadata(), undefined, peer.openDocx(source, false), sidecar
+    );
+    return peer;
+  };
+  const plan = (session: YrsSession) => session.paragraphSavePlan().splicedParts!
+    .find(({ part }) => part === 'word/document.xml')!;
+  try {
+    const live = await create(41_001);
+    live.seedFromDocx(source);
+    const { paraId } = live.paragraphs('body')[0]!;
+    const replace = (session: YrsSession, from: number, to: number, text: string) =>
+      session.replaceRange({
+        story: 'body', start: { paraId, offset: from }, end: { paraId, offset: to },
+      }, text);
+    replace(live, 9, 10, 'J');
+    const sender = await fork(live, 41_002);
+    const other = await fork(live, 41_002);
+    const swapped = await fork(live, 41_003);
+    const unpaired = await fork(live, 41_004);
+    const base = sender.encodeStateVector();
+    replace(sender, 3, 6, 'YZ');
+    replace(sender, 0, 3, 'X');
+    replace(other, 3, 6, 'Z');
+    replace(other, 0, 3, 'XY');
+    const update = sender.encodeStateAsUpdate(base);
+    const otherUpdate = other.encodeStateAsUpdate(base);
+    sender.encodeStateAsUpdate(sender.encodeStateVector());
+    const sidecar = sender.encodeEditProvenanceForTransfer(update, base);
+    const otherSidecar = other.encodeEditProvenanceForTransfer(otherUpdate, base);
+    expect(update).not.toEqual(otherUpdate);
+    expect(sidecar.length).toBeGreaterThan(0);
+    expect(otherSidecar.length).toBeGreaterThan(0);
+
+    const observed: Array<ReturnType<typeof plan>> = [];
+    const unsubscribe = live.onUpdate((_update, origin) => {
+      if (origin === 'local') observed.push(plan(live));
+    });
+    live.applyLocalUpdateWithProvenance(update, sidecar);
+    unsubscribe();
+    swapped.applyLocalUpdateWithProvenance(update, otherSidecar);
+    unpaired.applyLocalUpdate(update);
+    const exported = await fork(live, 41_005);
+    for (const session of [live, exported, swapped, unpaired]) {
+      expect(session.paragraphs('body')[0]!.text).toBe('XYZghiJ');
+      expect(plan(session).changed).toEqual([0]);
+    }
+    expect(observed).toEqual([plan(live)]);
+    for (const session of [live, exported]) {
+      const part = plan(session);
+      expect(part.legacyParagraphs).toEqual([]);
+      expect(part.paragraphPatches).toHaveLength(1);
+      expect(part.paragraphPatches![0]!.textEdits.map(({ from, to, donor, insert }) =>
+        [from, to, donor, insert.map(run => run.text).join('')]
+      )).toEqual([
+        [0, 3, { kind: 'at', at: 0 }, 'X'],
+        [3, 6, { kind: 'at', at: 3 }, 'YZ'],
+        [9, 10, { kind: 'at', at: 9 }, 'J'],
+      ]);
+    }
+    for (const session of [swapped, unpaired]) {
+      const part = plan(session);
+      expect(part.paragraphPatches).toEqual([]);
+      expect(part.legacyParagraphs).toEqual([{
+        ordinal: 0, code: 'AMBIGUOUS_ALIGNMENT', detail: 'ambiguous: unproven edit provenance',
+      }]);
+    }
+  } finally {
+    for (const session of sessions.reverse()) session.destroy();
   }
 });
 

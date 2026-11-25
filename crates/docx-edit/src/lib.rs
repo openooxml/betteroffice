@@ -1023,6 +1023,20 @@ impl EditingDoc {
         self.keeps_deleted.store(true, Ordering::Relaxed);
     }
 
+    fn with_retained_deleted<T>(&self, load: impl FnOnce() -> T) -> T {
+        struct ResumeCollection<'a>(&'a AtomicBool);
+
+        impl Drop for ResumeCollection<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        let _resume = (!self.keeps_deleted.swap(true, Ordering::Relaxed))
+            .then(|| ResumeCollection(&self.keeps_deleted));
+        load()
+    }
+
     #[doc(hidden)]
     pub fn set_direct_batches(&self, on: bool) {
         self.direct_batches.store(on, Ordering::Relaxed);

@@ -71,6 +71,27 @@ impl EditSessionCore {
         metadata: &[u8],
         source: Option<Vec<u8>>,
     ) -> EngineResult<()> {
+        self.bootstrap_peer_inner(state, metadata, source, None)
+    }
+
+    #[doc(hidden)]
+    pub fn bootstrap_peer_with_provenance(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+        sidecar: &[u8],
+    ) -> EngineResult<()> {
+        self.bootstrap_peer_inner(state, metadata, source, Some(sidecar))
+    }
+
+    fn bootstrap_peer_inner(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+        sidecar: Option<&[u8]>,
+    ) -> EngineResult<()> {
         let source = source.map(PackageBytes::from);
         let bootstrap = self
             .engine
@@ -89,7 +110,14 @@ impl EditSessionCore {
         self.engine.set_partial_document(false);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(self.host.entropy());
-        self.load(state)
+        if let Some(sidecar) = sidecar {
+            let doc = self.engine.doc();
+            doc.with_retained_deleted(|| self.load(state))?;
+            doc.install_bootstrap_provenance(state, sidecar);
+            Ok(())
+        } else {
+            self.load(state)
+        }
     }
 
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
@@ -335,6 +363,13 @@ impl EditSessionCore {
         self.engine.doc().encode_state_as_update_v1()
     }
 
+    #[doc(hidden)]
+    pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
+        self.engine
+            .doc()
+            .encode_edit_provenance_for_transfer(bytes, base)
+    }
+
     /// This replica's yrs v1 state vector — what a peer sends so
     /// [`EditSessionCore::encode_diff`] can compute the update it is missing.
     pub fn encode_state_vector(&self) -> Vec<u8> {
@@ -417,6 +452,18 @@ impl EditSessionCore {
         self.engine
             .doc()
             .apply_local_update_v1(update)
+            .map_err(EngineError::message)
+    }
+
+    #[doc(hidden)]
+    pub fn apply_local_update_with_provenance(
+        &self,
+        update: &[u8],
+        sidecar: &[u8],
+    ) -> EngineResult<()> {
+        self.engine
+            .doc()
+            .apply_local_update_with_provenance(update, sidecar)
             .map_err(EngineError::message)
     }
 

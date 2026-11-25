@@ -28,6 +28,7 @@ export const editsession_apply_input: (a: number, b: number, c: number, d: numbe
 export const editsession_apply_input_profile_json: (a: number) => [number, number];
 export const editsession_apply_input_profiled: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
+export const editsession_apply_local_update_with_provenance: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
@@ -38,6 +39,7 @@ export const editsession_begin_opening: (a: number, b: number, c: number) => voi
 export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_shared_reads: (a: number) => void;
 export const editsession_bootstrap_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+export const editsession_bootstrap_peer_with_provenance: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -77,6 +79,7 @@ export const editsession_echo_glyph_set_json: (a: number, b: number, c: number, 
 export const editsession_edit_text_resident: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_encode_diff_chunks: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const editsession_encode_edit_provenance_for_transfer: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
 export const editsession_encode_state_vector: (a: number) => [number, number];

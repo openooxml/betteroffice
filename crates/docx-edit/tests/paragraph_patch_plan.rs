@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use docx_edit::session::{EditSessionCore, Host};
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
@@ -3535,4 +3536,77 @@ fn matching_sidecar_can_carry_records_for_an_already_loaded_state() {
         .apply_local_update_with_provenance(&update, &sidecar)
         .unwrap();
     assert_splices(&receiver, &[(1, 2, 1, "X")]);
+}
+
+fn bootstrap_body_plan(
+    source: &[u8],
+    state: &[u8],
+    metadata: &[u8],
+    sidecar: &[u8],
+) -> serde_json::Value {
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let peer = EditSessionCore::new(72, host);
+    peer.bootstrap_peer_with_provenance(state, metadata, Some(source.to_vec()), sidecar)
+        .unwrap();
+    let plan: serde_json::Value = serde_json::from_str(&peer.paragraph_save_plan().unwrap()).unwrap();
+    plan["splicedParts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["part"] == "word/document.xml")
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn matching_bootstrap_sidecar_carries_adjacent_splice_records() {
+    let source = package(ADJACENT_SOURCE);
+    let sender = EditingDoc::new(71);
+    seed_from_docx_with_generation(&sender, &source, "bootstrap").unwrap();
+    replace(&sender, 3, 6, "YZ");
+    replace(&sender, 0, 3, "X");
+    let state = sender.encode_state_as_update_v1();
+    let sidecar = sender.encode_edit_provenance_for_transfer(&state, None);
+    let metadata = sender.encode_peer_metadata().unwrap();
+    let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar);
+    let patches: Vec<ParagraphPatchV1> =
+        serde_json::from_value(part["paragraphPatches"].clone()).unwrap();
+    assert_eq!(part["changed"], json!([0]));
+    assert_eq!(part["legacyParagraphs"], json!([]));
+    assert_eq!(patches.len(), 1);
+    assert_eq!(
+        splice_summary(&patches[0]),
+        owned_splices(&[(0, 3, 0, "X"), (3, 6, 3, "YZ")]),
+    );
+}
+
+#[test]
+fn bootstrap_sidecar_rejects_state_from_another_moment_or_document() {
+    let source = package(ADJACENT_SOURCE);
+    let sender = EditingDoc::new(71);
+    seed_from_docx_with_generation(&sender, &source, "bootstrap").unwrap();
+    replace(&sender, 3, 6, "YZ");
+    let earlier = sender.encode_state_as_update_v1();
+    replace(&sender, 0, 3, "X");
+    let state = sender.encode_state_as_update_v1();
+    let sidecar = sender.encode_edit_provenance_for_transfer(&state, None);
+    assert!(!sidecar.is_empty());
+    assert!(sender.encode_edit_provenance_for_transfer(&earlier, None).is_empty());
+
+    let other = EditingDoc::new(71);
+    seed_from_docx_with_generation(&other, &source, "other").unwrap();
+    replace(&other, 3, 6, "YZ");
+    replace(&other, 0, 3, "X");
+    let foreign = other.encode_state_as_update_v1();
+    for (doc, state) in [(&sender, earlier), (&other, foreign)] {
+        let metadata = doc.encode_peer_metadata().unwrap();
+        let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar);
+        assert_eq!(part["changed"], json!([0]));
+        assert_eq!(part["paragraphPatches"], json!([]));
+        assert_eq!(part["legacyParagraphs"], json!([{
+            "ordinal": 0,
+            "code": "AMBIGUOUS_ALIGNMENT",
+            "detail": "ambiguous: unproven edit provenance",
+        }]));
+    }
 }

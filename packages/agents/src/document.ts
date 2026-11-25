@@ -571,6 +571,7 @@ export class DocxAgentDocument {
     if (options.tracked && options.date !== undefined && !Number.isFinite(Date.parse(options.date))) {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
+    const baseVersion = this.session.version();
     const draft = await this.fork();
     const release = cleanupGuard(() => draft.destroy());
     try {
@@ -578,9 +579,18 @@ export class DocxAgentDocument {
       const vector = draft.encodeStateVector();
       this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined);
       this.checkPending(held);
+      const update = draft.encodeStateAsUpdate(vector);
       this.session.addUndoBoundary();
-      try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
-      finally { this.session.addUndoBoundary(); }
+      try {
+        const sidecar = this.session.version() === baseVersion
+          ? draft.encodeEditProvenanceForTransfer?.(update, vector)
+          : undefined;
+        if (sidecar !== undefined && typeof this.session.applyLocalUpdateWithProvenance === 'function') {
+          this.session.applyLocalUpdateWithProvenance(update, sidecar);
+        } else {
+          this.session.applyLocalUpdate(update);
+        }
+      } finally { this.session.addUndoBoundary(); }
       held.value.status = 'accepted';
       return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
     } catch (error) { throw release.failed(error); } finally { release.run(); }
@@ -972,7 +982,13 @@ export class DocxAgentDocument {
       if (source) {
         const bytes = new Uint8Array(source);
         const host = draft.openDocx(bytes, false);
-        draft.bootstrapPeer(state, this.session.encodePeerMetadata(), bytes, host);
+        const metadata = this.session.encodePeerMetadata();
+        const sidecar = this.session.encodeEditProvenanceForTransfer?.(state);
+        if (sidecar !== undefined && typeof draft.bootstrapPeerWithProvenance === 'function') {
+          draft.bootstrapPeerWithProvenance(state, metadata, bytes, host, sidecar);
+        } else {
+          draft.bootstrapPeer(state, metadata, bytes, host);
+        }
       } else {
         draft.loadState(state);
       }

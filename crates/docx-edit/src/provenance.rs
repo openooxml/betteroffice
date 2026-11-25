@@ -141,7 +141,7 @@ struct Outgoing {
 #[derive(Serialize)]
 struct Sidecar<'a> {
     generation: &'a str,
-    base: &'a [u8],
+    base: Option<&'a [u8]>,
     digest: [u8; CHECKSUM_BYTES],
     state_digest: Option<[u8; CHECKSUM_BYTES]>,
     overflowed: bool,
@@ -152,7 +152,7 @@ struct Sidecar<'a> {
 #[serde(deny_unknown_fields)]
 struct Incoming {
     generation: String,
-    base: Vec<u8>,
+    base: Option<Vec<u8>>,
     digest: [u8; CHECKSUM_BYTES],
     state_digest: Option<[u8; CHECKSUM_BYTES]>,
     overflowed: bool,
@@ -1028,12 +1028,6 @@ impl EditingDoc {
     #[doc(hidden)]
     pub fn encode_edit_provenance(&self) -> Vec<u8> {
         let txn = self.doc.transact();
-        let Some(generation) = generation(&txn) else {
-            return Vec::new();
-        };
-        if generation.len() > OPENING_BYTES {
-            return Vec::new();
-        }
         let proof = self.provenance.lock().unwrap();
         let Some(outgoing) = proof
             .outgoing
@@ -1043,31 +1037,48 @@ impl EditingDoc {
             return Vec::new();
         };
         let base = StateVector::decode_v1(&outgoing.base).expect("encoded provenance base");
-        let encode = |entries: &BTreeMap<String, Option<Records>>, overflowed| {
-            let mut bytes = vec![VERSION];
-            let sidecar = Sidecar {
-                generation: &generation,
-                base: &outgoing.base,
-                digest: outgoing.digest,
-                state_digest: references_older_insertions(entries, &base)
-                    .then(|| state_digest(&txn)),
-                overflowed,
-                entries,
-            };
-            serde_json::to_writer(&mut bytes, &sidecar).expect("encode edit provenance");
-            let checksum = Sha256::digest(&bytes);
-            bytes.extend_from_slice(&checksum);
-            bytes
-        };
-        let bytes = encode(&proof.entries, proof.overflowed);
-        if bytes.len() <= OPENING_BYTES {
-            return bytes;
+        encode_sidecar(&txn, &proof, Some((&outgoing.base, &base)), outgoing.digest)
+    }
+
+    /// Encodes provenance bound to a diff or full bootstrap state.
+    #[doc(hidden)]
+    pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
+        let txn = self.doc.transact();
+        if txn.has_missing_updates() {
+            return Vec::new();
         }
-        let bytes = encode(&BTreeMap::new(), true);
-        if bytes.len() <= OPENING_BYTES {
-            bytes
-        } else {
-            Vec::new()
+        let digest = Sha256::digest(bytes).into();
+        let base = match base {
+            Some(base) if base.len() <= OPENING_BYTES => {
+                let Ok(vector) = StateVector::decode_v1(base) else {
+                    return Vec::new();
+                };
+                if crate::deterministic::encode_diff_v1(&txn, &vector).as_slice() != bytes {
+                    return Vec::new();
+                }
+                Some((base, vector))
+            }
+            Some(_) => return Vec::new(),
+            None if state_digest(&txn) == digest => None,
+            None => return Vec::new(),
+        };
+        let proof = self.provenance.lock().unwrap();
+        encode_sidecar(
+            &txn,
+            &proof,
+            base.as_ref().map(|(bytes, vector)| (*bytes, vector)),
+            digest,
+        )
+    }
+
+    pub(crate) fn install_bootstrap_provenance(&self, state: &[u8], sidecar: &[u8]) {
+        let txn = self.doc.transact();
+        let incoming = decode_sidecar(&txn, state, sidecar)
+            .filter(|incoming| incoming.base.is_none() && incoming.state_digest.is_none());
+        let mut proof = self.provenance.lock().unwrap();
+        match incoming {
+            Some(incoming) => proof.merge(incoming),
+            None => proof.overflow(),
         }
     }
 
@@ -1082,7 +1093,7 @@ impl EditingDoc {
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         let incoming = {
             let txn = self.doc.transact();
-            decode_sidecar(&txn, update, sidecar)
+            decode_update_sidecar(&txn, update, sidecar)
         };
         let mut watch = self.watch_provenance(WatchKind::All);
         let result = self.integrate_updates_inner(vec![decoded], UpdateOrigin::Local);
@@ -1107,7 +1118,60 @@ impl EditingDoc {
     }
 }
 
-fn decode_sidecar(txn: &impl ReadTxn, update: &[u8], sidecar: &[u8]) -> Option<Incoming> {
+fn encode_sidecar(
+    txn: &impl ReadTxn,
+    proof: &Provenance,
+    base: Option<(&[u8], &StateVector)>,
+    digest: [u8; CHECKSUM_BYTES],
+) -> Vec<u8> {
+    let Some(generation) = generation(txn).filter(|value| value.len() <= OPENING_BYTES) else {
+        return Vec::new();
+    };
+    if proof.generation.as_ref().is_some_and(|recorded| recorded != &generation) {
+        return Vec::new();
+    }
+    let encode = |entries: &BTreeMap<String, Option<Records>>, overflowed| {
+        let mut bytes = vec![VERSION];
+        let sidecar = Sidecar {
+            generation: &generation,
+            base: base.map(|(bytes, _)| bytes),
+            digest,
+            state_digest: base
+                .is_some_and(|(_, vector)| references_older_insertions(entries, vector))
+                .then(|| state_digest(txn)),
+            overflowed,
+            entries,
+        };
+        serde_json::to_writer(&mut bytes, &sidecar).expect("encode edit provenance");
+        let checksum = Sha256::digest(&bytes);
+        bytes.extend_from_slice(&checksum);
+        bytes
+    };
+    let bytes = encode(&proof.entries, proof.overflowed);
+    if bytes.len() <= OPENING_BYTES {
+        return bytes;
+    }
+    let bytes = encode(&BTreeMap::new(), true);
+    if bytes.len() <= OPENING_BYTES {
+        bytes
+    } else {
+        Vec::new()
+    }
+}
+
+fn decode_update_sidecar(txn: &impl ReadTxn, update: &[u8], sidecar: &[u8]) -> Option<Incoming> {
+    let incoming = decode_sidecar(txn, update, sidecar)?;
+    let base = StateVector::decode_v1(incoming.base.as_deref()?).ok()?;
+    if base != txn.state_vector()
+        || (incoming.state_digest.is_none()
+            && references_older_insertions(&incoming.entries, &base))
+    {
+        return None;
+    }
+    Some(incoming)
+}
+
+fn decode_sidecar(txn: &impl ReadTxn, bytes: &[u8], sidecar: &[u8]) -> Option<Incoming> {
     if sidecar.first() != Some(&VERSION) || sidecar.len() > OPENING_BYTES {
         return None;
     }
@@ -1116,10 +1180,8 @@ fn decode_sidecar(txn: &impl ReadTxn, update: &[u8], sidecar: &[u8]) -> Option<I
         return None;
     }
     let incoming: Incoming = serde_json::from_slice(&data[1..]).ok()?;
-    let base = StateVector::decode_v1(&incoming.base).ok()?;
     if generation(txn)?.as_str() != incoming.generation
-        || base != txn.state_vector()
-        || incoming.digest != <[u8; CHECKSUM_BYTES]>::from(Sha256::digest(update))
+        || incoming.digest != <[u8; CHECKSUM_BYTES]>::from(Sha256::digest(bytes))
         || txn.store().pending_update().is_some()
         || txn.store().pending_ds().is_some()
         || incoming.entries.iter().any(|(key, records)| {
@@ -1137,8 +1199,6 @@ fn decode_sidecar(txn: &impl ReadTxn, update: &[u8], sidecar: &[u8]) -> Option<I
                         })
                 })
         })
-        || (incoming.state_digest.is_none()
-            && references_older_insertions(&incoming.entries, &base))
     {
         return None;
     }
