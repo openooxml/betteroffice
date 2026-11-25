@@ -454,9 +454,7 @@ impl PendingSplice {
                     .into_iter()
                     .find(|bounds| bounds.start <= start && start <= bounds.pilcrow)
             });
-        let Some(mut bounds) = bounds else {
-            return None;
-        };
+        let mut bounds = bounds?;
         bounds.start = crate::ops::past_leading_blocks_indexed(story, txn, bounds.start, indexed);
         if !inheriting || end > bounds.pilcrow || start < bounds.start || end < start {
             let to = if end > bounds.pilcrow && inheriting {
