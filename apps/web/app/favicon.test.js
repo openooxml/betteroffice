@@ -14,7 +14,7 @@ test("favicon.ico holds 16, 32 and 48 px entries as 8-bit RGBA PNGs", () => {
     const png = ICO.subarray(offset, offset + ICO.readUInt32LE(dir + 8));
     expect(png.subarray(0, 8).toString("hex")).toBe(PNG_SIGNATURE);
     expect(png.subarray(12, 16).toString("ascii")).toBe("IHDR");
-    return { size: ICO[dir] || 256, width: png.readUInt32BE(16), height: png.readUInt32BE(20), depth: png[24], colorType: png[25] };
+    return { width: ICO[dir] || 256, height: ICO[dir + 1] || 256, pngWidth: png.readUInt32BE(16), pngHeight: png.readUInt32BE(20), depth: png[24], colorType: png[25] };
   });
-  expect(entries).toEqual([16, 32, 48].map((size) => ({ size, width: size, height: size, depth: 8, colorType: 6 })));
+  expect(entries).toEqual([16, 32, 48].map((size) => ({ width: size, height: size, pngWidth: size, pngHeight: size, depth: 8, colorType: 6 })));
 });
