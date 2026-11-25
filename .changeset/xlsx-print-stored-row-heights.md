@@ -1,6 +1,8 @@
 ---
-'@betteroffice/rust-crates': patch
 '@betteroffice/xlsx': patch
+'@betteroffice/xlsx-native': patch
+'@betteroffice/python-xlsx': patch
+'@betteroffice/rust-crates': patch
 ---
 
-Printed worksheets keep their stored row heights when the sheet's default row height is smaller than its font needs, so ranges that fit one page in Excel no longer spill onto the next.
+Printed sheets keep their stored row heights when the default row height is below the font's natural height, so they paginate closer to Excel.
