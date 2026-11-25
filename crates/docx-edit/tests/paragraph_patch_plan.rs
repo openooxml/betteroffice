@@ -2039,7 +2039,105 @@ fn repeated_text_alignment_is_legacy() {
 }
 
 #[test]
-fn ambiguous_replacements_across_unmodeled_source_run_properties_are_legacy() {
+fn a_deletion_beside_a_shared_prefix_with_other_formatting_is_legacy() {
+    let doc = open(concat!(
+        "<w:r><w:rPr><w:i/><w:noProof/></w:rPr><w:t>a</w:t></w:r><w:r><w:t>a</w:t></w:r>",
+        "<w:r><w:t xml:space=\"preserve\"> and </w:t></w:r><w:r><w:t>xx</w:t></w:r>",
+    ));
+    replace(&doc, 7, 9, "yy");
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+}
+
+#[test]
+fn a_whole_run_anchor_beside_a_deleted_tail_is_legacy() {
+    let doc = open(concat!(
+        "<w:r><w:t>qp</w:t></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>BBBB</w:t></w:r>",
+        "<w:r><w:rPr><w:bCs/></w:rPr><w:t>MMMyy</w:t></w:r>",
+    ));
+    replace(&doc, 9, 11, "wyBBBB");
+    replace(&doc, 2, 6, "z");
+    replace(&doc, 0, 1, "r");
+    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+}
+
+#[test]
+fn one_replacement_across_a_one_character_run_is_legacy() {
+    let doc = open(concat!(
+        "<w:r><w:t>aaaa</w:t></w:r><w:r><w:t>-</w:t></w:r>",
+        "<w:r><w:rPr><w:b/><w:noProof/></w:rPr><w:t>bbbb</w:t></w:r>",
+    ));
+    replace(&doc, 0, 9, "a-x");
+    assert_legacy(&doc, PatchErrorCode::AmbiguousAlignment, "ambiguous:");
+}
+
+#[test]
+fn one_replacement_over_runs_with_unmodelled_properties_keeps_no_middle_donor() {
+    let content = concat!(
+        r#"<w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t>pq</w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:noProof/></w:rPr><w:t>MM</w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:bCs/></w:rPr><w:t>rs</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    replace(&doc, 0, 6, "r1s2MM34");
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    if part.legacy_paragraphs.is_empty() {
+        let (saved, _) = save_paragraph(&doc, content, |_| {});
+        assert!(!saved.contains("<w:noProof/>"), "{saved}");
+        assert!(!saved.contains("<w:bCs/>"), "{saved}");
+    }
+}
+
+#[test]
+fn a_shared_edge_across_unmodelled_properties_keeps_the_untouched_run() {
+    let untouched = r#"<w:r><w:t xml:space="preserve"> and </w:t></w:r>"#;
+    let content = format!(
+        "{}{}{untouched}{}",
+        r#"<w:r><w:rPr><w:bdr w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:rPr><w:t>a</w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:lang w:val="fr-FR"/></w:rPr><w:t>ax</w:t></w:r>"#,
+        "<w:r><w:t>pp</w:t></w:r>",
+    );
+    let doc = open(&content);
+    replace(&doc, 8, 10, "qq");
+    replace(&doc, 2, 3, "y");
+    doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    if part.legacy_paragraphs.is_empty() {
+        let (saved, _) = save_paragraph(&doc, &content, |_| {});
+        assert!(saved.contains(untouched), "{saved}");
+        assert!(!saved.contains("<w:bdr "), "{saved}");
+        assert!(
+            saved.contains(r#"<w:lang w:val="fr-FR"/></w:rPr><w:t>ay</w:t>"#),
+            "{saved}"
+        );
+    }
+}
+
+#[test]
+fn an_anchor_inside_a_replaced_run_is_legacy() {
+    let doc = open(concat!(
+        "<w:r><w:t>xxAAA</w:t></w:r><w:r><w:t>!</w:t></w:r>",
+        "<w:r><w:rPr><w:noProof/></w:rPr><w:t>y</w:t></w:r>",
+    ));
+    replace(&doc, 6, 7, "wAAAv");
+    replace(&doc, 0, 5, "xz");
+    assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+}
+
+#[test]
+fn replacements_in_runs_with_unmodeled_source_properties_patch_each_run() {
     for properties in [
         [
             r#"<w:lang w:val="fr-FR"/>"#,
@@ -2064,8 +2162,166 @@ fn ambiguous_replacements_across_unmodeled_source_run_properties_are_legacy() {
         let doc = open(&content);
         replace(&doc, 0, 1, "A");
         replace(&doc, 11, 12, "C");
-        assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+        let edits: Vec<_> = patch(&doc)
+            .text_edits
+            .iter()
+            .map(|edit| (edit.from, edit.to))
+            .collect();
+        assert_eq!(edits, [(0, 1), (11, 12)]);
+        let (saved, _) = save_paragraph(&doc, &content, |_| {});
+        let expected = content
+            .replacen("<w:t>aaaa</w:t>", "<w:t>Aaaa</w:t>", 1)
+            .replacen("<w:t>cccc</w:t>", "<w:t>cccC</w:t>", 1);
+        assert!(saved.contains(&format!("{expected}</w:p>")), "{saved}");
     }
+}
+
+#[test]
+fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
+    const SEED: u64 = 0x95c4_7e10_aa2b_631d;
+    const CASES: usize = 300;
+    let mut state = SEED;
+    let random = |state: &mut u64, upper: usize| {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as usize % upper
+    };
+    let random_text = |state: &mut u64| -> String {
+        let alphabet = b"ab -";
+        (0..1 + random(state, 6))
+            .map(|_| char::from(alphabet[random(state, alphabet.len())]))
+            .collect()
+    };
+    let properties = [
+        "",
+        "<w:rPr><w:i/></w:rPr>",
+        "<w:rPr><w:b/></w:rPr>",
+        "<w:rPr><w:noProof/></w:rPr>",
+        "<w:rPr><w:i/><w:noProof/></w:rPr>",
+    ];
+    let mut completed = 0;
+    let mut minimal = 0;
+    'cases: for case in 0..CASES {
+        let run_count = 3 + random(&mut state, 5);
+        let mut original = String::new();
+        let runs: Vec<_> = (0..run_count)
+            .map(|index| {
+                let value = random_text(&mut state);
+                let rpr = properties[random(&mut state, properties.len())];
+                let xml = format!(
+                    r#"<w:r w:rsidR="{index:08X}">{rpr}<w:t xml:space="preserve">{value}</w:t></w:r>"#
+                );
+                let start = original.len();
+                original.push_str(&value);
+                (start..original.len(), xml)
+            })
+            .collect();
+        let content: String = runs.iter().map(|(_, xml)| xml.as_str()).collect();
+        let (edits, expected) = loop {
+            let count = 2 + random(&mut state, (run_count - 2).min(2));
+            let mut touched: Vec<_> = (0..run_count).collect();
+            for index in 0..count {
+                let chosen = index + random(&mut state, run_count - index);
+                touched.swap(index, chosen);
+            }
+            touched.truncate(count);
+            touched.sort_unstable();
+            let mut edits = Vec::new();
+            for index in touched {
+                let run = &runs[index].0;
+                let start = run.start + random(&mut state, run.len());
+                let end = start + 1 + random(&mut state, run.end - start);
+                let span = start..end;
+                let mut value = random_text(&mut state);
+                while value == original[span.clone()] {
+                    value = random_text(&mut state);
+                }
+                edits.push((index, span, value));
+            }
+            if edits
+                .windows(2)
+                .any(|pair| pair[0].1.end >= pair[1].1.start)
+            {
+                continue;
+            }
+            let mut expected = original.clone();
+            for (_, span, value) in edits.iter().rev() {
+                expected.replace_range(span.clone(), value);
+            }
+            if expected != original {
+                break (edits, expected);
+            }
+        };
+
+        let case_info = format!("seed {SEED:#x}, case {case}, edits {edits:?}\n{content}");
+        let doc = open(&content);
+        for (_, span, value) in edits.iter().rev() {
+            if doc
+                .replace_range(
+                    &ctx(),
+                    StoryRange::new("body", span.start as u32, span.end as u32),
+                    value,
+                )
+                .is_err()
+            {
+                continue 'cases;
+            }
+        }
+        completed += 1;
+
+        let plan = doc.paragraph_save_plan();
+        let part = plan
+            .spliced_parts
+            .iter()
+            .find(|part| part.part == "word/document.xml")
+            .unwrap_or_else(|| panic!("missing document save plan\n{case_info}"));
+        assert_eq!(part.changed, [0], "{case_info}");
+        if let [legacy] = part.legacy_paragraphs.as_slice() {
+            assert_eq!(legacy.ordinal, 0, "{case_info}");
+            assert!(part.paragraph_patches.is_empty(), "{case_info}");
+            continue;
+        }
+        assert!(part.legacy_paragraphs.is_empty(), "{case_info}");
+        assert!(
+            matches!(part.paragraph_patches.as_slice(), [patch] if patch.ordinal == 0),
+            "missing paragraph patch\n{case_info}"
+        );
+        minimal += 1;
+
+        let (saved, _) = save_paragraph(&doc, &content, |_| {});
+        for (index, (_, xml)) in runs.iter().enumerate() {
+            if edits.iter().all(|(touched, _, _)| *touched != index) {
+                assert!(
+                    saved.contains(xml.as_str()),
+                    "untouched run {index} changed\n{case_info}\nsaved: {saved}"
+                );
+            }
+        }
+        let limits = docx_parse::ParseLimits::default();
+        let xml = docx_parse::parse_xml(
+            saved.as_bytes(),
+            "word/document.xml",
+            &mut docx_parse::ParseBudget::new(&limits),
+        )
+        .unwrap_or_else(|error| panic!("cannot parse saved XML: {error:?}\n{case_info}"));
+        let paragraph = xml
+            .root()
+            .and_then(|root| root.child("w", "body"))
+            .and_then(|body| body.child("w", "p"))
+            .unwrap_or_else(|| panic!("missing saved paragraph\n{case_info}"));
+        let saved_text: String = paragraph
+            .children_named("w", "r")
+            .flat_map(|run| run.children_named("w", "t"))
+            .map(|text| text.text_content())
+            .collect();
+        assert_eq!(saved_text, expected, "{case_info}");
+    }
+    assert!(
+        completed > CASES / 2,
+        "seed {SEED:#x}, completed {completed}/{CASES}"
+    );
+    assert!(minimal > 0, "seed {SEED:#x}, no minimal patches");
 }
 
 #[test]
@@ -2079,9 +2335,12 @@ fn ambiguous_replacements_keep_identical_source_run_properties() {
     replace(&doc, 0, 1, "A");
     replace(&doc, 11, 12, "C");
     let patch = patch(&doc);
-    assert_eq!(patch.text_edits.len(), 1);
-    assert_eq!((patch.text_edits[0].from, patch.text_edits[0].to), (0, 12));
-    assert_eq!(patch.text_edits[0].insert[0].text, "AaaabbbbcccC");
+    let edits: Vec<_> = patch
+        .text_edits
+        .iter()
+        .map(|edit| (edit.from, edit.to, edit.insert[0].text.as_str()))
+        .collect();
+    assert_eq!(edits, [(0, 1, "A"), (11, 12, "C")]);
 }
 
 #[test]
