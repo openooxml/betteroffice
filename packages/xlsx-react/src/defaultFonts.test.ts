@@ -56,19 +56,26 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
     file: `${family}-${bold}-${italic}.ttf.zst`, byteLength: family === 'Noto Sans JP' ? 12 : 4,
   });
   const metric = mock((family: string, bold: boolean, italic: boolean) =>
-    family === 'Calibri' ? face('Carlito', bold, italic) : family === 'MS Gothic' ? face('Noto Sans JP', bold, italic) : undefined);
+    family === 'Calibri' ? face('Carlito', bold, italic) : family === 'Arial' ? face('Liberation Sans', bold, italic)
+      : family === 'MS Gothic' ? face('Noto Sans JP', bold, italic) : undefined);
   const bundled = mock((family: string, bold: boolean, italic: boolean) =>
     family === 'Carlito' || family === 'Noto Sans Thai' ? face(family, bold, italic) : undefined);
+  const scriptLoads = mock(bytes);
   const create = mock((_options?: unknown, runtime?: { decoder?: FontDecoder }) => {
-    const resolve = (resolveFace: typeof metric) => (family: string, bold: boolean, italic: boolean) => {
-      const resolved = resolveFace(family, bold, italic);
+    const load = (resolved: BundledFontFace | undefined, fetch: typeof bytes) => {
       return resolved ? async () => {
         const decoded = await runtime!.decoder!(new Uint8Array([1]), { codec: 'zstd' });
         expect(new Uint8Array(decoded.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
-        return bytes(resolved);
+        return fetch(resolved);
       } : undefined;
     };
-    return { resolve: resolve(metric), resolveFamily: resolve(bundled) };
+    const resolve = (resolveFace: typeof metric) => (family: string, bold: boolean, italic: boolean) =>
+      load(resolveFace(family, bold, italic), bytes);
+    return {
+      resolve: resolve(metric), resolveFamily: resolve(bundled),
+      resolveScriptFallback: (...args: Parameters<typeof fonts.resolveScriptFallbackFace>) =>
+        load(fonts.resolveScriptFallbackFace(...args), scriptLoads),
+    };
   });
   const module = {
     resolveMetricCompatFace: metric, resolveBundledFamilyFace: bundled,
@@ -92,7 +99,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
   const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
   restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
-  return { imported, create, metric, bundled, module, remoteImported, remoteLoads, remoteGate };
+  return { imported, create, metric, bundled, scriptLoads, module, remoteImported, remoteLoads, remoteGate };
 }
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
@@ -123,6 +130,31 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
   expect(repaint).toHaveBeenCalledTimes(1);
   fonts.dispose();
   expect(added).toHaveLength(2);
+});
+
+test('requests pack faces when Arabic and Devanagari cells come into view after a Latin-only frame', async () => {
+  const { added } = browser();
+  const { scriptLoads } = provider();
+  const repaint = mock(() => {});
+  const painter = createDefaultFontPainter(decoder(), repaint);
+  const cells = (...texts: string[]): DisplayList => ({ width: 200, height: 100, commands: texts.map<TextCmd>((text) => ({
+    op: 'text', x: 0, y: 0, text, color: '#000000', fontSize: 12, fontFamily: 'Arial',
+  })) });
+  try {
+    await painter.load(cells('Résumé'));
+    expect(scriptLoads).not.toHaveBeenCalled();
+    expect(added.map(({ family }) => family)).toEqual(['Arial']);
+
+    const frame = cells('مرحبا', 'नमस्ते', 'مرحبا');
+    const loading = painter.load(frame);
+    const ready = painter.paint(frame, () => {});
+    await loading;
+    expect(scriptLoads.mock.calls.map(([face]) => face.family).sort()).toEqual(['Noto Sans Arabic', 'Noto Sans Devanagari']);
+    expect(added.map(({ family }) => family).sort()).toEqual(['Arial', 'Noto Sans Arabic', 'Noto Sans Devanagari']);
+    expect(ready).toBe(false);
+    expect(painter.paint(frame, () => {})).toBe(true);
+    expect(repaint).toHaveBeenCalledTimes(2);
+  } finally { painter.dispose(); }
 });
 
 test('preloading a frame that is not painted registers its faces without repainting, and its later paint is settled', async () => {
