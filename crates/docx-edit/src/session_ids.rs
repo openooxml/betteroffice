@@ -304,6 +304,48 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_never_reissues_an_id_that_was_live_after_the_cap() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740991".into()));
+        }
+        let ids = SessionIds::new(41);
+        assert_eq!(ids.draw(&doc.transact()), "41:0");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:2", Any::String("later".into()));
+        }
+        assert_eq!(ids.draw(&doc.transact()), "41:1");
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:2");
+        }
+        assert_eq!(ids.draw(&doc.transact()), "41:3");
+    }
+
+    #[test]
+    fn reaching_the_cap_by_drawing_keeps_ids_the_floor_saw() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:1", Any::String("old".into()));
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740990".into()));
+        }
+        let ids = SessionIds::new(41);
+        assert_eq!(ids.draw(&doc.transact()), "41:9007199254740991");
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:1");
+        }
+        let txn = doc.transact();
+        let later = [ids.draw(&txn), ids.draw(&txn)];
+        assert!(!later.contains(&"41:1".to_owned()), "{later:?}");
+    }
+
+    #[test]
     fn the_counter_never_wraps() {
         let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
         let ids = SessionIds::new(41);
