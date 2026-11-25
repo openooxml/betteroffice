@@ -980,7 +980,10 @@ describe('release wiring', () => {
     }
 
     function canPublish(job: any) {
-      return hasWritePermission(job.permissions ?? release.permissions) || hasPublishingStep(job);
+      const permissions = job.permissions ?? release.permissions;
+      const callsOtherWorkflow =
+        job.uses !== undefined && !distFiles.map((file) => `./.github/workflows/${file}`).includes(job.uses);
+      return permissions === undefined || hasWritePermission(permissions) || callsOtherWorkflow || hasPublishingStep(job);
     }
 
     function requiresRelease(id: string, visited = new Set<string>()): boolean {
@@ -1013,7 +1016,9 @@ describe('release wiring', () => {
       }
     }
 
-    for (const id of ['plan', 'test', 'native-build', 'native-build-retry', 'python-build', 'python-build-retry']) {
+    const gates = Object.keys(release.jobs).filter((id) => !publishing.includes(id) && !requiresRelease(id)).sort();
+    expect(gates).toEqual(['native-build', 'native-build-retry', 'plan', 'python-build', 'python-build-retry', 'test']);
+    for (const id of gates) {
       const job = release.jobs[id];
       const permissions = job.permissions;
       expect(permissions !== null && typeof permissions === 'object' && !Array.isArray(permissions), id).toBe(true);

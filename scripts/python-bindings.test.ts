@@ -567,7 +567,9 @@ globalThis.fetch = async (url) => {
     );
     const loadArtifacts = load.strategy.matrix.platform.map((platform: any) => platform.artifact);
     expect(loadArtifacts.sort()).toEqual(wheelArtifacts.sort());
-    const [, python, download, install, pytest] = load.steps;
+    const [lineEndings, checkout, python, download, install, pytest] = load.steps;
+    expect(lineEndings.run).toBe('git config --global core.autocrlf false');
+    expect(checkout.uses).toBe('actions/checkout@v7.0.1');
     expect(python.uses).toBe('actions/setup-python@v7.1.0');
     expect(python.with['python-version']).toBe('3.13');
     expect(download.uses).toBe('actions/download-artifact@v8');
@@ -579,7 +581,7 @@ globalThis.fetch = async (url) => {
     expect(pytest.if).toBeUndefined();
     expect(pytest['continue-on-error']).toBeUndefined();
     expect(pytest['working-directory']).toBe('${{ runner.temp }}');
-    expect(pytest.env.BINDING).toBe('${{ inputs.binding }}');
+    expect(pytest.env).toEqual({ BINDING: '${{ inputs.binding }}', PYTHONUTF8: '1' });
     expect(pytest.run).toBe('python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"');
     expect(dist.jobs.built.if).toContain("needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.load.result == 'success'");
   });

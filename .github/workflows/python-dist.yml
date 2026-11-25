@@ -86,6 +86,9 @@ jobs:
           - os: windows-latest
             artifact: windows-latest.x64
     steps:
+      - name: Keep the committed line endings
+        run: git config --global core.autocrlf false
+
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.sha }}
@@ -109,6 +112,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           BINDING: ${{ inputs.binding }}
+          PYTHONUTF8: "1"
         run: python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"
 
   sdist:
