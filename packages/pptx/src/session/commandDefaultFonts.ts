@@ -29,7 +29,12 @@ export const commandFontProvider = {
   async load(...configuration: [fontCdn?: FontCdnConfiguration]) {
     if (configuration.length) setFontCdnConfiguration(configuration[0]);
     const fonts = await importFonts();
-    return fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: 'except-optional-cdn-failure' });
+    const source = fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: 'except-optional-cdn-failure' });
+    let coverage: typeof source | undefined;
+    return { ...source, resolveScriptFallback(...args: Parameters<typeof source.resolveScriptFallback>) {
+      coverage ??= fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: true });
+      return coverage.resolveScriptFallback(...args);
+    } };
   },
 };
 
@@ -72,6 +77,7 @@ export function createCommandDefaultFonts(
   const pending = new Map<string, Promise<DefaultFontFace | undefined>>();
   const installations = new Map<string, Promise<boolean>>();
   const registered = new Set<string>();
+  const reportedCdnFailures = new WeakSet<Error>();
   let provider: ReturnType<typeof commandFontProvider.load> | undefined;
   let disposed = false;
   let prepared = false;
@@ -174,11 +180,23 @@ export function createCommandDefaultFonts(
             if (isImplicitFontCdnError(error) && error.diagnostic.pack === 'latin') throw error;
           }
         }
-        const bytes = await load().catch((error: unknown) => {
-          if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+        const bytes = await load().catch(async (error: unknown) => {
+          const implicit = isImplicitFontCdnError(error);
+          if (implicit && (face.kind !== 'coverage' || !reportedCdnFailures.has(error))) {
+            reportedCdnFailures.add(error);
+            reportImplicitCdnFailure(error);
+          }
+          if (face.kind === 'coverage') {
+            const status = ((implicit ? error.cause : error) as { status?: number } | null)?.status;
+            if (status === 403 || status === 404 || status === 410 ||
+              (!implicit && (await importFonts()).isMissingFontAddon(error))) {
+              available = false;
+              return undefined;
+            }
+          }
           throw error;
         });
-        if (disposed || suppliedFamily(face)) return undefined;
+        if (!bytes || disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily)
           : { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
@@ -202,7 +220,10 @@ export function createCommandDefaultFonts(
       }, (error: unknown) => {
         pending.delete(id);
         if (isImplicitFontCdnError(error)) {
-          if (previousAttempts === undefined) {
+          if (face.kind === 'coverage') {
+            attempts.set(id, previousAttempts ?? 0);
+            retryAt.set(id, error.retryAt ?? Date.now() + DEFAULT_FONT_RETRY_DELAYS_MS[0]);
+          } else if (previousAttempts === undefined) {
             attempted.delete(id);
             attempts.delete(id);
           } else {
