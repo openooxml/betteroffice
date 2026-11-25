@@ -1,6 +1,6 @@
 import { beforeAll, expect, test } from "bun:test";
 import { initEngines } from "../replica/engines";
-import { openTestClient, sourceBytes } from "../../test/replica/clients";
+import { openFreshClient, openTestClient, sourceBytes } from "../../test/replica/clients";
 import { addToken, makeHarness, SRC } from "../../test/session/harness";
 
 beforeAll(async () => {
@@ -52,7 +52,16 @@ async function run(stripInfoVersion: boolean, seed: number) {
     plainPuts: h.putCount(),
     relativePuts: h.callsFor("PUT_RELATIVE").length,
     externalInFile: Buffer.from(h.host.files.get("file1")!.bytes).equals(Buffer.from(external!)),
+    copyHasFirstEdit: false,
+    copyHasSecondEdit: false,
   };
+  const copies = [...h.host.files.entries()].filter(([id]) => id !== "file1").map(([, file]) => file.bytes);
+  if (copies.length === 1) {
+    const copy = await openFreshClient("xlsx", copies[0]!, seed + 100);
+    outcome.copyHasFirstEdit = copy.contains("first-edit");
+    outcome.copyHasSecondEdit = copy.contains("second-edit");
+    copy.destroy();
+  }
   console.log("same-length outcome", JSON.stringify({ stripInfoVersion, ...outcome }));
   return outcome;
 }
@@ -63,5 +72,7 @@ for (const stripInfoVersion of [false, true]) {
     expect(outcome.externalInFile).toBe(true);
     expect(outcome.firstSaved).toBe(true);
     expect(outcome.relativePuts).toBe(1);
+    expect(outcome.copyHasFirstEdit).toBe(true);
+    expect(outcome.copyHasSecondEdit).toBe(false);
   });
 }

@@ -1141,7 +1141,8 @@ export class FileSession {
   async #readBackMatches(user: UserSession, bytes: Uint8Array): Promise<boolean> {
     try {
       const stored = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: user.accessToken });
-      return Buffer.from(stored).equals(Buffer.from(bytes));
+      const view = (data: Uint8Array) => Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+      return view(stored).equals(view(bytes));
     } catch {
       return false;
     }
