@@ -7,6 +7,7 @@ import { engineKind } from '../wasm/engine';
 import { initWasm } from '../wasm/loader';
 import { openPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
+import { commandMetafileSvgModule } from './metafileSvg';
 
 async function deckWithMetafile(): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -85,6 +86,41 @@ test.skipIf(engineKind === 'native')('the first session frame resolves with a pe
     try {
       await client?.dispose();
     } finally {
+      fetchSpy.mockRestore();
+    }
+  }
+}, 10_000);
+
+test.skipIf(engineKind === 'native')('a session frame carries SVG after the converter fetch outlasts the first frame cap', async () => {
+  await initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_lean_bg.wasm', import.meta.url)));
+  const bytes = await deckWithMetafile();
+  const converterUrl = metafileWasmAssetUrl();
+  const converterWasm = new Uint8Array(await readFile(converterUrl));
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    if (String(input instanceof Request ? input.url : input) !== converterUrl.href) return originalFetch(input, init);
+    attempts++;
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    return new Response(converterWasm, { headers: { 'Content-Type': 'application/wasm' } });
+  });
+  const load = spyOn(commandMetafileSvgModule, 'load');
+
+  let client: PresentationSession | undefined;
+  try {
+    client = await openPresentationSession(bytes, { worker: sessionWorker });
+    const assetId = 'ppt/media/picture.emf';
+    const first = await client.call.frame(0);
+    expect(first.media.get(assetId)).toHaveLength(0);
+    await load.mock.results[0]!.value;
+    const later = await client.call.frame(0);
+    expect(new TextDecoder().decode(later.media.get(assetId)?.subarray(0, 256))).toMatch(/^\s*<svg[\s>]/);
+    expect(attempts).toBe(1);
+  } finally {
+    try {
+      await client?.dispose();
+    } finally {
+      load.mockRestore();
       fetchSpy.mockRestore();
     }
   }

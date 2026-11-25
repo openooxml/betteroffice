@@ -112,7 +112,10 @@ wasmTest('openPresentationSession frames await lazy SVG media on the lean core',
   expect(load).toHaveBeenCalledTimes(1);
 });
 
-wasmTest('openPresentationSession retries a failed converter load on the next frame', async () => {
+wasmTest('openPresentationSession retries a failed converter load on the next frame after backoff', async () => {
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  restorers.push(() => clock.mockRestore());
   let attempts = 0;
   const load = loader(async () => {
     if (++attempts === 1) throw new Error('unavailable');
@@ -122,18 +125,19 @@ wasmTest('openPresentationSession retries a failed converter load on the next fr
   clients.push(client);
   expect((await client.call.frame(0)).media.get('ppt/media/picture.emf')).toHaveLength(0);
   expect(load).toHaveBeenCalledTimes(1);
+  now += 5_000;
   expect((await client.call.frame(0)).media.get('ppt/media/picture.emf')).toEqual(svg);
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-wasmTest('openPresentationSession holds a frame until a slow converter load settles', async () => {
+wasmTest('openPresentationSession holds a frame for a converter load that settles before the cap', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
   const client = await openPresentationSession(await deck(1), { worker: sessionWorker });
   clients.push(client);
   let settled = false;
   const framing = client.call.frame(0).then((frame) => { settled = true; return frame; });
-  await new Promise((resolve) => setTimeout(resolve, 3500));
+  await new Promise((resolve) => setTimeout(resolve, 10));
   expect(settled).toBe(false);
   pending.resolve(svgModule());
   expect((await framing).media.get('ppt/media/picture.emf')).toEqual(svg);
@@ -287,7 +291,10 @@ wasmTest('disposal during a converter load sends no later messages', async () =>
   expect(wire.messages).toHaveLength(count);
 });
 
-wasmTest('a failed opening load retries after the first frame and repaints', async () => {
+wasmTest('a failed opening load retries after backoff and repaints', async () => {
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  restorers.push(() => clock.mockRestore());
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   let attempts = 0;
@@ -300,6 +307,8 @@ wasmTest('a failed opening load retries after the first frame and repaints', asy
   const client = await createPresentationCommandClient(await deck(1), options, wire.transport);
   clients.push(client);
   expect(client.state.frame?.media[0]?.bytes.byteLength).toBe(0);
+  now += 5_000;
+  expect((await client.thumbnail(client.state.slides[0]!.id)).status).toBe('frame');
   await requested.promise;
   const repainted = deferred<void>();
   client.subscribe(() => repainted.resolve());

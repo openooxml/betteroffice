@@ -24,18 +24,23 @@ test('start shares a load and conversion is unavailable until ready', async () =
   expect(load).toHaveBeenCalledTimes(1);
 });
 
-test('a failed start is retryable', async () => {
-  let attempts = 0;
-  const load = mock(async () => {
-    if (++attempts === 1) throw new Error('unavailable');
-    return moduleFor(() => bytes);
-  });
-  const converter = createMetafileSvg(load);
+test('failed starts back off and stop after four attempts', async () => {
+  let now = 0;
+  const load = mock(async () => { throw new Error('unavailable'); });
+  const converter = createMetafileSvg(load, () => now);
+  await expect(converter.start()).rejects.toThrow('unavailable');
+  for (const [index, delay] of [5_000, 30_000, 120_000].entries()) {
+    now += delay - 1;
+    await expect(converter.start()).rejects.toThrow('unavailable');
+    expect(load).toHaveBeenCalledTimes(index + 1);
+    now += 1;
+    await expect(converter.start()).rejects.toThrow('unavailable');
+    expect(load).toHaveBeenCalledTimes(index + 2);
+  }
+  now += 120_001;
   await expect(converter.start()).rejects.toThrow('unavailable');
   expect(converter.ready()).toBe(false);
-  await converter.start();
-  expect(converter.ready()).toBe(true);
-  expect(load).toHaveBeenCalledTimes(2);
+  expect(load).toHaveBeenCalledTimes(4);
 });
 
 test('cache identity includes source length and content, even for reused buffers', async () => {

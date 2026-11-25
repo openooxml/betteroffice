@@ -75,3 +75,56 @@ test.skipIf(engineKind === 'native')('command frames bound retries when the meta
     }
   }
 }, 10_000);
+
+test.skipIf(engineKind === 'native')('a command frame retries the converter after backoff and repaints with SVG', async () => {
+  await initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_lean_bg.wasm', import.meta.url)));
+  const bytes = await deckWithMetafile();
+  const converterUrl = metafileWasmAssetUrl();
+  const converterWasm = new Uint8Array(await readFile(converterUrl));
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  const fetchSpy = spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    if (String(input instanceof Request ? input.url : input) !== converterUrl.href) return originalFetch(input, init);
+    if (++attempts === 1) return new Response(null, { status: 404 });
+    return new Response(converterWasm, { headers: { 'Content-Type': 'application/wasm' } });
+  });
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  const pair = createInProcessPair();
+
+  let client: PresentationCommandClient | undefined;
+  try {
+    createPresentationSessionHost(pair.host, { initWasm: async () => {} });
+    client = await createPresentationCommandClient(bytes, {
+      session: 'metafile-retry', incarnation: 'metafile-retry-worker', defaultFonts: false,
+    }, pair.client);
+    const first = client.state.frame!;
+    const assetId = 'ppt/media/picture.emf';
+    expect(first.media.find((asset) => asset.assetId === assetId)?.bytes.byteLength).toBe(0);
+    const slideId = client.state.slides[0]!.id;
+    for (let request = 0; request < 50; request++) {
+      expect((await client.thumbnail(slideId)).status).toBe('frame');
+    }
+    expect(attempts).toBe(1);
+
+    const repainted = new Promise<void>((resolve) => {
+      client!.subscribe((ack) => {
+        if (ack.frame && ack.frame.slideRevision > first.slideRevision) resolve();
+      });
+    });
+    now += 5_001;
+    expect((await client.thumbnail(slideId)).status).toBe('frame');
+    await repainted;
+    expect(attempts).toBe(2);
+    const picture = client.state.frame?.media.find((asset) => asset.assetId === assetId);
+    expect(new TextDecoder().decode(picture?.bytes.slice(0, 256))).toMatch(/^\s*<svg[\s>]/);
+  } finally {
+    try {
+      await client?.dispose();
+    } finally {
+      pair.client.close();
+      clock.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  }
+}, 10_000);

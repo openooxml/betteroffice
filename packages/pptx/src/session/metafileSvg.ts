@@ -3,6 +3,7 @@ import { metafileWasmAssetUrl } from '../wasm/asset';
 import { metafileSvgBindings } from '../wasm/engine';
 
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024;
+const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
 
 export interface MetafileSvgModule {
   MetafileConverter: new () => {
@@ -27,15 +28,22 @@ function contentKey(assetId: string, bytes: Uint8Array): string {
   return JSON.stringify([assetId, bytes.byteLength, hash]);
 }
 
-export function createMetafileSvg(load: MetafileSvgModuleLoader = () => commandMetafileSvgModule.load()) {
+export function createMetafileSvg(
+  load: MetafileSvgModuleLoader = () => commandMetafileSvgModule.load(),
+  now: () => number = Date.now,
+) {
   let converter: InstanceType<MetafileSvgModule['MetafileConverter']> | undefined;
   let loading: Promise<void> | undefined;
+  let attempts = 0;
+  let retryAt: number | undefined;
   const cache = new Map<string, Uint8Array | undefined>();
   return {
     start(): Promise<void> {
-      if (loading) return loading;
+      if (loading && (retryAt === undefined || now() < retryAt)) return loading;
+      const delay = RETRY_DELAYS_MS[attempts++];
+      retryAt = undefined;
       loading = Promise.resolve().then(load).then((loaded) => { converter = new loaded.MetafileConverter(); }).catch((error) => {
-        loading = undefined;
+        if (delay !== undefined) retryAt = now() + delay;
         throw error;
       });
       return loading;

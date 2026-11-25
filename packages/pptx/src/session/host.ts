@@ -84,11 +84,25 @@ export function createPresentationSessionHost(
     start: async () => {}, ready: () => true,
     convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
   } : createMetafileSvg();
+  let metafileLoad: { promise: Promise<void>; wait: Promise<void> } | undefined;
+  let endMetafileWait: (() => void) | undefined;
 
-  async function loadMetafiles(): Promise<void> {
-    try {
-      await metafiles.start();
-    } catch {}
+  function loadMetafiles(): Promise<void> {
+    const promise = metafiles.start();
+    if (metafileLoad?.promise === promise) return metafileLoad.wait;
+    const wait = new Promise<void>((resolve) => {
+      const finish = () => {
+        if (endMetafileWait !== finish) return;
+        endMetafileWait = undefined;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(finish, 3_000);
+      endMetafileWait = finish;
+      void promise.then(finish, finish);
+    });
+    metafileLoad = { promise, wait };
+    return wait;
   }
 
   function presentation(): PresentationHandle | PresentationPeerHandle {
@@ -132,6 +146,8 @@ export function createPresentationSessionHost(
 
   function dispose(): void {
     disposed = true;
+    endMetafileWait?.();
+    metafileLoad = undefined;
     const opened = handle;
     handle = undefined;
     sentMedia.clear();
