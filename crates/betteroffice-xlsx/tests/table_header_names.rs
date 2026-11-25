@@ -1386,9 +1386,7 @@ fn a_header_rename_preserves_other_workbook_and_table_selectors() {
         &source,
         "xl/worksheets/sheet1.xml",
         r#"<c r="F2"><v>10</v></c></row>"#,
-        &format!(
-            r#"<c r="F2"><v>10</v></c><c r="H2"><f>{local_refs}</f><v>1</v></c></row>"#
-        ),
+        &format!(r#"<c r="F2"><v>10</v></c><c r="H2"><f>{local_refs}</f><v>1</v></c></row>"#),
     );
     let mut workbook = Workbook::open(&source).unwrap();
     edit(&mut workbook, "B1", "State");
