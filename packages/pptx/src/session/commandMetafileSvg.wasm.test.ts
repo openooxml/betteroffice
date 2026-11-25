@@ -319,6 +319,34 @@ wasmTest('a failed opening load retries after backoff and repaints', async () =>
   expect(new Uint8Array(client.state.frame!.media[0]!.bytes)).toEqual(svg);
 });
 
+wasmTest('failed opening loads wake up after each backoff delay and stop after four attempts', async () => {
+  let now = Date.now();
+  const clock = spyOn(Date, 'now').mockImplementation(() => now);
+  restorers.push(() => clock.mockRestore());
+  const backoff = [5_000, 30_000, 120_000];
+  const scheduled: number[] = [];
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, delay?: number, ...args: unknown[]) => {
+    if (delay === undefined || !backoff.includes(delay)) return timeout(callback, delay, ...args);
+    scheduled.push(delay);
+    return timeout(() => { now += delay; callback(); }, 0);
+  }) as typeof setTimeout);
+  restorers.push(() => timer.mockRestore());
+  let attempts = 0;
+  const exhausted = deferred<void>();
+  loader(() => {
+    if (++attempts === 4) exhausted.resolve();
+    return Promise.reject(new Error('unavailable'));
+  });
+  const wire = connection();
+  const client = await createPresentationCommandClient(await deck(1), options, wire.transport);
+  clients.push(client);
+  await exhausted.promise;
+  await new Promise((resolve) => timeout(resolve, 50));
+  expect(scheduled).toEqual(backoff);
+  expect(attempts).toBe(4);
+});
+
 wasmTest('a late metafile repaint drops the worker raster media cached from the empty first frame', async () => {
   const pending = deferred<MetafileSvgModule>();
   loader(() => pending.promise);
