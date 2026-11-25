@@ -888,7 +888,7 @@ describe('release wiring', () => {
     const plan = release.jobs.plan;
     expect(plan.if).toBe("github.ref == 'refs/heads/main' || inputs.rehearse == true");
     expect(plan['runs-on']).toBe('ubuntu-latest');
-    expect(plan['timeout-minutes']).toBe(10);
+    expect(plan['timeout-minutes']).toBe(20);
     expect(plan.permissions).toEqual({ contents: 'read' });
     expect(plan.steps[1].uses).toBe('actions/checkout@v7.0.1');
     expect(plan.steps[2]).toEqual({ uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24' } });
@@ -1044,6 +1044,17 @@ describe('release wiring', () => {
     }
   });
 
+  test('dispatches the WOPI image only after a successful release and when opted in', () => {
+    expect(release.jobs['wopi-image'].needs).toBe('release');
+    expect(release.jobs['wopi-image'].if).toBe([
+      "!cancelled() && needs.release.result == 'success' && needs.release.outputs.published == 'true' &&",
+      "github.repository == 'openooxml/betteroffice' && github.event_name == 'push' &&",
+      "github.ref == 'refs/heads/main' && github.event.repository.fork == false &&",
+      "startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) &&",
+      "vars.WOPI_IMAGE_PUBLISH == 'true'"
+    ].join(' '));
+  });
+
   test('compares publisher files with main before authenticating or uploading', () => {
     const guard = release.jobs.release.steps.find((step: any) => step.name === 'Check the publisher files match main');
     expect(guard.if).toBe("needs.plan.outputs.publishing == 'true'");
@@ -1054,16 +1065,14 @@ describe('release wiring', () => {
   test.each([
     ['native-npm', 'publish-native.yml'],
     ['python-pypi', 'publish-python-binding.yml']
-  ] as const)('%s checks this commit against main immediately before dispatch', (id, publisher) => {
+  ] as const)('%s checks out the release commit and compares publisher files in the dispatch step', (id, publisher) => {
     const job = release.jobs[id];
     const dispatch = job.steps.findIndex((step: any) => step.run?.includes(`${publisher}/dispatches`));
-    expect(dispatch).toBe(2);
+    expect(dispatch).toBe(1);
+    expect(job.steps).toHaveLength(2);
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     expect(job.steps[0].with).toEqual({ ref: '${{ github.sha }}', 'fetch-depth': 1 });
-    expect(job.steps[dispatch - 1]).toEqual({
-      name: 'Check the publisher files match main',
-      run: 'bash scripts/check-publisher-files.sh'
-    });
+    expect(job.steps[dispatch].env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
   });
 
   test('the shared guard compares the same publisher files', () => {

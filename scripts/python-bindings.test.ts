@@ -44,9 +44,10 @@ const ALL_NAMES = [...FONT_PACK_NAMES, ...PYTHON_PUBLISH_NAMES];
 const ALL_RUN_IDS = ALL_NAMES.map((_, index) => 4300 + index);
 
 /** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
-function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, checkStatus = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
+function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, failCheckAt = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
   const log = join(directory, 'gh.log');
+  writeFileSync(log, '');
   const ids = names.map(
     (name, index) => `    *"inputs[binding]=${name}"*) echo ${runIds[index]} ;;`
   );
@@ -67,7 +68,10 @@ function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, checkStatus =
   );
   writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
   const check = join(directory, 'check-publisher-files.sh');
-  writeFileSync(check, `echo check-publisher-files >> "${log}"\nexit ${checkStatus}\n`);
+  writeFileSync(check, [
+    `echo check-publisher-files >> "${log}"`,
+    `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
+  ].join('\n'));
   const path = join(directory, 'dispatch.sh');
   writeFileSync(path, dispatchStep.run);
   const result = spawnSync('bash', ['-e', path], {
@@ -81,7 +85,7 @@ function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, checkStatus =
       CHECK_PUBLISHER_FILES: check
     }
   });
-  return { ...result, log: readFileSync(log, 'utf8').trim().split('\n') };
+  return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
 }
 
 describe('registry', () => {
@@ -331,9 +335,11 @@ globalThis.fetch = async (url) => {
 
   test('a dispatch fans out only over the opted-in bindings, at the commit that triggered it', () => {
     expect(release.jobs['python-pypi'].needs).toEqual(['release', 'python-bindings']);
-    expect(release.jobs['python-pypi'].if).toBe(
+    expect(release.jobs['python-pypi'].if).toBe([
+      "!cancelled() && needs.release.result == 'success' &&",
+      "needs.python-bindings.result == 'success' &&",
       "needs.python-bindings.outputs.publish != '[]'"
-    );
+    ].join(' '));
     expect(dispatchStep.env.PUBLISH).toBe('${{ needs.python-bindings.outputs.publish }}');
     expect(dispatchStep.env.SHA).toBe('${{ github.sha }}');
     expect(dispatchStep.env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
@@ -341,12 +347,23 @@ globalThis.fetch = async (url) => {
     const result = dispatch();
 
     expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toEqual(
+    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
+    expect(posts).toEqual(
       PYTHON_PUBLISH_NAMES.map(
         (name) =>
           `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`
       )
     );
+    for (const post of posts) {
+      expect(result.log[result.log.indexOf(post) - 1]).toBe('check-publisher-files');
+    }
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(posts.length);
+  });
+
+  test('an empty publish list runs no check and dispatches nothing', () => {
+    const result = dispatch({ names: [] });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([]);
   });
 
   test('the wait watches exactly the runs the dispatch created', () => {
@@ -460,16 +477,19 @@ globalThis.fetch = async (url) => {
   test('font packs publish first, and a failed pack dispatches no format binding', () => {
     const ok = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS });
     expect(ok.status, ok.stdout).toBe(0);
-    const order = ok.log
-      .filter((line) => line.startsWith('api --method POST') || line.startsWith('run watch'))
-      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1] ?? line);
+    const order = ok.log.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1] ?? line);
     const packs = FONT_PACK_NAMES.length;
-    const formatWatches = 2 * packs + PYTHON_PUBLISH_NAMES.length;
-    expect(order.slice(0, packs)).toEqual(FONT_PACK_NAMES);
-    expect(order.slice(packs, 2 * packs).sort()).toEqual(
+    const formatDispatches = 3 * packs;
+    const formatWatches = formatDispatches + 2 * PYTHON_PUBLISH_NAMES.length;
+    expect(order.slice(0, 2 * packs)).toEqual(
+      FONT_PACK_NAMES.flatMap((name) => ['check-publisher-files', name])
+    );
+    expect(order.slice(2 * packs, formatDispatches).sort()).toEqual(
       ALL_RUN_IDS.slice(0, packs).map((id) => `run watch ${id} --exit-status`)
     );
-    expect(order.slice(2 * packs, formatWatches)).toEqual(PYTHON_PUBLISH_NAMES);
+    expect(order.slice(formatDispatches, formatWatches)).toEqual(
+      PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', name])
+    );
     expect(order.slice(formatWatches).sort()).toEqual(
       ALL_RUN_IDS.slice(packs).map((id) => `run watch ${id} --exit-status`)
     );
@@ -484,29 +504,23 @@ globalThis.fetch = async (url) => {
     expect(dispatched).toEqual(FONT_PACK_NAMES);
   });
 
-  test('the publisher files are compared again after the font packs and before any format binding', () => {
-    const ok = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS });
-    expect(ok.status, ok.stdout).toBe(0);
-    const check = ok.log.indexOf('check-publisher-files');
-    const lastPackWatch = Math.max(
-      ...ALL_RUN_IDS.slice(0, FONT_PACK_NAMES.length).map((id) => ok.log.indexOf(`run watch ${id} --exit-status`))
-    );
-    const firstFormat = ok.log.findIndex((line) => line.includes(`inputs[binding]=${PYTHON_PUBLISH_NAMES[0]} `));
-    expect(check).toBeGreaterThan(lastPackWatch);
-    expect(check).toBeLessThan(firstFormat);
-
-    const stale = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, checkStatus: 1 });
-    expect(stale.status).not.toBe(0);
-    const dispatched = stale.log
+  test.each([
+    ['font pack', FONT_PACK_NAMES, 1],
+    ['format binding', ALL_NAMES, FONT_PACK_NAMES.length + 1]
+  ] as const)('a failed publisher file check for a %s skips its dispatch and fails the job', (_, waveNames, failedIndex) => {
+    const result = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failCheckAt: failedIndex + 1 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${ALL_NAMES[failedIndex]} failed.`);
+    expect(result.stdout.includes('no format binding was dispatched')).toBe(failedIndex < FONT_PACK_NAMES.length);
+    const dispatched = result.log
       .filter((line) => line.startsWith('api --method POST'))
       .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
-    expect(dispatched).toEqual(FONT_PACK_NAMES);
-
-    expect(dispatch().log).not.toContain('check-publisher-files');
+    expect(dispatched).toEqual(waveNames.filter((_, index) => index !== failedIndex));
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(waveNames.length);
   });
 
   test('a font pack builds and checks one pure wheel from the committed assets, and no Rust', () => {
-    for (const job of ['wheels', 'sdist', 'load']) {
+    for (const job of ['wheels', 'sdist']) {
       expect(dist.jobs[job].if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
     }
     const pack = dist.jobs['font-pack'];
@@ -546,6 +560,7 @@ globalThis.fetch = async (url) => {
   test('loads each native wheel from its exact artifact and tests the installed binding', () => {
     const load = dist.jobs.load;
     expect(load.needs).toBe('wheels');
+    expect(load.if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
     expect(load['continue-on-error']).toBeUndefined();
     expect(load['runs-on']).toBe('${{ matrix.platform.os }}');
     expect(load.defaults.run.shell).toBe('bash');
@@ -567,6 +582,7 @@ globalThis.fetch = async (url) => {
     );
     const loadArtifacts = load.strategy.matrix.platform.map((platform: any) => platform.artifact);
     expect(loadArtifacts.sort()).toEqual(wheelArtifacts.sort());
+    for (const step of load.steps) expect(step.if).toBeUndefined();
     const [lineEndings, checkout, python, download, install, pytest] = load.steps;
     expect(lineEndings.run).toBe('git config --global core.autocrlf false');
     expect(checkout.uses).toBe('actions/checkout@v7.0.1');
@@ -574,11 +590,9 @@ globalThis.fetch = async (url) => {
     expect(python.with['python-version']).toBe('3.13');
     expect(download.uses).toBe('actions/download-artifact@v8');
     expect(download.with).toEqual({ name: 'python-${{ inputs.binding }}.${{ matrix.platform.artifact }}', path: 'wheel' });
-    expect(install.if).toBeUndefined();
     expect(install['continue-on-error']).toBeUndefined();
     expect(install.run).toContain('python -I scripts/python_font_packs.py --out font-packs');
     expect(install.run).toContain('python -m pip install --only-binary :all: --find-links font-packs wheel/*.whl');
-    expect(pytest.if).toBeUndefined();
     expect(pytest['continue-on-error']).toBeUndefined();
     expect(pytest['working-directory']).toBe('${{ runner.temp }}');
     expect(pytest.env).toEqual({ BINDING: '${{ inputs.binding }}', PYTHONUTF8: '1' });

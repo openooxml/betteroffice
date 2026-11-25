@@ -25,7 +25,7 @@ jobs:
     name: Plan release
     if: github.ref == 'refs/heads/main' || inputs.rehearse == true
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
     outputs:
@@ -420,7 +420,10 @@ jobs:
   python-pypi:
     name: Publish Python bindings
     needs: [release, python-bindings]
-    if: needs.python-bindings.outputs.publish != '[]'
+    if: >-
+      !cancelled() && needs.release.result == 'success' &&
+      needs.python-bindings.result == 'success' &&
+      needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 165
     permissions:
@@ -432,9 +435,6 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
-
-      - name: Check the publisher files match main
-        run: bash scripts/check-publisher-files.sh
 
       - name: Dispatch a publish per binding, then wait for each
         env:
@@ -452,10 +452,11 @@ jobs:
             for binding in "$@"; do
               # From API version 2026-03-10 the dispatch returns the created run's id,
               # so the wait below watches exactly the runs this job started.
-              if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-                "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
-                -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-                -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+              if bash "$CHECK_PUBLISHER_FILES" &&
+                run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+                  "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
+                  -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+                  -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
                 runs="$runs $binding:$run"
               else
                 echo "::error::Dispatching the publish of betteroffice-$binding failed."
@@ -492,9 +493,6 @@ jobs:
             echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
             exit 1
           fi
-          if [ -n "$packs" ] && [ -n "$formats" ]; then
-            bash "$CHECK_PUBLISHER_FILES"
-          fi
           # shellcheck disable=SC2086 # binding names contain no spaces
           publish 100 $formats
           exit $status
@@ -524,31 +522,34 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
-      - name: Check the publisher files match main
-        run: bash scripts/check-publisher-files.sh
-
       - name: Dispatch a publish per format, then wait for each
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PUBLISH: ${{ needs.release.outputs.native }}
           SHA: ${{ github.sha }}
+          CHECK_PUBLISHER_FILES: scripts/check-publisher-files.sh
         run: |
           set -euo pipefail
           bindings=$(jq -er '.[]' <<< "$PUBLISH" || [ "$PUBLISH" = '[]' ])
           status=0
           runs=""
           for binding in $bindings; do
-            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-              "repos/$GH_REPO/actions/workflows/publish-native.yml/dispatches" \
-              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+            if bash "$CHECK_PUBLISHER_FILES" &&
+              run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+                "repos/$GH_REPO/actions/workflows/publish-native.yml/dispatches" \
+                -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+                -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
               runs="$runs $binding:$run"
             else
               echo "::error::Dispatching @betteroffice/$binding-native failed."
               status=1
             fi
           done
+
+          if [ -z "$runs" ]; then
+            exit "$status"
+          fi
 
           watchers=()
           for entry in $runs; do
@@ -626,7 +627,12 @@ jobs:
   wopi-image:
     name: Start the WOPI image publish
     needs: release
-    if: needs.release.result == 'success' && needs.release.outputs.published == 'true' && github.repository == 'openooxml/betteroffice' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) && vars.WOPI_IMAGE_PUBLISH == 'true'
+    if: >-
+      !cancelled() && needs.release.result == 'success' && needs.release.outputs.published == 'true' &&
+      github.repository == 'openooxml/betteroffice' && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' && github.event.repository.fork == false &&
+      startsWith(github.workflow_ref, format('{0}/.github/workflows/release.yml@refs/heads/main', github.repository)) &&
+      vars.WOPI_IMAGE_PUBLISH == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

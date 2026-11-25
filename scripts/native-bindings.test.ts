@@ -248,6 +248,45 @@ describe('native package release wiring', () => {
     readFileSync(new URL('../.github/workflows/native-packages.yml', import.meta.url), 'utf8')
   ) as any;
 
+  function dispatch({ publish = JSON.stringify(NATIVE_FORMATS), failCheckAt = 0 } = {}) {
+    const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
+    try {
+      const log = join(directory, 'gh.log');
+      writeFileSync(log, '');
+      writeFileSync(
+        join(directory, 'gh'),
+        [
+          '#!/bin/sh',
+          `echo "$@" >> "${log}"`,
+          'case "$*" in',
+          ...NATIVE_FORMATS.map((name, index) => `  *"inputs[binding]=${name}"*) echo ${4200 + index} ;;`),
+          'esac'
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+      const check = join(directory, 'check-publisher-files.sh');
+      writeFileSync(check, [
+        `echo check-publisher-files >> "${log}"`,
+        `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
+      ].join('\n'));
+      const result = spawnSync('bash', ['-c', dispatchStep.run], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          GH_REPO: 'openooxml/betteroffice',
+          PUBLISH: publish,
+          SHA: '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182',
+          CHECK_PUBLISHER_FILES: check
+        }
+      });
+      return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
   test('keeps native publishing outside the main release job', () => {
     const job = structuredClone(release.jobs.release);
     const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
@@ -343,21 +382,38 @@ describe('native package release wiring', () => {
     expect(step.run).toContain('exit $status');
   });
 
-  test('an invalid publish list fails before dispatch', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
-    try {
-      writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho unexpected-dispatch\nexit 99\n', {
-        mode: 0o755
-      });
-      const result = spawnSync('bash', ['-c', dispatchStep.run], {
-        encoding: 'utf8',
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, PUBLISH: 'invalid' }
-      });
-      expect(result.status).toBe(1);
-      expect(result.stdout).not.toContain('unexpected-dispatch');
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
+  test('compares publisher files immediately before each native dispatch', () => {
+    const result = dispatch();
+    expect(result.status, result.stderr).toBe(0);
+    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
+    expect(posts.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1])).toEqual(NATIVE_FORMATS);
+    for (const post of posts) {
+      expect(result.log[result.log.indexOf(post) - 1]).toBe('check-publisher-files');
     }
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(posts.length);
+  });
+
+  test('an empty publish list runs no check and dispatches nothing', () => {
+    const result = dispatch({ publish: '[]' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([]);
+  });
+
+  test('a failed publisher file check skips that native dispatch and fails the job', () => {
+    const result = dispatch({ failCheckAt: 2 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
+    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
+    expect(posts.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1])).toEqual(
+      NATIVE_FORMATS.filter((_, index) => index !== 1)
+    );
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(NATIVE_FORMATS.length);
+  });
+
+  test('an invalid publish list fails before dispatch', () => {
+    const result = dispatch({ publish: 'invalid' });
+    expect(result.status).toBe(1);
+    expect(result.log).toEqual([]);
   });
 
   test('publisher is dispatch-only and uses token-free OIDC', () => {
@@ -518,12 +574,14 @@ describe('native package release wiring', () => {
   test('dist loads each musl binary in Node on Alpine', () => {
     const job = dist.jobs['musl-smoke'];
     expect(job.needs).toBe('bindings');
+    expect(job.if).toBeUndefined();
     expect(job['continue-on-error']).toBeUndefined();
     expect(job.strategy.matrix.include).toEqual([
       { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-musl' },
       { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-musl' }
     ]);
     const steps = job.steps;
+    for (const step of steps) expect(step.if).toBeUndefined();
     expect(steps[0].with.ref).toBe('${{ inputs.sha }}');
     const binary = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native.${{ matrix.target }}');
     const loader = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native-loader');
@@ -537,10 +595,8 @@ describe('native package release wiring', () => {
 
   test('dist loads the Windows arm64 binary in Node on Windows arm64', () => {
     const job = dist.jobs['windows-arm64-smoke'];
-    const musl = dist.jobs['musl-smoke'];
-    expect(job.needs).toBe(musl.needs);
+    expect(job.needs).toBe('bindings');
     expect(job.if).toBeUndefined();
-    expect(musl.if).toBeUndefined();
     expect(job['continue-on-error']).toBeUndefined();
     expect(job['runs-on']).toBe('windows-11-arm');
     expect(job['timeout-minutes']).toBe(15);
