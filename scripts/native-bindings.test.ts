@@ -395,15 +395,15 @@ describe('native package release wiring', () => {
     expect(toolchain.with.targets).toBe('${{ matrix.platform.target }}');
     const build = job.steps.find((step: any) => step.name === 'Build binding');
     expect(build.run).toBe(
-      "bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || matrix.platform.napi_cross && '--use-napi-cross' || '' }} -- --locked"
+      "bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked"
     );
   });
 
-  test('dist builds GNU Linux binaries with the N-API toolchain and checks their glibc floor', () => {
+  test('dist builds GNU Linux binaries natively on pinned Ubuntu 24.04 images and checks their glibc floor', () => {
     const job = dist.jobs.bindings;
-    expect(job.strategy.matrix.platform.filter((platform: any) => platform.napi_cross)).toEqual([
-      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu', napi_cross: true },
-      { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', napi_cross: true }
+    expect(job.strategy.matrix.platform.filter((platform: any) => platform.target.endsWith('-linux-gnu'))).toEqual([
+      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' },
+      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu' }
     ]);
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
     expect(job.steps[build + 1]).toEqual({
@@ -412,7 +412,7 @@ describe('native package release wiring', () => {
       shell: 'bash',
       run: 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
     });
-    expect(GLIBC_FLOOR).toBe('2.17');
+    expect(GLIBC_FLOOR).toBe('2.35');
   });
 
   test('dist cross-compiles musl with zig and Windows arm64 with MSVC on GitHub-hosted runners', () => {
@@ -455,23 +455,15 @@ describe('native package release wiring', () => {
   });
 
   test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {
-    const job = dist.jobs['gnu-smoke'];
-    expect(job.name).toBe('${{ matrix.target }} on Debian 12');
-    expect(job.needs).toBe('bindings');
-    expect(job['runs-on']).toBe('${{ matrix.os }}');
-    expect(job.strategy.matrix.include).toEqual([
-      { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu' },
-      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' }
-    ]);
-    expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
-    expect(job.steps.filter((step: any) => step.uses === 'actions/download-artifact@v8').map((step: any) => step.with)).toEqual([
-      { name: '${{ inputs.binding }}-native.${{ matrix.target }}', path: 'bindings/${{ inputs.binding }}-native' },
-      { name: '${{ inputs.binding }}-native-loader', path: 'bindings/${{ inputs.binding }}-native' }
-    ]);
-    const smoke = job.steps.find((step: any) => step.name === 'Smoke test on Debian 12');
-    expect(smoke.run).toBe(
-      `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
-    );
+    expect(dist.jobs['gnu-smoke']).toBeUndefined();
+    const steps = dist.jobs.bindings.steps;
+    const entries = steps.findIndex((step: any) => step.name === 'Build the JS entries');
+    expect(steps[entries + 1]).toEqual({
+      name: 'Smoke test on Debian 12',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+    });
   });
 
   test('dist uploads the generated loader from GNU Linux x64 after testing', () => {
@@ -499,7 +491,7 @@ describe('native package release wiring', () => {
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
     expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
-    expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(testing));
     const fonts = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
     expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
