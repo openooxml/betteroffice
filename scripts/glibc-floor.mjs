@@ -171,7 +171,7 @@ function dynamicSymbolCount({ tags, u32, requireRange, mapAddress }) {
   for (let index = 0; index < bucketCount; index += 1) {
     lastBucketStart = Math.max(lastBucketStart, u32(buckets + index * 4));
   }
-  if (lastBucketStart === 0) return symbolOffset;
+  if (lastBucketStart === 0) throw new Error('ELF DT_GNU_HASH lists no symbols, so the dynamic symbol count is unknown');
   if (lastBucketStart < symbolOffset) throw new Error('invalid ELF DT_GNU_HASH bucket');
 
   const chains = buckets + bucketCount * 4;

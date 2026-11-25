@@ -191,9 +191,14 @@ test('finds unversioned undefined symbols using either dynamic hash table', () =
 
 test('treats undefined symbols as unversioned without DT_VERSYM', () => {
   const bytes = elf([], 183, {
-    symbols: [{ name: '__isoc23_strtol' }], hash: 'gnu', versym: false
+    symbols: [{ name: '__isoc23_strtol' }, { name: 'napi_register_module_v1', section: 1 }], hash: 'gnu', versym: false
   });
   expect(unversionedUndefinedSymbols(bytes)).toEqual(['__isoc23_strtol']);
+});
+
+test('rejects a GNU hash table without hashed symbols, whose symbol offset does not count the imports', () => {
+  const bytes = elf([], 62, { symbols: [{ name: '__isoc23_strtol' }], hash: 'gnu' });
+  expect(() => unversionedUndefinedSymbols(bytes)).toThrow('dynamic symbol count is unknown');
 });
 
 test('the CLI checks every file, rejecting newer binaries and files without version needs', () => {
