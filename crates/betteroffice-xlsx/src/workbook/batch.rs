@@ -1368,11 +1368,13 @@ impl Workbook {
             validate_op(&preview, &op)?;
             let formats = preview.styles.cell_xfs.len();
             let staged = (|| -> Result<_> {
-                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
                 if let Op::SetCell { sheet, at, cell } = &op
-                    && cell_write_is_unchanged(&preview, *sheet, *at, cell)?
+                    && table_header_at(&preview.tables, *sheet, *at).is_some()
                 {
-                    return Ok(None);
+                    self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
+                    if cell_write_is_unchanged(&preview, *sheet, *at, cell)? {
+                        return Ok(None);
+                    }
                 }
                 Ok(Some(xlsx_ops::apply_in_place(&mut preview, &op)?.0))
             })();
@@ -1808,4 +1810,55 @@ fn capped_targets(keys: &[String], cells: &[(SheetId, CellRef)]) -> (Vec<CellTar
         .map(|(sheet, cell)| cell_target(keys, *sheet, *cell))
         .collect();
     (targets, cells.len() > MAX_DIAGNOSTIC_CELLS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::CELL_WRITE_CHECKS;
+    use super::*;
+    use crate::RangeAddress;
+
+    #[test]
+    fn a_table_free_batch_skips_the_header_write_comparison() {
+        let mut model = xlsx_model::Workbook::default();
+        model.sheets.push(Sheet::new("Sheet1"));
+        let mut workbook = Workbook::from_model(model).unwrap();
+        let sheet = SheetId(0);
+        workbook
+            .edit_cell(
+                sheet,
+                CellRef::new(0, 0),
+                "old",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(
+                sheet,
+                CellRef::new(0, 1),
+                "=1+1",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+
+        let before = CELL_WRITE_CHECKS.get();
+        let applied = workbook
+            .apply_edits(&EditRequest {
+                expect_version: workbook.version(),
+                source: Default::default(),
+                history: Default::default(),
+                calculation: Default::default(),
+                steps: vec![EditStep::new(EditOperation::SetCellValues {
+                    target: RangeTarget {
+                        sheet_id: "sheet:0".into(),
+                        range: RangeAddress::A1 { a1: "A1:B1".into() },
+                    },
+                    values: vec![vec![CellValue::Number { value: 3.0 }; 2]],
+                })],
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.receipts[0].changed_cells.len(), 2);
+        assert_eq!(CELL_WRITE_CHECKS.get(), before);
+    }
 }

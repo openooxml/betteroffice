@@ -428,6 +428,48 @@ fn numeric_input_in_a_header_is_stored_as_text() {
 }
 
 #[test]
+fn setting_the_existing_numeric_header_value_normalizes_the_cell_and_caption() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="B1" t="s"><v>0</v></c>"#,
+        r#"<c r="B1"><v>2024</v></c>"#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    let number = CellValue::Number { value: 2024.0 };
+    assert_eq!(workbook.model().value(SHEET1, at("B1")), number);
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
+    let applied = workbook
+        .apply_edits(&EditRequest {
+            expect_version: workbook.version(),
+            source: Default::default(),
+            history: Default::default(),
+            calculation: Default::default(),
+            steps: vec![EditStep::new(EditOperation::SetCellValues {
+                target: RangeTarget {
+                    sheet_id: "sheet:0".into(),
+                    range: RangeAddress::A1 { a1: "B1".into() },
+                },
+                values: vec![vec![number.clone()]],
+            })],
+        })
+        .unwrap()
+        .unwrap();
+    assert!(applied.receipts[0].changed);
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "2024", "Rev"]);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(workbook.model().value(SHEET1, at("B1")), number);
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
+}
+
+#[test]
 fn clearing_a_header_skips_a_taken_default_name() {
     let mut workbook = Workbook::open(&book()).unwrap();
     edit(&mut workbook, "A1", "Column1");
@@ -487,6 +529,40 @@ fn undo_and_redo_restore_the_header_cell_and_column_name() {
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
     workbook.redo(CalculationOptions::default()).unwrap();
     assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+}
+
+#[test]
+fn undo_restores_the_header_and_source_of_a_sheet_removed_in_the_same_batch() {
+    for index in [0, 1] {
+        let mut workbook = Workbook::open(&book()).unwrap();
+        let mut ops = Vec::new();
+        if index != 0 {
+            ops.push(Op::MoveSheet { from: 0, to: index });
+        }
+        ops.extend([
+            Op::SetCell {
+                sheet: SheetId(index as u32),
+                at: at("B1"),
+                cell: CellState {
+                    value: CellValue::Text {
+                        value: "State".into(),
+                    },
+                    ..CellState::default()
+                },
+            },
+            Op::RemoveSheet { index },
+        ]);
+        workbook
+            .apply_ops(ops, CalculationOptions::default())
+            .unwrap();
+        assert!(workbook.model().table("Table1").is_none());
+
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
+
+        workbook.redo(CalculationOptions::default()).unwrap();
+        assert!(workbook.model().table("Table1").is_none());
+    }
 }
 
 #[test]
@@ -1063,6 +1139,7 @@ fn escaped_table_captions_keep_structured_references_evaluable() {
         ("a'b", "a''b"),
         ("x[1]", "x'[1']"),
         ("#n", "'#n"),
+        ("Margin(%)", "Margin(%)"),
     ] {
         let mut workbook = Workbook::open(&book()).unwrap();
         edit(
@@ -1235,26 +1312,39 @@ fn a_header_rename_rewrites_only_the_matching_qualified_table_reference() {
 fn a_header_rename_preserves_other_workbook_and_table_selectors() {
     let other_refs = concat!(
         "'Other.xlsx'!OtherTable[Status]+[1]Sheet1!Other[Status]+",
-        "[1]Sheet1!Table1[Status]+OtherTable[Status]+OtherTable [Status]+",
-        "'Other.xlsx'!OtherTable [Status]+[1]Sheet1!Other [Status]",
+        "[1]Sheet1!Table1[Status]+OtherTable[Status]+",
+        "'Other.xlsx'!OtherTable [Status]+[1]Sheet1!Other [Status]+",
     );
+    let local_refs = "OtherTable [Status]+SUM(AllowedRange [@Status])+[@Status]";
     let source = replace_part(
         &book(),
         "xl/worksheets/sheet1.xml",
         r#"<c r="C2"><v>1</v></c>"#,
-        &format!(r#"<c r="C2"><f>{other_refs}+[@Status]</f><v>1</v></c>"#),
+        &format!(r#"<c r="C2"><f>{other_refs}{local_refs}</f><v>1</v></c>"#),
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="F2"><v>10</v></c></row>"#,
+        &format!(
+            r#"<c r="F2"><v>10</v></c><c r="H2"><f>{local_refs}</f><v>1</v></c></row>"#
+        ),
     );
     let mut workbook = Workbook::open(&source).unwrap();
     edit(&mut workbook, "B1", "State");
     let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
-    assert_eq!(
-        reopened.model().sheets[0]
-            .cell(at("C2"))
-            .unwrap()
-            .formula
-            .as_deref(),
-        Some(format!("{other_refs}+[@State]").as_str())
-    );
+    let local_rewritten = "OtherTable [State]+SUM(AllowedRange [@State])+[@State]";
+    let rewritten = format!("{other_refs}{local_rewritten}");
+    for (address, formula) in [("C2", rewritten.as_str()), ("H2", local_refs)] {
+        assert_eq!(
+            reopened.model().sheets[0]
+                .cell(at(address))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some(formula)
+        );
+    }
 }
 
 #[test]

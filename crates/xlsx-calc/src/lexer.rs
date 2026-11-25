@@ -12,10 +12,6 @@ pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
 pub const MAX_FORMULA_CHARS: usize = 8192;
 const TABLE_ESCAPE_CHARS: &[char] = &['[', ']', '#', '@', '\''];
-const TABLE_BRACKET_CHARS: &[char] = &[
-    '\t', '\n', '\r', ' ', ',', ':', '.', '[', ']', '#', '@', '\'', '"', '{', '}', '$', '^', '&',
-    '*', '+', '=', '-', '>', '<', '/',
-];
 /// how many significant digits of a number literal excel keeps; the rest
 /// read as zeros.
 const LITERAL_DIGITS: usize = 15;
@@ -255,6 +251,10 @@ pub fn rewrite_table_columns<'a>(
     let tokens = lexer.run()?;
     let table_refs = lexer.table_refs.take().unwrap();
     let mut spans = Vec::new();
+    let external_prefix_before = |index: usize| {
+        index > 0
+            && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('['))
+    };
     let references = tokens
         .iter()
         .enumerate()
@@ -270,26 +270,36 @@ pub fn rewrite_table_columns<'a>(
         },
     ) in references.zip(table_refs)
     {
-        let external = (index > 0
-            && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('[')))
+        let external = external_prefix_before(index)
             || sheet.as_deref().is_some_and(|sheet| sheet.starts_with('['));
         if external {
             continue;
         }
-        if table.is_empty()
-            && index > 0
-            && matches!(
-                &tokens[index - 1].kind,
-                TokKind::Name { .. } | TokKind::Ident(_)
-            )
-        {
-            continue;
+        if table.is_empty() && index > 0 {
+            let previous = &tokens[index - 1];
+            let is_name = matches!(&previous.kind, TokKind::Name { .. } | TokKind::Ident(_));
+            let scope = match &previous.kind {
+                TokKind::Name { scope, .. } => scope.as_deref(),
+                TokKind::Ref { sheet, .. }
+                | TokKind::Range { sheet, .. }
+                | TokKind::ColumnRange { sheet, .. }
+                | TokKind::RowRange { sheet, .. } => sheet.as_deref(),
+                _ => None,
+            };
+            if (is_name && previous.end == token.start)
+                || ((is_name || scope.is_some()) && external_prefix_before(index - 1))
+                || scope.is_some_and(external_name_scope)
+            {
+                continue;
+            }
         }
         lexer.pos = selector_start;
         lexer.read_table_spec(token.start, |column, span| {
             if let Some(new) = caption(sheet.as_deref(), table, column) {
                 let prefix = &input[selector_start + 1..span.start];
-                let needs_brackets = new.contains(TABLE_BRACKET_CHARS);
+                let needs_brackets = new
+                    .chars()
+                    .any(|ch| !(ch.is_alphabetic() || ch.is_ascii_digit() || ch == '_'));
                 let bare = matches!(prefix, "" | "@");
                 let span =
                     if !needs_brackets && matches!(prefix, "[" | "@[") && token.end == span.end + 2
@@ -346,6 +356,15 @@ pub fn rewrite_table_columns<'a>(
     }
     result.push_str(&input[cursor..]);
     Ok(Some(result))
+}
+
+fn external_name_scope(scope: &str) -> bool {
+    scope.contains('[')
+        || scope.rsplit_once('.').is_some_and(|(_, extension)| {
+            ["xls", "xlsx", "xlsm", "xlsb", "xla", "xlam"]
+                .iter()
+                .any(|kind| extension.eq_ignore_ascii_case(kind))
+        })
 }
 
 struct Lexer<'a> {
@@ -891,6 +910,31 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             r#"T[New]+t[[#This Row], [New]]+T[[New]:[X]]+T[@New]+[@New]+Other[Old]+"T[Old]""#
+        );
+    }
+
+    #[test]
+    fn rewritten_captions_with_punctuation_or_spaces_use_bracketed_selectors() {
+        let source = "T[Old]+[@Old]+T[[#This Row],[Old]]";
+        for caption in ["Margin(%)", "a b", "x-y"] {
+            let rewritten = rewrite_table_column(source, "T", "Data", true, "Old", caption)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                rewritten,
+                format!("T[[{caption}]]+[@[{caption}]]+T[[#This Row],[{caption}]]")
+            );
+        }
+    }
+
+    #[test]
+    fn a_local_selector_can_follow_an_internal_name_or_be_an_external_function_argument() {
+        let source = "SUM(Data!AllowedRange [@Old])+[1]!ExternalFn([@Old])";
+        assert_eq!(
+            rewrite_table_column(source, "T", "Data", true, "Old", "New")
+                .unwrap()
+                .as_deref(),
+            Some("SUM(Data!AllowedRange [@New])+[1]!ExternalFn([@New])")
         );
     }
 

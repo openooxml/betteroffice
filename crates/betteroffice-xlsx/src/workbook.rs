@@ -3102,7 +3102,10 @@ impl Workbook {
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
-        self.ensure_table_header_history(&ops)?;
+        self.ensure_table_header_history(
+            &ops,
+            self.preserved_undo.last().map(|entry| &entry.before),
+        )?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
@@ -3168,7 +3171,10 @@ impl Workbook {
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
-        self.ensure_table_header_history(&ops)?;
+        self.ensure_table_header_history(
+            &ops,
+            self.preserved_redo.last().map(|entry| &entry.after),
+        )?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
@@ -4466,12 +4472,43 @@ impl Workbook {
         Ok(())
     }
 
-    fn ensure_table_header_history(&self, ops: &[Op]) -> Result<()> {
+    fn ensure_table_header_history(
+        &self,
+        ops: &[Op],
+        target: Option<&PreservedSheetState>,
+    ) -> Result<()> {
         if !ops
             .iter()
             .any(|op| matches!(op, Op::RestoreTableColumn { .. }))
         {
             return Ok(());
+        }
+        let mut restored_origins = Vec::new();
+        if let Some(target) = target
+            && ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+        {
+            let mut target_origins = target.origins.clone();
+            for op in ops.iter().rev() {
+                let len = target_origins.len();
+                match *op {
+                    Op::AddSheet { index, .. } if index < len => {
+                        restored_origins.push(target_origins.remove(index));
+                    }
+                    Op::RemoveSheet { index } if index <= len => {
+                        target_origins.insert(index, None);
+                    }
+                    Op::MoveSheet { from, to } if from < len && to < len => {
+                        let origin = target_origins.remove(to);
+                        target_origins.insert(from, origin);
+                    }
+                    Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::MoveSheet { .. } => {
+                        return Err(Error::InvalidOperation(
+                            "sheet history index out of range".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
         }
         let mut preview = self.model.clone();
         let mut origins = self.preserved.origins.clone();
@@ -4480,7 +4517,9 @@ impl Workbook {
             self.ensure_table_header_write(batch.workbook(), &origins, op)?;
             batch.apply(op)?;
             match *op {
-                Op::AddSheet { index, .. } => origins.insert(index, None),
+                Op::AddSheet { index, .. } => {
+                    origins.insert(index.min(origins.len()), restored_origins.pop().flatten());
+                }
                 Op::RemoveSheet { index } => {
                     origins.remove(index);
                 }
@@ -6774,12 +6813,19 @@ fn shared_table_header_edit() -> Error {
     .into()
 }
 
+#[cfg(test)]
+thread_local! {
+    static CELL_WRITE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn cell_write_is_unchanged(
     model: &WorkbookModel,
     sheet: SheetId,
     at: CellRef,
     cell: &CellState,
 ) -> Result<bool> {
+    #[cfg(test)]
+    CELL_WRITE_CHECKS.set(CELL_WRITE_CHECKS.get() + 1);
     let old = current_cell_state(model, sheet, at);
     if let Some((table, column, name)) = xlsx_ops::normalize_table_header(model, sheet, at, cell)? {
         if model.tables[table].columns[column] != name {

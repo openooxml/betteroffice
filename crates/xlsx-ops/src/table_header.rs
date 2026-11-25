@@ -37,7 +37,6 @@ pub fn table_header_write_at(
     }
     let (table, column) = header;
     let writes_header = match &cell.value {
-        CellValue::Empty => true,
         CellValue::Text { value } => {
             value.is_empty()
                 || workbook.tables[table]
@@ -45,7 +44,7 @@ pub fn table_header_write_at(
                     .get(column)
                     .is_some_and(|caption| caption != value)
         }
-        _ => false,
+        _ => true,
     };
     writes_header.then_some(header)
 }
