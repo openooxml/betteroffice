@@ -493,12 +493,12 @@ impl PreservedPackage {
                         && rewrites_sheet(index)
                         && crate::patch::alternate_content_matches(&child.bytes, |_| Ok(true))?)
                         || (has_alternate
-                        && contains_formula_in(
-                            &child.bytes,
-                            &[b"f", b"formula"],
-                            Some(alternate),
-                            |formula| matches(formula, local),
-                        )?)
+                            && contains_formula_in(
+                                &child.bytes,
+                                &[b"f", b"formula"],
+                                Some(alternate),
+                                |formula| matches(formula, local),
+                            )?)
                         || crate::patch::table_formula_rename_unsupported(
                             &child.bytes,
                             &self.original_workbook.sheets[index],
