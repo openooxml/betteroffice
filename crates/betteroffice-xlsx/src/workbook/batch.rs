@@ -26,8 +26,8 @@ use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved,
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
     cell_write_is_unchanged, committed_formula, current_cell_state, edit_cell_state,
-    entered_formula, entered_text, typed_formula_fails, validate_cell_state, validate_model_sheets,
-    validate_op, written_cell_style,
+    entered_formula, entered_text, typed_formula_fails, validate_cell_input_state,
+    validate_model_sheets, validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -973,6 +973,8 @@ impl Workbook {
             EditOperation::SetCellInputs { inputs, .. } => {
                 let mut states = Vec::new();
                 for (cell, input) in resolved.iter().zip(inputs.iter().flatten()) {
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let (mut state, format) = edit_cell_state(
                         &self.model,
                         &defined,
@@ -984,7 +986,7 @@ impl Workbook {
                     entered_formula(&self.model, resolved.sheet, cell, state.formula.take())
                         .and_then(|formula| {
                             state.formula = formula;
-                            validate_cell_state(&state)
+                            validate_cell_input_state(&state, header)
                         })
                         .map_err(|error| {
                             let message = if matches!(
@@ -998,7 +1000,7 @@ impl Workbook {
                             at(EditFailureCode::InvalidStep, message)
                         })?;
                     if format.is_some()
-                        || table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
+                        || header
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1030,7 +1032,7 @@ impl Workbook {
                             !header && matches!(value, CellValue::Empty),
                         ),
                     };
-                    validate_cell_state(&state).map_err(|error| {
+                    validate_cell_input_state(&state, header).map_err(|error| {
                         at(
                             EditFailureCode::InvalidStep,
                             format!("the value for {}: {error}", cell.to_a1()),
@@ -1211,7 +1213,7 @@ impl Workbook {
                     let stored_as = entered_formula(&self.model, resolved.sheet, cell, typed)
                         .and_then(|formula| {
                             state.formula = formula;
-                            validate_cell_state(&state)
+                            validate_cell_input_state(&state, header)
                         });
                     if let Err(error) = stored_as {
                         if matches!(error, Error::Operation(OpError::TableHeaderUnsupported(_))) {

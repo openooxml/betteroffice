@@ -272,6 +272,12 @@ pub fn rewrite_table_columns<'a>(
         if external {
             continue;
         }
+        if table.is_empty()
+            && index > 0
+            && matches!(&tokens[index - 1].kind, TokKind::Name { .. } | TokKind::Ident(_))
+        {
+            continue;
+        }
         lexer.pos = *selector_start;
         lexer.read_table_spec(token.start, |column, span| {
             if let Some(new) = caption(sheet.as_deref(), table, column) {

@@ -233,6 +233,20 @@ fn edit(workbook: &mut Workbook, address: &str, input: &str) {
         .unwrap();
 }
 
+fn assert_refused_header(workbook: &mut Workbook, address: &str, input: &str, message: &str) {
+    let version = workbook.version();
+    let model = workbook.model().clone();
+    let error = workbook
+        .edit_cell(SHEET1, at(address), input, CalculationOptions::default())
+        .unwrap_err();
+    let Error::Operation(OpError::TableHeaderUnsupported(reason)) = &error else {
+        panic!("expected a table header error, got {error}");
+    };
+    assert!(reason.contains(message), "{reason}");
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.model(), &model);
+}
+
 fn assert_saved_headers(bytes: &[u8], expected: [&str; 3]) -> Workbook {
     let parsed = assert_table_rule(bytes);
     let reopened = Workbook::open(bytes).unwrap();
@@ -375,20 +389,14 @@ fn clearing_a_header_skips_a_taken_default_name() {
 }
 
 #[test]
-fn a_suffix_over_the_cell_text_limit_is_refused_atomically() {
+fn a_table_header_cannot_exceed_255_characters_with_or_without_a_suffix() {
     let mut workbook = Workbook::open(&book()).unwrap();
-    let name = "x".repeat(xlsx_calc::eval::MAX_CELL_TEXT_CHARS);
+    let name = "é".repeat(255);
     edit(&mut workbook, "A1", &name);
-    let version = workbook.version();
-    let error = workbook
-        .edit_cell(SHEET1, at("B1"), &name, CalculationOptions::default())
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Operation(OpError::TableHeaderUnsupported(reason))
-            if reason.contains("length limit")
-    ));
-    assert_eq!(workbook.version(), version);
+    let over_cell_limit = "x".repeat(xlsx_calc::eval::MAX_CELL_TEXT_CHARS + 1);
+    for input in [name.clone(), format!("{name}x"), over_cell_limit] {
+        assert_refused_header(&mut workbook, "B1", &input, "255-character limit");
+    }
     assert_saved_headers(&workbook.save().unwrap(), [&name, "Status", "Rev"]);
 }
 
@@ -636,9 +644,58 @@ fn an_unrelated_edit_preserves_tables_with_duplicate_display_names_on_separate_s
     for path in ["xl/tables/table1.xml", path] {
         assert_eq!(part(&after, path), part(&before, path), "{path}");
     }
-    edit(&mut workbook, "B1", "State");
-    let error = workbook.save().unwrap_err();
-    assert!(error.to_string().contains("duplicate display name"));
+    for caption in ["State", "STATUS"] {
+        assert_refused_header(&mut workbook, "B1", caption, "duplicate display name");
+    }
+    assert_eq!(workbook.save().unwrap(), saved);
+}
+
+#[test]
+fn a_header_rename_is_refused_when_two_sheets_share_the_table_part() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/_rels/sheet2.xml.rels",
+        "table3.xml",
+        "table1.xml",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", "is shared");
+}
+
+#[test]
+fn a_header_rename_is_refused_when_the_source_column_name_is_missing() {
+    let source = replace_part(
+        &book(),
+        "xl/tables/table1.xml",
+        r#" id="2" name="Status""#,
+        r#" id="2""#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", "missing table column name");
+}
+
+#[test]
+fn a_header_rename_is_refused_when_an_untouched_sibling_is_invalid() {
+    for (cell, caption) in [
+        ("", "Rev"),
+        (r#"<c r="C1"><v>7</v></c>"#, "Rev"),
+        (r#"<c r="C1" t="inlineStr"><is><t>Name</t></is></c>"#, "Name"),
+    ] {
+        let source = replace_part(
+            &book(),
+            "xl/worksheets/sheet1.xml",
+            r#"<c r="C1" t="inlineStr"><is><t>Rev</t></is></c>"#,
+            cell,
+        );
+        let source = replace_part(
+            &source,
+            "xl/tables/table1.xml",
+            r#"name="Rev""#,
+            &format!(r#"name="{caption}""#),
+        );
+        let mut workbook = Workbook::open(&source).unwrap();
+        assert_refused_header(&mut workbook, "B1", "State", "column 3 (C1)");
+    }
 }
 
 #[test]
@@ -772,6 +829,43 @@ fn escaped_table_captions_keep_structured_references_evaluable() {
 }
 
 #[test]
+fn qualified_row_references_recalculate_after_a_rename() {
+    for (caption, escaped) in [("New Name", "New Name"), ("#n", "'#n")] {
+        let mut workbook = Workbook::open(&book()).unwrap();
+        edit(&mut workbook, "B2", "3");
+        edit(&mut workbook, "B3", "4");
+        edit(&mut workbook, "C3", "=Table1[@Status]*2");
+        let expected = [CellValue::Number { value: 8.0 }];
+        let values = |workbook: &Workbook| {
+            ["C3"].map(|address| workbook.model().value(SHEET1, at(address)))
+        };
+        assert_eq!(values(&workbook), expected);
+        edit(&mut workbook, "B1", caption);
+        assert_eq!(values(&workbook), expected);
+
+        let mut reopened =
+            assert_saved_headers(&workbook.save().unwrap(), ["Name", caption, "Rev"]);
+        reopened.recalculate_all(CalculationOptions::default());
+        assert_eq!(values(&reopened), expected);
+        for (address, formula) in [("C3", format!("Table1[@[{escaped}]]*2"))] {
+            assert_eq!(
+                reopened.model().sheets[0]
+                    .cell(at(address))
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some(formula.as_str())
+            );
+        }
+        edit(&mut reopened, "B3", "5");
+        assert_eq!(
+            reopened.model().value(SHEET1, at("C3")),
+            CellValue::Number { value: 10.0 }
+        );
+    }
+}
+
+#[test]
 fn a_rewrite_over_the_formula_character_limit_refuses_the_rename() {
     let limit = xlsx_calc::lexer::MAX_FORMULA_CHARS;
     let mut formula = "COUNTA(Table1[Status])".to_owned();
@@ -861,6 +955,32 @@ fn a_header_rename_rewrites_only_the_matching_qualified_table_reference() {
             Some(formula)
         );
     }
+}
+
+#[test]
+fn a_header_rename_preserves_other_workbook_and_table_selectors() {
+    let other_refs = concat!(
+        "'Other.xlsx'!OtherTable[Status]+[1]Sheet1!Other[Status]+",
+        "[1]Sheet1!Table1[Status]+OtherTable[Status]+OtherTable [Status]+",
+        "'Other.xlsx'!OtherTable [Status]+[1]Sheet1!Other [Status]",
+    );
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="C2"><v>1</v></c>"#,
+        &format!(r#"<c r="C2"><f>{other_refs}+[@Status]</f><v>1</v></c>"#),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+    assert_eq!(
+        reopened.model().sheets[0]
+            .cell(at("C2"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some(format!("{other_refs}+[@State]").as_str())
+    );
 }
 
 #[test]
@@ -1057,4 +1177,28 @@ fn a_reference_in_a_data_validation_refuses_the_rename() {
         Error::Operation(OpError::TableHeaderUnsupported(reason))
             if reason.contains("xl/worksheets/sheet2.xml")
     ));
+}
+
+#[test]
+fn a_local_conditional_format_reference_blocks_a_rename_on_overlap() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        "<tableParts ",
+        concat!(
+            r#"<conditionalFormatting sqref="D2:E2"><cfRule type="expression" priority="1">"#,
+            "<formula>[@Val]&gt;0</formula></cfRule></conditionalFormatting><tableParts ",
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "F1", "Value", "conditional formats");
+
+    let source = replace_part(&source, "xl/worksheets/sheet1.xml", "D2:E2", "D2:D3");
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "F1", "Value");
+    let saved = workbook.save().unwrap();
+    assert_eq!(
+        assert_table_rule(&saved).table("Table2").unwrap().columns[1],
+        "Value"
+    );
 }

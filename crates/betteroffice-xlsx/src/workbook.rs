@@ -2510,11 +2510,11 @@ impl Workbook {
         let (mut state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         state.formula = entered_formula(&self.model, sheet, cell, state.formula)?;
-        validate_cell_state(&state)?;
+        let header = xlsx_ops::table_header_at(&self.model.tables, sheet, cell).is_some();
+        validate_cell_input_state(&state, header)?;
         if format.is_none() && cell_write_is_unchanged(&self.model, sheet, cell, &state)? {
             return Ok(MutationResult::default());
         }
-        let header = xlsx_ops::table_header_at(&self.model.tables, sheet, cell).is_some();
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
@@ -2641,7 +2641,8 @@ impl Workbook {
             if !copied.get(index).copied().unwrap_or(false) {
                 state.formula = entered_formula(&preview, sheet, edit.cell, state.formula)?;
             }
-            validate_cell_state(&state)?;
+            let header = xlsx_ops::table_header_at(&preview.tables, sheet, edit.cell).is_some();
+            validate_cell_input_state(&state, header)?;
             if format.is_none() && cell_write_is_unchanged(&preview, sheet, edit.cell, &state)? {
                 continue;
             }
@@ -3320,7 +3321,9 @@ impl Workbook {
                 options.now_serial,
             );
             state.formula = entered_formula(&preview, edit.sheet, edit.cell, state.formula)?;
-            validate_cell_state(&state)?;
+            let header =
+                xlsx_ops::table_header_at(&preview.tables, edit.sheet, edit.cell).is_some();
+            validate_cell_input_state(&state, header)?;
             if format.is_some()
                 || !cell_write_is_unchanged(&preview, edit.sheet, edit.cell, &state)?
             {
@@ -3438,7 +3441,8 @@ impl Workbook {
                 options.now_serial,
             );
             state.formula = entered_formula(&preview, sheet, cell, state.formula)?;
-            validate_cell_state(&state)?;
+            let header = xlsx_ops::table_header_at(&preview.tables, sheet, cell).is_some();
+            validate_cell_input_state(&state, header)?;
             if !cell_write_is_unchanged(&preview, sheet, cell, &state)? {
                 touched.push((sheet, cell, state.formula.clone()));
                 let op = Op::SetCell {
@@ -4399,11 +4403,22 @@ impl Workbook {
         };
         let table = &model.tables[table];
         let old = &table.columns[column];
+        if *old == name {
+            return Ok(());
+        }
+        let unsupported = |error: xlsx_parse::ParseError| {
+            xlsx_ops::OpError::TableHeaderUnsupported(error.to_string())
+        };
+        let package = package
+            .materialize()
+            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+        package
+            .validate_table_column_rename(model, origins, table, column, &name)
+            .map_err(unsupported)?;
         if old.to_lowercase() == name.to_lowercase() {
             return Ok(());
         }
         let origin = origins.get(sheet.0 as usize).copied().flatten();
-        let package = package.materialize()?;
         let source_sheet = origin
             .and_then(|index| package.source_sheet_name(index))
             .unwrap_or(&model.sheets[sheet.0 as usize].name);
@@ -4411,7 +4426,7 @@ impl Workbook {
             .table_header_reference(origin, |formula, local| {
                 xlsx_ops::references_table_column(formula, &table.name, source_sheet, local, old)
             })
-            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+            .map_err(unsupported)?;
         if let Some(location) = location {
             return Err(xlsx_ops::OpError::TableHeaderUnsupported(format!(
                 "cannot rename table {} column {old}: a reference in {location} \
@@ -4420,9 +4435,6 @@ impl Workbook {
             ))
             .into());
         }
-        package
-            .validate_table_column_rename(model, origins, table, column, &name)
-            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
         Ok(())
     }
 
@@ -6487,12 +6499,18 @@ pub(crate) fn entered_formula(
 }
 
 fn validate_cell_state(state: &CellState) -> Result<()> {
+    validate_cell_input_state(state, false)
+}
+
+fn validate_cell_input_state(state: &CellState, table_header: bool) -> Result<()> {
     if matches!(state.value, CellValue::Number { value } if !value.is_finite()) {
         return Err(Error::InvalidOperation(
             "cell number must be finite".to_string(),
         ));
     }
-    if matches!(&state.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
+    if !table_header
+        && let CellValue::Text { value } = &state.value
+        && value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS
     {
         return Err(Error::InvalidOperation(
             "cell text exceeds Excel's length limit".to_string(),
@@ -7915,6 +7933,59 @@ mod tests {
             ),
         ]);
         parts
+    }
+
+    #[test]
+    fn a_header_rename_is_refused_when_table_part_paths_differ_only_in_case() {
+        let sheet = SheetId(0);
+        let at = CellRef::new(0, 0);
+        let mut model = WorkbookModel {
+            sheets: vec![xlsx_model::Sheet::new("Sheet1")],
+            ..WorkbookModel::default()
+        };
+        model.sheets[0].set_cell(
+            at,
+            xlsx_model::Cell {
+                value: CellValue::Text {
+                    value: "Old".into(),
+                },
+                ..xlsx_model::Cell::default()
+            },
+        );
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        append_xml(
+            &mut parts,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "</Relationships>",
+            r#"<Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>"#,
+        );
+        let table = br#"<table displayName="Table1" ref="A1:A2"><tableColumns count="1"><tableColumn name="Old"/></tableColumns></table>"#;
+        parts.extend([
+            ("xl/tables/table1.xml".into(), table.to_vec()),
+            ("xl/tables/Table1.xml".into(), table.to_vec()),
+        ]);
+        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts).unwrap();
+        let mut workbook = Workbook::from_source(
+            parsed.workbook,
+            Some(parsed.package),
+            parsed.active_sheet,
+            true,
+            None,
+            &parsed.legacy_dimensions,
+            (parsed.legacy_styles.as_ref(), &[]),
+        )
+        .unwrap();
+        let version = workbook.version();
+        let error = workbook
+            .edit_cell(sheet, at, "New", CalculationOptions::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(xlsx_ops::OpError::TableHeaderUnsupported(reason))
+                if reason.contains("multiple destinations")
+        ));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.model.tables[0].columns, ["Old"]);
     }
 
     #[test]

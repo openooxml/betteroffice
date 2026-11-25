@@ -6,6 +6,8 @@ use xlsx_model::{CellRange, CellRef, CellValue, SheetId, Table, Workbook};
 
 use crate::{CellState, Op, OpError};
 
+const MAX_TABLE_HEADER_CHARS: usize = 255;
+
 pub fn table_header_at(tables: &[Table], sheet: SheetId, at: CellRef) -> Option<(usize, usize)> {
     tables.iter().enumerate().find_map(|(index, table)| {
         (table.sheet == sheet
@@ -82,10 +84,10 @@ pub fn normalize_table_header(
     } else {
         base
     };
-    if name.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS {
-        return Err(OpError::TableHeaderUnsupported(
-            "cell text exceeds Excel's length limit".into(),
-        ));
+    if name.chars().count() > MAX_TABLE_HEADER_CHARS {
+        return Err(OpError::TableHeaderUnsupported(format!(
+            "table column name exceeds Excel's {MAX_TABLE_HEADER_CHARS}-character limit"
+        )));
     }
     Ok(Some((table, column, name)))
 }
@@ -185,7 +187,7 @@ fn rewrite_table_formulas(
         for group in &sheet.conditional_formats {
             let local = id == table.sheet
                 && group.sqref.split_ascii_whitespace().any(|text| {
-                    CellRange::parse_a1(text).is_ok_and(|range| table.range.contains(range.start))
+                    CellRange::parse_a1(text).is_ok_and(|range| table.range.overlaps(&range))
                 });
             if group
                 .rules

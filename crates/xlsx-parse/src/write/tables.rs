@@ -88,8 +88,74 @@ impl PreservedPackage {
         caption: &str,
     ) -> Result<(), ParseError> {
         let pairs = table_pairs(workbook, self, origins);
+        let (_, source, path) = pairs
+            .iter()
+            .copied()
+            .find(|(target, _, _)| std::ptr::eq(*target, table))
+            .ok_or_else(|| {
+                ParseError::UnsupportedEdit(format!(
+                    "cannot find source part for table {}",
+                    table.name
+                ))
+            })?;
+        let mut columns = table.columns.clone();
+        *columns.get_mut(column).ok_or_else(|| column_count_error(path))? = caption.to_owned();
+        if columns != source.columns {
+            let (path, bytes) =
+                self.validate_table_change(workbook, table, source, path, &columns, Some(column))?;
+            patch_names(path, bytes, &source.columns, &columns)?;
+        }
         let renames = caption_renames(self, &pairs, Some((table, column, caption)));
         self.patch_table_formulas(&renames, |_, _| Ok(()))
+    }
+
+    fn validate_table_change(
+        &self,
+        workbook: &Workbook,
+        table: &Table,
+        source: &Table,
+        path: &str,
+        columns: &[String],
+        proposed_column: Option<usize>,
+    ) -> Result<(&str, &[u8]), ParseError> {
+        let destination = self.table_part_destination(path, &table.name)?;
+        let name = table.name.to_lowercase();
+        let duplicate = |tables: &[Table]| {
+            tables
+                .iter()
+                .filter(|table| table.name.to_lowercase() == name)
+                .nth(1)
+                .is_some()
+        };
+        if duplicate(&self.original_workbook.tables) || duplicate(&workbook.tables) {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "cannot patch table {} in {path}: duplicate display name",
+                table.name
+            )));
+        }
+        if columns.len() != source.columns.len() {
+            return Err(column_count_error(path));
+        }
+        validate_headers(workbook, table, columns, &source.columns, proposed_column)?;
+        Ok(destination)
+    }
+
+    fn table_part_destination(&self, path: &str, table: &str) -> Result<(&str, &[u8]), ParseError> {
+        reject_shared_part(self, path, table)?;
+        let normalized = normalized_part_name(path);
+        let mut destinations = self
+            .parts
+            .iter()
+            .filter(|(path, _)| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized));
+        let (destination, bytes) = destinations
+            .next()
+            .ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
+        if destinations.next().is_some() {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "cannot patch table {table}: table part {path} has multiple destinations"
+            )));
+        }
+        Ok((destination, bytes))
     }
 
     fn patch_table_formulas(
@@ -105,24 +171,8 @@ impl PreservedPackage {
                 .part_bytes(path)
                 .ok_or_else(|| ParseError::MissingPart(path.clone()))?;
             if let Some(output) = patch_formulas(path, bytes, table, renames)? {
-                reject_shared_part(self, path, &table.name)?;
-                let normalized = normalized_part_name(path);
-                if self
-                    .parts
-                    .iter()
-                    .filter(|(path, _)| {
-                        path.trim_start_matches('/')
-                            .eq_ignore_ascii_case(&normalized)
-                    })
-                    .nth(1)
-                    .is_some()
-                {
-                    return Err(ParseError::UnsupportedEdit(format!(
-                        "cannot patch table {}: table part {path} has multiple destinations",
-                        table.name
-                    )));
-                }
-                patched(path, output)?;
+                let (destination, _) = self.table_part_destination(path, &table.name)?;
+                patched(destination, output)?;
             }
         }
         Ok(())
@@ -255,46 +305,14 @@ pub(super) fn patch_table_parts(
     if changes.is_empty() {
         return Ok(());
     }
-    let mut destinations = HashMap::new();
-    for (path, bytes) in &package.parts {
-        destinations
-            .entry(normalized_part_name(path))
-            .and_modify(|entry| *entry = None)
-            .or_insert(Some((path, bytes)));
-    }
-    let originals = &package.original_workbook.tables;
     let mut names = HashMap::new();
     for &(table, source, path) in changes {
-        let name = table.name.to_lowercase();
-        let duplicate = |tables: &[Table]| {
-            tables
-                .iter()
-                .filter(|table| table.name.to_lowercase() == name)
-                .nth(1)
-                .is_some()
-        };
-        if duplicate(originals) || duplicate(&workbook.tables) {
-            return Err(ParseError::UnsupportedEdit(format!(
-                "cannot patch table {} in {path}: duplicate display name",
-                table.name
-            )));
-        }
-        if table.columns.len() != source.columns.len() {
-            return Err(column_count_error(path));
-        }
-        let normalized = normalized_part_name(path);
-        reject_shared_part(package, path, &table.name)?;
-        let destination = destinations
-            .get(&normalized)
-            .ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
-        let Some((destination, bytes)) = destination else {
-            return Err(ParseError::UnsupportedEdit(format!(
-                "cannot patch table {}: table part {path} has multiple destinations",
-                table.name
-            )));
-        };
-        validate_headers(workbook, table, source)?;
-        names.insert(normalized, (destination, bytes, source, table));
+        let (destination, bytes) =
+            package.validate_table_change(workbook, table, source, path, &table.columns, None)?;
+        names.insert(
+            normalized_part_name(path),
+            (destination, bytes, source, table),
+        );
     }
     let renames = caption_renames(package, changes, None);
     package.patch_table_formulas(&renames, |path, mut bytes| {
@@ -305,7 +323,7 @@ pub(super) fn patch_table_parts(
     })?;
     for (_, (path, bytes, source, table)) in names {
         parts.set(
-            (*path).clone(),
+            path.to_owned(),
             patch_names(path, bytes, &source.columns, &table.columns)?,
         )?;
     }
@@ -335,24 +353,28 @@ fn reject_shared_part(
     Ok(())
 }
 
-fn validate_headers(workbook: &Workbook, table: &Table, source: &Table) -> Result<(), ParseError> {
+fn validate_headers(
+    workbook: &Workbook,
+    table: &Table,
+    columns: &[String],
+    original: &[String],
+    proposed_column: Option<usize>,
+) -> Result<(), ParseError> {
     let sheet = &workbook.sheets[table.sheet.0 as usize];
     let start = table.range.start;
     let width = table.range.end.col - start.col + 1;
-    if table.header_rows == 0 || table.columns.len() != width as usize {
+    if table.header_rows == 0 || columns.len() != width as usize {
         return Err(ParseError::UnsupportedEdit(format!(
             "table {} does not have a header cell for each column",
             table.name
         )));
     }
     let mut seen = HashSet::new();
-    for (col, (caption, original)) in
-        (start.col..=table.range.end.col).zip(table.columns.iter().zip(&source.columns))
-    {
-        let at = CellRef::new(start.row, col);
+    for (index, (caption, original)) in columns.iter().zip(original).enumerate() {
+        let at = CellRef::new(start.row, start.col + index as u32);
         let folded = caption.to_lowercase();
-        if caption.is_empty()
-            || !sheet.cell(at).is_some_and(|cell| {
+        let matches = proposed_column == Some(index)
+            || sheet.cell(at).is_some_and(|cell| {
                 cell.formula.is_none()
                     && matches!(
                         &cell.value,
@@ -360,13 +382,12 @@ fn validate_headers(workbook: &Workbook, table: &Table, source: &Table) -> Resul
                             if value == caption
                                 || caption == original && value.to_lowercase() == folded
                     )
-            })
-            || !seen.insert(folded)
-        {
+            });
+        if caption.is_empty() || !matches || !seen.insert(folded) {
             return Err(ParseError::UnsupportedEdit(format!(
                 "table {} column {} ({}) needs non-empty, unique text matching its caption",
                 table.name,
-                col - start.col + 1,
+                index + 1,
                 at.to_a1()
             )));
         }
