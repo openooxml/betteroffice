@@ -545,7 +545,8 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
                 columns = Some(depth);
             }
             Event::Start(e)
-                if columns.is_some_and(|at| depth == at + 1) && local_name(&e) == b"tableColumn" =>
+                if columns.is_some_and(|at| depth == at + 1)
+                    && local_name(&e) == b"tableColumn" =>
             {
                 if let Some(table) = table.as_mut() {
                     if table.columns.len() >= MAX_TABLE_COLUMNS {

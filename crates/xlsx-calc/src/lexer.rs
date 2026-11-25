@@ -236,8 +236,8 @@ pub fn may_reference_table_column(input: &str, table: &str, local: bool, column:
         } else {
             folded.contains(&table)
         };
-        has_column |= folded.contains(&column)
-            || folded.replace('\'', "").contains(&unescaped_column);
+        has_column |=
+            folded.contains(&column) || folded.replace('\'', "").contains(&unescaped_column);
         has_selector && has_column
     };
     if !input.contains('"') {
@@ -314,8 +314,8 @@ pub fn rewrite_table_columns<'a>(
         },
     ) in references.zip(table_refs)
     {
-        let external = external_prefix_before(index)
-            || sheet.as_deref().is_some_and(external_workbook_scope);
+        let external =
+            external_prefix_before(index) || sheet.as_deref().is_some_and(external_workbook_scope);
         if external {
             continue;
         }
@@ -716,13 +716,19 @@ impl Lexer<'_> {
             return self.lex_reference(Some(word), start);
         }
 
-        if self.table_refs.is_some() && let Some(end) = self.unquoted_external_scope_end(start) {
+        if self.table_refs.is_some()
+            && let Some(end) = self.unquoted_external_scope_end(start)
+        {
             return self.lex_unquoted_sheet_ref(start, end);
         }
 
-        if self.external_prefixes && let Some(second) = self.input[self.pos..].strip_prefix(':') {
+        if self.external_prefixes
+            && let Some(second) = self.input[self.pos..].strip_prefix(':')
+        {
             let tail = second.trim_start_matches(is_word_char);
-            if tail.len() < second.len() && let Some(reference) = tail.strip_prefix('!') {
+            if tail.len() < second.len()
+                && let Some(reference) = tail.strip_prefix('!')
+            {
                 return self.lex_unquoted_sheet_ref(start, self.input.len() - reference.len() - 1);
             }
         }
@@ -1022,7 +1028,9 @@ mod tests {
     fn table_column_candidates_skip_strings_with_escaped_quotes() {
         let literal = r#"SUM(Jan:Mar!A1)+N("Table1[""Status""]")"#;
         for local in [false, true] {
-            assert!(!may_reference_table_column(literal, "Table1", local, "Status"));
+            assert!(!may_reference_table_column(
+                literal, "Table1", local, "Status"
+            ));
         }
         let source = r#"'Data "Q"'!Table1["Status"]+N("Table1[""Status""]")"#;
         assert_eq!(
