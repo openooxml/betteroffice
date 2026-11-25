@@ -19,7 +19,7 @@ pub(crate) enum PackageSlot {
         source: SourceContainer,
         facts: PackageFacts,
         rebuilt: OnceLock<std::result::Result<PreservedPackage, String>>,
-        alternate_validation: OnceLock<std::result::Result<AlternateContentSources, String>>,
+        alternate_validation: OnceLock<std::result::Result<Box<AlternateContentSources>, String>>,
     },
 }
 
@@ -247,6 +247,7 @@ impl PackageSlot {
                     !omitted.contains(&path.trim_start_matches('/').to_ascii_lowercase())
                 })?;
                 AlternateContentSources::from_parts(&parts, &included)
+                    .map(Box::new)
                     .map_err(|error| error.to_string())
             })
             .as_ref()

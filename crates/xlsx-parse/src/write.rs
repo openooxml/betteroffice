@@ -2634,7 +2634,7 @@ fn holds_formulas(wb: &Workbook, package: &PreservedPackage, sheets: &[PlannedSh
             Some(SourceSheetKind::Macrosheet | SourceSheetKind::Other)
         ) || package
             .source_cell_facts(origin)
-            .is_some_and(|facts| facts.alternate_formulas)
+            .is_some_and(|facts| facts.alternate_formulas || facts.sheet_data_alternate_formulas)
     }) || wb
         .sheets
         .iter()

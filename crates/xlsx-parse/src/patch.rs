@@ -244,7 +244,7 @@ pub(crate) fn scan_alternate_content(
                         block.inert = false;
                     }
                     if name == b"f" {
-                        facts.alternate_formulas = true;
+                        facts.sheet_data_alternate_formulas = true;
                         block.inert = false;
                         if !empty && formula.is_none() {
                             formula = Some((depth, String::new()));
@@ -2112,7 +2112,8 @@ fn alternate_grid_facts_detect_empty_wrappers_and_unmodeled_formulas() {
         scan_alternate_content(source.as_bytes(), true, &mut facts).unwrap();
         assert!(facts.has_sheet_data_alternates());
         assert!(facts.non_inert_alternate);
-        assert_eq!(facts.alternate_formulas, formula);
+        assert_eq!(facts.sheet_data_alternate_formulas, formula);
+        assert!(!facts.alternate_formulas);
     }
 }
 

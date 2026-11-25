@@ -1,4 +1,4 @@
-use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, SheetId, Workbook};
+use betteroffice_xlsx::{CalculationOptions, CellRef, CellValue, Error, SheetId, Workbook};
 use xlsx_model::CellProvider;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -56,4 +56,27 @@ fn a_cell_alternate_content_formula_keeps_cached_results_on_open() {
     };
     assert_eq!(value("A1"), CellValue::Number { value: 2.0 });
     assert_eq!(value("B1"), CellValue::Number { value: 7.0 });
+}
+
+#[test]
+fn a_cell_alternate_content_formula_refuses_sheet_rewrites_before_mutation() {
+    let options = CalculationOptions::default();
+    let mut workbook = Workbook::open_recalculating_stale(&package(), options, None).unwrap();
+    let model = workbook.model().clone();
+    let version = workbook.version();
+    let history = workbook.history_state();
+    let baseline = workbook.save().unwrap();
+    for address in ["A1", "B1"] {
+        let at = CellRef::parse_a1(address).unwrap();
+        let error = workbook.edit_cell(SheetId(0), at, "4", options).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+                if message.contains("Sheet1") && message.contains("mc:AlternateContent")
+        ));
+        assert_eq!(workbook.model(), &model);
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.history_state(), history);
+        assert_eq!(workbook.save().unwrap(), baseline);
+    }
 }

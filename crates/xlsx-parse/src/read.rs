@@ -706,13 +706,13 @@ pub struct SourceCellFacts {
     pub dropped_array_ranges: bool,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
-    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
-    /// branch's cell can stand in for it in the model.
+    /// A formula read from a wrapped cell whose address can recur in another branch.
     pub alternate_formulas: bool,
     pub alternate_cells: BTreeSet<(u32, u32)>,
     pub alternate_rows: BTreeSet<u32>,
     pub(crate) alternate_spans: Vec<crate::patch::AlternateSpan>,
     pub(crate) non_inert_alternate: bool,
+    pub(crate) sheet_data_alternate_formulas: bool,
     pub(crate) alternate_formula_texts: Vec<String>,
 }
 
