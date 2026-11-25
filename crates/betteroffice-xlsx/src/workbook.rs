@@ -2921,15 +2921,13 @@ impl Workbook {
             validate_insert_capacity(staged, op)?;
             batch.apply_with_inverse(op, |inverse| {
                 rewrote_table_names |= matches!(op, Op::SetCell { .. })
-                    && inverse
-                        .iter()
-                        .any(|op| {
-                            matches!(
-                                op,
-                                Op::RestoreTableColumn { defined_names, .. }
-                                    if !defined_names.is_empty()
-                            )
-                        });
+                    && inverse.iter().any(|op| {
+                        matches!(
+                            op,
+                            Op::RestoreTableColumn { defined_names, .. }
+                                if !defined_names.is_empty()
+                        )
+                    });
             })?;
             match *op {
                 Op::AddSheet { index, .. } => {

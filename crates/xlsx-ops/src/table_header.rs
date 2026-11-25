@@ -216,7 +216,13 @@ fn rewrite_table_formulas(
         for chart in &sheet.charts {
             if caption_changed
                 && chart.refs.iter().any(|reference| {
-                    references_table_column(&reference.formula, &table.name, table_sheet, false, old)
+                    references_table_column(
+                        &reference.formula,
+                        &table.name,
+                        table_sheet,
+                        false,
+                        old,
+                    )
                 })
             {
                 return Err(unsupported(chart.part.clone()));

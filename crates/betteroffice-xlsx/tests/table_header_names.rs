@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditApplication,
-    EditFailureCode, EditHistory, EditOperation, EditRequest, EditStep, Error, Op,
-    ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, SheetId, StylePatch, Workbook,
-    WorkbookModel,
+    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditApplication, EditFailureCode,
+    EditHistory, EditOperation, EditRequest, EditStep, Error, Op, ProposalEditInput,
+    ProposalRequest, RangeAddress, RangeTarget, SheetId, StylePatch, Workbook, WorkbookModel,
 };
 use xlsx_model::CellProvider;
 use xlsx_ops::{CellState, OpError};
@@ -598,7 +597,12 @@ fn a_formula_entered_between_two_header_renames_uses_the_final_caption() {
                 cell: at(address),
                 input: input.into(),
             });
-            assert!(workbook.edit_cells(SHEET1, &edits, options).unwrap().applied);
+            assert!(
+                workbook
+                    .edit_cells(SHEET1, &edits, options)
+                    .unwrap()
+                    .applied
+            );
         }
         let saved = workbook.save().unwrap();
         let reopened = assert_saved_headers(&saved, ["Name", "Status", "Rev"]);
@@ -676,7 +680,10 @@ fn a_batch_reports_sheets_with_rewritten_formulas_whose_values_stay_the_same() {
                 .as_deref(),
             Some("COUNTA(Table1[State])")
         );
-        assert_eq!(model.value(sheet, at("D1")), CellValue::Number { value: 3.0 });
+        assert_eq!(
+            model.value(sheet, at("D1")),
+            CellValue::Number { value: 3.0 }
+        );
     }
 }
 
@@ -1482,13 +1489,17 @@ fn an_array_formula_with_source_metadata_refuses_the_rename() {
         &book(),
         "[Content_Types].xml",
         "</Types>",
-        &format!(r#"<Override PartName="/{METADATA}" ContentType="{SPREADSHEET}.sheetMetadata+xml"/></Types>"#),
+        &format!(
+            r#"<Override PartName="/{METADATA}" ContentType="{SPREADSHEET}.sheetMetadata+xml"/></Types>"#
+        ),
     );
     let source = replace_part(
         &source,
         "xl/_rels/workbook.xml.rels",
         "</Relationships>",
-        &format!(r#"<Relationship Id="rId4" Type="{DOC_RELS}/sheetMetadata" Target="metadata.xml"/></Relationships>"#),
+        &format!(
+            r#"<Relationship Id="rId4" Type="{DOC_RELS}/sheetMetadata" Target="metadata.xml"/></Relationships>"#
+        ),
     );
     let sheet = "xl/worksheets/sheet1.xml";
     let source = replace_part(
@@ -1630,7 +1641,9 @@ fn a_reference_in_a_modeled_charts_extension_refuses_the_rename() {
         &source,
         "xl/worksheets/_rels/sheet1.xml.rels",
         "</Relationships>",
-        &format!(r#"<Relationship Id="rIdDrawing" Type="{DOC_RELS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#),
+        &format!(
+            r#"<Relationship Id="rIdDrawing" Type="{DOC_RELS}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#
+        ),
     );
     let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
     let chart = "xl/charts/chart1.xml";

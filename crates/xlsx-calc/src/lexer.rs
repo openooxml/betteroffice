@@ -262,8 +262,13 @@ pub fn rewrite_table_columns<'a>(
             TokKind::TableRef { table, .. } => Some((index, token, table)),
             _ => None,
         });
-    for ((index, token, table), TableRefRewrite { sheet, selector_start }) in
-        references.zip(table_refs)
+    for (
+        (index, token, table),
+        TableRefRewrite {
+            sheet,
+            selector_start,
+        },
+    ) in references.zip(table_refs)
     {
         let external = (index > 0
             && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('[')))
@@ -370,7 +375,9 @@ impl Lexer<'_> {
                 '\'' => self.lex_quoted_sheet_ref()?,
                 '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
-                '[' if self.table_refs.is_some() => self.lex_table_ref(None, String::new(), start)?,
+                '[' if self.table_refs.is_some() => {
+                    self.lex_table_ref(None, String::new(), start)?
+                }
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
