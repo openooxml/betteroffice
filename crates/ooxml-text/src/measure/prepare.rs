@@ -817,6 +817,7 @@ fn prepare_field_run(
         input.font_chains,
         (run.bold, run.italic, family),
         &run.word_features,
+        |_, _, _, _| {},
     )?;
     Ok(PreparedField {
         width,
@@ -908,6 +909,7 @@ pub(super) fn measure_plain_text(
     font_chains: FontChains<'_>,
     style: (bool, bool, &str),
     features: &[ShapeFeature],
+    mut shaped_run: impl FnMut(&str, FontId, u8, Vec<crate::ShapedGlyph>),
 ) -> Result<f32, MeasureError> {
     if text.len() > MAX_RUN_TEXT_BYTES {
         return Err(MeasureError::Unsupported(format!(
@@ -923,14 +925,14 @@ pub(super) fn measure_plain_text(
     }
 
     let levels = char_levels(text, base);
-    let mut plan: Vec<(char, FontId, u8)> = Vec::new();
+    let mut plan = Vec::new();
     let resolve = styled_font_resolver(
         font_chains.coverage_only(chain),
         font_chains.symbols_shape(),
         style.0,
         style.1,
     );
-    for (i, ch) in text.chars().enumerate() {
+    for (i, (byte, ch)) in text.char_indices().enumerate() {
         let Some(font) = resolve.resolve(store, chain, ch, style.2, true) else {
             return Err(MeasureError::Unsupported("uncovered character".to_string()));
         };
@@ -941,14 +943,14 @@ pub(super) fn measure_plain_text(
         } else {
             ch
         };
-        plan.push((shaped, font, levels[i]));
+        plan.push((shaped, font, levels[i], byte));
     }
 
     // shape maximal same-font single-level subranges and sum advances
     let mut width = 0.0f32;
     let mut seg_start = 0;
     while seg_start < plan.len() {
-        let (_, font, level) = plan[seg_start];
+        let (_, font, level, start_byte) = plan[seg_start];
         let mut seg_end = seg_start + 1;
         while seg_end < plan.len() && plan[seg_end].1 == font && plan[seg_end].2 == level {
             seg_end += 1;
@@ -976,6 +978,8 @@ pub(super) fn measure_plain_text(
         }
         .map_err(|e| MeasureError::Invalid(format!("shaping failed: {e}")))?;
         width += glyphs.iter().map(|g| g.x_advance).sum::<f32>();
+        let end_byte = plan.get(seg_end).map_or(text.len(), |run| run.3);
+        shaped_run(&text[start_byte..end_byte], font, level, glyphs);
         seg_start = seg_end;
     }
     Ok(width)

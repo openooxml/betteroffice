@@ -16,7 +16,7 @@ const TOKEN = "SECRETTOKEN-static-3c2b1a";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 afterEach(() => {

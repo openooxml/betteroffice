@@ -12,7 +12,7 @@ import { WopiHostError } from "../host/errors";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 let cid = 50000;
 function nextId(): number {

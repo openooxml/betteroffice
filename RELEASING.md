@@ -59,8 +59,9 @@ error fails the release instead of guessing a crate is new.
 
 ## Initial npm release of a new package
 
-`release.yml` authenticates to npm with OIDC Trusted Publishing and carries no
-`NPM_TOKEN` fallback. Trusted Publishing can only be configured on a package
+`release.yml` authenticates to npm with OIDC Trusted Publishing. When the
+optional `NPM_FALLBACK_TOKEN` secret is set, npm uses it only for a package whose
+OIDC exchange fails (see "npm fallback token"). Trusted Publishing can only be configured on a package
 that already exists, so **a brand-new package name cannot be published by the
 workflow** — its first version must be pushed by hand.
 
@@ -97,6 +98,16 @@ versions it reads are the ones about to be published: the publish path runs only
 when no changesets are pending, and `changesets/action` runs no `version`
 command then.
 
+## npm fallback token
+
+For a package that has no Trusted Publisher yet, create a granular access token
+on npmjs.com with "Read and write (publish and stage)", "Bypass two-factor
+authentication", only the packages that need it, and a short expiry. Add it as
+the repository secret `NPM_FALLBACK_TOKEN`. The npm publish steps of
+`release.yml` and `publish-native.yml` pass it as `NODE_AUTH_TOKEN`; npm still
+tries OIDC first and uses the token only where the exchange fails. Delete the
+secret after the release and add the missing Trusted Publishers.
+
 ## Native packages
 
 `@betteroffice/{docx,pptx,xlsx}-native` are three roots with eight platform packages
@@ -106,7 +117,8 @@ Each root joins its core's fixed Changesets group. `version-packages.mjs` syncs
 the platform manifests and the Cargo version.
 Repository roots are private so `changeset publish` skips them. The dispatch-only
 `publish-native.yml` drops `private` and uploads with OIDC Trusted Publishing in
-environment `npm-<format>`, refusing `NPM_TOKEN`.
+environment `npm-<format>`, refusing `NPM_TOKEN` and falling back to
+`NPM_FALLBACK_TOKEN` when it is set.
 After a successful npm release, `release.yml`'s `native-npm` job dispatches that
 workflow for formats whose root version is missing and waits for every run.
 The release holds packages that need a native version missing from npm. The

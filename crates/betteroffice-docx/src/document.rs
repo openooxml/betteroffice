@@ -454,6 +454,7 @@ impl Document {
 
     #[cfg(feature = "fonts")]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
+        input.clamp_column_counts();
         let requirements =
             self.font_requirements(input.measured.iter().map(|measured| &measured.block));
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
@@ -545,6 +546,7 @@ impl Document {
 
     #[cfg(not(feature = "fonts"))]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
+        input.clamp_column_counts();
         let layout = docx_layout::compute_layout_input(&mut input)?;
         let display_list =
             docx_layout::build_display_list(&input, &layout).map_err(Error::DisplayList)?;

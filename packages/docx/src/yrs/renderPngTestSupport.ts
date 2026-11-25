@@ -25,7 +25,8 @@ export function stubBrowser() {
   class Canvas {
     constructor(public width: number, public height: number) {}
     getContext() {
-      if (calls.sizes.at(-1)?.[0] !== this.width || calls.sizes.at(-1)?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
+      const last = calls.sizes[calls.sizes.length - 1];
+      if (last?.[0] !== this.width || last?.[1] !== this.height) calls.sizes.push([this.width, this.height]);
       return new Proxy({} as Record<string, unknown>, {
         get(target, property) {
           if (property === 'fill') return () => { calls.fills++; };
@@ -55,10 +56,14 @@ export interface TextRun {
   text: string;
   bold?: boolean;
   rtl?: boolean;
+  paragraphFamily?: string;
 }
 
-const runXml = ({ family, text, bold, rtl }: TextRun) =>
-  `<w:p>${rtl ? '<w:pPr><w:bidi/></w:pPr>' : ''}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${bold ? '<w:b/><w:bCs/>' : ''}${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+const runXml = ({ family, text, bold, rtl, paragraphFamily }: TextRun) => {
+  const paragraphFonts = paragraphFamily ? `<w:rPr><w:rFonts w:ascii="${paragraphFamily}" w:hAnsi="${paragraphFamily}"/></w:rPr>` : '';
+  const paragraphProperties = rtl || paragraphFonts ? `<w:pPr>${rtl ? '<w:bidi/>' : ''}${paragraphFonts}</w:pPr>` : '';
+  return `<w:p>${paragraphProperties}<w:r><w:rPr><w:rFonts w:ascii="${family}" w:hAnsi="${family}" w:cs="${family}"/>${bold ? '<w:b/><w:bCs/>' : ''}${rtl ? '<w:rtl/>' : ''}</w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+};
 
 /** A one-section document with a paragraph per run. */
 export const runsDocument = (...runs: TextRun[]) => new Uint8Array(rezipPartsToArrayBuffer(new Map([

@@ -246,7 +246,7 @@ fn balance_current_column_region<P: ColumnBalancePaginator>(
         .filter(|boundary| *boundary >= ideal - BOUNDARY_SLACK_PX && *boundary < ceiled)
         .find(|height| {
             packs_exactly
-                && content_packs(legal_breaks, fit_height, columns.count as usize, *height)
+                && content_packs(legal_breaks, fit_height, columns.column_count(), *height)
         });
     let balanced_height = half_way.unwrap_or_else(|| {
         legal_breaks

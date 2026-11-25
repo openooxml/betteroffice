@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/wopi",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "test": "bun test src test web/src",
@@ -15,6 +15,8 @@
     "@betteroffice/docx-react": "workspace:*",
     "@betteroffice/fonts": "workspace:*",
     "@betteroffice/fonts-cjk": "workspace:*",
+    "@betteroffice/fonts-intl": "workspace:*",
+    "@betteroffice/fonts-latin": "workspace:*",
     "@betteroffice/pptx": "workspace:*",
     "@betteroffice/pptx-react": "workspace:*",
     "@betteroffice/xlsx": "workspace:*",

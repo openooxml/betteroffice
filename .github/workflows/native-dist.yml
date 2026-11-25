@@ -27,7 +27,7 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -58,7 +58,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}
+          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig
@@ -76,6 +76,11 @@ jobs:
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked
 
+      - name: Check glibc floor
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
+
       - name: Build the font packages
         shell: bash
         run: |
@@ -86,6 +91,11 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=8192
         run: bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js
+
+      - name: Smoke test on Debian 12
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}

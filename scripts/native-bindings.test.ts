@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { GLIBC_FLOOR } from './glibc-floor.mjs';
 import {
   NATIVE_PACKAGES,
   NATIVE_FORMATS,
@@ -225,7 +226,7 @@ describe('native package release wiring', () => {
     const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
     expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
     delete npmCheck.env;
-    expect(job['timeout-minutes']).toBe(90);
+    expect(job['timeout-minutes']).toBe(180);
     expect(JSON.stringify(job)).not.toContain('native');
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
@@ -252,7 +253,7 @@ describe('native package release wiring', () => {
       "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
     );
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(75);
+    expect(job['timeout-minutes']).toBe(90);
     expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const step = job.steps[1];
@@ -296,6 +297,7 @@ describe('native package release wiring', () => {
     expect(publish.name).toBe('Publish a native package');
     expect(publish['run-name']).toContain('native package');
     const job = publish.jobs.publish;
+    expect(job.needs).toBe('dist');
     expect(job.permissions['id-token']).toBe('write');
     expect(job.environment).toBe('npm-${{ inputs.binding }}');
     const refusal = job.steps.find((step: any) => step.name === 'Refuse an npm token');
@@ -397,6 +399,22 @@ describe('native package release wiring', () => {
     );
   });
 
+  test('dist builds GNU Linux binaries natively on pinned Ubuntu 24.04 images and checks their glibc floor', () => {
+    const job = dist.jobs.bindings;
+    expect(job.strategy.matrix.platform.filter((platform: any) => platform.target.endsWith('-linux-gnu'))).toEqual([
+      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' },
+      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu' }
+    ]);
+    const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
+    expect(job.steps[build + 1]).toEqual({
+      name: 'Check glibc floor',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
+    });
+    expect(GLIBC_FLOOR).toBe('2.35');
+  });
+
   test('dist cross-compiles musl with zig and Windows arm64 with MSVC on GitHub-hosted runners', () => {
     const platforms = dist.jobs.bindings.strategy.matrix.platform;
     const entry = (target: string) => platforms.find((platform: any) => platform.target === target);
@@ -436,6 +454,18 @@ describe('native package release wiring', () => {
     expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
   });
 
+  test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {
+    expect(dist.jobs['gnu-smoke']).toBeUndefined();
+    const steps = dist.jobs.bindings.steps;
+    const entries = steps.findIndex((step: any) => step.name === 'Build the JS entries');
+    expect(steps[entries + 1]).toEqual({
+      name: 'Smoke test on Debian 12',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+    });
+  });
+
   test('dist uploads the generated loader from GNU Linux x64 after testing', () => {
     const steps = dist.jobs.bindings.steps;
     const loader = steps.find(
@@ -461,7 +491,7 @@ describe('native package release wiring', () => {
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
     expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
-    expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(testing));
     const fonts = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
     expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
@@ -611,6 +641,7 @@ describe('native package release wiring', () => {
       'scripts/native-bindings.mjs',
       'scripts/native-bindings-smoke.mjs',
       'scripts/native-raw-smoke.mjs',
+      'scripts/glibc-floor.mjs',
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',
@@ -620,6 +651,7 @@ describe('native package release wiring', () => {
       'packages/docx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
+      'scripts/workspace-ranges.mjs',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',
       '.github/workflows/publish-native.yml'

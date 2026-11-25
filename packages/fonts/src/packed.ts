@@ -4,6 +4,7 @@ import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 import { readFontBytes } from './bytes';
 import type { FontDecoder } from './decode';
+import type { FontRequestPolicy } from './fontCdn';
 import type { BundledFontFace } from './manifest';
 import type { SliceRef } from './progressive';
 import { sha256 } from './sha256';
@@ -70,9 +71,10 @@ async function loadFace(
   face: BundledFontFace,
   manifest: PackManifest,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
-  timeoutMs?: number | ((url: URL) => number | undefined),
+  policy?: FontRequestPolicy | ((url: URL) => FontRequestPolicy | undefined),
   wasmUrl?: URL,
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
+  resolvedUrl?: URL,
 ): Promise<DecodedFace> {
   const decoder = runtime?.decoder;
   let cache = decodedCache;
@@ -80,11 +82,12 @@ async function loadFace(
     cache = engineCaches.get(decoder) ?? new Map();
     engineCaches.set(decoder, cache);
   }
-  const url = await resolveUrl(face);
-  const requestTimeoutMs = typeof timeoutMs === 'function' ? timeoutMs(url) : timeoutMs;
+  const url = resolvedUrl ?? await resolveUrl(face);
+  const request = typeof policy === 'function' ? policy(url) : policy;
   const entry = manifest.faces.find((entry) => entry.file === face.file);
   if (entry === undefined) throw new Error(`Unknown bundled font asset: ${face.file}`);
-  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${requestTimeoutMs ?? ''}|${wasmUrl?.href ?? ''}`;
+  const policyKey = typeof request === 'object' ? 'implicit' : request ?? '';
+  const key = `${manifest.pack}|${manifest.version}|${url.href}|${entry.codec}|${entry.dict}|${entry.encodedLength}|${face.byteLength}|${entry.sha256}|${policyKey}|${wasmUrl?.href ?? ''}`;
   let pending = cache.get(key);
   if (pending === undefined) {
     pending = (async () => {
@@ -94,33 +97,48 @@ async function loadFace(
         || regular.codec !== entry.codec || regular.family !== entry.family)) {
         throw new Error(`Missing bundled font dictionary for ${face.file}`);
       }
+      const dictionary = regular && { ...face, file: regular.file, byteLength: regular.byteLength };
+      const dictionaryUrl = dictionary && await resolveUrl(dictionary);
+      const dictionaryRequest = dictionaryUrl && (typeof policy === 'function' ? policy(dictionaryUrl) : policy);
+      const checkDictionary = dictionaryUrl && typeof dictionaryRequest === 'object'
+        ? () => dictionaryRequest.check(dictionaryUrl) : undefined;
+      const loadDictionary = () => dictionary && loadFace(
+        dictionary, manifest, resolveUrl, policy, wasmUrl, runtime, dictionaryUrl,
+      );
+      const checkLength = (encoded: ArrayBuffer) => {
+        if (encoded.byteLength !== entry.encodedLength) {
+          throw new Error(`Bundled font ${face.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
+        }
+        return encoded;
+      };
+      const decode = async (encoded: ArrayBuffer, prerequisite: DecodedFace | undefined) => {
+        const dictionary = prerequisite === undefined ? undefined
+          : (prerequisite.payload ?? prerequisite.font).slice(0);
+        const decoded = await decodeWith(wasmUrl, decoder)(encoded,
+          { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
+        if (decoded.font.byteLength !== face.byteLength) {
+          throw new Error(`Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`);
+        }
+        if (await sha256(decoded.font) !== entry.sha256) {
+          throw new Error(`Bundled font ${face.file} SHA-256 mismatch`);
+        }
+        if (entry.codec === 'woff2t+zstd' && decoded.payload === undefined) {
+          throw new Error(`Missing bundled font dictionary payload for ${face.file}`);
+        }
+        return decoded;
+      };
+      if (typeof request === 'object') {
+        return request.load(face.file, url, async (encoded, check) => {
+          await check(() => checkLength(encoded));
+          const prerequisite = await loadDictionary();
+          return check(() => decode(encoded, prerequisite));
+        }, checkDictionary);
+      }
+      checkDictionary?.();
       const [encoded, prerequisite] = await Promise.all([
-        readFontBytes(face.file, url, requestTimeoutMs),
-        regular === undefined ? undefined : loadFace(
-          { ...face, file: regular.file, byteLength: regular.byteLength },
-          manifest, resolveUrl, timeoutMs, wasmUrl, runtime,
-        ),
+        readFontBytes(face.file, url, request).then(checkLength), loadDictionary(),
       ]);
-      if (encoded.byteLength !== entry.encodedLength) {
-        throw new Error(
-          `Bundled font ${face.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`,
-        );
-      }
-      const dictionary = prerequisite === undefined ? undefined
-        : (prerequisite.payload ?? prerequisite.font).slice(0);
-      const decoded = await decodeWith(wasmUrl, decoder)(encoded, { codec: entry.codec, dict: dictionary, maxOutput: 64 * 1024 * 1024 });
-      if (decoded.font.byteLength !== face.byteLength) {
-        throw new Error(
-          `Bundled font ${face.file} has ${decoded.font.byteLength} bytes; expected ${face.byteLength}`,
-        );
-      }
-      if (await sha256(decoded.font) !== entry.sha256) {
-        throw new Error(`Bundled font ${face.file} SHA-256 mismatch`);
-      }
-      if (entry.codec === 'woff2t+zstd' && decoded.payload === undefined) {
-        throw new Error(`Missing bundled font dictionary payload for ${face.file}`);
-      }
-      return decoded;
+      return decode(encoded, prerequisite);
     })();
     cache.set(key, pending);
     const current = pending;
@@ -131,7 +149,7 @@ async function loadFace(
   }
   const shared = pending;
   return shared.then((decoded) => intact(decoded, face) ? decoded : (cache.get(key) === shared && cache.delete(key),
-    loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)));
+    loadFace(face, manifest, resolveUrl, policy, wasmUrl, runtime)));
 }
 
 function intact(decoded: DecodedFace, face: BundledFontFace): boolean {
@@ -162,18 +180,18 @@ export function sliceRefOf(file: string): SliceRef | undefined {
 export async function loadPackedFontBytes(
   face: BundledFontFace,
   resolveUrl: (face: BundledFontFace) => Promise<URL>,
-  timeoutMs?: number | ((url: URL) => number | undefined),
+  policy?: FontRequestPolicy | ((url: URL) => FontRequestPolicy | undefined),
   wasmUrl?: URL,
   manifest: PackManifest = packFor(face),
   runtime?: { decoder?: FontDecoder; /** @internal Entries this call creates are dropped once settled; concurrent requests still share one decode. */ retain?: boolean },
 ): Promise<ArrayBuffer> {
-  return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font.slice(0);
+  return (await loadFace(face, manifest, resolveUrl, policy, wasmUrl, runtime)).font.slice(0);
 }
 
 /** @internal The cached decoded face, shared with every caller: read it, never change or transfer it. */
 export async function readPackedFontBytes(
   ...args: Parameters<typeof loadPackedFontBytes>
 ): Promise<ArrayBuffer> {
-  const [face, resolveUrl, timeoutMs, wasmUrl, manifest = packFor(face), runtime] = args;
-  return (await loadFace(face, manifest, resolveUrl, timeoutMs, wasmUrl, runtime)).font;
+  const [face, resolveUrl, policy, wasmUrl, manifest = packFor(face), runtime] = args;
+  return (await loadFace(face, manifest, resolveUrl, policy, wasmUrl, runtime)).font;
 }

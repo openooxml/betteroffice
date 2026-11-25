@@ -254,8 +254,10 @@ pub(crate) fn measurement_widths(input: &docx_layout::types::Input) -> Result<Ve
         .into_iter()
         .map(|section| {
             let columns = section.columns.unwrap_or_else(default_columns);
-            let count =
-                (columns.count.max(1.0) as usize).max(columns.columns.as_ref().map_or(0, Vec::len));
+            let count = columns
+                .column_count()
+                .max(columns.columns.as_ref().map_or(0, Vec::len))
+                .min(docx_layout::types::MAX_COLUMNS);
             let paginator = docx_layout::page_flow::Paginator::new(
                 section.page_size,
                 section.margins,

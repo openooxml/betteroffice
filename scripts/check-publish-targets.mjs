@@ -20,6 +20,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org';
 const CRATES_REGISTRY = process.env.CRATES_REGISTRY_URL ?? 'https://crates.io/api/v1/crates';
 const CDN_BASE = process.env.CDN_BASE_URL ?? 'https://cdn.jsdelivr.net/npm';
+const FONT_PACKAGES = new Set(['@betteroffice/fonts-latin', '@betteroffice/fonts-intl', '@betteroffice/fonts-cjk']);
 const VERIFY_WAIT_MS = 10 * 60_000;
 // crates.io rejects a request without one.
 const USER_AGENT = 'betteroffice-release (https://github.com/openooxml/betteroffice)';
@@ -353,6 +354,22 @@ async function waitForPublished(url, method, timeoutMs, deadline) {
   return false;
 }
 
+function cdnPublishTargets(packages, workspaces, baseUrl) {
+  return releaseEntries(packages, workspaces).flatMap(({ name, version, directory }) => {
+    const tag = `${name}@${version}`;
+    const asset = FONT_PACKAGES.has(name)
+      ? JSON.parse(readFileSync(join(directory, 'assets', 'manifest.json'), 'utf8'))?.faces?.[0]?.file
+      : undefined;
+    if (FONT_PACKAGES.has(name) && (typeof asset !== 'string' || !asset.endsWith('.zst'))) throw new Error(`${tag} has no compressed assets in its manifest`);
+    return [
+      { label: tag, service: 'the CDN', method: 'HEAD', url: `${baseUrl}/${tag}/package.json` },
+      ...(asset ? [
+        { label: `${tag}/assets/${asset}`, service: 'the CDN', method: 'HEAD', url: `${baseUrl}/${tag}/assets/${asset}` }
+      ] : [])
+    ];
+  });
+}
+
 export async function missingHeldNatives(packages, {
   registry = NPM_REGISTRY,
   timeoutMs = REQUEST_TIMEOUT_MS,
@@ -396,29 +413,26 @@ export async function verifyPublished({
   }
   const targets = [
     ...immediate.map(({ name, version }) => ({
-      name, version, service: 'npm', method: 'GET',
+      label: `${name}@${version}`, service: 'npm', method: 'GET',
       url: npmVersionUrl(registry, name, version)
     })),
-    ...[...cdnPackages.values()].map(({ name, version }) => ({
-      name, version, service: 'the CDN', method: 'HEAD',
-      url: `${cdnBase.replace(/\/+$/, '')}/${name}@${version}/package.json`
-    }))
+    ...cdnPublishTargets([...cdnPackages.values()], workspaces, cdnBase.replace(/\/+$/, ''))
   ];
   const deadline = Date.now() + Math.min(maxWaitMs, VERIFY_WAIT_MS);
   const results = await Promise.all(targets.map(async (target) => ({
     ...target,
     found: await waitForPublished(target.url, target.method, timeoutMs, deadline)
   })));
-  for (const { name, version, service, found } of results) {
-    const message = `${name}@${version} is ${found ? '' : 'not '}on ${service} after publishing.`;
+  for (const { label, service, found } of results) {
+    const message = `${label} is ${found ? '' : 'not '}on ${service} after publishing.`;
     if (found) out.log(message);
     else out.error(message);
   }
   const missing = results.filter(({ found }) => !found);
   if (missing.length === 0) return 0;
   if (annotate) {
-    for (const { name, version, service } of missing) {
-      out.error(`::error title=Release incomplete::${name}@${version} is not on ${service} after publishing`);
+    for (const { label, service } of missing) {
+      out.error(`::error title=Release incomplete::${label} is not on ${service} after publishing`);
     }
   }
   if (summary) {
@@ -427,7 +441,7 @@ export async function verifyPublished({
       '',
       'These versions were not found after publishing. If the publish step succeeded, the registry or CDN is still propagating: check them again later. If it failed, publish what is missing (RELEASING.md); native packages and the deploy are dispatched with publish-native.yml and deploy.yml.',
       '',
-      ...missing.map(({ name, version, service }) => `- \`${name}@${version}\` on ${service}`),
+      ...missing.map(({ label, service }) => `- \`${label}\` on ${service}`),
       ''
     ].join('\n'));
   }
