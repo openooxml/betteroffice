@@ -34,6 +34,15 @@ const HAN: ReadonlyArray<readonly [number, number]> = [
 
 const within = (ranges: ReadonlyArray<readonly [number, number]>, point: number) => ranges.some(([low, high]) => point >= low && point <= high);
 
+const NON_CJK = [['arabic', ARABIC], ['hebrew', HEBREW], ...INTL] as const;
+const nonCjkUnicodeRanges = new Map(NON_CJK.map(([script, ranges]) => [
+  script, ranges.map(([low, high]) => `U+${low.toString(16)}-${high.toString(16)}`).join(', '),
+] as const));
+
+export function nonCjkScriptUnicodeRange(script: string): string | undefined {
+  return nonCjkUnicodeRanges.get(script);
+}
+
 /**
  * The script coverage buckets of one text, in the order the native engines ask their font manager for faces
  * (`ooxml_text::paragraph_scripts_with_han_fallback(&[text], false)`): Japanese, Korean, Simplified Chinese for

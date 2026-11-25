@@ -1,5 +1,5 @@
 import type { TextCmd } from '../display-list/types';
-import { cellScriptFaces } from './cellScriptFonts';
+import { cellScriptFaces } from '../../../../shared/office-session/xlsxScriptFonts';
 
 const PX_PER_PT = 96 / 72;
 const quoteFamily = (family: string) => `"${family.replace(/"/g, '\\"')}"`;
@@ -18,7 +18,7 @@ function cellFontFamily(cmd: TextCmd): string {
   const requested = cmd.fontFamily;
   const primary = requested?.trim().toLowerCase();
   let families = requested ? `${quoteFamily(requested)}, ` : '';
-  for (const { face } of cellScriptFaces(cmd)) {
+  for (const face of cellScriptFaces(cmd)) {
     if (face.family.toLowerCase() !== primary) families += `${quoteFamily(face.family)}, `;
   }
   return `${families}sans-serif`;

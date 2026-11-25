@@ -93,8 +93,6 @@ export { buildA11yGrid } from './a11y/index';
 
 export { paintDisplayList } from './render/canvas2d';
 export type { PaintOptions, PictureSource } from './render/canvas2d';
-/** @internal */
-export { cellScriptFontRequests } from './render/cellScriptFonts';
 export {
   initWasm,
   decodeFontFace,
