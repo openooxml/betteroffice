@@ -295,6 +295,10 @@ wasmTest('a failed opening load retries after backoff and repaints', async () =>
   let now = Date.now();
   const clock = spyOn(Date, 'now').mockImplementation(() => now);
   restorers.push(() => clock.mockRestore());
+  const timeout = globalThis.setTimeout;
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void, delay?: number, ...args: unknown[]) =>
+    delay === 5_000 ? timeout(() => { now += 5_000; callback(); }, 0) : timeout(callback, delay, ...args)) as typeof setTimeout);
+  restorers.push(() => timer.mockRestore());
   const pending = deferred<MetafileSvgModule>();
   const requested = deferred<void>();
   let attempts = 0;
@@ -307,8 +311,6 @@ wasmTest('a failed opening load retries after backoff and repaints', async () =>
   const client = await createPresentationCommandClient(await deck(1), options, wire.transport);
   clients.push(client);
   expect(client.state.frame?.media[0]?.bytes.byteLength).toBe(0);
-  now += 5_000;
-  expect((await client.thumbnail(client.state.slides[0]!.id)).status).toBe('frame');
   await requested.promise;
   const repainted = deferred<void>();
   client.subscribe(() => repainted.resolve());

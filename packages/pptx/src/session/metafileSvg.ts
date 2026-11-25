@@ -48,6 +48,10 @@ export function createMetafileSvg(
       });
       return loading;
     },
+    retryIn(): number | undefined {
+      if (retryAt !== undefined) return Math.max(0, retryAt - now());
+      return loading ? undefined : 0;
+    },
     ready(): boolean { return converter !== undefined; },
     convert(assetId: string, bytes: Uint8Array): Uint8Array | undefined {
       if (!converter || bytes.byteLength > MAX_SOURCE_BYTES) return undefined;

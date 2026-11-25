@@ -218,7 +218,7 @@ export function registerPresentationCommandHandlers(
   const sentMedia = new Set<string>();
   const pendingMetafiles = new Set<string>();
   const metafiles = engineKind === 'native' ? {
-    start: async () => {}, ready: () => true,
+    start: async () => {}, ready: () => true, retryIn: () => undefined,
     convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
   } : createMetafileSvg();
   let metafileLoad: Promise<void> | undefined;
@@ -246,16 +246,21 @@ export function registerPresentationCommandHandlers(
     if (metafileLoad) return metafileLoad;
     metafileLoad = metafiles.start().then(() => {
       repaintMetafiles();
-    }).finally(() => { metafileLoad = undefined; });
+    }).finally(() => {
+      metafileLoad = undefined;
+      if (!opening) idleMetafiles();
+    });
     return metafileLoad;
   }
 
   function idleMetafiles(): void {
     if (disposed || metafileTimer !== undefined) return;
+    const delay = metafiles.retryIn();
+    if (delay === undefined) return;
     metafileTimer = setTimeout(() => {
       metafileTimer = undefined;
       if (!disposed) void loadMetafiles().catch(() => {});
-    }, 0);
+    }, delay);
   }
 
   const frames = new Map<string, {

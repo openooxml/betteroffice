@@ -43,6 +43,24 @@ test('failed starts back off and stop after four attempts', async () => {
   expect(load).toHaveBeenCalledTimes(4);
 });
 
+test('retryIn reports when the next load may start', async () => {
+  let now = 0;
+  const converter = createMetafileSvg(async () => { throw new Error('unavailable'); }, () => now);
+  expect(converter.retryIn()).toBe(0);
+  await expect(converter.start()).rejects.toThrow('unavailable');
+  for (const delay of [5_000, 30_000, 120_000]) {
+    expect(converter.retryIn()).toBe(delay);
+    now += delay;
+    expect(converter.retryIn()).toBe(0);
+    await expect(converter.start()).rejects.toThrow('unavailable');
+  }
+  expect(converter.retryIn()).toBeUndefined();
+
+  const ready = createMetafileSvg(async () => moduleFor((source) => source));
+  await ready.start();
+  expect(ready.retryIn()).toBeUndefined();
+});
+
 test('cache identity includes source length and content, even for reused buffers', async () => {
   const convert = mock((source: Uint8Array) => source.slice());
   const converter = createMetafileSvg(async () => moduleFor(convert));
