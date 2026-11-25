@@ -265,6 +265,28 @@ mod tests {
     }
 
     #[test]
+    fn the_fallback_never_reissues_an_id_seen_live_this_session() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:1", Any::String("old".into()));
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740991".into()));
+        }
+        let ids = SessionIds::new(41);
+        let first = ids.draw(&doc.transact());
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:1");
+        }
+        let txn = doc.transact();
+        let later = [ids.draw(&txn), ids.draw(&txn)];
+        assert_eq!(first, "41:0");
+        assert!(!later.contains(&"41:1".to_owned()), "{later:?}");
+        assert!(!later.contains(&first), "{later:?}");
+    }
+
+    #[test]
     fn the_counter_never_wraps() {
         let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
         let ids = SessionIds::new(41);
