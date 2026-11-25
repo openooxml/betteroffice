@@ -542,7 +542,9 @@ impl DeckSession {
                 "shapes".into(),
                 ArrayPrelim::from(roots.iter().map(|id| rename(id)).collect::<Vec<_>>()).into(),
             );
-            (new_id, order, position, slides, shapes, stories, slide, copies)
+            (
+                new_id, order, position, slides, shapes, stories, slide, copies,
+            )
         };
         let (comments, comment_copies) = {
             let txn = self.doc.transact();

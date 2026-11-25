@@ -36,7 +36,11 @@ fn assert_save_reopens(deck: &Presentation, calls: u32) {
         deck.slide_ids().unwrap().len(),
         "slides after {calls} calls"
     );
-    assert_eq!(all_text(&reopened), all_text(deck), "texts after {calls} calls");
+    assert_eq!(
+        all_text(&reopened),
+        all_text(deck),
+        "texts after {calls} calls"
+    );
 }
 
 fn add_slides(add: impl Fn(&Presentation, &EditCtx, &[String], u32)) {
@@ -55,7 +59,11 @@ fn add_slides(add: impl Fn(&Presentation, &EditCtx, &[String], u32)) {
             "count after call {call}"
         );
         if call == 258 || call == ADDITIONS {
-            assert_eq!(slide_text(&deck, &ids[1]), text, "second slide after call {call}");
+            assert_eq!(
+                slide_text(&deck, &ids[1]),
+                text,
+                "second slide after call {call}"
+            );
             assert_save_reopens(&deck, call);
         }
     }
@@ -83,7 +91,9 @@ fn the_first_two_hundred_added_slides_keep_their_ids() {
     let added: Vec<_> = (count..count + 200)
         .map(|index| deck.insert_slide(&context, index, None).unwrap().slide_id)
         .collect();
-    let expected: Vec<_> = (0..200).map(|counter| format!("slide:1:{counter}")).collect();
+    let expected: Vec<_> = (0..200)
+        .map(|counter| format!("slide:1:{counter}"))
+        .collect();
     assert_eq!(added, expected);
 }
 
