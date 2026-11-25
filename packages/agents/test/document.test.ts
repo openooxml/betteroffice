@@ -253,6 +253,27 @@ describe('grep, read, propose, export', () => {
     }
   });
 
+  test('direct accept inherits formatting at each splice and preserves untouched runs', async () => {
+    const bold = (text: string) => `<w:r><w:rPr><w:b/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const red = (text: string) => `<w:r><w:rPr><w:color w:val="C00000"/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const punctuation = '<w:r><w:rPr><w:i/></w:rPr><w:t>&#x21;</w:t></w:r>';
+    const separator = '<w:r><w:t>&#x7C;</w:t></w:r>';
+    const bracket = '<w:r><w:rPr><w:strike/></w:rPr><w:t>]</w:t></w:r>';
+    const zip = await JSZip.loadAsync(await fixture());
+    const source = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', source.replace('<w:r><w:t>Executive summary</w:t></w:r>',
+      bold('Left') + punctuation + red('old') + separator + bracket));
+    const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+    const [hit] = doc.grep({ query: 'Left!old|]' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: '(Left?!NEW|' }] });
+    await doc.accept(proposal.id);
+    expect(doc.read(hit.ref).text).toBe('(Left?!NEW|');
+    const saved = await JSZip.loadAsync(await doc.export());
+    const xml = await saved.file('word/document.xml')!.async('string');
+    expect(xml).toContain(bold('(Left?') + punctuation + red('NEW') + separator + '</w:p>');
+    expect(xml).not.toContain(bracket);
+  });
+
   test('invalidates cursors after edits and releases attached sessions without destroying them', async () => {
     const doc = await open(50);
     const cursor = doc.grep({ query: 'Aurora', limit: 1 }).nextCursor!;
