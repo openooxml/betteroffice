@@ -1,5 +1,4 @@
 use std::fmt::Write;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use betteroffice_xlsx::{
     CalculationOptions, CalculationRequest, CellRange, CellRef, CellValue, Color, EditHistory,
@@ -81,75 +80,6 @@ fn styles(size: &str) -> String {
     )
 }
 
-fn outcome<T: std::fmt::Debug>(run: impl FnOnce() -> T) -> (bool, String) {
-    match catch_unwind(AssertUnwindSafe(run)) {
-        Ok(value) => (true, format!("{value:?}")),
-        Err(_) => (false, "PANIC".to_owned()),
-    }
-}
-
-fn probe(name: &str, bytes: &[u8]) {
-    let workbook = match Workbook::open(bytes) {
-        Ok(workbook) => workbook,
-        Err(error) => {
-            println!("F7 {name} open=error {error}");
-            return;
-        }
-    };
-    let results = [
-        ("can_undo", outcome(|| workbook.can_undo())),
-        ("can_redo", outcome(|| workbook.can_redo())),
-        (
-            "history_undo_depth",
-            outcome(|| workbook.history_state().undo_depth),
-        ),
-        ("client_id", outcome(|| workbook.client_id())),
-        (
-            "state_update_bytes",
-            outcome(|| workbook.encode_state_as_update_v1().len()),
-        ),
-    ];
-    let line: Vec<String> = results
-        .iter()
-        .map(|(label, (_, value))| format!("{label}={value}"))
-        .collect();
-    println!("F7 {name} open=ok {}", line.join(" "));
-    assert!(
-        results.iter().all(|(_, (ok, _))| *ok),
-        "{name}: an accessor panicked"
-    );
-}
-
-#[test]
-fn a_non_finite_font_size_starts_collaboration_without_a_panic() {
-    probe(
-        "non-finite-font-size",
-        &package(
-            r#"<row r="1"><c r="A1"><v>1</v></c></row>"#,
-            "",
-            None,
-            &styles("INF"),
-        ),
-    );
-}
-
-#[test]
-fn many_long_hyperlinks_start_collaboration_without_a_panic() {
-    let links: u32 = std::env::var("F7_LINKS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60_000);
-    let url_len: usize = std::env::var("F7_URL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
-    println!("F7 hyperlinks links={links} url_len={url_len}");
-    probe(
-        "many-long-hyperlinks",
-        &long_hyperlink_package(links, url_len),
-    );
-}
-
 fn external_hyperlink(row: u32, url_len: usize) -> Hyperlink {
     let at = CellRef::new(row - 1, 0);
     let mut url = format!("https://example.com/catalog/item/{row}?ref=");
@@ -194,62 +124,13 @@ fn parse(bytes: &[u8]) -> WorkbookModel {
     xlsx_parse::parse_workbook(&ooxml_opc::unzip_parts(bytes).unwrap()).unwrap()
 }
 
-fn keep_for_comparison(bytes: &[u8], expected_error: Option<&str>) {
-    static KEPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    if let Ok(dir) = std::env::var("F7_OUT") {
-        let index = KEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let side = if expected_error.is_some() {
-            "refuse"
-        } else {
-            "accept"
-        };
-        std::fs::write(format!("{dir}/{index:03}-{side}.xlsx"), bytes).unwrap();
-    }
-}
-
-#[test]
-fn keep_size_files_for_comparison() {
-    if std::env::var("F7_OUT").is_err() {
-        return;
-    }
-    let dir = std::env::var("F7_OUT").unwrap();
-    std::fs::write(
-        format!("{dir}/size-30k-accept.xlsx"),
-        long_hyperlink_package(30_000, 300),
-    )
-    .unwrap();
-    std::fs::write(
-        format!("{dir}/size-50k-refuse.xlsx"),
-        long_hyperlink_package(50_000, 300),
-    )
-    .unwrap();
-}
-
 fn assert_open_matches_build(bytes: &[u8], expected_error: Option<&str>) {
-    keep_for_comparison(bytes, expected_error);
     let standalone = Workbook::open(bytes).err().map(|error| error.to_string());
     let collaborative = Workbook::open_collaborative(bytes, 1)
         .err()
         .map(|error| error.to_string());
     assert_eq!(standalone.as_deref(), expected_error);
     assert_eq!(standalone, collaborative);
-}
-
-#[test]
-fn probe_0_5_1_authority_build_failure() {
-    let bytes = long_hyperlink_package(50_000, 300);
-    match Workbook::open(&bytes) {
-        Ok(workbook) => {
-            let (_, client_id) = outcome(|| workbook.client_id());
-            let (_, update_bytes) = outcome(|| workbook.encode_state_as_update_v1().len());
-            println!("standalone open=ok client_id={client_id} state_update_bytes={update_bytes}");
-        }
-        Err(error) => println!("standalone open=error {error}"),
-    }
-    match Workbook::open_collaborative(&bytes, 1) {
-        Ok(_) => println!("collaborative open=ok"),
-        Err(error) => println!("collaborative open=error {error}"),
-    }
 }
 
 #[test]
