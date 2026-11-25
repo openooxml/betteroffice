@@ -13,6 +13,7 @@ import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
 import { createDefaultFontPainter, xlsxDefaultFontManager } from './defaultFonts';
 import { createWorkbookSession } from '../../xlsx/src/session/client';
 import type { WorkbookSessionMethods } from '../../xlsx/src/session/methods';
+import { fontString } from '../../xlsx/src/render/fontString';
 
 const descriptors = ['document', 'FontFace'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
 const restorers: (() => void)[] = [];
@@ -60,6 +61,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
       : family === 'MS Gothic' ? face('Noto Sans JP', bold, italic) : undefined);
   const bundled = mock((family: string, bold: boolean, italic: boolean) =>
     family === 'Carlito' || family === 'Noto Sans Thai' ? face(family, bold, italic) : undefined);
+  const scriptFace = mock(fonts.resolveScriptFallbackFace);
   const scriptLoads = mock(bytes);
   const create = mock((_options?: unknown, runtime?: { decoder?: FontDecoder }) => {
     const load = (resolved: BundledFontFace | undefined, fetch: typeof bytes) => {
@@ -79,7 +81,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   });
   const module = {
     resolveMetricCompatFace: metric, resolveBundledFamilyFace: bundled,
-    createFontProvider: create,
+    resolveScriptFallbackFace: scriptFace, createFontProvider: create,
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>;
   const imported = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue(module);
   const remoteGate = { wait: Promise.resolve() as Promise<void> };
@@ -99,7 +101,7 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   } as unknown as Awaited<ReturnType<typeof xlsxDefaultFontManager.loadRemote>>;
   const remoteImported = spyOn(xlsxDefaultFontManager, 'loadRemote').mockResolvedValue(remote);
   restorers.push(() => imported.mockRestore(), () => remoteImported.mockRestore());
-  return { imported, create, metric, bundled, scriptLoads, module, remoteImported, remoteLoads, remoteGate };
+  return { imported, create, metric, bundled, scriptFace, scriptLoads, module, remoteImported, remoteLoads, remoteGate };
 }
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
@@ -132,9 +134,9 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
   expect(added).toHaveLength(2);
 });
 
-test('requests pack faces when Arabic and Devanagari cells come into view after a Latin-only frame', async () => {
+test('requests script-restricted pack faces when Arabic and Devanagari cells come into view', async () => {
   const { added } = browser();
-  const { scriptLoads } = provider();
+  const { scriptFace, scriptLoads } = provider();
   const repaint = mock(() => {});
   const painter = createDefaultFontPainter(decoder(), repaint);
   const cells = (...texts: string[]): DisplayList => ({ width: 200, height: 100, commands: texts.map<TextCmd>((text) => ({
@@ -142,6 +144,7 @@ test('requests pack faces when Arabic and Devanagari cells come into view after 
   })) });
   try {
     await painter.load(cells('Résumé'));
+    expect(scriptFace).not.toHaveBeenCalled();
     expect(scriptLoads).not.toHaveBeenCalled();
     expect(added.map(({ family }) => family)).toEqual(['Arial']);
 
@@ -151,9 +154,28 @@ test('requests pack faces when Arabic and Devanagari cells come into view after 
     await loading;
     expect(scriptLoads.mock.calls.map(([face]) => face.family).sort()).toEqual(['Noto Sans Arabic', 'Noto Sans Devanagari']);
     expect(added.map(({ family }) => family).sort()).toEqual(['Arial', 'Noto Sans Arabic', 'Noto Sans Devanagari']);
+    expect(added.find(({ family }) => family === 'Noto Sans Arabic')?.descriptors.unicodeRange ?? '').toMatch(/U\+0?600-0?6FF/i);
+    expect(added.find(({ family }) => family === 'Noto Sans Devanagari')?.descriptors.unicodeRange ?? '').toMatch(/U\+0?900-0?97F/i);
+    expect(fontString(frame.commands[0] as TextCmd)).toBe('16px "Arial", "Noto Sans Arabic", sans-serif');
     expect(ready).toBe(false);
     expect(painter.paint(frame, () => {})).toBe(true);
+    expect(scriptFace).toHaveBeenCalledTimes(2);
     expect(repaint).toHaveBeenCalledTimes(2);
+  } finally { painter.dispose(); }
+});
+
+test('CJK punctuation in Calibri makes no script pack request', async () => {
+  const { added } = browser();
+  const { scriptFace, scriptLoads } = provider();
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const frame = display({ family: 'Calibri' }, { family: 'Calibri' });
+  (frame.commands[0] as TextCmd).text = '。';
+  (frame.commands[1] as TextCmd).text = '（注）';
+  try {
+    await painter.load(frame);
+    expect(scriptLoads).not.toHaveBeenCalled();
+    expect(scriptFace).not.toHaveBeenCalled();
+    expect(added.map(({ family }) => family)).toEqual(['Calibri']);
   } finally { painter.dispose(); }
 });
 
