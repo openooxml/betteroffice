@@ -330,6 +330,15 @@ impl DeckSession {
         slide_scope(&self.doc, &self.package, slide_index)
     }
 
+    fn next_slide_id<T: ReadTxn>(&self, slides: &MapRef, txn: &T) -> String {
+        loop {
+            let id = self.next_id("slide");
+            if !slides.contains_key(txn, &id) {
+                return id;
+            }
+        }
+    }
+
     pub fn insert_slide(
         &self,
         context: &EditCtx,
@@ -353,8 +362,8 @@ impl DeckSession {
             let (position, length) = slide_insert_position(&order, &txn, index)?;
             (order, required_map(&txn, SLIDES)?, position, length)
         };
-        let slide_id = self.next_id("slide");
         let mut txn = self.transact_for(context);
+        let slide_id = self.next_slide_id(&slides, &txn);
         let slide = slides.insert(&mut txn, slide_id.as_str(), MapPrelim::default());
         slide.insert(&mut txn, "id", slide_id.as_str());
         slide.insert(&mut txn, "name", format!("Slide {}", length + 1));
@@ -465,6 +474,7 @@ impl DeckSession {
             let order = required_order(&txn)?;
             let (position, _) = slide_insert_position(&order, &txn, index)?;
             let source = slide_ref(&txn, slide_id)?;
+            let slides = required_map(&txn, SLIDES)?;
             let shapes = required_map(&txn, SHAPES)?;
             let stories = required_map(&txn, STORIES)?;
             let mut slide = source.as_prelim(&txn);
@@ -477,7 +487,7 @@ impl DeckSession {
             for id in &roots {
                 collect_shape_entries(&shapes, &txn, id, &mut HashSet::new(), &mut entries)?;
             }
-            let new_id = self.next_id("slide");
+            let new_id = self.next_slide_id(&slides, &txn);
             let rename = |id: &str| -> String {
                 if let Some(tail) = id.strip_prefix(slide_id) {
                     format!("{new_id}{tail}")
@@ -532,16 +542,7 @@ impl DeckSession {
                 "shapes".into(),
                 ArrayPrelim::from(roots.iter().map(|id| rename(id)).collect::<Vec<_>>()).into(),
             );
-            (
-                new_id,
-                order,
-                position,
-                required_map(&txn, SLIDES)?,
-                shapes,
-                stories,
-                slide,
-                copies,
-            )
+            (new_id, order, position, slides, shapes, stories, slide, copies)
         };
         let (comments, comment_copies) = {
             let txn = self.doc.transact();
