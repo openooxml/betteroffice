@@ -676,6 +676,23 @@ impl Lexer<'_> {
         self.lex_reference(Some(sheet), start)
     }
 
+    fn try_3d_reference(&mut self, start: usize, bang: usize) -> Option<TokKind> {
+        let save = self.pos;
+        self.pos = bang + 1;
+        let word = self.read_word();
+        let sheet = Some(self.input[start..bang].to_owned());
+        if self.peek() != Some('[') {
+            if let Some(kind) = self.try_range_token(&sheet, &word) {
+                return Some(kind);
+            }
+            if let Ok(cell) = CellRef::parse_a1(&word.to_ascii_uppercase()) {
+                return Some(TokKind::Ref { sheet, cell });
+            }
+        }
+        self.pos = save;
+        None
+    }
+
     /// `'Quoted Sheet'!A1` or `'Quoted Sheet'!A1:B2`. `''` escapes a quote.
     fn lex_quoted_sheet_ref(&mut self) -> Result<TokKind, ParseError> {
         let start = self.pos;
@@ -727,9 +744,10 @@ impl Lexer<'_> {
         {
             let tail = second.trim_start_matches(is_word_char);
             if tail.len() < second.len()
-                && let Some(reference) = tail.strip_prefix('!')
+                && tail.starts_with('!')
+                && let Some(kind) = self.try_3d_reference(start, self.input.len() - tail.len())
             {
-                return self.lex_unquoted_sheet_ref(start, self.input.len() - reference.len() - 1);
+                return Ok(kind);
             }
         }
 
@@ -1043,13 +1061,53 @@ mod tests {
 
     #[test]
     fn the_rewrite_lexer_accepts_3d_qualifiers() {
-        for source in ["Jan:Mar!A1", "'Jan:Mar'!A1"] {
-            assert!(matches!(
-                &lex_for_rewrite(source).unwrap()[0].kind,
-                TokKind::Ref { sheet: Some(sheet), .. } if sheet == "Jan:Mar"
-            ));
+        for (source, scope) in [
+            ("Jan:Mar!A1", "Jan:Mar"),
+            ("'Jan:Mar'!A1", "Jan:Mar"),
+            ("Sheet1:Sheet2!A1", "Sheet1:Sheet2"),
+            ("'Sheet1:Sheet2'!A1", "Sheet1:Sheet2"),
+            ("Sheet1:Sheet2!$A$1", "Sheet1:Sheet2"),
+            ("Sheet1:Sheet2!A1:B2", "Sheet1:Sheet2"),
+            ("Sheet1:Sheet2!A:A", "Sheet1:Sheet2"),
+            ("Sheet1:Sheet2!1:1", "Sheet1:Sheet2"),
+        ] {
+            let tokens = lex_for_rewrite(source).unwrap();
+            assert_eq!(tokens.len(), 1, "{source}");
+            assert!(
+                matches!(
+                    &tokens[0].kind,
+                    TokKind::Ref { sheet: Some(sheet), .. }
+                        | TokKind::Range { sheet: Some(sheet), .. }
+                        | TokKind::ColumnRange { sheet: Some(sheet), .. }
+                        | TokKind::RowRange { sheet: Some(sheet), .. }
+                        if sheet == scope
+                ),
+                "{source}"
+            );
         }
         assert!(lex("Jan:Mar!A1").is_err());
+    }
+
+    #[test]
+    fn the_rewrite_lexer_keeps_the_range_operator_before_qualified_names() {
+        for (source, first, sheet, name) in [
+            ("Name:Sheet!Name", "Name", "Sheet", "Name"),
+            ("Sheet1:Sheet2!Total", "Sheet1", "Sheet2", "Total"),
+        ] {
+            let tokens = lex_for_rewrite(source).unwrap();
+            assert_eq!(
+                tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>(),
+                [
+                    TokKind::Ident(first.into()),
+                    TokKind::Colon,
+                    TokKind::Name {
+                        scope: Some(sheet.into()),
+                        name: name.into(),
+                    },
+                ],
+                "{source}"
+            );
+        }
     }
 
     #[test]
