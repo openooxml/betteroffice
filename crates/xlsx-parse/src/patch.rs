@@ -87,6 +87,7 @@ struct SourceCell {
     empty: bool,
     at: CellRef,
     shared_string: bool,
+    alternate_content: bool,
     formula: Option<FormulaMarkup>,
 }
 
@@ -95,6 +96,7 @@ struct FormulaMarkup {
     tag: Range<usize>,
     text_end: Option<usize>,
     empty: bool,
+    array: bool,
     group: Option<u32>,
     reference: Option<CellRange>,
     text_rewritable: bool,
@@ -1078,6 +1080,7 @@ impl SheetPatch<'_> {
 pub(crate) fn unpatchable_table_formula(
     data: &[u8],
     original: &Sheet,
+    dropped_array_ranges: bool,
     affected: impl Fn(&str, CellRef) -> bool,
 ) -> Result<bool, ParseError> {
     let mut affected: HashSet<_> = original
@@ -1093,14 +1096,34 @@ pub(crate) fn unpatchable_table_formula(
         return Ok(false);
     }
     let Some((_, rows)) = scan_sheet_data(data)? else {
-        return Ok(true);
+        return Ok(dropped_array_ranges || sheet_data_regeneration_loss(data)?.is_some());
     };
-    for cell in rows.iter().flat_map(|row| &row.cells) {
-        if affected.remove(&cell.at)
-            && (cell.formula.as_ref().and_then(|formula| formula.reference)
-                != original.array_formula(cell.at)
-                || formula_text_slot(data, cell)?.is_none()
-                || cached_value_slot(data, cell)?.is_none())
+    let cells = rows.iter().flat_map(|row| &row.cells);
+    let groups: HashSet<_> = cells
+        .clone()
+        .filter(|cell| affected.contains(&cell.at))
+        .filter_map(|cell| cell.formula.as_ref()?.group)
+        .collect();
+    for cell in cells {
+        let formula = cell.formula.as_ref();
+        let in_dirty_group = formula
+            .and_then(|formula| formula.group)
+            .is_some_and(|group| groups.contains(&group));
+        if !affected.remove(&cell.at) && !in_dirty_group {
+            continue;
+        }
+        let array = formula.filter(|formula| formula.array);
+        if cell.alternate_content
+            || array.is_some_and(|formula| formula.reference.is_none())
+            || array.and_then(|formula| formula.reference) != original.array_formula(cell.at)
+        {
+            return Ok(true);
+        }
+        let (_, attributes) = start_tag(&data[cell.tag.clone()])?;
+        if attributes
+            .iter()
+            .any(|attribute| !matches!(attribute.name.as_str(), "r" | "s" | "t"))
+            && (formula_text_slot(data, cell)?.is_none() || cached_value_slot(data, cell)?.is_none())
         {
             return Ok(true);
         }
@@ -1531,6 +1554,12 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
         let before = reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = reader.buffer_position() as usize;
+        if let Some(cell) = &mut cell
+            && let Event::Start(element) | Event::Empty(element) = &event
+            && element.local_name().as_ref() == b"AlternateContent"
+        {
+            cell.alternate_content = true;
+        }
         match event {
             Event::Start(element) => {
                 match depth {
@@ -1564,6 +1593,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                                 empty: false,
                                 at,
                                 shared_string: attr(&element, b"t")?.as_deref() == Some("s"),
+                                alternate_content: false,
                                 formula: None,
                             });
                         }
@@ -1614,6 +1644,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                             empty: true,
                             at,
                             shared_string,
+                            alternate_content: false,
                             formula: None,
                         });
                     }
@@ -1713,6 +1744,7 @@ fn formula_markup(
         tag,
         text_end: None,
         empty,
+        array: ty.as_deref() == Some("array"),
         group,
         reference: parsed.flatten(),
         text_rewritable: !positional

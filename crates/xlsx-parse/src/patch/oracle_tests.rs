@@ -615,6 +615,7 @@ fn source_row(cells: &[(&str, Option<u32>)]) -> (Vec<u8>, SourceRow) {
             empty,
             at: CellRef::parse_a1(address).unwrap(),
             shared_string: false,
+            alternate_content: false,
             formula: None,
         });
     }

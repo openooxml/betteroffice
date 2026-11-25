@@ -484,6 +484,7 @@ impl PreservedPackage {
                         || crate::patch::unpatchable_table_formula(
                             &child.bytes,
                             &self.original_workbook.sheets[index],
+                            sheet.cell_facts.source.dropped_array_ranges,
                             |formula, at| matches(formula, local && range.contains(at)),
                         )?
                     {

@@ -1335,6 +1335,53 @@ fn a_header_rename_patches_local_and_cross_table_formulas() {
 }
 
 #[test]
+fn a_header_rename_rewrites_every_cell_in_a_shared_formula_group() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let mut source = book();
+    for (row, formula, value) in [
+        (
+            2,
+            r#"<f t="shared" ref="D2:D4" si="0">Table1[@Status]&amp;C2</f>"#,
+            "Open1",
+        ),
+        (3, r#"<f t="shared" si="0"/>"#, "Closed2"),
+        (4, r#"<f t="shared" si="0"/>"#, "Pending3"),
+    ] {
+        let previous = format!(r#"<c r="C{row}"><v>{}</v></c>"#, row - 1);
+        source = replace_part(
+            &source,
+            sheet,
+            &previous,
+            &format!(r#"{previous}<c r="D{row}" t="str">{formula}<v>{value}</v></c>"#),
+        );
+    }
+    let mut workbook = Workbook::open(&source).unwrap();
+    let expected = ["Open1", "Closed2", "Pending3"].map(|value| CellValue::Text {
+        value: value.into(),
+    });
+    let values = |workbook: &Workbook| {
+        ["D2", "D3", "D4"].map(|address| workbook.model().value(SHEET1, at(address)))
+    };
+    assert_eq!(values(&workbook), expected);
+    edit(&mut workbook, "B1", "State");
+    let saved = workbook.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = std::str::from_utf8(part(&parts, sheet)).unwrap();
+    for row in 2..=4 {
+        assert!(
+            xml.contains(&format!(
+                r#"<c r="D{row}" t="str"><f>Table1[@State]&amp;C{row}</f>"#
+            )),
+            "{xml}"
+        );
+    }
+    let mut reopened = assert_saved_headers(&saved, ["Name", "State", "Rev"]);
+    assert_eq!(values(&reopened), expected);
+    reopened.recalculate_all(CalculationOptions::default());
+    assert_eq!(values(&reopened), expected);
+}
+
+#[test]
 fn rewriting_an_array_formula_preserves_its_source_metadata() {
     const METADATA: &str = "xl/metadata.xml";
     let source = replace_part(
