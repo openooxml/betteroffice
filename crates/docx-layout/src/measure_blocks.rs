@@ -1763,8 +1763,6 @@ impl FlowState {
         )
     }
 
-    /// Moves the flow onto a block: clears it at a flow reset, then takes in
-    /// the zones the block anchors.
     fn enter(
         &mut self,
         resets: bool,
@@ -1806,8 +1804,6 @@ impl FlowState {
         }
     }
 
-    /// Measures the block [`Self::enter`] moved the flow onto, then moves the
-    /// flow past it.
     fn measure_entered(
         &mut self,
         block: &mut LayoutBlock,
@@ -1892,8 +1888,6 @@ impl FlowState {
         Ok(extent)
     }
 
-    /// Whether `other` is the same flow state, compared bit for bit: zones
-    /// meet lines in absolute coordinates, so only equal bits measure alike.
     fn same_as(&self, other: &Self) -> bool {
         self.cumulative_y.to_bits() == other.cumulative_y.to_bits()
             && self.active_zones.len() == other.active_zones.len()
@@ -1924,10 +1918,7 @@ impl FloatingZone {
     }
 }
 
-/// One block's part in a float flow: whether the flow starts afresh at it,
-/// the paragraph-anchored zones it adds, and where the flow stands after it.
-/// [`FloatFlowReplay`] rebuilds the flow state before any block from the
-/// steps of the blocks before it, without measuring them.
+/// A block's replay record for [`FloatFlowReplay`].
 #[derive(Clone, Debug)]
 pub struct FloatFlowStep {
     starts: bool,
@@ -1936,8 +1927,7 @@ pub struct FloatFlowStep {
 }
 
 impl FloatFlowStep {
-    /// Whether the flow starts afresh at this block, as at a flow segment's
-    /// first block.
+    /// Whether this block starts a float flow segment.
     pub fn starts(&self) -> bool {
         self.starts
     }
@@ -1961,9 +1951,7 @@ impl FloatFlowReplay {
     }
 }
 
-/// [`measure_float_segment_with_width_policy`] one block at a time, from the
-/// segment's first block or from where an earlier flow stood before a later
-/// one. Each block's zones are found as it is measured.
+/// Incremental measurement of a float flow segment.
 #[derive(Debug, Default)]
 pub struct FloatSegmentFlow {
     state: FlowState,
@@ -1976,8 +1964,7 @@ impl FloatSegmentFlow {
         Self::default()
     }
 
-    /// A flow standing where `replay` stands, before the block that follows
-    /// the steps it replayed.
+    /// Resumes measurement from the replayed float state.
     pub fn resume(replay: &FloatFlowReplay) -> Self {
         Self {
             state: replay.state.clone(),
@@ -1985,10 +1972,7 @@ impl FloatSegmentFlow {
         }
     }
 
-    /// Measures the next block of the segment. `width`, `table_frame` and
-    /// `section_break_mark` are the block's entries in what
-    /// [`measure_float_segment_with_width_policy`] takes. `Ok(None)` when the
-    /// block anchors a margin-relative zone.
+    /// Measures the next block, returning `Ok(None)` for margin-relative zones.
     #[allow(clippy::too_many_arguments)]
     pub fn measure(
         &mut self,
@@ -2045,7 +2029,7 @@ impl FloatSegmentFlow {
         Ok(Some((extent?, reads, step)))
     }
 
-    /// Whether this flow stands exactly where `replay`'s flow stood.
+    /// Whether the current and replayed float states match bit for bit.
     pub fn matches(&self, replay: &FloatFlowReplay) -> bool {
         self.state.same_as(&replay.state)
     }
@@ -2063,8 +2047,6 @@ pub struct FloatFlow {
     measured: Vec<BlockExtent>,
     font_dependencies: Vec<FontChainDependencies>,
     zone_dependencies: Vec<FontChainDependencies>,
-    /// The measured blocks' steps; `None` when margin-relative zones couple
-    /// the whole flow, which steps do not record.
     steps: Option<Vec<FloatFlowStep>>,
 }
 
@@ -2156,9 +2138,7 @@ impl FloatFlow {
         &self.font_dependencies
     }
 
-    /// The measured blocks' [`FloatFlowStep`]s, the same steps
-    /// [`FloatSegmentFlow`] takes through each flow segment. `None` when the
-    /// blocks anchor a margin-relative zone.
+    /// Replay records for measured blocks, or `None` for margin-relative zones.
     pub fn steps(&self) -> Option<&[FloatFlowStep]> {
         self.steps.as_deref()
     }

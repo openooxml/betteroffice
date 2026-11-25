@@ -2233,13 +2233,9 @@ impl MeasurementPatch {
     }
 }
 
-/// Per arena block, its [`FloatFlowStep`] in the float flow that measured the
-/// arena, `None` where that flow is unknown. Only a region pass's body
-/// measurement records them, and only when [`flow_wrapping_remeasures`] is
-/// false: flow wrapping measures the blocks again outside the flow.
+/// Each arena block's replay record, or `None` if its float state is unknown.
 type FloatFlowSteps = Vec<Option<FloatFlowStep>>;
 
-/// `float_flow` for an arena of `blocks` blocks, or no steps at all.
 fn retained_float_flow(mut float_flow: FloatFlowSteps, blocks: usize) -> FloatFlowSteps {
     if float_flow.len() != blocks {
         float_flow.clear();
@@ -2248,12 +2244,8 @@ fn retained_float_flow(mut float_flow: FloatFlowSteps, blocks: usize) -> FloatFl
     float_flow
 }
 
-/// A resident body arena: its measured blocks, their fingerprints, and with
-/// floats their float flow steps.
 type ResidentMeasured = (Vec<MeasuredBlock>, Vec<Fingerprint>, FloatFlowSteps);
 
-/// The blocks of a float flow segment [`measure_float_segment_from_change`]
-/// measured, `indices` in order, as measurement took them.
 struct MeasuredFloatSegment {
     indices: Vec<usize>,
     blocks: Vec<LayoutBlock>,
@@ -2262,22 +2254,8 @@ struct MeasuredFloatSegment {
     steps: Vec<FloatFlowStep>,
 }
 
-/// Measures the flow segment `segment` holding `float_dirty` blocks as
-/// `measure_float_segment_with_width_policy` measures the whole segment, for
-/// the blocks whose extents can differ from the retained ones. `retained`
-/// holds each block's step in the flow that measured the retained arena (see
-/// [`retained_float_flow`]); `normalized` gives a block as measurement takes
-/// it.
-///
-/// The steps of the blocks before a dirty block rebuild the flow state the
-/// earlier flow reached it in. Measuring starts at the first dirty block from
-/// that state; after any measured block that leaves the flow exactly where the
-/// earlier flow stood, it skips the clean blocks up to the next dirty one,
-/// resuming there from the state their steps rebuild, or stops when no dirty
-/// block is left. From the same state the earlier flow measured those clean
-/// blocks as this one would. Without the steps it measures on, to the
-/// segment's end. `Ok(None)` when a measured block anchors a margin-relative
-/// zone.
+/// Early exit requires an exact match with the retained float state.
+/// A missing replay record forces remeasurement through the segment end.
 #[allow(clippy::too_many_arguments)]
 fn measure_float_segment_from_change(
     segment: std::ops::Range<usize>,
@@ -2293,13 +2271,9 @@ fn measure_float_segment_from_change(
     marks: &[bool],
 ) -> Result<Option<MeasuredFloatSegment>, String> {
     let step = |index: usize| retained.get(index).and_then(Option::as_ref);
-    // The earlier flow's state as far as this one has come, from the earlier
-    // flow's own start.
     let mut earlier = step(segment.start)
         .is_some_and(FloatFlowStep::starts)
         .then(FloatFlowReplay::default);
-    // Moves `earlier` past the clean blocks before the next dirty block, or
-    // to the segment's end; that block, or `None` without their steps.
     let skip = |earlier: &mut FloatFlowReplay, from: usize| {
         let next = (from..segment.end)
             .find(|&index| float_dirty[index])
@@ -8491,7 +8465,6 @@ impl EngineSession {
         } else {
             None
         };
-        // The fast region path edits a float-free arena in place, without steps.
         let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
             Vec::new()
         } else {
@@ -8914,7 +8887,6 @@ impl EngineSession {
             next: Vec::new(),
             placed_blocks: 0,
         };
-        // The fast region path edits a float-free arena in place, without steps.
         let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
             Vec::new()
         } else {
@@ -10393,7 +10365,6 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
-        // A region pass that measured the arena records its float flow after this.
         pagination.float_flow.clear();
         pagination.flowed_tail = None;
         pagination.measured_spacing = measured_spacing;
@@ -10764,8 +10735,6 @@ impl EngineSession {
     /// Reuse retained extents for blocks that cannot have changed (equal
     /// normalized block, width, config, and section-break adjacency).
     /// `Ok(None)` means the caller must measure the whole story.
-    /// With `floats`, a changed block re-measures every block of its float
-    /// flow segment instead of itself alone.
     #[allow(clippy::too_many_arguments)]
     fn resident_region_measured(
         &self,
