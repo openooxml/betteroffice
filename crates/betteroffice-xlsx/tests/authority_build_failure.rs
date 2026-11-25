@@ -212,8 +212,17 @@ fn keep_size_files_for_comparison() {
     if std::env::var("F7_OUT").is_err() {
         return;
     }
-    keep_for_comparison(&long_hyperlink_package(30_000, 300), None);
-    keep_for_comparison(&long_hyperlink_package(50_000, 300), Some(HYPERLINK_ERROR));
+    let dir = std::env::var("F7_OUT").unwrap();
+    std::fs::write(
+        format!("{dir}/size-30k-accept.xlsx"),
+        long_hyperlink_package(30_000, 300),
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{dir}/size-50k-refuse.xlsx"),
+        long_hyperlink_package(50_000, 300),
+    )
+    .unwrap();
 }
 
 fn assert_open_matches_build(bytes: &[u8], expected_error: Option<&str>) {
