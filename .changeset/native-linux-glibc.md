@@ -4,4 +4,4 @@
 "@betteroffice/pptx-native": patch
 ---
 
-The Linux native packages load again on distributions with glibc 2.17 or newer, such as Ubuntu 24.04 and Debian 12.
+The Linux native packages load again on Ubuntu 24.04, Debian 12 and other distributions that run Node.js, as their binaries now need glibc 2.17 at most.

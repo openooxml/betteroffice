@@ -60,7 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}
+          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ matrix.platform.napi_cross && '-napi-cross' || '' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig

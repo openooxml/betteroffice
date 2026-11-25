@@ -101,7 +101,8 @@ export function requiredGlibcVersions(bytes) {
     requireRange(need, VERNEED_SIZE, 'Verneed', needs.end);
     const count = u16(need + 2);
     const auxOffset = u32(need + 8);
-    if (count > 0 && auxOffset < VERNEED_SIZE) throw new Error('invalid ELF vn_aux offset');
+    if (count === 0) throw new Error('invalid ELF vn_cnt');
+    if (auxOffset < VERNEED_SIZE) throw new Error('invalid ELF vn_aux offset');
     for (let item = 0, aux = need + auxOffset; item < count; item += 1) {
       requireRange(aux, VERNAUX_SIZE, 'Vernaux', needs.end);
       const start = u32(aux + 8);
@@ -109,6 +110,7 @@ export function requiredGlibcVersions(bytes) {
       if (end === -1) throw new Error('invalid ELF Vernaux name');
       const name = decoder.decode(stringTable.subarray(start, end));
       if (/^GLIBC_\d+\.\d+(?:\.\d+)?$/.test(name)) versions.add(name);
+      else if (name.startsWith('GLIBC_')) throw new Error(`unsupported glibc version need ${name}`);
 
       const next = u32(aux + 12);
       if (item + 1 < count ? next < VERNAUX_SIZE : next !== 0) {

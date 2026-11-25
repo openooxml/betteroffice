@@ -92,10 +92,20 @@ const cli = (...files: string[]) => spawnSync('node', [
 test('collects sorted unique glibc versions from every needed library', () => {
   for (const machine of [62, 183]) {
     expect(requiredGlibcVersions(elf([
-      ['GLIBC_2.43', 'GLIBC_2.9', 'GLIBC_PRIVATE'],
+      ['GLIBC_2.43', 'GLIBC_2.9'],
       [`GLIBC_${GLIBC_FLOOR}`, 'GCC_3.0', 'CXXABI_1.3', 'GLIBC_2.9', 'GLIBC_2.2.5']
     ], machine))).toEqual(['GLIBC_2.2.5', 'GLIBC_2.9', `GLIBC_${GLIBC_FLOOR}`, 'GLIBC_2.43']);
   }
+});
+
+test('rejects glibc needs that are not a numbered version', () => {
+  for (const need of ['GLIBC_ABI_DT_RELR', 'GLIBC_PRIVATE']) {
+    expect(() => requiredGlibcVersions(elf([[`GLIBC_${GLIBC_FLOOR}`, need]]))).toThrow(`unsupported glibc version need ${need}`);
+  }
+});
+
+test('rejects a version record that lists no versions', () => {
+  expect(() => requiredGlibcVersions(elf([[], ['GLIBC_2.9']]))).toThrow('invalid ELF vn_cnt');
 });
 
 test('compares major, minor and patch versions numerically', () => {

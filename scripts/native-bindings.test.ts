@@ -253,7 +253,7 @@ describe('native package release wiring', () => {
       "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
     );
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(75);
+    expect(job['timeout-minutes']).toBe(90);
     expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const step = job.steps[1];
