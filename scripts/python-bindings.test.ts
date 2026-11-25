@@ -36,13 +36,15 @@ const publish = Bun.YAML.parse(readFileSync(publishWorkflow, 'utf8')) as any;
 const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
 
 const SHA = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
-const dispatchStep = release.jobs['python-pypi'].steps[0];
+const dispatchStep = release.jobs['python-pypi'].steps.find(
+  (step: any) => step.name === 'Dispatch a publish per binding, then wait for each'
+);
 const RUN_IDS = PYTHON_PUBLISH_NAMES.map((_, index) => 4200 + index);
 const ALL_NAMES = [...FONT_PACK_NAMES, ...PYTHON_PUBLISH_NAMES];
 const ALL_RUN_IDS = ALL_NAMES.map((_, index) => 4300 + index);
 
 /** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
-function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
+function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, checkStatus = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
   const log = join(directory, 'gh.log');
   const ids = names.map(
@@ -64,6 +66,8 @@ function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, names = PYTHO
     { mode: 0o755 }
   );
   writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+  const check = join(directory, 'check-publisher-files.sh');
+  writeFileSync(check, `echo check-publisher-files >> "${log}"\nexit ${checkStatus}\n`);
   const path = join(directory, 'dispatch.sh');
   writeFileSync(path, dispatchStep.run);
   const result = spawnSync('bash', ['-e', path], {
@@ -73,7 +77,8 @@ function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, names = PYTHO
       PATH: `${directory}:${process.env.PATH}`,
       GH_REPO: 'openooxml/betteroffice',
       PUBLISH: JSON.stringify(names),
-      SHA
+      SHA,
+      CHECK_PUBLISHER_FILES: check
     }
   });
   return { ...result, log: readFileSync(log, 'utf8').trim().split('\n') };
@@ -321,16 +326,17 @@ globalThis.fetch = async (url) => {
     const runs = JSON.stringify(release.jobs['python-pypi']);
     expect(runs).not.toContain('pypa/gh-action-pypi-publish');
     expect(runs).not.toContain('PYPI_API_TOKEN');
-    expect(release.jobs['python-pypi'].permissions).toEqual({ actions: 'write' });
+    expect(release.jobs['python-pypi'].permissions).toEqual({ contents: 'read', actions: 'write' });
   });
 
   test('a dispatch fans out only over the opted-in bindings, at the commit that triggered it', () => {
     expect(release.jobs['python-pypi'].needs).toEqual(['release', 'python-bindings']);
-    expect(release.jobs['python-pypi'].if).toContain(
+    expect(release.jobs['python-pypi'].if).toBe(
       "needs.python-bindings.outputs.publish != '[]'"
     );
     expect(dispatchStep.env.PUBLISH).toBe('${{ needs.python-bindings.outputs.publish }}');
     expect(dispatchStep.env.SHA).toBe('${{ github.sha }}');
+    expect(dispatchStep.env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
 
     const result = dispatch();
 
@@ -380,9 +386,13 @@ globalThis.fetch = async (url) => {
     expect(dispatchStep.run).toContain('timeout "${minutes}m" gh run watch "$run" --exit-status');
     const packs = Number(dispatchStep.run.match(/^publish (\d+) \$packs$/m)?.[1]);
     const formats = Number(dispatchStep.run.match(/^publish (\d+) \$formats$/m)?.[1]);
-    expect(packs).toBeGreaterThan(0);
-    expect(formats).toBeGreaterThan(0);
-    expect(packs + formats).toBeLessThan(job['timeout-minutes']);
+    const wheelAndLoad = dist.jobs.wheels['timeout-minutes'] + dist.jobs.load['timeout-minutes'];
+    const sdist = dist.jobs.sdist['timeout-minutes'];
+    const fontPack = dist.jobs['font-pack']['timeout-minutes'];
+    const afterBuild = dist.jobs.built['timeout-minutes'] + publish.jobs.publish['timeout-minutes'] + 20;
+    expect(packs).toBeGreaterThanOrEqual(fontPack + afterBuild);
+    expect(formats).toBeGreaterThanOrEqual(Math.max(wheelAndLoad, sdist) + afterBuild);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(packs + formats + 10);
     expect(dispatchStep.run).toContain('wait "$watcher" || status=1');
 
     const result = dispatch({ timedOut: RUN_IDS[0]! });
@@ -472,6 +482,27 @@ globalThis.fetch = async (url) => {
       .filter((line) => line.startsWith('api --method POST'))
       .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
     expect(dispatched).toEqual(FONT_PACK_NAMES);
+  });
+
+  test('the publisher files are compared again after the font packs and before any format binding', () => {
+    const ok = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS });
+    expect(ok.status, ok.stdout).toBe(0);
+    const check = ok.log.indexOf('check-publisher-files');
+    const lastPackWatch = Math.max(
+      ...ALL_RUN_IDS.slice(0, FONT_PACK_NAMES.length).map((id) => ok.log.indexOf(`run watch ${id} --exit-status`))
+    );
+    const firstFormat = ok.log.findIndex((line) => line.includes(`inputs[binding]=${PYTHON_PUBLISH_NAMES[0]} `));
+    expect(check).toBeGreaterThan(lastPackWatch);
+    expect(check).toBeLessThan(firstFormat);
+
+    const stale = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, checkStatus: 1 });
+    expect(stale.status).not.toBe(0);
+    const dispatched = stale.log
+      .filter((line) => line.startsWith('api --method POST'))
+      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
+    expect(dispatched).toEqual(FONT_PACK_NAMES);
+
+    expect(dispatch().log).not.toContain('check-publisher-files');
   });
 
   test('a font pack builds and checks one pure wheel from the committed assets, and no Rust', () => {
@@ -773,20 +804,30 @@ describe('pending publish selection', () => {
   });
 
   test('an unreadable PyPI fails the run instead of skipping a publish', async () => {
-    const fetchImpl = async () => ({ status: 503, ok: false }) as Response;
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response('unavailable', { status: 503 });
+    };
     await expect(
       pendingPublishNames({ fetchImpl, attempts: 2, retryDelayMs: 0 })
     ).rejects.toThrow('cannot read PyPI');
+    expect(calls).toBe(2);
   });
 
-  test('a transient error is retried', async () => {
-    let calls = 0;
-    const good = pypi(live()).fetchImpl;
+  test.each(['HTTP 503', 'connection reset'])('retries a transient PyPI %s', async (failure) => {
+    const requested: string[] = [];
+    const { fetchImpl: good } = pypi(live());
     const fetchImpl = async (url: string) => {
-      calls += 1;
-      if (calls === 1) throw new Error('reset');
+      requested.push(url);
+      if (requested.length === 1) {
+        if (failure === 'connection reset') throw new Error('reset');
+        return new Response('unavailable', { status: 503 });
+      }
       return good(url);
     };
     expect(await pendingPublishNames({ fetchImpl, retryDelayMs: 0 })).toEqual([]);
+    expect(requested[1]).toBe(requested[0]);
+    expect(requested).toHaveLength(ALL_NAMES.length + 1);
   });
 });

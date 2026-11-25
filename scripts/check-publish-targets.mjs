@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { NATIVE_PACKAGES, platformPackageVersions } from './native-bindings.mjs';
+import { REQUEST_TIMEOUT_MS, attemptRegistry, backoffMs, fetchRegistry, sleep } from './registry-fetch.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const require = createRequire(import.meta.url);
@@ -22,69 +23,6 @@ const CRATES_REGISTRY = process.env.CRATES_REGISTRY_URL ?? 'https://crates.io/ap
 const CDN_BASE = process.env.CDN_BASE_URL ?? 'https://cdn.jsdelivr.net/npm';
 const FONT_PACKAGES = new Set(['@betteroffice/fonts-latin', '@betteroffice/fonts-intl', '@betteroffice/fonts-cjk']);
 const VERIFY_WAIT_MS = 10 * 60_000;
-// crates.io rejects a request without one.
-const USER_AGENT = 'betteroffice-release (https://github.com/openooxml/betteroffice)';
-const ATTEMPTS = 5;
-const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_TIMEOUT_MS ?? 15_000);
-// A registry may ask for an hour; a release gate waits a minute.
-const RETRY_AFTER_CAP_MS = 60_000;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Half the backoff plus a random half, so parallel releases don't retry in lockstep. */
-function backoffMs(attempt) {
-  const base = 2 ** attempt * 500;
-  return base / 2 + Math.random() * (base / 2);
-}
-
-/** `Retry-After` in ms — seconds or an HTTP-date — or undefined if there is none. */
-function retryAfterMs(response) {
-  const header = response.headers.get('Retry-After');
-  if (!header) return undefined;
-  const seconds = Number(header);
-  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
-  if (!Number.isFinite(ms)) return undefined;
-  return Math.min(Math.max(ms, 0), RETRY_AFTER_CAP_MS);
-}
-
-/** The parsed body, `null` when the name is unclaimed, or a failure to weigh. */
-async function attemptRegistry(url, headers, timeoutMs, method = 'GET', readBody = method !== 'HEAD') {
-  const response = await fetch(url, {
-    method,
-    headers: { 'User-Agent': USER_AGENT, ...headers },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  if (response.status === 404) return { body: null };
-  if (response.ok && readBody) return { body: await response.json() };
-  if (response.ok) {
-    response.body?.cancel().catch(() => {});
-    return { body: true };
-  }
-  const error = new Error(`${url} returned ${response.status}`);
-  const retry = response.status === 429 || response.status >= 500;
-  return { error, retry, wait: retry ? retryAfterMs(response) : undefined };
-}
-
-async function fetchRegistry(url, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS, readBody = true) {
-  let lastError;
-  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-    let result;
-    try {
-      result = await attemptRegistry(url, headers, timeoutMs, 'GET', readBody);
-    } catch (error) {
-      // A refused connection, a request past REQUEST_TIMEOUT_MS, or a body that stops mid-JSON.
-      result = { error, retry: true };
-    }
-    if (!result.error) return result.body;
-    if (!result.retry) throw result.error;
-    lastError = result.error;
-    if (attempt < ATTEMPTS - 1) await sleep(result.wait ?? backoffMs(attempt));
-  }
-  throw lastError;
-}
 
 /** Bodies by name; with `readBody` false, `true` for a name that exists and `null` for one that does not. */
 function npmPackages(registry, timeoutMs, readBody = true) {
@@ -93,9 +31,7 @@ function npmPackages(registry, timeoutMs, readBody = true) {
     if (!cache.has(name)) {
       cache.set(name, fetchRegistry(
         `${registry.replace(/\/+$/, '')}/${encodeURIComponent(name)}`,
-        { Accept: 'application/vnd.npm.install-v1+json' },
-        timeoutMs,
-        readBody
+        { headers: { Accept: 'application/vnd.npm.install-v1+json' }, timeoutMs, readBody }
       ));
     }
     return cache.get(name);
@@ -222,7 +158,7 @@ export function repositoryScan(packages = publishedPackageVersions(), workspaces
 export async function auditCrates(names, registry = CRATES_REGISTRY, timeoutMs = REQUEST_TIMEOUT_MS) {
   const audit = [];
   for (const name of names) {
-    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, {}, timeoutMs);
+    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, { timeoutMs });
     audit.push({ name, state: body === null ? 'missing' : 'present' });
   }
   return audit;
@@ -385,7 +321,7 @@ export async function missingHeldNatives(packages, {
     const url = npmVersionUrl(registry, name, version);
     const found = wait
       ? await waitForPublished(url, 'GET', timeoutMs, deadline)
-      : (await fetchRegistry(url, {}, timeoutMs, false)) !== null;
+      : (await fetchRegistry(url, { timeoutMs, readBody: false })) !== null;
     return found ? null : { name, version };
   }));
   return missing.filter(Boolean);

@@ -135,7 +135,7 @@ describe('native package registry', () => {
       fetchImpl: async (url: string, options: RequestInit) => {
         const name = packageName(url);
         requested.push(name);
-        expect(options.headers).toEqual({ Accept: 'application/vnd.npm.install-v1+json' });
+        expect(options.headers).toMatchObject({ Accept: 'application/vnd.npm.install-v1+json' });
         expect(options.signal).toBeInstanceOf(AbortSignal);
         return name === '@betteroffice/pptx-native' || !roots.some((root) => root.name === name)
           ? Response.json({ versions: {} })
@@ -182,16 +182,40 @@ describe('native package registry', () => {
     expect(requested.sort()).toEqual(packages.map(({ name }) => name).sort());
   });
 
-  test('registry errors stop release detection', async () => {
+  test.each(['HTTP 503', 'timeout'])('retries a transient registry %s', async (failure) => {
+    const target = '@betteroffice/docx-native';
+    let attempts = 0;
+    const pending = await pendingPublishNames({
+      fetchImpl: async (url: string) => {
+        const name = packageName(url);
+        if (name !== target) return published(name);
+        if (++attempts === 1) {
+          if (failure === 'timeout') throw new DOMException('registry timed out', 'TimeoutError');
+          return new Response('unavailable', { status: 503, headers: { 'Retry-After': '0' } });
+        }
+        return Response.json({ versions: {} });
+      }
+    });
+    expect(pending).toEqual(['docx']);
+    expect(attempts).toBe(2);
+  });
+
+  test('persistent registry errors stop release detection after five attempts', async () => {
     for (const failed of ['@betteroffice/docx-native', '@betteroffice/docx-native-linux-x64-gnu']) {
+      let attempts = 0;
       await expect(
         pendingPublishNames({
           fetchImpl: async (url: string) => {
             const name = packageName(url);
-            return name === failed ? new Response('unavailable', { status: 503 }) : published(name);
+            if (name !== failed) return published(name);
+            attempts += 1;
+            return new Response('unavailable', { status: 503, headers: { 'Retry-After': '0' } });
           }
         })
-      ).rejects.toThrow(`npm answered 503 for ${failed}`);
+      ).rejects.toThrow(
+        `cannot read npm for ${failed}: https://registry.npmjs.org/${encodeURIComponent(failed)} returned 503`
+      );
+      expect(attempts).toBe(5);
     }
   });
 });
@@ -212,6 +236,9 @@ describe('native version synchronization', () => {
 
 describe('native package release wiring', () => {
   const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
+  const dispatchStep = release.jobs['native-npm'].steps.find(
+    (step: any) => step.name === 'Dispatch a publish per format, then wait for each'
+  );
   const publish = Bun.YAML.parse(readFileSync(publishWorkflow, 'utf8')) as any;
   const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
   const ci = Bun.YAML.parse(
@@ -284,9 +311,8 @@ describe('native package release wiring', () => {
       "(needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}"
     ].join(' '));
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(90);
-    expect(job.permissions).toEqual({ actions: 'write' });
-    const step = job.steps[0];
+    expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
+    const step = dispatchStep;
     expect(step.env.SHA).toBe('${{ github.sha }}');
     expect(step.env.PUBLISH).toBe('${{ needs.release.outputs.native }}');
     expect(release.jobs.release.outputs.native).toBe('${{ needs.plan.outputs.native }}');
@@ -298,8 +324,14 @@ describe('native package release wiring', () => {
     expect(step.run).toContain('inputs[sha]=$SHA');
     expect(step.run).toContain('inputs[dry_run]=false');
     expect(step.run).toContain("--jq '.workflow_run_id'");
-    const bound = step.run.match(/timeout (\d+)m gh run watch "\$run" --exit-status/);
-    expect(Number(bound?.[1])).toBeLessThan(job['timeout-minutes']);
+    const watch = Number(step.run.match(/timeout (\d+)m gh run watch "\$run" --exit-status/)?.[1]);
+    const build = dist.jobs.bindings['timeout-minutes'];
+    const smoke = Math.max(
+      dist.jobs['musl-smoke']['timeout-minutes'],
+      dist.jobs['windows-arm64-smoke']['timeout-minutes']
+    );
+    expect(watch).toBeGreaterThanOrEqual(build + smoke + publish.jobs.publish['timeout-minutes'] + 20);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(watch + 10);
     expect(step.run).toContain('if [ "$?" -eq 124 ]; then\n        gh run cancel "$run" || true');
     expect(step.run).toContain('wait "$watcher" || status=1');
     expect(step.run).toContain('@betteroffice/$binding-native');
@@ -312,8 +344,7 @@ describe('native package release wiring', () => {
       writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho unexpected-dispatch\nexit 99\n', {
         mode: 0o755
       });
-      const step = release.jobs['native-npm'].steps[0];
-      const result = spawnSync('bash', ['-c', step.run], {
+      const result = spawnSync('bash', ['-c', dispatchStep.run], {
         encoding: 'utf8',
         env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, PUBLISH: 'invalid' }
       });
@@ -561,6 +592,8 @@ describe('native package release wiring', () => {
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe("bun test bindings/${{ inputs.binding }}-native/index.test.ts ${{ inputs.binding != 'xlsx' && format('bindings/{0}-native/png.test.ts', inputs.binding) || '' }}");
+    expect(testing['continue-on-error']).toBeUndefined();
+    expect(dist.jobs.bindings['continue-on-error']).toBeUndefined();
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
     const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');

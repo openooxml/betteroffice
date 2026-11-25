@@ -264,48 +264,7 @@ jobs:
 
       - name: Check the publisher files match main
         if: needs.plan.outputs.publishing == 'true'
-        run: |
-          git fetch --no-tags origin main
-          paths=(
-            .github/workflows/native-dist.yml
-            .github/workflows/publish-native.yml
-            .github/workflows/python-dist.yml
-            .github/workflows/publish-python-binding.yml
-            .github/workflows/deploy.yml
-            .github/workflows/wopi-image.yml
-            .github/actions/
-            package.json
-            bun.lock
-            apps/demo/scripts/build-collaboration-seeds.ts
-            packages/docx/scripts/copy-assets.ts
-            scripts/build-docx-wasm.ts
-            scripts/build-fonts-decoder.ts
-            scripts/build-pptx-wasm.ts
-            scripts/build-stale-packages.ts
-            scripts/build-vsdx-wasm.ts
-            scripts/build-xlsx-wasm.ts
-            scripts/check-packed-license.mjs
-            scripts/create-demo-deck.ts
-            scripts/create-demo-diagram.ts
-            scripts/create-demo-workbook.ts
-            scripts/glibc-floor.mjs
-            scripts/native-allocator-smoke.mjs
-            scripts/native-engine.ts
-            scripts/native-raw-smoke.mjs
-            scripts/package-boundary.ts
-            scripts/python-binding-names.mjs
-            scripts/python_font_packs.py
-            scripts/rewrite-workspace-deps.ts
-            scripts/wasm-cache-key.ts
-            scripts/wasm.ts
-            scripts/worker-stub.ts
-          )
-          if ! git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"; then
-            git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}" | while IFS= read -r path; do
-              echo "::error::Publisher file differs from main: $path"
-            done
-            exit 1
-          fi
+        run: bash scripts/check-publisher-files.sh
 
       - name: Build packages
         if: needs.plan.outputs.publishing == 'true'
@@ -463,18 +422,27 @@ jobs:
     needs: [release, python-bindings]
     if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
-    # Covers the font packs' worst case, 15 (wheel) + 5 + 15 (publish), then the
-    # bindings': 45 (wheels) + 15 (load) + 5 + 15 (publish).
-    timeout-minutes: 140
+    timeout-minutes: 165
     permissions:
+      contents: read
       actions: write # dispatch publish-python-binding.yml
     steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Check the publisher files match main
+        run: bash scripts/check-publisher-files.sh
+
       - name: Dispatch a publish per binding, then wait for each
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PUBLISH: ${{ needs.python-bindings.outputs.publish }}
           SHA: ${{ github.sha }}
+          CHECK_PUBLISHER_FILES: scripts/check-publisher-files.sh
         run: |
           status=0
           publish() {
@@ -518,14 +486,17 @@ jobs:
           packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
           formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
           # shellcheck disable=SC2086 # binding names contain no spaces
-          publish 40 $packs
+          publish 55 $packs
           if [ $status -ne 0 ] && [ -n "$formats" ]; then
             echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
             echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
             exit 1
           fi
+          if [ -n "$packs" ] && [ -n "$formats" ]; then
+            bash "$CHECK_PUBLISHER_FILES"
+          fi
           # shellcheck disable=SC2086 # binding names contain no spaces
-          publish 90 $formats
+          publish 100 $formats
           exit $status
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
@@ -541,11 +512,20 @@ jobs:
       ((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||
       (needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes + 15 for smoke tests) and publishing (15 minutes).
-    timeout-minutes: 90
+    timeout-minutes: 105
     permissions:
+      contents: read
       actions: write
     steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Check the publisher files match main
+        run: bash scripts/check-publisher-files.sh
+
       - name: Dispatch a publish per format, then wait for each
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -574,7 +554,7 @@ jobs:
             binding=${entry%%:*}
             run=${entry#*:}
             (
-              timeout 80m gh run watch "$run" --exit-status || {
+              timeout 95m gh run watch "$run" --exit-status || {
                 if [ "$?" -eq 124 ]; then
                   gh run cancel "$run" || true
                 fi

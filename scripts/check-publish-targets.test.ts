@@ -1043,12 +1043,35 @@ describe('release wiring', () => {
     const guard = release.jobs.release.steps.find((step: any) => step.name === 'Check the publisher files match main');
     expect(guard.if).toBe("needs.plan.outputs.publishing == 'true'");
     expect(steps.indexOf(guard.name)).toBeLessThan(steps.indexOf('Detect crates.io bootstrap token'));
-    expect(guard.run).toContain('git fetch --no-tags origin main');
-    expect(guard.run).toContain('git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
-    expect(guard.run).toContain('git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
-    expect(guard.run).toContain('::error::Publisher file differs from main: $path');
-    expect(guard.run).toContain('exit 1');
-    const paths = guard.run.match(/^paths=\(\n([\s\S]*?)\n\)/m)?.[1].trim().split(/\s+/);
+    expect(guard.run).toBe('bash scripts/check-publisher-files.sh');
+  });
+
+  test.each([
+    ['native-npm', 'publish-native.yml'],
+    ['python-pypi', 'publish-python-binding.yml']
+  ] as const)('%s checks this commit against main immediately before dispatch', (id, publisher) => {
+    const job = release.jobs[id];
+    const dispatch = job.steps.findIndex((step: any) => step.run?.includes(`${publisher}/dispatches`));
+    expect(dispatch).toBe(2);
+    expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
+    expect(job.steps[0].with).toEqual({ ref: '${{ github.sha }}', 'fetch-depth': 1 });
+    expect(job.steps[dispatch - 1]).toEqual({
+      name: 'Check the publisher files match main',
+      run: 'bash scripts/check-publisher-files.sh'
+    });
+  });
+
+  test('the shared guard compares the same publisher files', () => {
+    const guard = readFileSync(new URL('./check-publisher-files.sh', import.meta.url), 'utf8');
+    expect(guard).toStartWith('#!/usr/bin/env bash\nset -euo pipefail\n');
+    expect(guard).toContain('git rev-parse --is-shallow-repository');
+    expect(guard).toContain('git fetch --no-tags --depth=1 origin main');
+    expect(guard).toContain('git fetch --no-tags origin main');
+    expect(guard).toContain('git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
+    expect(guard).toContain('git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
+    expect(guard).toContain('::error::Publisher file differs from main: $path');
+    expect(guard).toContain('exit 1');
+    const paths = guard.match(/^paths=\(\n([\s\S]*?)\n\)/m)?.[1].trim().split(/\s+/);
     expect(paths).toEqual([
       '.github/workflows/native-dist.yml',
       '.github/workflows/publish-native.yml',
