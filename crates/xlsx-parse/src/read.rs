@@ -763,8 +763,12 @@ fn parse_worksheet(
                     continue;
                 };
                 let name = local_name(&e);
+                let compatibility = e
+                    .name()
+                    .prefix()
+                    .is_some_and(|prefix| prefix.as_ref() == b"mc");
                 if depth == c.depth + 1 {
-                    let alternate = name.as_slice() == b"AlternateContent";
+                    let alternate = compatibility && name.as_slice() == b"AlternateContent";
                     c.alternate = alternate.then_some(depth);
                     c.fallback = None;
                     if alternate {
@@ -772,17 +776,18 @@ fn parse_worksheet(
                     }
                 }
                 if c.alternate.is_some_and(|at| depth == at + 1) {
-                    c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
+                    c.fallback = (compatibility && name.as_slice() == b"Fallback").then_some(depth);
                     continue;
                 }
-                if depth != c.depth + 1 && !c.fallback.is_some_and(|at| depth == at + 1) {
+                let direct = depth == c.depth + 1;
+                if !direct && !c.fallback.is_some_and(|at| depth == at + 1) {
                     continue;
                 }
                 match name.as_slice() {
                     b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
                     b"f" => {
                         let text = collect_text(&mut reader, &mut buf, &mut depth)?;
-                        if c.formula.is_some() {
+                        if c.formula.is_some() && !direct {
                             continue;
                         }
                         if let Some(origin) = c.addr {
