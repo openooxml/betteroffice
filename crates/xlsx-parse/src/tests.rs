@@ -8975,3 +8975,133 @@ fn a_chart_reference_holding_a_character_xml_cannot_carry_is_never_written() {
         ));
     }
 }
+
+const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#;
+
+fn alternate_cell(cell: &str) -> Workbook {
+    let body = format!(r#"<sheetData><row r="1">{cell}</row></sheetData>"#);
+    parse_workbook_with_package(&package(&body, &[], false))
+        .unwrap()
+        .workbook
+}
+
+#[test]
+fn a_cached_value_inside_cell_alternate_content_is_read() {
+    let workbook = alternate_cell(&format!(
+        r#"<c r="A1"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><f>1+1</f><v>2</v></mc:Choice><mc:Fallback><f>1+1</f><v>2</v></mc:Fallback></mc:AlternateContent></c>"#
+    ));
+    let cell = cell_at(&workbook, "A1");
+    assert_eq!(cell.value, CellValue::Number { value: 2.0 });
+    assert_eq!(cell.formula.as_deref(), Some("1+1"));
+}
+
+#[test]
+fn cell_alternate_content_reads_only_its_fallback() {
+    let workbook = alternate_cell(&format!(
+        r#"<c r="A1"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><v>9</v></mc:Choice><mc:Fallback><v>3</v></mc:Fallback></mc:AlternateContent></c>"#
+    ));
+    assert_eq!(
+        cell_at(&workbook, "A1").value,
+        CellValue::Number { value: 3.0 }
+    );
+    let workbook = alternate_cell(&format!(
+        r#"<c r="A1"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><v>9</v></mc:Choice></mc:AlternateContent></c>"#
+    ));
+    assert_eq!(cell_at(&workbook, "A1").value, CellValue::Empty);
+}
+
+#[test]
+fn a_cell_with_direct_children_and_alternate_content_keeps_the_last_value() {
+    let workbook = alternate_cell(&format!(
+        r#"<c r="A1"><f>1+1</f><v>2</v><mc:AlternateContent {MC}><mc:Choice Requires="x14"><v>9</v></mc:Choice><mc:Fallback><v>3</v></mc:Fallback></mc:AlternateContent></c>"#
+    ));
+    let cell = cell_at(&workbook, "A1");
+    assert_eq!(cell.value, CellValue::Number { value: 3.0 });
+    assert_eq!(cell.formula.as_deref(), Some("1+1"));
+}
+
+#[test]
+fn a_shared_formula_inside_cell_alternate_content_is_recorded_once() {
+    let workbook = alternate_cell(&format!(
+        concat!(
+            r#"<c r="A1"><mc:AlternateContent {mc}><mc:Choice Requires="x14"><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v></mc:Choice>"#,
+            r#"<mc:Fallback><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v></mc:Fallback></mc:AlternateContent></c>"#,
+            r#"<c r="B1"><f t="shared" si="0"/><v>2</v></c>"#
+        ),
+        mc = MC
+    ));
+    assert_eq!(cell_at(&workbook, "A1").formula.as_deref(), Some("1+1"));
+    assert_eq!(cell_at(&workbook, "B1").formula.as_deref(), Some("1+1"));
+    assert_eq!(
+        cell_at(&workbook, "B1").value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
+#[test]
+fn a_model_save_keeps_a_cached_value_from_cell_alternate_content() {
+    let workbook = alternate_cell(&format!(
+        r#"<c r="A1"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><f>1+1</f><v>2</v></mc:Choice><mc:Fallback><f>1+1</f><v>2</v></mc:Fallback></mc:AlternateContent></c>"#
+    ));
+    let reopened = parse_workbook(&serialize_workbook(&workbook).unwrap()).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "A1").value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
+#[test]
+fn a_later_child_never_reads_from_an_ended_alternate_content_fallback() {
+    let workbook = alternate_cell(&format!(
+        concat!(
+            r#"<c r="A1"><mc:AlternateContent {mc}><mc:Choice Requires="x14"><v>9</v></mc:Choice><mc:Fallback><v>2</v></mc:Fallback></mc:AlternateContent>"#,
+            r#"<x:payload xmlns:x="urn:example"><x:Fallback><x:v>99</x:v></x:Fallback></x:payload></c>"#
+        ),
+        mc = MC
+    ));
+    assert_eq!(
+        cell_at(&workbook, "A1").value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
+#[test]
+fn a_shared_master_given_directly_and_in_a_fallback_is_recorded_once() {
+    let workbook = alternate_cell(&format!(
+        concat!(
+            r#"<c r="A1"><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v><mc:AlternateContent {mc}><mc:Choice Requires="x14"><v>2</v></mc:Choice>"#,
+            r#"<mc:Fallback><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v></mc:Fallback></mc:AlternateContent></c>"#,
+            r#"<c r="B1"><f t="shared" si="0"/><v>2</v></c>"#
+        ),
+        mc = MC
+    ));
+    assert_eq!(cell_at(&workbook, "B1").formula.as_deref(), Some("1+1"));
+}
+
+#[test]
+fn inline_strings_inside_cell_alternate_content_are_read() {
+    for (inline, text) in [
+        ("<is><t>plain</t></is>", "plain"),
+        (
+            "<is><r><rPr><b/></rPr><t>Bo</t></r><r><t>ld</t></r></is>",
+            "Bold",
+        ),
+    ] {
+        let workbook = alternate_cell(&format!(
+            r#"<c r="A1" t="inlineStr"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><is><t>choice</t></is></mc:Choice><mc:Fallback>{inline}</mc:Fallback></mc:AlternateContent></c>"#
+        ));
+        assert_eq!(
+            cell_at(&workbook, "A1").value,
+            CellValue::Text {
+                value: text.to_owned()
+            },
+            "{inline}"
+        );
+    }
+}
+
+#[test]
+fn two_direct_formulas_keep_the_last_one() {
+    let workbook = alternate_cell(r#"<c r="A1"><f>1+1</f><f>2+2</f><v>4</v></c>"#);
+    assert_eq!(cell_at(&workbook, "A1").formula.as_deref(), Some("2+2"));
+}
