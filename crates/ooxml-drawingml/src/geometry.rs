@@ -1454,41 +1454,38 @@ mod tests {
 
     #[test]
     fn bent_connectors_follow_ecma376_orthogonal_segments() {
-        for (name, expected_segments) in [
-            ("bentConnector2", 2usize),
-            ("bentConnector3", 3),
-            ("bentConnector4", 4),
-            ("bentConnector5", 5),
-        ] {
-            let cmds = preset_geometry_to_path(name, &HashMap::new(), 1.0).unwrap();
-            assert_eq!(cmds.len(), expected_segments + 1, "{name}");
-            let pts: Vec<(f64, f64)> = cmds
-                .into_iter()
-                .map(|c| match c {
-                    GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
-                        (x, y)
-                    }
-                    other => panic!("{name}: unexpected command {other:?}"),
-                })
-                .collect();
-            assert_eq!(pts.first(), Some(&(0.0, 0.0)), "{name} start");
-            assert_eq!(pts.last(), Some(&(1.0, 1.0)), "{name} end");
-            for pair in pts.windows(2) {
-                let dx = (pair[1].0 - pair[0].0).abs();
-                let dy = (pair[1].1 - pair[0].1).abs();
-                assert!(
-                    dx < 1e-9 || dy < 1e-9,
-                    "{name}: non-orthogonal segment {:?} -> {:?}",
-                    pair[0],
-                    pair[1]
-                );
-            }
+        for adjustments in [HashMap::new(), HashMap::from([("adj1".to_owned(), 0.25)])] {
+            let b2 = preset_geometry_to_path("bentConnector2", &adjustments, 1.0).unwrap();
+            assert_eq!(
+                b2,
+                vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                ]
+            );
         }
         let b3 = preset_geometry_to_path("bentConnector3", &HashMap::new(), 1.0).unwrap();
         assert_eq!(
             b3,
             vec![
                 GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+        let b4 = preset_geometry_to_path(
+            "bentConnector4",
+            &HashMap::from([("adj1".to_owned(), 0.75), ("adj2".to_owned(), -0.25)]),
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(
+            b4,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.75, y: -0.25 },
+                GeometryPathCommand::Line { x: 1.0, y: -0.25 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
                 GeometryPathCommand::Line { x: 0.5, y: 0.0 },
                 GeometryPathCommand::Line { x: 0.5, y: 1.0 },
                 GeometryPathCommand::Line { x: 1.0, y: 1.0 },
@@ -1544,17 +1541,29 @@ mod tests {
     }
 
     #[test]
-    fn curved_connector2_curves_from_horizontal_to_vertical() {
+    fn bent_connector_defaults_non_finite_adjustments() {
+        let expected = preset_geometry_to_path("bentConnector5", &HashMap::new(), 1.0).unwrap();
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let adjustments = ["adj1", "adj2", "adj3"]
+                .map(|name| (name.to_owned(), value))
+                .into();
+            let path = preset_geometry_to_path("bentConnector5", &adjustments, 1.0).unwrap();
+            assert_eq!(path, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn curved_connector2_follows_a_quarter_ellipse() {
         let cmds = preset_geometry_to_path("curvedConnector2", &HashMap::new(), 1.0).unwrap();
         assert_eq!(
             cmds,
             vec![
                 GeometryPathCommand::Move { x: 0.0, y: 0.0 },
                 GeometryPathCommand::Cubic {
-                    cp1x: 0.5,
+                    cp1x: ELLIPSE_KAPPA,
                     cp1y: 0.0,
                     cp2x: 1.0,
-                    cp2y: 0.5,
+                    cp2y: 1.0 - ELLIPSE_KAPPA,
                     x: 1.0,
                     y: 1.0,
                 },

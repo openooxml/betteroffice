@@ -11918,6 +11918,7 @@ mod tests {
                             rotation_deg: 0.0,
                             flip_h,
                             flip_v: false,
+                bent_connector: None,
                         },
                         TextFlow::Horizontal,
                     ),
@@ -11943,6 +11944,49 @@ mod tests {
                         ],
                     }],
                 }),
+    #[test]
+    fn hit_testing_a_rotated_bent_connector_follows_its_painted_detour() {
+        let session = DeckSession::open(FIXTURE, 8_015).unwrap();
+        let slide_id = session.slide_ids().unwrap().remove(0);
+        let added = session
+            .add_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &pptx_edit::PresetShapeDraft {
+                    name: "Connector".to_owned(),
+                    geometry: "bentConnector3".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 952_500,
+                        y: 952_500,
+                        width: 952_500,
+                        height: 952_500,
+                    },
+                    fill: None,
+                },
+            )
+            .unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        let shapes = &mut snapshot.slides[0].shapes;
+        shapes.retain(|shape| shape.id == added.shape_id);
+        let shape = &mut shapes[0];
+        shape.rotation_deg = 90.0;
+        shape.flip_h = true;
+        shape.outline = Some(red_outline(76_200.0));
+        shape.adjust_values.insert("adj1".to_owned(), 1.5);
+
+        let rendered = SlideRenderer::new()
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(
+            rendered.hit_test(150.0, 53.5),
+            Some(HitTestResult::Shape {
+                shape_id: added.shape_id,
+            })
+        );
+        assert_eq!(rendered.hit_test(150.0, 55.0), None);
+        assert_eq!(rendered.hit_test(150.0, 150.0), None);
+    }
+
             }],
         };
         let position = |flip_h| match slide(flip_h).hit_test(120.0, 120.0) {
@@ -11976,6 +12020,7 @@ mod tests {
                 primitives: Vec::new(),
                 alt_text: BTreeMap::new(),
                 title_shape: None,
+                bent_connector: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -12056,6 +12101,7 @@ mod tests {
         assert_eq!(TextFlow::from_body_vert(Some("eaVert")), TextFlow::Vert);
         assert_eq!(
             TextFlow::from_body_vert(Some("mongolianVert")),
+                bent_connector: None,
             TextFlow::VertLeftToRight
         );
         for mode in ["wordArtVert", "wordArtVertRtl"] {

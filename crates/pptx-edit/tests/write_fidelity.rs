@@ -5,7 +5,8 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+    CommentFlavor, DeckSession, EditCtx, EditError, EditRequest, PresetShapeDraft, ShapeRect,
+    ShapeSnapshot, TextStyle,
 };
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2418,6 +2419,88 @@ fn unevaluated_adjustment_guides_survive_a_shape_adjust() {
     let slide = part_text(&saved, "ppt/slides/slide1.xml");
     assert!(slide.contains(r#"name="adj" fmla="val 25000""#));
     assert!(slide.contains(r#"name="adj2" fmla="*/ missing 2 3""#));
+}
+
+fn bent_connector_deck() -> Vec<u8> {
+    let mut source = fixture_parts(256);
+    let (_, slide) = source
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    *slide = slide.replacen(
+        r#"<a:prstGeom prst="line"><a:avLst/></a:prstGeom>"#,
+        r#"<a:prstGeom prst="bentConnector4"><a:avLst><a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val 50000"/></a:avLst></a:prstGeom>"#,
+        1,
+    );
+    zip(source)
+}
+
+fn bent_connector(session: &DeckSession) -> (String, ShapeSnapshot) {
+    let slide = session.snapshot().unwrap().slides.remove(0);
+    let shape = slide
+        .shapes
+        .into_iter()
+        .find(|shape| shape.geometry == "bentConnector4")
+        .unwrap();
+    (slide.id, shape)
+}
+
+fn assert_bent_connector_reopens(session: &DeckSession) {
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    let xml = part_text(&saved_parts, "ppt/slides/slide1.xml");
+    assert!(xml.contains(r#"name="adj1" fmla="val 150000""#));
+    assert!(xml.contains(r#"name="adj2" fmla="val -25000""#));
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let expected = BTreeMap::from([("adj1".to_owned(), 1.5), ("adj2".to_owned(), -0.25)]);
+    assert_eq!(bent_connector(session).1.adjust_values, expected);
+    assert_eq!(bent_connector(&reopened).1.adjust_values, expected);
+}
+
+#[test]
+fn a_direct_bent_connector_edit_preserves_the_authored_detour() {
+    let session = DeckSession::open(&bent_connector_deck(), 11).unwrap();
+    let (slide, shape) = bent_connector(&session);
+    assert_eq!(shape.adjust_values["adj1"], 1.5);
+    let mut adjustments = shape.adjust_values;
+    adjustments.insert("adj2".to_owned(), -0.25);
+    let receipt = session
+        .set_shape_adjust(&context(), &slide, &shape.id, &adjustments)
+        .unwrap();
+    assert_eq!(receipt.after, adjustments);
+    assert_bent_connector_reopens(&session);
+
+    let requested = BTreeMap::from([("adj1".to_owned(), 1e37)]);
+    let error = session
+        .set_shape_adjust(&context(), &slide, &shape.id, &requested)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidAdjustment(_)));
+    assert_eq!(bent_connector(&session).1.adjust_values, adjustments);
+}
+
+#[test]
+fn a_batch_bent_connector_edit_preserves_the_authored_detour() {
+    let session = DeckSession::open(&bent_connector_deck(), 11).unwrap();
+    let (slide, shape) = bent_connector(&session);
+    assert_eq!(shape.adjust_values["adj1"], 1.5);
+    let request = |adjustments| -> EditRequest {
+        serde_json::from_value(serde_json::json!({
+            "expectVersion": session.version(),
+            "steps": [{
+                "op": "setShapeAdjust",
+                "target": {"slideId": slide, "shapeId": shape.id},
+                "adjustments": adjustments
+            }]
+        }))
+        .unwrap()
+    };
+    let unchanged = request(serde_json::json!(shape.adjust_values));
+    assert!(!session.validate_edits(&unchanged).unwrap().unwrap().would_apply);
+    let partial = || request(serde_json::json!({"adj2": -0.25}));
+    assert!(session.validate_edits(&partial()).unwrap().unwrap().would_apply);
+    assert!(session.apply_edits(&partial()).unwrap().unwrap().applied);
+    assert_bent_connector_reopens(&session);
+    assert!(!session.validate_edits(&partial()).unwrap().unwrap().would_apply);
 }
 
 #[test]

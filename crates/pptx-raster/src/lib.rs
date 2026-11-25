@@ -1673,6 +1673,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn extreme_bent_connector_guides_keep_a_finite_raster_path() {
+        for guide in [1e37, -1e37] {
+            let commands = ooxml_drawingml::preset_geometry_to_path(
+                "bentConnector3",
+                &std::collections::HashMap::from([("adj1".to_owned(), guide)]),
+                1.0,
+            )
+            .unwrap();
+            let path = geometry_path(&commands, 20.0, 20.0, 100.0, 100.0)
+                .expect("the extreme guide still produces a finite raster path");
+            let bounds = path.bounds();
+            assert!(bounds.left().is_finite() && bounds.right().is_finite());
+            assert_eq!((bounds.top(), bounds.bottom()), (20.0, 120.0));
+            if guide > 0.0 {
+                assert!(bounds.right() > 120.0, "the path still runs past the frame");
+            } else {
+                assert!(bounds.left() < 20.0, "the path still runs past the frame");
+            }
+        }
+    }
+
+    #[test]
     fn gradient_outlines_paint_shapes_images_and_zero_height_lines() {
         let fonts = FontStore::new();
         let images = AssetMap::new();

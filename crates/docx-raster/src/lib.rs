@@ -4094,6 +4094,33 @@ mod tests {
                     "y": 2,
                     "w": 12,
                     "h": 12
+    #[test]
+    fn connector_line_ends_follow_the_first_and_last_nonzero_tangents() {
+        for (preset, commands, expected) in [
+            (
+                "bentConnector2",
+                json!([
+                    {"type": "move", "x": 0, "y": 0},
+                    {"type": "line", "x": 100, "y": 0},
+                    {"type": "line", "x": 100, "y": 0}
+                ]),
+                [(0.0, 0.0), (100.0, 0.0), (0.0, 0.0), (100.0, 0.0)],
+            ),
+            (
+                "curvedConnector2",
+                json!([
+                    {"type": "move", "x": 0, "y": 0},
+                    {"type": "cubic", "cp1x": 50, "cp1y": 0, "cp2x": 100, "cp2y": 40,
+                        "x": 100, "y": 80}
+                ]),
+                [(0.0, 0.0), (50.0, 0.0), (100.0, 40.0), (100.0, 80.0)],
+            ),
+        ] {
+            let commands: Vec<ShapePathCommand> = serde_json::from_value(commands).unwrap();
+            assert_eq!(path_endpoints(&commands).unwrap(), Some(expected), "{preset}");
+        }
+    }
+
                 })
             })
             .collect();
