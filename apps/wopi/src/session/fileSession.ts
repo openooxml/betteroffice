@@ -1209,9 +1209,10 @@ export class FileSession {
         } catch (err) {
           unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
         }
-        const ours = result.itemVersion === null && info?.Size === bytes.byteLength && (await this.#readBackMatches(current, bytes));
+        const sameSize = result.itemVersion === null && info?.Size === bytes.byteLength;
+        const ours = sameSize && (await this.#readBackMatches(current, bytes));
         const written = result.itemVersion ?? (ours ? info?.Version : undefined) ?? null;
-        if (info?.Version && info.Version !== written) {
+        if ((sameSize && !ours) || (info?.Version && info.Version !== written)) {
           return this.#saveCurrentConflict(current, tried);
         }
         if (result.itemVersion === null && written !== null) this.#recordWritten(written);
