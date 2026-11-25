@@ -207,8 +207,7 @@ pub fn rewrite_table_column(
     let old = old.to_lowercase();
     let folded = input.to_lowercase();
     if (!local && !folded.contains(&table))
-        || (!folded.contains(&old)
-            && !folded.replace('\'', "").contains(&old.replace('\'', "")))
+        || (!folded.contains(&old) && !folded.replace('\'', "").contains(&old.replace('\'', "")))
     {
         return Ok(None);
     }
@@ -792,8 +791,7 @@ mod tests {
     fn rewrites_only_the_matching_structured_reference_columns() {
         let source =
             r#"T[Old]+t[[#This Row], [old]]+T[[Old]:[X]]+T[@OLD]+[@Old]+Other[Old]+"T[Old]""#;
-        let expected =
-            r#"T['#New']]+t[[#This Row], ['#New']]]+T[['#New']]:[X]]+T[@'#New']]+[@'#New']]+Other[Old]+"T[Old]""#;
+        let expected = r#"T['#New']]+t[[#This Row], ['#New']]]+T[['#New']]:[X]]+T[@'#New']]+[@'#New']]+Other[Old]+"T[Old]""#;
         let rewritten = rewrite_table_column(source, "T", true, "Old", "#New]")
             .unwrap()
             .unwrap();

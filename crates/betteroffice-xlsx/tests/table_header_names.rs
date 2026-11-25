@@ -302,10 +302,15 @@ fn changing_only_the_case_of_a_header_preserves_the_typed_name() {
     let source = book();
     let mut workbook = Workbook::open(&source).unwrap();
     edit(&mut workbook, "B1", "STATUS");
-    assert_eq!(workbook.model().table("Table1").unwrap().columns[1], "STATUS");
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns[1],
+        "STATUS"
+    );
     assert_eq!(
         workbook.model().value(SHEET1, at("B1")),
-        CellValue::Text { value: "STATUS".into() },
+        CellValue::Text {
+            value: "STATUS".into()
+        },
     );
     let saved = workbook.save().unwrap();
     let before = ooxml_opc::unzip_parts(&source).unwrap();
@@ -313,8 +318,13 @@ fn changing_only_the_case_of_a_header_preserves_the_typed_name() {
     let path = "xl/tables/table1.xml";
     assert_eq!(part(&after, path), part(&before, path));
     assert_eq!(
-        Workbook::open(&saved).unwrap().model().value(SHEET1, at("B1")),
-        CellValue::Text { value: "STATUS".into() },
+        Workbook::open(&saved)
+            .unwrap()
+            .model()
+            .value(SHEET1, at("B1")),
+        CellValue::Text {
+            value: "STATUS".into()
+        },
     );
 }
 
@@ -343,7 +353,10 @@ fn a_suffix_over_the_cell_text_limit_is_refused_atomically() {
     let error = workbook
         .edit_cell(SHEET1, at("B1"), &name, CalculationOptions::default())
         .unwrap_err();
-    assert!(matches!(error, Error::Operation(OpError::TableHeaderTextTooLong)));
+    assert!(matches!(
+        error,
+        Error::Operation(OpError::TableHeaderTextTooLong)
+    ));
     assert_eq!(workbook.version(), version);
     assert_saved_headers(&workbook.save().unwrap(), [&name, "Status", "Rev"]);
 }
@@ -403,7 +416,9 @@ fn a_header_edit_preserves_other_table_parts_byte_for_byte() {
     let reopened = Workbook::open(&saved).unwrap();
     assert_eq!(
         reopened.model().value(SHEET1, at("B1")),
-        CellValue::Text { value: "State".into() },
+        CellValue::Text {
+            value: "State".into()
+        },
     );
 }
 
@@ -420,7 +435,9 @@ fn a_data_cell_edit_preserves_the_table_part_byte_for_byte() {
     let reopened = assert_saved_headers(&saved, ["Name", "Status", "Rev"]);
     assert_eq!(
         reopened.model().value(SHEET1, at("B3")),
-        CellValue::Text { value: "Reviewed".into() },
+        CellValue::Text {
+            value: "Reviewed".into()
+        },
     );
 }
 
@@ -433,7 +450,10 @@ fn saving_heals_an_existing_header_mismatch_and_preserves_other_tables() {
         "<t>State</t>",
     );
     let mut workbook = Workbook::open(&source).unwrap();
-    assert_eq!(workbook.model().table("Table1").unwrap().columns[1], "Status");
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
     edit(&mut workbook, "B3", "Reviewed");
     let saved = workbook.save().unwrap();
     assert_saved_headers(&saved, ["Name", "State", "Rev"]);
@@ -447,7 +467,12 @@ fn saving_heals_an_existing_header_mismatch_and_preserves_other_tables() {
 #[test]
 fn editing_the_first_data_row_of_a_headerless_table_preserves_its_part() {
     let path = "xl/tables/table2.xml";
-    let source = replace_part(&book(), path, "headerRowCount=\"1\"", "headerRowCount=\"0\"");
+    let source = replace_part(
+        &book(),
+        path,
+        "headerRowCount=\"1\"",
+        "headerRowCount=\"0\"",
+    );
     let mut workbook = Workbook::open(&source).unwrap();
     edit(&mut workbook, "E1", "7");
     let saved = workbook.save().unwrap();
@@ -455,7 +480,10 @@ fn editing_the_first_data_row_of_a_headerless_table_preserves_its_part() {
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(part(&after, path), part(&before, path));
     let reopened = Workbook::open(&saved).unwrap();
-    assert_eq!(reopened.model().value(SHEET1, at("E1")), CellValue::Number { value: 7.0 });
+    assert_eq!(
+        reopened.model().value(SHEET1, at("E1")),
+        CellValue::Number { value: 7.0 }
+    );
 }
 
 #[test]
@@ -471,7 +499,10 @@ fn a_table_with_totals_uses_its_first_row_as_headers() {
     edit(&mut workbook, "B1", "State");
     let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
     assert_eq!(reopened.model().table("Table1").unwrap().totals_rows, 1);
-    assert_eq!(reopened.model().value(SHEET1, at("B4")), CellValue::Number { value: 7.0 });
+    assert_eq!(
+        reopened.model().value(SHEET1, at("B4")),
+        CellValue::Number { value: 7.0 }
+    );
 }
 
 #[test]
@@ -494,7 +525,11 @@ fn an_existing_structured_reference_follows_a_header_rename_and_undo() {
     assert_eq!(workbook.model().value(SHEET1, at("H1")), expected);
     edit(&mut workbook, "B1", "State");
     let formula = |workbook: &Workbook| {
-        workbook.model().sheets[0].cell(at("H1")).unwrap().formula.clone()
+        workbook.model().sheets[0]
+            .cell(at("H1"))
+            .unwrap()
+            .formula
+            .clone()
     };
     assert_eq!(formula(&workbook).as_deref(), Some("COUNTA(Table1[State])"));
     assert_eq!(workbook.model().value(SHEET1, at("H1")), expected);
@@ -502,7 +537,10 @@ fn an_existing_structured_reference_follows_a_header_rename_and_undo() {
     assert_eq!(formula(&reopened).as_deref(), Some("COUNTA(Table1[State])"));
     assert_eq!(reopened.model().value(SHEET1, at("H1")), expected);
     workbook.undo(CalculationOptions::default()).unwrap();
-    assert_eq!(formula(&workbook).as_deref(), Some("COUNTA(Table1[Status])"));
+    assert_eq!(
+        formula(&workbook).as_deref(),
+        Some("COUNTA(Table1[Status])")
+    );
     assert_eq!(workbook.model().value(SHEET1, at("H1")), expected);
 }
 
@@ -535,7 +573,11 @@ fn another_sheets_formula_and_a_defined_name_follow_a_header_rename() {
     workbook.undo(CalculationOptions::default()).unwrap();
     assert_eq!(workbook.model().defined_names[0].formula, "Table1[Status]");
     assert_eq!(
-        workbook.model().sheets[1].cell(at("D1")).unwrap().formula.as_deref(),
+        workbook.model().sheets[1]
+            .cell(at("D1"))
+            .unwrap()
+            .formula
+            .as_deref(),
         Some("COUNTA(Table1[[Status]:[Rev]])")
     );
 }
@@ -547,13 +589,23 @@ fn a_peer_receives_the_header_and_its_rewritten_formula() {
     let mut peer = Workbook::open_collaborative(&source, 78).unwrap();
     edit(&mut writer, "H1", "=COUNTA(Table1[Status])");
     edit(&mut writer, "B1", "State");
-    let update = writer.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap();
-    peer.apply_update_v1(&update, CalculationOptions::default()).unwrap();
+    let update = writer
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
+    peer.apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
     assert_eq!(
-        peer.model().sheets[0].cell(at("H1")).unwrap().formula.as_deref(),
+        peer.model().sheets[0]
+            .cell(at("H1"))
+            .unwrap()
+            .formula
+            .as_deref(),
         Some("COUNTA(Table1[State])")
     );
-    assert_eq!(peer.model().value(SHEET1, at("H1")), CellValue::Number { value: 3.0 });
+    assert_eq!(
+        peer.model().value(SHEET1, at("H1")),
+        CellValue::Number { value: 3.0 }
+    );
     assert_saved_headers(&peer.save().unwrap(), ["Name", "State", "Rev"]);
 }
 

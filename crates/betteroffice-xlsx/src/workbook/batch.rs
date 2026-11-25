@@ -25,9 +25,9 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    cell_write_is_unchanged, committed_formula, current_cell_state, edit_cell_state, entered_formula,
-    entered_text, typed_formula_fails, validate_cell_state, validate_model_sheets, validate_op,
-    written_cell_style,
+    cell_write_is_unchanged, committed_formula, current_cell_state, edit_cell_state,
+    entered_formula, entered_text, typed_formula_fails, validate_cell_state, validate_model_sheets,
+    validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -1013,7 +1013,8 @@ impl Workbook {
                 let mut states = Vec::new();
                 for (cell, value) in resolved.iter().zip(values.iter().flatten()) {
                     let current = current_cell_state(&self.model, resolved.sheet, cell);
-                    let header = table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let state = CellState {
                         value: value.clone(),
                         formula: None,

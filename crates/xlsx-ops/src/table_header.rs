@@ -27,7 +27,8 @@ pub fn normalize_table_header(
     }
     let old = workbook.sheet(sheet).and_then(|sheet| sheet.cell(at));
     if cell.formula.as_deref() == old.and_then(|cell| cell.formula.as_deref())
-        && (cell.formula.is_some() || &cell.value == old.map_or(&CellValue::Empty, |cell| &cell.value))
+        && (cell.formula.is_some()
+            || &cell.value == old.map_or(&CellValue::Empty, |cell| &cell.value))
     {
         return Ok(None);
     }
@@ -87,7 +88,9 @@ fn may_reference_column(formula: &str, table: &str, local: bool, column: &str) -
     let text = formula.to_lowercase();
     (local && text.contains('[') || text.contains(&format!("{}[", table.to_lowercase())))
         && (text.contains(&column.to_lowercase())
-            || text.replace('\'', "").contains(&column.to_lowercase().replace('\'', "")))
+            || text
+                .replace('\'', "")
+                .contains(&column.to_lowercase().replace('\'', "")))
 }
 
 pub(crate) fn rename_table_column(
@@ -106,14 +109,19 @@ pub(crate) fn rename_table_column(
         column: old.clone(),
         location,
     };
-    let rewrite = |formula: &str, local: bool, location: &dyn Fn() -> String| {
-        match rewrite_table_column(formula, &table.name, local, old, new) {
+    let rewrite =
+        |formula: &str, local: bool, location: &dyn Fn() -> String| match rewrite_table_column(
+            formula,
+            &table.name,
+            local,
+            old,
+            new,
+        ) {
             Ok(Some(text)) if !text.contains('\0') => Ok(Some(text)),
             Ok(None) => Ok(None),
             Err(_) if !may_reference_column(formula, &table.name, local, old) => Ok(None),
             _ => Err(unsupported(location())),
-        }
-    };
+        };
     let mut edits = Vec::new();
     let mut restores = Vec::new();
     for (index, sheet) in workbook.sheets.iter().enumerate() {
@@ -179,7 +187,8 @@ pub(crate) fn rename_table_column(
         if let Some(updated) = rewrite(&name.formula, false, &location)? {
             crate::validate_defined_name_formula(&updated).map_err(|_| unsupported(location()))?;
             names.get_or_insert_with(|| workbook.defined_names.clone())[index].formula = updated;
-        } else if changes_lookup && references_table_column(&name.formula, &table.name, false, new) {
+        } else if changes_lookup && references_table_column(&name.formula, &table.name, false, new)
+        {
             restore_names = true;
         }
     }

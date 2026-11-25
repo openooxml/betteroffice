@@ -3292,7 +3292,9 @@ impl Workbook {
             );
             state.formula = entered_formula(&preview, edit.sheet, edit.cell, state.formula)?;
             validate_cell_state(&state)?;
-            if format.is_some() || !cell_write_is_unchanged(&preview, edit.sheet, edit.cell, &state)? {
+            if format.is_some()
+                || !cell_write_is_unchanged(&preview, edit.sheet, edit.cell, &state)?
+            {
                 let op = Op::SetCell {
                     sheet: edit.sheet,
                     at: edit.cell,
@@ -4353,7 +4355,8 @@ impl Workbook {
         let (Some(package), Op::SetCell { sheet, at, cell }) = (&self.source_package, op) else {
             return Ok(());
         };
-        let Some((table, column, name)) = xlsx_ops::normalize_table_header(model, *sheet, *at, cell)?
+        let Some((table, column, name)) =
+            xlsx_ops::normalize_table_header(model, *sheet, *at, cell)?
         else {
             return Ok(());
         };

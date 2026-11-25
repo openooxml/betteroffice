@@ -483,8 +483,8 @@ impl PreservedPackage {
             }
         }
         for (source, path) in self.original_workbook.tables.iter().zip(&self.table_parts) {
-            let local = origin == Some(source.sheet.0 as usize)
-                && source.name.eq_ignore_ascii_case(table);
+            let local =
+                origin == Some(source.sheet.0 as usize) && source.name.eq_ignore_ascii_case(table);
             if let Some(bytes) = self.part_bytes(path)
                 && contains_formula(
                     bytes,
@@ -516,7 +516,9 @@ impl PreservedPackage {
             let normalized = normalized_part_name(path);
             if !model_charts.contains(path.as_str())
                 && (chart_parts.contains(&normalized) || normalized.starts_with("xl/charts/"))
-                && contains_formula(bytes, &[b"f", b"formula"], |formula| matches(formula, false))?
+                && contains_formula(bytes, &[b"f", b"formula"], |formula| {
+                    matches(formula, false)
+                })?
             {
                 return Ok(Some(path));
             }

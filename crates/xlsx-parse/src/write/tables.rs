@@ -222,8 +222,7 @@ mod tests {
     use xlsx_model::{Cell, SheetId};
 
     const PATH: &str = "xl/tables/table1.xml";
-    const TABLE: &str =
-        r#"<table displayName="Sales" ref="A1:A2"><tableColumns count="1"><tableColumn name="Old"/></tableColumns></table>"#;
+    const TABLE: &str = r#"<table displayName="Sales" ref="A1:A2"><tableColumns count="1"><tableColumn name="Old"/></tableColumns></table>"#;
 
     #[test]
     fn patch_names_keeps_surrounding_bytes() {
@@ -267,7 +266,9 @@ mod tests {
         parsed.workbook.sheets[0].set_cell(
             CellRef::new(0, 0),
             Cell {
-                value: CellValue::Text { value: "New".into() },
+                value: CellValue::Text {
+                    value: "New".into(),
+                },
                 ..Cell::default()
             },
         );
