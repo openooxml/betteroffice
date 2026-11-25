@@ -70,6 +70,7 @@ describe('newCrateRateLimitRetryAt', () => {
     ['a different status', NEW_CRATE_REFUSAL.replace('status 429', 'status 500'), null],
     ['the update limit', NEW_CRATE_REFUSAL.replace('new crates', 'updates'), null],
     ['a generic 429', 'HTTP 429: Too Many Requests', null],
+    ['unrelated text on a 429 line', 'warning: status 429 seen; too many new crates in this workspace', null],
     ['an unauthorized error', 'error: unauthorized', null]
   ];
   test.each(cases)('handles %s', (_label, output, expected) => {
@@ -426,8 +427,33 @@ describe('new-crate rate limit', () => {
   test.each(marginCases)('applies the retry margin for %s', async (_label, output, waitMs) => {
     const clock = fakeClock();
     const tracker = publishTracker([
-      { token: FAKE_OIDC, status: 101, output },
-      { token: FAKE_OIDC, status: 0 }
+      { token: FAKE_BOOTSTRAP, status: 101, output },
+      { token: FAKE_BOOTSTRAP, status: 0 }
+    ]);
+    const result = await attemptPublishWithFallback({
+      name: 'betteroffice-fonts-latin',
+      version: '0.1.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      checkVersion: async () => null,
+      runPublish: tracker.runPublish,
+      now: clock.now,
+      sleep: clock.sleep
+    });
+    expect(result).toEqual({ source: 'bootstrap' });
+    expect(clock.waits).toEqual([waitMs]);
+    expect(tracker.calls).toEqual([
+      { token: FAKE_BOOTSTRAP, source: 'bootstrap' },
+      { token: FAKE_BOOTSTRAP, source: 'bootstrap' }
+    ]);
+  });
+
+  test('an existing crate never waits on the new-crate refusal text', async () => {
+    const clock = fakeClock();
+    const tracker = publishTracker([
+      { token: FAKE_OIDC, status: 101, output: newCrateRefusal(START_MS + 60_000) },
+      { token: FAKE_BOOTSTRAP, status: 0 }
     ]);
     const result = await attemptPublishWithFallback({
       name: 'betteroffice-xlsx',
@@ -440,12 +466,8 @@ describe('new-crate rate limit', () => {
       now: clock.now,
       sleep: clock.sleep
     });
-    expect(result).toEqual({ source: 'oidc' });
-    expect(clock.waits).toEqual([waitMs]);
-    expect(tracker.calls).toEqual([
-      { token: FAKE_OIDC, source: 'oidc' },
-      { token: FAKE_OIDC, source: 'oidc' }
-    ]);
+    expect(result).toEqual({ source: 'bootstrap-fallback' });
+    expect(clock.waits).toEqual([]);
   });
 
   const otherFailures: Array<[string, string]> = [

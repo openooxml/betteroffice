@@ -17,6 +17,7 @@ const WAIT_TIMEOUT_MS = 5 * 60 * 1000;
 const WAIT_INTERVAL_MS = 10 * 1000;
 const NEW_CRATE_REFILL_MS = 600_000;
 const NEW_CRATE_RETRY_MARGIN_MS = 15_000;
+const CAPTURED_OUTPUT_BYTES = 64 * 1024;
 export const NEW_CRATE_WAIT_BUDGET_MS = 100 * 60_000;
 
 function sleep(ms) {
@@ -87,16 +88,19 @@ export async function runWithTee(command, args, { env = {} } = {}) {
   }
 
   const child = spawn(command, args, { stdio: ['inherit', 'pipe', 'pipe'], env: childEnv });
-  const stdout = [];
-  const stderr = [];
-  child.stdout.on('data', (chunk) => stdout.push(chunk));
-  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  const captured = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  const keepTail = (stream) => (chunk) => {
+    const joined = Buffer.concat([captured[stream], chunk]);
+    captured[stream] = joined.subarray(Math.max(joined.length - CAPTURED_OUTPUT_BYTES, 0));
+  };
+  child.stdout.on('data', keepTail('stdout'));
+  child.stderr.on('data', keepTail('stderr'));
   child.stdout.pipe(process.stdout, { end: false });
   child.stderr.pipe(process.stderr, { end: false });
 
   const [status] = await once(child, 'close');
-  const output = [stdout, stderr]
-    .map((chunks) => Buffer.concat(chunks).toString('utf8'))
+  const output = [captured.stdout, captured.stderr]
+    .map((buffer) => buffer.toString('utf8'))
     .filter(Boolean)
     .join('\n');
   return { status, output };
@@ -105,7 +109,7 @@ export async function runWithTee(command, args, { env = {} } = {}) {
 export function newCrateRateLimitRetryAt(output, nowMs) {
   const refusal = output
     .split(/\r?\n/)
-    .find((line) => /\bstatus 429\b.*\btoo many new crates\b/i.test(line));
+    .find((line) => /responded with an error \(status 429\b[^)]*\):\s*You have published too many new crates\b/i.test(line));
   if (!refusal) return null;
   const retryDate = refusal.match(/\btry again after\s+(.*?\bGMT\b)/i)?.[1];
   const retryAt = Date.parse(retryDate ?? '');
@@ -167,7 +171,7 @@ export async function attemptPublishWithFallback({
       if (result.status === 0) return { source: attempt.source };
 
       const nowMs = now();
-      const retryAt = newCrateRateLimitRetryAt(result.output ?? '', nowMs);
+      const retryAt = exists ? null : newCrateRateLimitRetryAt(result.output ?? '', nowMs);
       if (retryAt === null) break;
       const waitMs = Math.max(retryAt - nowMs, 0) + NEW_CRATE_RETRY_MARGIN_MS;
       if (rateLimitBudget.waitedMs + waitMs > NEW_CRATE_WAIT_BUDGET_MS) {
@@ -347,7 +351,11 @@ async function publish() {
 
   const rateLimitBudget = { waitedMs: 0, newCratesLeft: 0 };
   for (const { name } of RUST_PUBLISH_CRATES) {
-    if (!(await crateExists(name))) rateLimitBudget.newCratesLeft += 1;
+    try {
+      if (!(await crateExists(name))) rateLimitBudget.newCratesLeft += 1;
+    } catch (error) {
+      console.log(`Could not count ${name} as new or existing: ${error.message}`);
+    }
   }
 
   for (const { name } of RUST_PUBLISH_CRATES) {
