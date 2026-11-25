@@ -9049,3 +9049,31 @@ fn a_model_save_keeps_a_cached_value_from_cell_alternate_content() {
         CellValue::Number { value: 2.0 }
     );
 }
+
+#[test]
+fn a_later_child_never_reads_from_an_ended_alternate_content_fallback() {
+    let workbook = alternate_cell(&format!(
+        concat!(
+            r#"<c r="A1"><mc:AlternateContent {mc}><mc:Choice Requires="x14"><v>9</v></mc:Choice><mc:Fallback><v>2</v></mc:Fallback></mc:AlternateContent>"#,
+            r#"<x:payload xmlns:x="urn:example"><x:Fallback><x:v>99</x:v></x:Fallback></x:payload></c>"#
+        ),
+        mc = MC
+    ));
+    assert_eq!(
+        cell_at(&workbook, "A1").value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
+#[test]
+fn a_shared_master_given_directly_and_in_a_fallback_is_recorded_once() {
+    let workbook = alternate_cell(&format!(
+        concat!(
+            r#"<c r="A1"><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v><mc:AlternateContent {mc}><mc:Choice Requires="x14"><v>2</v></mc:Choice>"#,
+            r#"<mc:Fallback><f t="shared" ref="A1:B1" si="0">1+1</f><v>2</v></mc:Fallback></mc:AlternateContent></c>"#,
+            r#"<c r="B1"><f t="shared" si="0"/><v>2</v></c>"#
+        ),
+        mc = MC
+    ));
+    assert_eq!(cell_at(&workbook, "B1").formula.as_deref(), Some("1+1"));
+}
