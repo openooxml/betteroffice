@@ -15,7 +15,9 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
 use xlsx_model::numfmt::format_renders_date;
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
-use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
+use xlsx_ops::{
+    CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty, table_header_at,
+};
 use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 use xlsx_render::{display_text, format_code_for_cell};
 
@@ -23,8 +25,8 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    committed_formula, current_cell_state, edit_cell_state, entered_formula, entered_text,
-    typed_formula_fails, validate_cell_state, validate_model_sheets, validate_op,
+    cell_write_is_unchanged, committed_formula, current_cell_state, edit_cell_state, entered_formula,
+    entered_text, typed_formula_fails, validate_cell_state, validate_model_sheets, validate_op,
     written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
@@ -991,6 +993,7 @@ impl Workbook {
                             )
                         })?;
                     if format.is_some()
+                        || table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1005,6 +1008,7 @@ impl Workbook {
                 let mut states = Vec::new();
                 for (cell, value) in resolved.iter().zip(values.iter().flatten()) {
                     let current = current_cell_state(&self.model, resolved.sheet, cell);
+                    let header = table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let state = CellState {
                         value: value.clone(),
                         formula: None,
@@ -1012,7 +1016,7 @@ impl Workbook {
                             &self.model,
                             resolved.sheet,
                             cell,
-                            matches!(value, CellValue::Empty),
+                            !header && matches!(value, CellValue::Empty),
                         ),
                     };
                     validate_cell_state(&state).map_err(|error| {
@@ -1021,7 +1025,7 @@ impl Workbook {
                             format!("the value for {}: {error}", cell.to_a1()),
                         )
                     })?;
-                    if !cell_states_semantically_equal(&current, &state) {
+                    if header || !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state, None));
                     }
                 }
@@ -1196,6 +1200,7 @@ impl Workbook {
                         continue;
                     }
                     if format.is_some()
+                        || table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1335,19 +1340,26 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut changed: Vec<BTreeSet<(u32, u32)>> = vec![BTreeSet::new(); steps.len()];
         let mut per_op = Vec::with_capacity(ops.len());
-        for (step, op) in &ops {
-            validate_op(&preview, op)?;
+        let mut staged_ops = Vec::with_capacity(ops.len());
+        for (step, op) in ops {
+            validate_op(&preview, &op)?;
+            if let Op::SetCell { sheet, at, cell } = &op
+                && table_header_at(&preview.tables, *sheet, *at).is_some()
+                && cell_write_is_unchanged(&preview, *sheet, *at, cell)?
+            {
+                continue;
+            }
             let formats = preview.styles.cell_xfs.len();
-            let inverse = match xlsx_ops::apply_in_place(&mut preview, op) {
+            let inverse = match xlsx_ops::apply_in_place(&mut preview, &op) {
                 Ok(inverse) => inverse.0,
                 Err(error @ (OpError::InvalidStyle(_) | OpError::NumFmtTableFull)) => {
                     let code = match error {
                         OpError::NumFmtTableFull => EditFailureCode::LimitExceeded,
                         _ => EditFailureCode::InvalidStep,
                     };
-                    let planned = &steps[*step as usize];
+                    let planned = &steps[step as usize];
                     return refuse(
-                        failure(code, error.to_string(), Some(planned.target.clone())).at(*step),
+                        failure(code, error.to_string(), Some(planned.target.clone())).at(step),
                     );
                 }
                 Err(error) => return Err(error.into()),
@@ -1355,22 +1367,23 @@ impl Workbook {
             if (formats..preview.styles.cell_xfs.len())
                 .any(|index| !cell_format_fits(&preview.styles.cell_format(Some(index as u32))))
             {
-                let planned = &steps[*step as usize];
+                let planned = &steps[step as usize];
                 return refuse(
                     failure(
                         EditFailureCode::LimitExceeded,
                         "a resulting cell format exceeds the size a workbook can share".to_owned(),
                         Some(planned.target.clone()),
                     )
-                    .at(*step),
+                    .at(step),
                 );
             }
             for undone in &inverse {
-                if let Op::SetCell { at, .. } = undone {
-                    changed[*step as usize].insert((at.row, at.col));
+                if let Op::SetCell { at, .. } | Op::RestoreTableHeader { at, .. } = undone {
+                    changed[step as usize].insert((at.row, at.col));
                 }
             }
             per_op.push(inverse);
+            staged_ops.push(op);
         }
         if changed.iter().all(BTreeSet::is_empty) {
             return unchanged(steps);
@@ -1385,7 +1398,7 @@ impl Workbook {
             EditHistory::None => CommitHistory::None,
         };
         let prepared = match self.prepare_commit(
-            ops.into_iter().map(|(_, op)| op).collect(),
+            staged_ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::User,
             history,
@@ -1529,13 +1542,22 @@ impl Workbook {
             Some(previous) => graph.adopt_unevaluated(previous),
             None => super::assume_unevaluated(&graph, &self.last_calculation),
         }
-        let recalculated = recalc_after_with_seed(
-            &mut prepared.model,
-            &mut graph,
-            &seeds,
-            request.calculation.now_serial,
-            self.rand_seed,
-        );
+        let recalculated = if self.model.tables != prepared.model.tables {
+            xlsx_calc::engine::recalc_all_kept(
+                &mut prepared.model,
+                &mut graph,
+                request.calculation.now_serial,
+                self.rand_seed,
+            )
+        } else {
+            recalc_after_with_seed(
+                &mut prepared.model,
+                &mut graph,
+                &seeds,
+                request.calculation.now_serial,
+                self.rand_seed,
+            )
+        };
         let changed_sheets = steps
             .iter()
             .zip(&changed)

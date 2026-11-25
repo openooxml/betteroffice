@@ -164,6 +164,13 @@ define_ops! {
             at: CellRef,
             cell: CellState,
         },
+        #[doc(hidden)]
+        RestoreTableHeader => "restoreTableHeader" {
+            sheet: SheetId,
+            at: CellRef,
+            cell: CellState,
+            name: String,
+        },
         InsertRows => "insertRows" {
             sheet: SheetId,
             at: RowId,

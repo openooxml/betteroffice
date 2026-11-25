@@ -18,6 +18,7 @@ use crate::remap::{
     remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
     rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
 };
+use crate::table_header::{normalize_table_header, table_header_at};
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
 /// order, restores the prior workbook state.
@@ -29,6 +30,11 @@ pub enum OpError {
     SheetNotFound(SheetId),
     SheetIndexOutOfRange(usize),
     FormulaNotRewritable {
+        sheet: SheetId,
+        cell: CellRef,
+    },
+    TableHeaderFormulaUnsupported,
+    MissingTableColumn {
         sheet: SheetId,
         cell: CellRef,
     },
@@ -87,6 +93,12 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
+            OpError::TableHeaderFormulaUnsupported => {
+                f.write_str("formulas are not supported in Excel table headers")
+            }
+            OpError::MissingTableColumn { sheet, cell } => {
+                write!(f, "no table column for sheet {}, {}", sheet.0, cell.to_a1())
+            }
             OpError::SheetNameNotWritable => write!(
                 f,
                 "sheet name contains a character xml cannot carry, and the workbook references the sheet"
@@ -178,6 +190,16 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
     crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
         Op::SetCell { sheet, at, cell } => {
+            if let Some((table, column, name)) =
+                normalize_table_header(&wb.tables, *sheet, *at, cell)?
+            {
+                let cell = CellState {
+                    value: CellValue::Text { value: name.clone() },
+                    formula: None,
+                    style: cell.style,
+                };
+                return set_table_header(wb, *sheet, *at, (table, column), cell, name);
+            }
             wb.styles.preserve_style_identity();
             let s = sheet_mut(wb, *sheet)?;
             let old = s.cell(*at).map(CellState::from).unwrap_or_default();
@@ -187,6 +209,20 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 at: *at,
                 cell: old,
             }]))
+        }
+        Op::RestoreTableHeader {
+            sheet,
+            at,
+            cell,
+            name,
+        } => {
+            let target = table_header_at(&wb.tables, *sheet, *at)
+                .filter(|&(table, column)| column < wb.tables[table].columns.len())
+                .ok_or(OpError::MissingTableColumn {
+                    sheet: *sheet,
+                    cell: *at,
+                })?;
+            set_table_header(wb, *sheet, *at, target, cell.clone(), name.clone())
         }
         Op::SetColWidth { sheet, col, width } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -1321,7 +1357,8 @@ fn apply_range_formats(
         }
     }
     let mut inverse = Vec::with_capacity(staged.len());
-    let sheet_ref = wb.sheet_mut(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    let tables = &wb.tables;
+    let sheet_ref = &mut wb.sheets[sheet.0 as usize];
     let mut staged = staged.into_iter();
     for row in range.start.row..=range.end.row {
         for col in range.start.col..=range.end.col {
@@ -1349,10 +1386,20 @@ fn apply_range_formats(
             if remove {
                 sheet_ref.set_cell(at, Cell::default());
             }
-            inverse.push(Op::SetCell {
-                sheet,
-                at,
-                cell: old,
+            let name = table_header_at(tables, sheet, at)
+                .and_then(|(table, column)| tables[table].columns.get(column));
+            inverse.push(match name {
+                Some(name) => Op::RestoreTableHeader {
+                    sheet,
+                    at,
+                    cell: old,
+                    name: name.clone(),
+                },
+                None => Op::SetCell {
+                    sheet,
+                    at,
+                    cell: old,
+                },
             });
         }
     }
@@ -2990,6 +3037,27 @@ fn next_conditional_format_id(groups: &[ConditionalFormatting]) -> String {
         }
     }
     format!("cf{}", next + 1)
+}
+
+fn set_table_header(
+    wb: &mut Workbook,
+    sheet: SheetId,
+    at: CellRef,
+    (table, column): (usize, usize),
+    cell: CellState,
+    name: String,
+) -> Result<InvertedOp, OpError> {
+    wb.styles.preserve_style_identity();
+    let target = sheet_mut(wb, sheet)?;
+    let old = target.cell(at).map(CellState::from).unwrap_or_default();
+    target.set_cell(at, cell.into());
+    let name = std::mem::replace(&mut wb.tables[table].columns[column], name);
+    Ok(InvertedOp(vec![Op::RestoreTableHeader {
+        sheet,
+        at,
+        cell: old,
+        name,
+    }]))
 }
 
 fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {

@@ -7,7 +7,7 @@ use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::sort::sort_by_shared;
 use xlsx_model::{CellRef, SheetId, Workbook};
 
-use crate::read::{SharedStringCells, SourceCellFacts, WorksheetCellFacts};
+use crate::read::{IndexedWorkbook, SharedStringCells, SourceCellFacts, WorksheetCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
     PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
@@ -34,6 +34,7 @@ pub struct PreservedPackage {
     pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
+    pub(crate) table_parts: Vec<String>,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
     /// Per source sheet, the drawings holding anchors no chart claims; read on first use.
@@ -50,14 +51,14 @@ impl PreservedPackage {
     /// and the save path borrows from it rather than holding a second copy.
     pub(crate) fn capture(
         parts: Vec<(String, Vec<u8>)>,
-        workbook: &Workbook,
-        active_sheet: SheetId,
-        shared_string_cells: &[SharedStringCells],
-        declined_parts: &[String],
-        rich_shared_strings: BTreeSet<usize>,
-        cell_facts: Vec<WorksheetCellFacts>,
+        parsed: &mut IndexedWorkbook,
     ) -> Result<Self, ParseError> {
-        let mut cell_facts = cell_facts.into_iter();
+        let workbook = &parsed.workbook;
+        let active_sheet = parsed.active_sheet;
+        let shared_string_cells = &parsed.shared_string_cells;
+        let declined_parts = &parsed.declined_parts;
+        let rich_shared_strings = std::mem::take(&mut parsed.rich_shared_strings);
+        let mut cell_facts = std::mem::take(&mut parsed.cell_facts).into_iter();
         let workbook_xml = find_part(&parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
@@ -197,6 +198,7 @@ impl PreservedPackage {
             calc_chains,
             stylesheet_template,
             original_workbook: workbook.clone(),
+            table_parts: std::mem::take(&mut parsed.table_parts),
             active_sheet,
             unpatchable_references,
             drawing_anchors: Arc::new(OnceLock::new()),

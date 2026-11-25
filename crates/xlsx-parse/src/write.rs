@@ -42,6 +42,7 @@ mod app_titles;
 mod fragment_rename;
 mod source_coordinates;
 mod style_derivation;
+mod tables;
 mod views;
 
 /// A saved workbook's parts: generated entries are owned, entries the source
@@ -641,6 +642,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         }
     }
     let chart_refreshes = patch_chart_parts(wb, package, origins, sheet_axes, &mut parts)?;
+    tables::patch_table_parts(wb, package, &claimed, &mut parts)?;
 
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_plan = style_derivation::StylePlan::new(wb, package, origins, sheet_axes)?;

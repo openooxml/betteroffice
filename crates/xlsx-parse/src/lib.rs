@@ -116,16 +116,8 @@ pub fn parse_workbook_with_package(
 pub fn parse_workbook_with_owned_package(
     parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(&parts)?;
-    let package = PreservedPackage::capture(
-        parts,
-        &parsed.workbook,
-        parsed.active_sheet,
-        &parsed.shared_string_cells,
-        &parsed.declined_parts,
-        parsed.rich_shared_strings,
-        parsed.cell_facts,
-    )?;
+    let mut parsed = read::parse_workbook_indexed(&parts)?;
+    let package = PreservedPackage::capture(parts, &mut parsed)?;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,

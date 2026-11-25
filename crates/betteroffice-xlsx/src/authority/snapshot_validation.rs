@@ -663,7 +663,7 @@ fn content_matches(
     let kind = values.first().ok_or_else(invalid)?;
     let kind = any_i64(kind, "cell content kind").map_err(SnapshotError::new)?;
     let payload = match kind {
-        0 if values.len() == 2 => &values[1],
+        0 | AUTHORED_TABLE_HEADER if values.len() == 2 => &values[1],
         1 if values.len() == 3 => &values[2],
         _ => return Err(invalid()),
     };
@@ -675,6 +675,9 @@ fn content_matches(
     } else {
         None
     };
+    if kind == AUTHORED_TABLE_HEADER && text.is_none_or(str::is_empty) {
+        return Err(invalid());
+    }
     if kind == 1 {
         if text.is_none() {
             value_from_any(payload).map_err(SnapshotError::new)?;

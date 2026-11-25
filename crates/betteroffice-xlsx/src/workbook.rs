@@ -2498,11 +2498,10 @@ impl Workbook {
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         state.formula = entered_formula(&self.model, sheet, cell, state.formula)?;
         validate_cell_state(&state)?;
-        if format.is_none()
-            && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
-        {
+        if format.is_none() && cell_write_is_unchanged(&self.model, sheet, cell, &state)? {
             return Ok(MutationResult::default());
         }
+        let tables_changed = xlsx_ops::table_header_at(&self.model.tables, sheet, cell).is_some();
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
@@ -2514,19 +2513,13 @@ impl Workbook {
         }];
         ops.extend(format);
         let update = self.commit_user(&ops)?;
-        self.graph.as_mut().expect("graph initialized").set_formula(
-            sheet,
-            cell,
-            formula.as_deref(),
-        );
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
+        let result = self.recalculate_cell_inputs(
+            &[(sheet, cell, formula)],
             &seeds,
-            options.now_serial,
-            self.rand_seed,
+            tables_changed,
+            options,
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
@@ -2619,8 +2612,7 @@ impl Workbook {
                 state.formula = entered_formula(&preview, sheet, edit.cell, state.formula)?;
             }
             validate_cell_state(&state)?;
-            let old = current_cell_state(&preview, sheet, edit.cell);
-            if format.is_none() && cell_states_semantically_equal(&old, &state) {
+            if format.is_none() && cell_write_is_unchanged(&preview, sheet, edit.cell, &state)? {
                 continue;
             }
             touched.push((sheet, edit.cell, state.formula.clone()));
@@ -2652,25 +2644,13 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let tables_changed = self.model.tables != prepared.model.tables;
         let update = self.commit_prepared_cell_inputs(prepared)?;
-        for (sheet, cell, formula) in &touched {
-            self.graph.as_mut().expect("graph initialized").set_formula(
-                *sheet,
-                *cell,
-                formula.as_deref(),
-            );
-        }
         let seeds: Vec<_> = touched
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
-            &seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let result = self.recalculate_cell_inputs(&touched, &seeds, tables_changed, options);
         let result = self.mutation_result(true, result, &seeds);
         self.calculated_now = options.now_serial;
         self.publish(update);
@@ -3290,16 +3270,15 @@ impl Workbook {
             );
             state.formula = entered_formula(&preview, edit.sheet, edit.cell, state.formula)?;
             validate_cell_state(&state)?;
-            if format.is_some()
-                || !cell_states_semantically_equal(
-                    &current_cell_state(&preview, edit.sheet, edit.cell),
-                    &state,
-                )
-            {
-                preview
-                    .sheet_mut(edit.sheet)
-                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                    .set_cell(edit.cell, state.into());
+            if format.is_some() || !cell_write_is_unchanged(&preview, edit.sheet, edit.cell, &state)? {
+                xlsx_ops::apply_in_place(
+                    &mut preview,
+                    &Op::SetCell {
+                        sheet: edit.sheet,
+                        at: edit.cell,
+                        cell: state,
+                    },
+                )?;
             }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
@@ -3407,7 +3386,7 @@ impl Workbook {
             );
             state.formula = entered_formula(&preview, sheet, cell, state.formula)?;
             validate_cell_state(&state)?;
-            if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
+            if !cell_write_is_unchanged(&preview, sheet, cell, &state)? {
                 touched.push((sheet, cell, state.formula.clone()));
                 let op = Op::SetCell {
                     sheet,
@@ -3476,25 +3455,13 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let tables_changed = self.model.tables != prepared.model.tables;
         let update = self.commit_prepared(prepared)?;
-        for (sheet, cell, formula) in &touched {
-            self.graph.as_mut().expect("graph initialized").set_formula(
-                *sheet,
-                *cell,
-                formula.as_deref(),
-            );
-        }
         let seeds: Vec<_> = touched
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
-            &seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let result = self.recalculate_cell_inputs(&touched, &seeds, tables_changed, options);
         let mutation = self.mutation_result(true, result, &seeds);
         self.calculated_now = options.now_serial;
         self.proposals.remove(id);
@@ -4503,7 +4470,11 @@ impl Workbook {
         }
         ops.iter()
             .filter_map(|op| match op {
-                Op::SetCell { sheet, at, .. } if *sheet == self.active_sheet => Some(*at),
+                Op::SetCell { sheet, at, .. } | Op::RestoreTableHeader { sheet, at, .. }
+                    if *sheet == self.active_sheet =>
+                {
+                    Some(*at)
+                }
                 _ => None,
             })
             .filter_map(|at| {
@@ -4568,7 +4539,7 @@ impl Workbook {
                         return;
                     }
                 }
-                Op::SetCell { sheet, at, cell } => {
+                Op::SetCell { sheet, at, cell } | Op::RestoreTableHeader { sheet, at, cell, .. } => {
                     if *sheet != self.active_sheet {
                         continue;
                     }
@@ -4852,6 +4823,37 @@ impl Workbook {
         }
     }
 
+    fn recalculate_cell_inputs(
+        &mut self,
+        touched: &[(SheetId, CellRef, Option<String>)],
+        seeds: &[(SheetId, CellRef)],
+        tables_changed: bool,
+        options: CalculationOptions,
+    ) -> RecalcResult {
+        if tables_changed {
+            let (graph, result) = rebuild_and_recalc_all_after(
+                &mut self.model,
+                self.graph.as_ref(),
+                options.now_serial,
+                self.rand_seed,
+            );
+            self.graph = Some(graph);
+            self.mark_graph_current();
+            return result;
+        }
+        let graph = self.graph.as_mut().expect("graph initialized");
+        for (sheet, cell, formula) in touched {
+            graph.set_formula(*sheet, *cell, formula.as_deref());
+        }
+        recalc_after_with_seed(
+            &mut self.model,
+            graph,
+            seeds,
+            options.now_serial,
+            self.rand_seed,
+        )
+    }
+
     fn mutation_result(
         &mut self,
         applied: bool,
@@ -4924,7 +4926,9 @@ impl Workbook {
         }
         for op in ops {
             match *op {
-                Op::SetCell { sheet, at, .. } => self.invalidate_text_source(sheet, at),
+                Op::SetCell { sheet, at, .. } | Op::RestoreTableHeader { sheet, at, .. } => {
+                    self.invalidate_text_source(sheet, at)
+                }
                 Op::AddSheet { index, .. } => self.preserved.insert(index),
                 Op::RemoveSheet { index } => self.preserved.remove(index),
                 Op::MoveSheet { from, to } => self.preserved.move_sheet(from, to),
@@ -5583,6 +5587,7 @@ fn validate_shared_drawings(model: &WorkbookModel) -> Result<()> {
 fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
     match op {
         Op::SetCell { sheet, .. }
+        | Op::RestoreTableHeader { sheet, .. }
         | Op::InsertRows { sheet, .. }
         | Op::DeleteRows { sheet, .. }
         | Op::InsertCols { sheet, .. }
@@ -5952,6 +5957,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         }
         Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. } => {}
         Op::RestoreSheet { .. }
+        | Op::RestoreTableHeader { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetTables { .. }
         | Op::SetCharts { .. }
@@ -6350,6 +6356,9 @@ pub(crate) fn entered_formula(
     at: CellRef,
     formula: Option<String>,
 ) -> Result<Option<String>> {
+    if formula.is_some() && xlsx_ops::table_header_at(&model.tables, sheet, at).is_some() {
+        return Err(xlsx_ops::OpError::TableHeaderFormulaUnsupported.into());
+    }
     match formula {
         Some(formula) if stored_formula(model, sheet, at) != Some(formula.as_str()) => {
             formula_entry::storable_formula(formula).map(Some)
@@ -6411,6 +6420,24 @@ fn edit_cell_state(
     input: &str,
     now_serial: Option<f64>,
 ) -> (CellState, Option<Op>) {
+    if xlsx_ops::table_header_at(&workbook.tables, sheet, cell).is_some() {
+        let style = written_cell_style(workbook, sheet, cell, false);
+        let state = match input.strip_prefix('=') {
+            Some(formula) => CellState {
+                formula: Some(formula.to_owned()),
+                style,
+                ..CellState::default()
+            },
+            None => CellState {
+                value: CellValue::Text {
+                    value: input.strip_prefix('\'').unwrap_or(input).to_owned(),
+                },
+                formula: None,
+                style,
+            },
+        };
+        return (state, None);
+    }
     let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.effective_style(cell));
@@ -6541,10 +6568,34 @@ fn cell_states_semantically_equal(left: &CellState, right: &CellState) -> bool {
     }
 }
 
+fn cell_write_is_unchanged(
+    model: &WorkbookModel,
+    sheet: SheetId,
+    at: CellRef,
+    cell: &CellState,
+) -> Result<bool> {
+    let old = current_cell_state(model, sheet, at);
+    if let Some((table, column, name)) =
+        xlsx_ops::normalize_table_header(&model.tables, sheet, at, cell)?
+    {
+        if model.tables[table].columns[column] != name {
+            return Ok(false);
+        }
+        let cell = CellState {
+            value: CellValue::Text { value: name },
+            formula: None,
+            style: cell.style,
+        };
+        return Ok(cell_states_semantically_equal(&old, &cell));
+    }
+    Ok(cell_states_semantically_equal(&old, cell))
+}
+
 fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> bool {
     if left.date_system != right.date_system
         || left.shared_strings != right.shared_strings
         || left.styles != right.styles
+        || left.tables != right.tables
         || left.sheets.len() != right.sheets.len()
     {
         return false;
@@ -7202,7 +7253,7 @@ impl CalculationScope {
             | Op::RestoreRowStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. } => Self::Kept,
-            Op::SetCell { sheet, at, cell } => {
+            Op::SetCell { sheet, at, cell } | Op::RestoreTableHeader { sheet, at, cell, .. } => {
                 let style = model
                     .sheet(*sheet)
                     .and_then(|sheet| sheet.cell(*at))

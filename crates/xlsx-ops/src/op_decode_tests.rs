@@ -699,6 +699,23 @@ fn goldens() -> Vec<Golden> {
             minimal: r##"{"type":"setTables","tables":[]}"##,
             canonical_minimal: r##"{"type":"setTables","tables":[]}"##,
         },
+        Golden {
+            op: Op::RestoreTableHeader {
+                sheet,
+                at: CellRef::new(0, 1),
+                cell: CellState::default(),
+                name: "Year".into(),
+            },
+            json: concat!(
+                r##"{"type":"restoreTableHeader","sheet":2,"at":{"row":0,"col":1},"##,
+                r##""cell":{"value":{"kind":"empty"}},"name":"Year"}"##,
+            ),
+            minimal: r##"{"type":"restoreTableHeader","sheet":2,"at":{"row":0,"col":1},"cell":{},"name":"Year"}"##,
+            canonical_minimal: concat!(
+                r##"{"type":"restoreTableHeader","sheet":2,"at":{"row":0,"col":1},"##,
+                r##""cell":{"value":{"kind":"empty"}},"name":"Year"}"##,
+            ),
+        },
     ]
 }
 
@@ -1008,7 +1025,7 @@ mod well_formed {
     #[test]
     fn every_variant_has_full_and_minimal_serialization_goldens() {
         let cases = goldens();
-        assert_eq!(cases.len(), 42);
+        assert_eq!(cases.len(), 43);
         for Golden {
             op,
             json,

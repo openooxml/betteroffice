@@ -44,6 +44,7 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
     pub(crate) cell_facts: Vec<WorksheetCellFacts>,
+    pub(crate) table_parts: Vec<String>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
     /// The style table releases that needed an explicit `applyX` flag read,
     /// present only when it differs. A legacy collaboration fingerprint is the
@@ -136,6 +137,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let (table_parts, tables) = tables.into_iter().unzip();
     let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
@@ -154,6 +156,7 @@ pub(crate) fn parse_workbook_indexed(
         active_sheet: meta.active_sheet,
         shared_string_cells,
         cell_facts,
+        table_parts,
         legacy_dimensions,
         legacy_styles,
         declined_parts,
@@ -440,6 +443,8 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
     Ok(map)
 }
 
+type ParsedTable = (Table, Option<TableStyleInfo>);
+
 /// Read every `table` relationship of one worksheet into the model. A part that
 /// is absent or lacks a usable `ref`/name is skipped: it stays preserved on the
 /// package either way, and a structured reference to it reports `#REF!`.
@@ -448,7 +453,7 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
+    out: &mut Vec<(String, ParsedTable)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut seen = PartNames::default();
@@ -467,7 +472,7 @@ fn collect_tables(
             if out.len() >= MAX_TABLES {
                 return Err(ParseError::Malformed("table count exceeded cap".into()));
             }
-            out.push(table);
+            out.push((path, table));
         }
     }
     Ok(())
@@ -489,7 +494,7 @@ pub(crate) fn take_table_parses() -> usize {
 fn parse_table(
     data: &[u8],
     sheet: SheetId,
-) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+) -> Result<Option<ParsedTable>, ParseError> {
     #[cfg(test)]
     TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);

@@ -8,6 +8,7 @@ mod input;
 mod op;
 mod proposals;
 mod remap;
+mod table_header;
 mod undo;
 
 #[doc(hidden)]
@@ -34,4 +35,5 @@ pub use op::OracleOp;
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::{ProposalSheets, insertion_keeps_chart_anchor_on_grid, remap_proposal_formula};
+pub use table_header::{normalize_table_header, table_header_at};
 pub use undo::UndoStack;
