@@ -305,7 +305,10 @@ fn retyping_a_mismatched_header_renames_the_caption_and_undo_restores_it() {
 
     workbook.undo(CalculationOptions::default()).unwrap();
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-    assert_eq!(reopened.model().table("Table1").unwrap().columns[1], "Status");
+    assert_eq!(
+        reopened.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
     assert_eq!(
         reopened.model().value(SHEET1, at("B1")),
         CellValue::Text {
