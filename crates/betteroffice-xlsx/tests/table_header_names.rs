@@ -504,7 +504,10 @@ fn undo_restores_the_caption_after_a_header_normalization_and_unrecorded_rename(
 
     workbook.undo(CalculationOptions::default()).unwrap();
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-    assert_eq!(reopened.model().table("Table1").unwrap().columns[1], "Status");
+    assert_eq!(
+        reopened.model().table("Table1").unwrap().columns[1],
+        "Status"
+    );
     assert_eq!(
         reopened.model().value(SHEET1, at("B1")),
         CellValue::Text {
