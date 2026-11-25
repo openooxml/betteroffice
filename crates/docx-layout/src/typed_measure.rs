@@ -8,8 +8,8 @@
 
 use ooxml_text::measure::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
-    MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn,
-    TabStopIn,
+    InlineListMarker, MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn,
+    SpacingIn, TabStopIn,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -201,7 +201,7 @@ fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
     })
 }
 
-fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
+pub(crate) fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
     Some(AttrsIn {
         justification_mode: attrs.justification_mode.clone(),
         alignment: attrs.alignment.clone(),
@@ -433,6 +433,11 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
         }),
         float_skip_before: row.float_skip_before.map(normalize_output),
         marker_tab_offset: row.marker_tab_offset.map(normalize_output),
+        inline_list_marker: row.inline_list_marker.map(|marker| InlineListMarker {
+            width: normalize_output(marker.width),
+            advance: normalize_output(marker.advance),
+            shape: marker.shape,
+        }),
         run_advances: row.run_advances.map(|advances| {
             advances
                 .into_iter()

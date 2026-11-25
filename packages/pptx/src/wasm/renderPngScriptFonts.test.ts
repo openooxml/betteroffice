@@ -5,7 +5,9 @@ import { resolve } from 'node:path';
 import * as fonts from '@betteroffice/fonts';
 import JSZip from 'jszip';
 import { initWasm, openPresentation } from '../index';
-import { engineKind } from './engine';
+import { engineKind, PptxDocument } from './engine';
+import { defaultFontLayout } from './enginePngFonts';
+import { decodeFontFace } from './loader';
 
 const root = resolve(import.meta.dir, '../../../..');
 const cases = JSON.parse(readFileSync(resolve(root, 'crates/betteroffice-fonts/data/script-fallback-chains.json'), 'utf8')) as
@@ -47,7 +49,7 @@ function stubCanvas() {
   restore = () => { Object.assign(scope, saved); };
 }
 
-async function arabicDeck(family: string, bold: boolean): Promise<Uint8Array> {
+async function textDeck(family: string, bold: boolean, text: string): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -55,7 +57,7 @@ async function arabicDeck(family: string, bold: boolean): Promise<Uint8Array> {
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
   zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slide" Target="slides/slide1.xml"/></Relationships>`);
-  zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"${bold ? ' b="1"' : ''}><a:latin typeface="${family}"/><a:cs typeface="${family}"/></a:rPr><a:t>مرحبا بالعالم</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+  zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"${bold ? ' b="1"' : ''}><a:latin typeface="${family}"/><a:cs typeface="${family}"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -64,7 +66,7 @@ describe.skipIf(engineKind === 'native')('canvas renderPng Arabic coverage per r
     test(`a ${family}${bold ? ' bold' : ''} run falls back for Arabic to the face the native chain gives`, async () => {
       stubCanvas();
       const installed = spyOn(fonts, 'bundledFaceInstalled');
-      const handle = openPresentation(await arabicDeck(family, bold), { clientId: 7400 });
+      const handle = openPresentation(await textDeck(family, bold, 'مرحبا بالعالم'), { clientId: 7400 });
       try {
         expect(new TextDecoder().decode(await handle.renderPng({ slide: 0 }))).toBe('png');
         const chosen = installed.mock.calls.map(([face]) => face).filter((face) => face.script === 'arabic').map((face) => face.file);
@@ -74,5 +76,20 @@ describe.skipIf(engineKind === 'native')('canvas renderPng Arabic coverage per r
         handle.dispose();
       }
     });
+  }
+});
+
+test.skipIf(engineKind === 'native')('PPTX PNG requests the Han script fallback with supplied Latin-only Arial', async () => {
+  const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+  const bytes = new Uint8Array(await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
+  const document = PptxDocument.openCollaborative(await textDeck('Arial', false, 'Ab 漢字 cd'), 7401);
+  const resolveScript = spyOn(fonts, 'resolveScriptFallbackFace');
+  try {
+    const { slides } = JSON.parse(document.snapshotJson()) as { slides: { id: string }[] };
+    await defaultFontLayout(document, slides[0]!.id, [], [{ family: 'Arial', bytes }]);
+    expect(resolveScript).toHaveBeenCalledWith('cjk-sc', false, false, 'Arial');
+  } finally {
+    resolveScript.mockRestore();
+    document.free();
   }
 });

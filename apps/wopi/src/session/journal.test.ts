@@ -23,7 +23,7 @@ function restartRegistry(h: Harness, journalDir: string): SessionRegistry {
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 describe("FileJournal", () => {
   test("creates a private journal directory and file with a permissive umask", () => {

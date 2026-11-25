@@ -70,6 +70,7 @@ COPY --from=build --chown=root:root /app/packages/fonts/dist/remote.js ./package
 COPY --from=build --chown=root:root /app/packages/fonts-cjk/assets ./packages/fonts-cjk/assets
 COPY --from=build --chown=root:root /app/shared/collaboration-limits.ts ./shared/collaboration-limits.ts
 COPY --from=build --chown=root:root /app/shared/collaboration-pipe ./shared/collaboration-pipe
+COPY --from=build --chown=root:root /app/shared/fontCdnDiagnostics.ts ./shared/fontCdnDiagnostics.ts
 COPY --from=build --chown=root:root /app/shared/media.ts ./shared/media.ts
 COPY --from=build --chown=root:root /app/shared/office-session ./shared/office-session
 COPY --from=build --chown=root:root /app/shared/safeHref.ts ./shared/safeHref.ts

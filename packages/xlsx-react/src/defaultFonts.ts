@@ -1,3 +1,5 @@
+import { fontCdnCacheKey } from '../../../shared/office-session/fontCdnRuntime';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
 import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace, type XlsxPngFont } from '@betteroffice/xlsx';
 import type { BundledFontFace } from '@betteroffice/fonts';
 import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
@@ -92,11 +94,10 @@ async function loadRemoteFace(
 const PRELOAD_MAX_BYTES = 1.5 * 1024 * 1024;
 const registeredFaces = new Map<string, Promise<boolean>>();
 const pendingFaces = new Map<string, Set<symbol>>();
-const absentFaces = new Set<string>();
 let activeFontSet: FontFaceSet | undefined;
 
 function registerFace(
-  key: string, face: BundledFontFace, family: string, load: () => Promise<ArrayBuffer>,
+  face: BundledFontFace, family: string, load: () => Promise<ArrayBuffer>,
   fontSet: FontFaceSet, owners: Set<symbol>,
 ): Promise<boolean> {
   const current = () => activeFontSet === fontSet && owners.size > 0;
@@ -104,10 +105,7 @@ function registerFace(
     try {
       if (!current()) return false;
       const bytes = await load();
-      if (bytes.byteLength !== face.byteLength) {
-        absentFaces.add(key);
-        return false;
-      }
+      if (bytes.byteLength !== face.byteLength) return false;
       if (!current()) return false;
       const loaded = await new FontFace(family, bytes, {
         weight: String(face.weight), style: face.style,
@@ -115,7 +113,10 @@ function registerFace(
       if (!current()) return false;
       fontSet.add(loaded);
       return true;
-    } catch { return false; }
+    } catch (error) {
+      if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+      return false;
+    }
   })();
 }
 
@@ -150,7 +151,7 @@ export function createDefaultFontPainter(
     try {
       if (!provider) {
         const loading = xlsxDefaultFontManager.load().then((fonts) => ({
-          fonts, source: fonts.createFontProvider(undefined, decoder ? { decoder, retain: false } : undefined),
+          fonts, source: fonts.createFontProvider(undefined, { ...(decoder ? { decoder, retain: false } : {}), strict: true }),
         }));
         provider = loading;
         void loading.catch(() => { if (provider === loading) provider = undefined; });
@@ -168,15 +169,16 @@ export function createDefaultFontPainter(
         return success;
       }
       if (face.byteLength > maxBytes) return false;
+      const cdn = fontCdnCacheKey();
+      if (source.faceUnavailableUntil && await source.faceUnavailableUntil(face) !== undefined) return false;
+      if (disposed || !document.fonts || cdn !== fontCdnCacheKey()) return false;
       const fontSet = document.fonts;
       if (activeFontSet !== fontSet) {
         registeredFaces.clear();
         pendingFaces.clear();
-        absentFaces.clear();
         activeFontSet = fontSet;
       }
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style]);
-      if (absentFaces.has(key)) return false;
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), face.weight, face.style, cdn]);
       let registration = registeredFaces.get(key);
       const shared = registration !== undefined;
       owners = pendingFaces.get(key);
@@ -185,12 +187,12 @@ export function createDefaultFontPainter(
         if (!load) return false;
         owners = new Set([owner]);
         pendingFaces.set(key, owners);
-        registration = registerFace(key, face, fontFamily, load, fontSet, owners);
+        registration = registerFace(face, fontFamily, load, fontSet, owners);
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;
         void task.then((success) => {
-          if (!success && registeredFaces.get(key) === task) registeredFaces.delete(key);
+          if (success !== true && registeredFaces.get(key) === task) registeredFaces.delete(key);
           if (pendingFaces.get(key) === group) pendingFaces.delete(key);
         });
       }
@@ -199,7 +201,7 @@ export function createDefaultFontPainter(
         interests.add(owners);
       }
       const success = await registration;
-      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, text, onRemote, onPartial, false, maxBytes);
+      if (success === false && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, text, onRemote, onPartial, false, maxBytes);
       return success;
     } catch { return false; }
     finally {
@@ -214,11 +216,12 @@ export function createDefaultFontPainter(
     || typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts;
 
   function faceKeys(displayList: DisplayList) {
+    const fontCdn = fontCdnCacheKey();
     const faces = new Map<string, { fontFamily: string; bold: boolean; italic: boolean; characters: Set<string> }>();
     for (const command of displayList.commands) {
       if (command.op !== 'text' || !command.fontFamily || command.chart) continue;
       const { fontFamily, bold = false, italic = false } = command;
-      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic]);
+      const key = JSON.stringify([fontFamily.trim().toLowerCase(), bold, italic, fontCdn]);
       let face = faces.get(key);
       if (!face) faces.set(key, face = { fontFamily, bold, italic, characters: new Set() });
       for (const character of command.text ?? '') face.characters.add(character);
@@ -294,7 +297,7 @@ export function createDefaultFontPainter(
         for (const [key, { fontFamily, bold, italic }] of faceKeys(displayList)) {
           if (inactive() || !idle()) return;
           if (loaded.has(key) || pending.has(key) || settled.has(key)) continue;
-          if (await loadFace(fontFamily, bold, italic, '', () => {}, () => {}, true, PRELOAD_MAX_BYTES)) {
+          if (await loadFace(fontFamily, bold, italic, '', () => {}, () => {}, true, PRELOAD_MAX_BYTES) === true) {
             loaded.add(key);
             settled.add(key);
           }
@@ -333,16 +336,15 @@ export function createDefaultFontPainter(
 
 /**
  * The faces the editor paints `fonts` with, for a PNG export to paint the same:
- * the bundled metric-compatible or same-family face, fetched as the editor
- * fetches it. A face the editor would use but cannot fetch rejects with
- * `font-unavailable`, so the export never paints a substitute for it.
+ * the bundled metric-compatible or same-family face, fetched as the editor fetches it.
  */
 export async function exportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
+  reported = new Set<Error>(),
 ): Promise<XlsxFontFace[]> {
   if (fonts.length === 0) return [];
   const bundled = await xlsxDefaultFontManager.load();
-  const source = bundled.createFontProvider(undefined, decoder ? { decoder, retain: false } : undefined);
+  const source = bundled.createFontProvider(undefined, { ...(decoder ? { decoder, retain: false } : {}), strict: true });
   const faces: XlsxFontFace[] = [];
   for (const font of fonts) {
     const face = bundled.resolveMetricCompatFace(font.family, font.bold, font.italic)
@@ -350,7 +352,16 @@ export async function exportFaces(
     const load = face && (source.resolve(font.family, font.bold, font.italic) ?? source.resolveFamily(font.family, font.bold, font.italic));
     if (!face || !load) continue;
     let bytes: ArrayBuffer;
-    try { bytes = await load(); } catch {
+    try { bytes = await load(); }
+    catch (error) {
+      if (face.script && face.script !== 'arabic' && face.script !== 'hebrew' && bundled.isMissingFontAddon(error)) continue;
+      if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
+        if (!reported.has(error)) {
+          reported.add(error);
+          reportImplicitCdnFailure(error);
+        }
+        continue;
+      }
       throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
     }
     if (bytes.byteLength !== face.byteLength) continue;
