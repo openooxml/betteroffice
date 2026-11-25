@@ -1,5 +1,58 @@
 # @betteroffice/python-docx
 
+## 0.3.0
+
+### Minor Changes
+
+- 62aa2c9: Adds `Document.replace_text_at(index, text)` and its alias `replace_paragraph_text_at`, which edit a body paragraph by its position in `paragraphs()`, including paragraphs without a `w14:paraId`. Untouched content keeps its bytes, and the edit writes no paragraph ID. The `Edit` receipt gains `index`.
+- b0ffbe6: DOCX `render_png` no longer refuses a page over an effect it cannot draw: it draws text shadows, small caps and shape shadows and glows as the browser does, leaves other effects out, and reports them by kind in `skipped_effects`.
+- 55f5df5: `TextRun` gains `highlight`, and `TableCell` gains `grid_span` and `v_merge`: a run's highlight colour as written, the grid columns a cell spans, and `"restart"` or `"continue"` for a vertically merged cell. Each is `None` when the document does not set it.
+- e1fed99: Adds `Document.replace_paragraph_text(para_id, text)` as an alias of `replace_text`, returning the same `Edit` receipt. Opt-in; `replace_text` is unchanged.
+- 750cbbb: Changes `render_png` to accept `{"page": 0}` with keyword-only `scale=1.0`. Migrate display-list callers to `render_display_list_png(display_list, page)`; page indexes remain zero-based.
+- d95750e: `Document.save_report()` takes the same keywords as `save()` and returns a `SaveReport`: the bytes `save()` writes, the paragraphs kept as source bytes in `kept_unchanged`, and the structure a part written whole dropped in `structure_dropped`.
+- 54d400a: DOCX no longer defaults to Google Fonts. Unbundled families share one substitution table. XLSX fetches only substitutes' visible-text character-range files from Bunny Fonts via `remoteFonts` or `setRemoteFontProvider` ('bunny', 'google', custom URL, 'off'). Python adds `font_substitute`. In DOCX, `setRemoteFontProvider` and `setGoogleFontsEnabled` have no effect.
+
+### Patch Changes
+
+- 8875bfa: Chart data labels and value axes linked to their source cells use the cached format of the values, so a `"$"#,##0` series labels $3,750; without a cached format they keep their own code. Linked pie percentages show a plain percentage.
+- 232fe11: Text set in Simplified Arabic or Traditional Arabic now uses the line height Word uses for those fonts, so Arabic documents break pages closer to where Word breaks them.
+- 27130ef: An autofit table whose explicit width is wider than the text area now keeps that width instead of being narrowed to the text area, matching Word. Percentage and automatic widths are unchanged.
+- c3d6f21: Autofit tables with no table width keep their cells' stated widths when those widths and the column grid both exceed the text width, as Word does, instead of squeezing the columns and wrapping text that fits.
+- c2b9ac7: Tables inserted or pasted in the editor lay out with the cell margins of the document's table styles, as Word shows them once saved, so text wraps on screen where Word wraps it. Opened tables are unchanged.
+- 455254f: Native DOCX rendering no longer fails on pages with charts or comma-separated font names. Chart text naming a theme font now uses the document theme's font in every engine.
+- fb5e111: Editing a paragraph in a Word document whose tables have vertically merged cells no longer rewrites the whole document body when saved through the Rust crate or the Python package; the bytes outside the edit are kept.
+- fd7736d: An edited save from the Rust crate or the Python package no longer seeds the source document a second time when its save plan can be prepared within the product's limits. Output bytes are unchanged.
+- 2ee08d7: The `betteroffice-docx` crate measures a substitute face with the requested family's advance widths and line metrics, as the editor and the wasm build do, so its page counts for documents naming families without a bundled face match theirs more often.
+- 46c17cb: Documents whose styles declare empty document defaults lay out their unstyled paragraphs and table cells without paragraph spacing, as Word does, instead of with Word's 8 pt after and 1.08 line spacing.
+- c13d981: A document whose last paragraph holds only a page break now starts its endnotes under the last line of text, as Word does, instead of on a new page.
+- 33fcb87: Endnotes now follow the last body text, as in Word, and continue onto new pages under a continuation separator. Before, long endnotes pushed body text onto extra pages and were painted over it. Set new fields in `NoteAreaContract`, `NoteRegion`, `ReservedBlock` and `NoteLayoutItemContract` literals.
+- 6a5dded: Word text watermarks now draw on the pages whose header carries them and no longer on a page whose header has none. Rust literals must set `HeaderFooter.watermark_box`, `HeaderFooterVariant.watermark` and `header_watermarks` on `HeaderFooterPayload` and `DocumentRegions`.
+- afcb67e: A DOCX list level override that sets no start value now keeps the start of the level it overrides, so its first label reads "A." or "3." instead of nothing or "0.".
+- 10fbc38: DOCX numbered list levels without a start value now count from zero, as Word does, and a zero counter prints "0." instead of nothing.
+- fa27c3c: DOCX lines measured with authoritative shaping now carry the glyphs measurement shaped them with, as `glyphRuns`, packed into one string per line. Rust `TypesetRow` literals must set `glyph_runs`.
+- 57f4975: Arabic text set in Simplified Arabic or Traditional Arabic now falls back to the bundled Naskh face, closer to those fonts' style and width.
+- 452e0a9: Native DOCX PNG export paints rectangular and path gradient fills as a radial gradient, as the browser renderer does, instead of failing the page.
+- 56c2c6c: Native docx page PNGs draw SVG, EMF and WMF pictures. A picture the renderer still cannot draw rejects `renderPng` with the new `picture-unavailable` code instead of leaving it blank.
+- ed0a3ce: DOCX Arabic, Syriac and Devanagari now paint the glyphs measurement shaped, so words join on screen, including words split across runs that differ only outside the complex-script font.
+- 934104f: A table pasted from another document lays out with this document's Word compatibility mode, as Word shows it once saved, instead of the source document's, so it no longer shifts left by its cell margin.
+- 6d54917: Native page PNGs clip elliptical pictures and their borders to the ellipse, as the editor does, instead of drawing a rectangle.
+- a2d41a8: Native page PNGs draw picture-filled shapes, stretched or tiled, with their outlines, as the editor does, instead of leaving the shape out.
+- aa54bb8: Native page PNGs accept VML color names, and a list marker in the paragraph's default font no longer refuses the page with a missing font chain.
+- 22b5073: DOCX `render_png` renders documents with footnotes or endnotes again. The layout request now writes integral numbers as integers, so note ids, the note numbering start and footnote columns reach layout in the form it reads.
+- d6d958e: `SaveReport` gains `whole_model_write`, true when a save had no session plan and wrote the stories from the model. Structure the model does not carry may then be gone, and `structure_dropped` is not computed, so its `None` no longer reads as nothing dropped.
+- 3789492: Shapes, SmartArt and shape text now use the document theme's colours instead of the Office 2013 palette. Shape outlines and SmartArt text without their own colour use their style's line and font colours.
+- fe023f2: Negative luminance offsets now darken DrawingML colours.
+- 4c5d946: Layout requests accept a whole-number float such as `1.0` where an integer is expected, as a parsed document forwarded from Python or Rust writes it, so documents with footnotes or endnotes lay out. Fractional values are rejected, naming the field.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- cba9236: Rendering orders font fallbacks as the product does: a family's own face, the Word last-resort face, the glyph fallback, then script faces. Latin text without a bundled face no longer gets a CJK face and too-tall lines.
+- a7bb16b: `Document.render_png` on an unedited document now lays out the requested page from the open document instead of saving and reopening it first. The PNG is unchanged.
+- 6bf6f7a: Saving an opened document keeps the bytes of every part and paragraph it did not change. An unedited save returns the opened file unchanged; an edited save uses the product's save plan, so tracked table grid changes and other unmodelled content survive.
+- f2d8528: `Layout.display_list` returns the same `DisplayList` on every access instead of a fresh copy, and a display list builds its JSON text only when `json`, `to_dict` or `write` asks for it, so a large layout holds far less memory.
+- 2758dfd: The Python packages now install the bundled fonts as `betteroffice-fonts-latin`, `betteroffice-fonts-intl` and `betteroffice-fonts-cjk` and render with them from disk; nothing is downloaded. `register_font` still adds or replaces a family.
+- d1166bc: `Presentation::save` in Rust and `Presentation.save` in Python succeed after slides are deleted and prepare fonts for added slides. DOCX layout limits a section's column count to what Word supports, so a very large count no longer stalls `Document::layout`.
+- ad45f86: Adds opt-in `decode_font_face` calls for zstd and woff2t font pack faces. Rust facades expose the shared `betteroffice-fonts` decoder as `fonts`; Python returns font bytes and an optional transformed payload.
+- fd25d97: Text in the Symbol font draws the Greek letters, arrows and math signs Office shows for it, in documents, slides and cells alike. Wingdings and Webdings run text uses the same shared slot table as bullets. Saved text is unchanged. Handle `SymbolFont::Symbol` in exhaustive matches.
+
 ## 0.2.2
 
 ### Patch Changes
