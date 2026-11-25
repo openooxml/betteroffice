@@ -333,14 +333,18 @@ test('primary and coverage misses emit one diagnostic per pack in each session',
   }
 });
 
-const slicedMisses = [403, 404, 410].flatMap<[number, boolean]>((status) => [[status, false], [status, true]]);
+const slicedMisses = [403, 404, 410].flatMap<[number, boolean, boolean]>((status) => [
+  [status, false, true], [status, false, false], [status, true, false],
+]);
 
-test.each(slicedMisses)('a sliced HTTP %s miss skips the whole face and emits at most one diagnostic (implicit: %s)', async (status, implicit) => {
+test.each(slicedMisses)('a sliced HTTP %s miss tries the whole face when allowed (implicit: %s, whole available: %s)', async (status, implicit, wholeAvailable) => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals(false);
   const runtime = fontRuntimeWithoutPacks();
   const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
-  const fetch = spyOnFontFetch(async () => new Response(null, { status }));
+  const whole = fonts.resolveScriptFallbackFace('cjk-jp', false, false)!.file;
+  const fetch = spyOnFontFetch(async (input) => wholeAvailable && String(input).endsWith(`/${whole}`)
+    ? fontAssetResponse(input) : new Response(null, { status }));
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const diagnostics = packDiagnostics();
   const sliced = createSlicedFontFaces();
@@ -349,7 +353,7 @@ test.each(slicedMisses)('a sliced HTTP %s miss skips the whole face and emits at
   const advance = retryClock();
   const wanted = { ...regular, scripts: ['cjk-jp'] };
   const cdn = implicit ? { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit }
-    : { baseUrl: 'https://sliced-miss.example/', timeoutMs: 10_000 };
+    : { baseUrl: `https://sliced-miss.example/${status}/${wholeAvailable ? 'whole' : 'missing'}/`, timeoutMs: 10_000 };
   let source: ReturnType<typeof commandFontProvider.load> | undefined;
   const shared = () => (source ??= commandFontProvider.load(cdn));
   const manager = createCommandDefaultFonts([regular], () => [wanted], () => {}, () => {},
@@ -357,11 +361,13 @@ test.each(slicedMisses)('a sliced HTTP %s miss skips the whole face and emits at
   try {
     prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), shared, true);
     await sleep(0);
-    expect(await manager.load()).toEqual([]);
+    expect(await manager.load()).toEqual(wholeAvailable ? [{ ...regular, family: 'Noto Sans JP', kind: 'coverage' }] : []);
     advance(60_001);
     expect(manager.hasPending()).toBe(false);
     expect(await manager.load()).toEqual([]);
-    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([expect.stringMatching(/\/slices\.json$/)]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringMatching(/\/slices\.json$/), ...(implicit ? [] : [expect.stringContaining(`/${whole}`)]),
+    ]);
     expect(diagnostics).toEqual(implicit ? [expect.objectContaining({ pack: 'cjk', reason: 'cdn-unavailable' })] : []);
   } finally {
     manager.dispose();
@@ -571,6 +577,37 @@ test('Arabic requests keep family and traits and install the shared regular face
     expect(fonts.hasPending()).toBe(false);
     expect(await fonts.load()).toEqual([]);
   } finally { fonts.dispose(); }
+});
+
+test.each([false, true])('Simplified Arabic uses its last resort while the Naskh face is unavailable (implicit: %s)', async (implicit) => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const advance = retryClock();
+  const delay = implicit ? 60_000 : 2000;
+  const outage = new Error('Offline');
+  if (implicit) Object.assign(outage, {
+    diagnostic: { pack: 'latin', reason: 'cdn-unavailable', detail: outage.message }, retryAt: Date.now() + delay,
+  });
+  const load = mock(async () => naskh).mockRejectedValueOnce(outage);
+  const source = provider(() => undefined, () => load);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { ...regular, family: 'Simplified Arabic' };
+  const registered: DefaultFontFace[] = [];
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }],
+    (face) => registered.push(face), () => {});
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    expect(registered.filter((face) => face.family === primary.family)).toEqual([{ ...primary, bytes }]);
+    advance(delay - 1);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1);
+    expect(manager.hasPending()).toBe(true);
+    expect(await manager.load()).toEqual([primary]);
+    expect(registered.filter((face) => face.family === primary.family)).toEqual([{ ...primary, bytes }, { ...primary, bytes: naskh }]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(manager.hasPending()).toBe(false);
+  } finally { manager.dispose(); }
 });
 
 test('script collection requests each style separately even when no script pack is available', async () => {
