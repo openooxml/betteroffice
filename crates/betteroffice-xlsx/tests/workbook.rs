@@ -8909,7 +8909,7 @@ fn refuses_structural_ops_that_would_strand_pivot_references() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
@@ -9187,7 +9187,7 @@ fn refuses_structural_ops_that_would_strand_unclaimed_chart_parts() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
@@ -9945,7 +9945,7 @@ fn refuses_chart_state_with_no_source_package_to_preserve_it() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
@@ -10909,7 +10909,7 @@ fn collaborative_sessions_move_a_chart_and_converge() {
     right
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "after",
             CalculationOptions::default(),
         )
@@ -10920,7 +10920,7 @@ fn collaborative_sessions_move_a_chart_and_converge() {
     left.apply_update_v1(&update, CalculationOptions::default())
         .unwrap();
     assert_eq!(left.model().sheets[0].charts[0].anchor, moved);
-    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "after");
+    assert_eq!(left.cell(SheetId(0), cell("D1")).unwrap().input, "after");
 
     // the mover can take the drag back, and the peer follows it home.
     assert!(left.can_undo());
@@ -12204,7 +12204,7 @@ fn a_locally_accepted_repin_is_one_a_peer_can_take() {
     let batch = vec![
         Op::SetCell {
             sheet: SheetId(0),
-            at: cell("A1"),
+            at: cell("D1"),
             cell: CellState {
                 value: CellValue::Text {
                     value: "important".to_owned(),
@@ -12274,7 +12274,7 @@ fn an_adopted_snapshot_answers_to_the_same_anchor_check_as_an_update() {
     touched
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "typed",
             CalculationOptions::default(),
         )
