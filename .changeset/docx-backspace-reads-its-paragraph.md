@@ -2,4 +2,4 @@
 '@betteroffice/docx': patch
 ---
 
-Backspace and Delete inside a paragraph check only that paragraph before deleting, instead of reading every paragraph of the story.
+The worker-backed editor checks single-character Backspace and Delete within ordinary paragraph text without requesting a story-wide list of paragraph lengths.

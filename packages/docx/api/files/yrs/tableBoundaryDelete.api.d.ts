@@ -17,8 +17,10 @@ export interface StoryParagraphSpans {
     indexOf(paraId: string): number;
     /** The span of the paragraph at `index`, which must be one of the story's paragraphs. */
     at(index: number): YrsParagraphLength;
+    segmentsAt(index: number): readonly YrsStorySegment[];
     /** How many paragraphs the story has. Reads every span of the story. */
     count(): number;
+    tableBoundaryTarget(at: YrsLoc, direction: 'backward' | 'forward'): YrsLoc | null;
 }
 /** @internal */
 export declare function storyParagraphSpans(reader: TableDeleteReader, story: string): StoryParagraphSpans;
