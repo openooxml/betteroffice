@@ -12,7 +12,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
-import { shouldSlicePresentationFonts, slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
@@ -1733,7 +1733,7 @@ export function registerPresentationCommandHandlers(
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
       useFontCdn(configuration);
-      const useSlices = sliced === undefined ? shouldSlicePresentationFonts() : sliced === true && slicedFacesSupported();
+      const useSlices = sliced === true && slicedFacesSupported();
       void commandDefaultFontModule.load().then((fonts) => {
         if (current()) {
           fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices, current);

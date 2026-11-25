@@ -33,16 +33,19 @@ export function createPeerlessFontCoverage(
 ): PaintFontCoverage & { readonly thumbnails: PaintFontCoverage; dispose(): void } {
   const families = new Map<string, Family>();
   const session = ++sessions;
+  const isSliced = (key: string) => client.state.slicedFamilies?.some((family) => keyOf(family) === key);
 
   async function request(name: string, entry: Family, batch: Batch): Promise<string> {
+    const key = keyOf(name);
+    const currentEntry = () => current() && families.get(key) === entry && isSliced(key);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const text = [...batch.texts].join('\n');
     batch.texts.clear();
     batch.flush = undefined;
-    const latest = entry.faces[entry.faces.length - 1];
-    const read = await client.readCoverageFont?.(name, text, latest?.revision ?? null).catch(() => null);
-    if (!read) return name;
-    if (!read.bytes) return latest?.family ?? name;
+    const have = entry.faces[entry.faces.length - 1]?.revision ?? null;
+    const read = await client.readCoverageFont?.(name, text, have).catch(() => null);
+    if (!read || !currentEntry()) return name;
+    if (!read.bytes) return entry.faces.find(({ revision }) => revision === read.revision)?.family ?? name;
     const family = `${name} s${session} r${read.revision}`;
     const fonts = pageFonts();
     if (!fonts || typeof FontFace !== 'function') return name;
@@ -51,7 +54,7 @@ export function createPeerlessFontCoverage(
       const face = await new FontFace(family, read.bytes, traits ? {
         weight: String(traits.weight), style: traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal',
       } : {}).load();
-      if (!current() || families.get(keyOf(name)) !== entry) return name;
+      if (!currentEntry()) return name;
       const newest = entry.faces[entry.faces.length - 1];
       if (newest && newest.revision >= read.revision) return newest.family;
       fonts.add(face);
@@ -72,8 +75,7 @@ export function createPeerlessFontCoverage(
       prepare(name, text) {
         const key = keyOf(name);
         const fonts = pageFonts();
-        if (!client.state.slicedFamilies?.some((family) => keyOf(family) === key) || !client.readCoverageFont ||
-          !fonts || typeof FontFace !== 'function') {
+        if (!isSliced(key) || !client.readCoverageFont || !fonts || typeof FontFace !== 'function') {
           const replaced = families.get(key);
           if (replaced) for (const { face } of replaced.faces) fonts?.delete(face);
           families.delete(key);

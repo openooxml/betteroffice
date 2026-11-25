@@ -1,5 +1,5 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
-import { shouldSlicePresentationFonts, slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -17,8 +17,8 @@ interface PreparedFontWorker {
 }
 
 type FontMode = 'disabled' | 'whole' | 'sliced';
-const fontMode = (defaultFonts: boolean | undefined, sliced: boolean): FontMode =>
-  defaultFonts === false ? 'disabled' : sliced ? 'sliced' : 'whole';
+const fontMode = ({ defaultFonts, slicedFonts }: { defaultFonts?: boolean; slicedFonts?: boolean }): FontMode =>
+  defaultFonts === false ? 'disabled' : shouldSlicePresentationFonts(slicedFonts) ? 'sliced' : 'whole';
 const preparedWorkers = new WeakMap<object, Map<FontMode, ReturnType<typeof createPreparedFontWorker>>>();
 const Registry = (globalThis as unknown as {
   FinalizationRegistry?: new (cleanup: (release: () => void) => void) => {
@@ -37,7 +37,7 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
   options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}): PreparedFontWorker {
-  const mode = fontMode(options.defaultFonts, shouldSlicePresentationFonts(options.slicedFonts));
+  const mode = fontMode(options);
   let workers = preparedWorkers.get(source);
   if (!workers) preparedWorkers.set(source, workers = new Map());
   let owner = workers.get(mode);
@@ -146,7 +146,7 @@ function createPreparedFontWorker() {
 export function takePresentationFontWorker(source: Uint8Array | ArrayBuffer,
   options: { defaultFonts?: boolean; slicedFonts?: boolean } = {}): Worker | undefined {
   const workers = preparedWorkers.get(source);
-  const mode = fontMode(options.defaultFonts, options.slicedFonts === true && slicedFacesSupported());
+  const mode = fontMode(options);
   const owner = workers?.get(mode);
   if (owner?.shared() && !owner.retired()) return undefined;
   workers?.delete(mode);

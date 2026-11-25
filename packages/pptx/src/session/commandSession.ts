@@ -1,4 +1,5 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { attachPptxWorkerRender, pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -30,7 +31,7 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
   activeSlideIndex?: number;
   /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
   defaultFonts?: boolean;
-  /** Opens CJK coverage faces in slices that load as text needs them. Defaults to false. */
+  /** Defaults to sliced CJK coverage faces in Chromium and Firefox with worker rendering. */
   slicedFonts?: boolean;
   collaboration?: { clientId: number; initialUpdate?: Uint8Array };
   signal?: AbortSignal;
@@ -65,6 +66,7 @@ export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
 ): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
+  const slicedFonts = shouldSlicePresentationFonts(options.slicedFonts);
   const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? sessionWasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
   const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes, options);
@@ -81,7 +83,7 @@ export function createPptxWorkerSession(
     fonts: options.fonts, fallbackFonts: options.fallbackFonts,
     initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm,
     observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
-    defaultFonts: options.defaultFonts, ...(options.slicedFonts ? { slicedFonts: true } : {}),
+    defaultFonts: options.defaultFonts, ...(slicedFonts ? { slicedFonts } : {}),
   };
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   const connectionErrors = new Set<(error: unknown) => void>();

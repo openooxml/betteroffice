@@ -1283,7 +1283,7 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
     activeSlideIndex?: number;
     /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
     defaultFonts?: boolean;
-    /** Opens CJK coverage faces in slices that load as text needs them. Defaults to false. */
+    /** Defaults to sliced CJK coverage faces in Chromium and Firefox with worker rendering. */
     slicedFonts?: boolean;
     collaboration?: {
         clientId: number;
