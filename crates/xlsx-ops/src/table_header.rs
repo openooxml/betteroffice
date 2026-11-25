@@ -322,7 +322,10 @@ pub(crate) fn restore_table_column(workbook: &mut Workbook, op: &Op) -> Result<O
         return Err(OpError::TooManyDefinedNames);
     }
     for (owner, at, (_, formula)) in &edits {
-        workbook.sheets[owner.0 as usize].cell_mut(*at).unwrap().formula = Some(formula.clone());
+        workbook.sheets[owner.0 as usize]
+            .cell_mut(*at)
+            .unwrap()
+            .formula = Some(formula.clone());
     }
     let defined_names = names
         .into_iter()

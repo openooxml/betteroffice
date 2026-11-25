@@ -804,7 +804,12 @@ fn a_rewrite_over_the_formula_character_limit_refuses_the_rename() {
         let version = workbook.version();
         let model = workbook.model().clone();
         let error = workbook
-            .edit_cell(SHEET1, at("B1"), "LongStatus", CalculationOptions::default())
+            .edit_cell(
+                SHEET1,
+                at("B1"),
+                "LongStatus",
+                CalculationOptions::default(),
+            )
             .unwrap_err();
         assert!(matches!(
             error,

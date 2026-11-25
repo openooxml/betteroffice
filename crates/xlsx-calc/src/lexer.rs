@@ -219,8 +219,7 @@ pub fn rewrite_table_column(
         let same_table = if name.is_empty() {
             local
         } else {
-            name.to_lowercase() == table
-                && scope.is_none_or(|scope| scope.to_lowercase() == sheet)
+            name.to_lowercase() == table && scope.is_none_or(|scope| scope.to_lowercase() == sheet)
         };
         (same_table && column.to_lowercase() == old).then_some(new)
     })
@@ -279,14 +278,13 @@ pub fn rewrite_table_columns<'a>(
                 let prefix = &input[*selector_start + 1..span.start];
                 let needs_brackets = new.contains(TABLE_BRACKET_CHARS);
                 let bare = matches!(prefix, "" | "@");
-                let span = if !needs_brackets
-                    && matches!(prefix, "[" | "@[")
-                    && token.end == span.end + 2
-                {
-                    span.start - 1..span.end + 1
-                } else {
-                    span
-                };
+                let span =
+                    if !needs_brackets && matches!(prefix, "[" | "@[") && token.end == span.end + 2
+                    {
+                        span.start - 1..span.end + 1
+                    } else {
+                        span
+                    };
                 spans.push((span, new, bare && needs_brackets));
             }
         })?;

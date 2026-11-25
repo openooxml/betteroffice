@@ -111,7 +111,8 @@ impl PreservedPackage {
                     .parts
                     .iter()
                     .filter(|(path, _)| {
-                        path.trim_start_matches('/').eq_ignore_ascii_case(&normalized)
+                        path.trim_start_matches('/')
+                            .eq_ignore_ascii_case(&normalized)
                     })
                     .nth(1)
                     .is_some()
@@ -224,7 +225,8 @@ fn patch_formulas(
                 if let Some(rewritten) = rewritten {
                     let tail = &bytes[start..bom + xml.buffer_position() as usize];
                     let end = tail.iter().rposition(|&byte| byte == b'<');
-                    let Some(end) = end.filter(|&end| direct && !tail[..end].contains(&b'<')) else {
+                    let Some(end) = end.filter(|&end| direct && !tail[..end].contains(&b'<'))
+                    else {
                         return Err(ParseError::UnsupportedEdit(format!(
                             "cannot patch formula text in {path}"
                         )));
@@ -319,7 +321,10 @@ fn reject_shared_part(
     if package
         .table_parts
         .iter()
-        .filter(|path| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized))
+        .filter(|path| {
+            path.trim_start_matches('/')
+                .eq_ignore_ascii_case(&normalized)
+        })
         .nth(1)
         .is_some()
     {
