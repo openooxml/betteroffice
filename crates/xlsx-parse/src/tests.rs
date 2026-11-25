@@ -9077,3 +9077,25 @@ fn a_shared_master_given_directly_and_in_a_fallback_is_recorded_once() {
     ));
     assert_eq!(cell_at(&workbook, "B1").formula.as_deref(), Some("1+1"));
 }
+
+#[test]
+fn inline_strings_inside_cell_alternate_content_are_read() {
+    for (inline, text) in [
+        ("<is><t>plain</t></is>", "plain"),
+        (
+            "<is><r><rPr><b/></rPr><t>Bo</t></r><r><t>ld</t></r></is>",
+            "Bold",
+        ),
+    ] {
+        let workbook = alternate_cell(&format!(
+            r#"<c r="A1" t="inlineStr"><mc:AlternateContent {MC}><mc:Choice Requires="x14">{inline}</mc:Choice><mc:Fallback>{inline}</mc:Fallback></mc:AlternateContent></c>"#
+        ));
+        assert_eq!(
+            cell_at(&workbook, "A1").value,
+            CellValue::Text {
+                value: text.to_owned()
+            },
+            "{inline}"
+        );
+    }
+}
