@@ -145,3 +145,22 @@ test('an editor export with no resolved faces leaves core font selection enabled
   await expect(api.renderPng({ sheet: 0, range: 'A1' })).resolves.toBe(png);
   expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
 });
+
+test('in-thread async exports respect the editor’s current default-font setting', async () => {
+  const load = bundled(async () => new ArrayBuffer(3));
+  const renderPng = mock(async (_target: XlsxPngTarget, _options?: XlsxPngOptions) => new Uint8Array([1]));
+  const sync = {
+    commands: createXlsxCommandController().store,
+    flushPendingInput: async () => {},
+    handle: { renderPng, renderPngFonts: () => [{ family: 'Calibri', bold: false, italic: false }] },
+  } as unknown as XlsxEditorApi;
+  let defaultFonts = false;
+  const api = createInThreadAsyncEditorApi(sync, false, () => {}, undefined, () => defaultFonts);
+  const target = { sheet: 0, range: 'A1' };
+  await api.renderPng(target);
+  expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
+  expect(load).not.toHaveBeenCalled();
+  defaultFonts = true;
+  await api.renderPng(target);
+  expect(renderPng.mock.lastCall?.[1]?.fonts?.map(({ family }) => family)).toEqual(['Calibri']);
+});

@@ -6,6 +6,7 @@ import { spyOnFontFetch } from '../../fonts/src/fontFetch.test-support';
 import type { FontDecoder } from '../../../shared/office-session/fontDecoder';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../shared/office-session/fontCdn';
 import { withinTestBudget } from '../../../shared/office-session/testing/loadBudget';
+import * as scripts from '../../../shared/office-session/textScripts';
 import { configureFontCdn as configureTestFontCdn } from '../../fonts/src/fontCdn';
 import { createSessionHost } from '../../../shared/office-session/host';
 import { createInProcessPair } from '../../../shared/office-session/testing/inProcessTransport';
@@ -13,9 +14,12 @@ import type { DisplayList, TextCmd } from '@betteroffice/xlsx';
 import { createDefaultFontPainter, xlsxDefaultFontManager } from './defaultFonts';
 import { createWorkbookSession } from '../../xlsx/src/session/client';
 import type { WorkbookSessionMethods } from '../../xlsx/src/session/methods';
-import { fontString } from '../../xlsx/src/render/fontString';
+import { paintDisplayList } from '../../xlsx/src/render/canvas2d';
+import { renderPng } from '../../xlsx/src/wasm/enginePng';
+import { sheetFonts } from '../../xlsx/src/render/png';
+import { editorExportFaces } from './useDefaultFonts';
 
-const descriptors = ['document', 'FontFace'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+const descriptors = ['document', 'FontFace', 'OffscreenCanvas'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
 const restorers: (() => void)[] = [];
 
 afterEach(() => {
@@ -32,11 +36,11 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function browser(gate: Promise<void> = Promise.resolve()) {
+function browser(gate: Promise<void> | ((family: string, descriptors: FontFaceDescriptors) => Promise<void>) = Promise.resolve()) {
   const added: Face[] = [];
   class Face {
     constructor(readonly family: string, readonly bytes: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
-    async load() { await gate; return this; }
+    async load() { await (typeof gate === 'function' ? gate(this.family, this.descriptors) : gate); return this; }
   }
   const remove = mock((face: Face) => { added.splice(added.indexOf(face), 1); });
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
@@ -106,6 +110,30 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
 
 function decoder() { return mock<FontDecoder>(async () => ({ font: new Uint8Array([0, 1, 0, 0]).buffer })); }
 
+function cellText(text: string, options: Partial<TextCmd> = {}): TextCmd {
+  return { op: 'text', x: 0, y: 12, text, color: '#000000', fontSize: 12, fontFamily: 'Calibri', ...options };
+}
+
+function cells(...commands: TextCmd[]): DisplayList {
+  return { width: 200, height: 100, commands };
+}
+
+function canvasText() {
+  const painted: { text: string; font: string }[] = [];
+  const context = new Proxy({ font: '', canvas: { width: 200, height: 100 } }, {
+    get(target, property) {
+      if (property === 'measureText') return (text: string) => ({ width: text.length });
+      if (property === 'fillText') return (text: string) => painted.push({ text, font: target.font });
+      return Reflect.has(target, property) ? Reflect.get(target, property) : () => {};
+    },
+  }) as unknown as CanvasRenderingContext2D;
+  Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: class {
+    getContext() { return context; }
+    async convertToBlob() { return new Blob(['png']); }
+  } });
+  return { context, painted };
+}
+
 test('registers Carlito regular and bold as Calibri and repaints once after the whole batch loads', async () => {
   const gate = deferred<void>();
   const { added } = browser(gate.promise);
@@ -136,6 +164,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
 
 test('requests script-restricted pack faces when Arabic and Devanagari cells come into view', async () => {
   const { added } = browser();
+  const { context, painted } = canvasText();
   const { scriptFace, scriptLoads } = provider();
   const repaint = mock(() => {});
   const painter = createDefaultFontPainter(decoder(), repaint);
@@ -153,15 +182,147 @@ test('requests script-restricted pack faces when Arabic and Devanagari cells com
     const ready = painter.paint(frame, () => {});
     await loading;
     expect(scriptLoads.mock.calls.map(([face]) => face.family).sort()).toEqual(['Noto Sans Arabic', 'Noto Sans Devanagari']);
-    expect(added.map(({ family }) => family).sort()).toEqual(['Arial', 'Noto Sans Arabic', 'Noto Sans Devanagari']);
-    expect(added.find(({ family }) => family === 'Noto Sans Arabic')?.descriptors.unicodeRange ?? '').toMatch(/U\+0?600-0?6FF/i);
-    expect(added.find(({ family }) => family === 'Noto Sans Devanagari')?.descriptors.unicodeRange ?? '').toMatch(/U\+0?900-0?97F/i);
-    expect(fontString(frame.commands[0] as TextCmd)).toBe('16px "Arial", "Noto Sans Arabic", sans-serif');
+    expect(added.map(({ family }) => family).sort()).toEqual(['Arial', 'bo-xlsx-editor-Noto Sans Arabic', 'bo-xlsx-editor-Noto Sans Devanagari']);
+    expect(added.find(({ family }) => family.endsWith('Noto Sans Arabic'))?.descriptors.unicodeRange ?? '').toMatch(/U\+0?600-0?6FF/i);
+    expect(added.find(({ family }) => family.endsWith('Noto Sans Devanagari'))?.descriptors.unicodeRange ?? '').toMatch(/U\+0?900-0?97F/i);
     expect(ready).toBe(false);
-    expect(painter.paint(frame, () => {})).toBe(true);
+    expect(painter.paint(frame, (list = frame) => paintDisplayList(context, list, 1))).toBe(true);
+    expect(painted[0]?.font).toBe('16px "Arial", "bo-xlsx-editor-Noto Sans Arabic", sans-serif');
     expect(scriptFace).toHaveBeenCalledTimes(2);
     expect(repaint).toHaveBeenCalledTimes(2);
   } finally { painter.dispose(); }
+});
+
+test('only requests and paints the script face for the rich-text piece that uses it', async () => {
+  browser();
+  const { context, painted } = canvasText();
+  const { scriptLoads } = provider();
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const frame = cells(cellText('Bold नमस्ते', { runs: [{ start: 0, end: 5, bold: true }] }));
+  try {
+    await painter.load(frame);
+    expect(scriptLoads.mock.calls.map(([face]) => [face.family, face.weight]))
+      .toEqual([['Noto Sans Devanagari', 400]]);
+    painter.paint(frame, (list = frame) => paintDisplayList(context, list, 1));
+    expect(painted).toEqual([
+      { text: 'Bold ', font: 'bold 16px "Calibri", sans-serif' },
+      { text: 'नमस्ते', font: '16px "Calibri", "bo-xlsx-editor-Noto Sans Devanagari", sans-serif' },
+    ]);
+  } finally { painter.dispose(); }
+});
+
+test('editor PNG exports use a private, range-limited copy of the same script face', async () => {
+  const beforeScriptPaint = deferred<void>();
+  const allowScriptPaint = deferred<void>();
+  const { added, remove } = browser(async (family, { unicodeRange }) => {
+    if (family.startsWith('bo-xlsx-png-') && unicodeRange) {
+      beforeScriptPaint.resolve();
+      await allowScriptPaint.promise;
+    }
+  });
+  const { context, painted } = canvasText();
+  const { scriptLoads } = provider();
+  const decode = decoder();
+  const painter = createDefaultFontPainter(decode, () => {});
+  const frame = cells(cellText('مرحبا'), cellText('שלום', { fontFamily: undefined }));
+  try {
+    await painter.load(frame);
+    painter.paint(frame, (list = frame) => paintDisplayList(context, list, 1));
+    const editorFaces = [...added];
+    const editorFamily = (name: string) => editorFaces.find(({ family }) => family.endsWith(name))?.family;
+    expect(painted.map(({ font }) => font)).toEqual([
+      `16px "Calibri", "${editorFamily('Noto Sans Arabic')}", sans-serif`,
+      `16px "${editorFamily('Noto Sans Hebrew')}", sans-serif`,
+    ]);
+    painted.length = 0;
+
+    const faces = await editorExportFaces(sheetFonts(frame, true), decode, undefined);
+    const readFrame = () => JSON.stringify(frame);
+    const png = renderPng({
+      onSheet: (_sheet, read) => read(),
+      doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
+    }, { sheet: 0, range: 'A1:B1' }, { fonts: structuredClone(faces) });
+    expect(await Promise.race([beforeScriptPaint.promise.then(() => true), png.then(() => false)])).toBe(true);
+    expect(painted).toEqual([]);
+    allowScriptPaint.resolve();
+    await png;
+
+    expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual([
+      'Noto Sans Arabic', 'Noto Sans Hebrew', 'Noto Sans Arabic', 'Noto Sans Hebrew',
+    ]);
+    const released = remove.mock.calls.map(([face]) => face);
+    const privateAlias = (family: string) => released.find(({ descriptors }) =>
+      descriptors.unicodeRange === editorFaces.find((face) => face.family === editorFamily(family))?.descriptors.unicodeRange
+      && descriptors.unicodeRange !== undefined)?.family;
+    const arabic = privateAlias('Noto Sans Arabic');
+    const hebrew = privateAlias('Noto Sans Hebrew');
+    expect(arabic).toMatch(/^bo-xlsx-png-/);
+    expect(hebrew).toMatch(/^bo-xlsx-png-/);
+    expect(painted.map(({ font }) => font)).toEqual([
+      `16px "${released[0]?.family}", "${arabic}", sans-serif`,
+      `16px "${hebrew}", sans-serif`,
+    ]);
+    expect(added).toEqual(editorFaces);
+  } finally { allowScriptPaint.resolve(); painter.dispose(); }
+});
+
+test('another editor and an explicit-face PNG export do not pick up a disposed editor’s script fallback', async () => {
+  const { added } = browser();
+  const { context, painted } = canvasText();
+  provider();
+  const first = createDefaultFontPainter(decoder(), () => {});
+  const second = createDefaultFontPainter(decoder(), () => {}, { defaultFonts: false });
+  const named = cellText('مرحبا', { fontFamily: 'Unbundled Sans' });
+  const unnamed = cellText('مرحبا', { fontFamily: undefined });
+  const frame = cells(named, unnamed);
+  try {
+    await first.load(frame);
+    first.dispose();
+    const readFrame = () => JSON.stringify(frame);
+    await renderPng({
+      onSheet: (_sheet, read) => read(),
+      doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
+    }, { sheet: 0, range: 'A1:B1' }, { fonts: [] });
+    second.paint(frame, (list = frame) => paintDisplayList(context, list, 1));
+    expect(painted.map(({ font }) => font)).toEqual([
+      '16px "Unbundled Sans", sans-serif', '16px sans-serif',
+      '16px "Unbundled Sans", sans-serif', '16px sans-serif',
+    ]);
+    expect(added.map(({ family }) => family)).toEqual(['bo-xlsx-editor-Noto Sans Arabic']);
+  } finally { first.dispose(); second.dispose(); }
+});
+
+test('an unsettled paint collects the frame’s font requests once', async () => {
+  browser();
+  provider();
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const read = mock(() => 'नमस्ते');
+  const cmd = cellText('');
+  Object.defineProperty(cmd, 'text', { get: read });
+  try {
+    expect(painter.paint(cells(cmd), () => {})).toBe(false);
+    expect(read).toHaveBeenCalledTimes(2);
+  } finally { painter.dispose(); }
+});
+
+test('recreated rich-text pieces reuse script detection for their text', async () => {
+  browser();
+  provider();
+  const detect = spyOn(scripts, 'textScripts');
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  const { context } = canvasText();
+  try {
+    const frame = () => cells(cellText('Report हेतु फ़ॉन्ट', { runs: [{ start: 0, end: 7, bold: true }] }));
+    const render = () => {
+      const list = frame();
+      painter.paint(list, (paintable = list) => paintDisplayList(context, paintable, 1));
+    };
+    await painter.load(frame());
+    detect.mockClear();
+    render();
+    render();
+    expect(detect).not.toHaveBeenCalled();
+  } finally { painter.dispose(); detect.mockRestore(); }
 });
 
 test('CJK punctuation in Calibri makes no script pack request', async () => {
