@@ -172,7 +172,7 @@ export declare class EditSession {
   prime_save_seed_states(paragraphs: number, inflated: number): boolean
   prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   prime_last_slice_cost(): number
-  paragraph_save_plan(): string
+  paragraph_save_plan(use_local_provenance?: boolean | undefined | null): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
   paragraphs(story: string): string

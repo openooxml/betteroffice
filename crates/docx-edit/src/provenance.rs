@@ -325,12 +325,12 @@ impl Provenance {
         }
     }
 
-    fn merge(&mut self, incoming: Incoming) {
-        if incoming.overflowed {
+    fn merge(&mut self, generation: &str, entries: BTreeMap<String, Entry>, overflowed: bool) {
+        if overflowed {
             self.overflow();
             return;
         }
-        for (key, entry) in incoming.entries {
+        for (key, entry) in entries {
             if let Entry::Recorded(records) = entry {
                 for splice in records.splices {
                     if self
@@ -346,7 +346,7 @@ impl Provenance {
                         continue;
                     }
                     self.record(
-                        incoming.generation.clone(),
+                        generation.to_owned(),
                         key.clone(),
                         records.story.clone(),
                         records.seed,
@@ -1226,6 +1226,24 @@ impl EditingDoc {
         }
     }
 
+    pub(crate) fn stage_text_provenance(&self, stage: &Self) -> bool {
+        let Some(source) = self.source_metadata() else {
+            return false;
+        };
+        *stage.metadata.lock().unwrap() = Some(source);
+        *lock_provenance(&stage.provenance) = self.provenance_snapshot();
+        true
+    }
+
+    pub(crate) fn adopt_staged_provenance(&self, stage: &Self) {
+        let staged = stage.provenance_snapshot();
+        lock_provenance(&self.provenance).merge(
+            staged.generation.as_deref().unwrap_or_default(),
+            staged.entries,
+            staged.overflowed,
+        );
+    }
+
     pub(crate) fn bind_edit_provenance(&self, base: &StateVector, update: &[u8]) {
         let mut proof = lock_provenance(&self.provenance);
         if proof.entries.is_empty() && !proof.overflowed {
@@ -1308,7 +1326,9 @@ impl EditingDoc {
             .filter(|incoming| incoming.base.is_none() && incoming.state_digest.is_none());
         let mut proof = lock_provenance(&self.provenance);
         match incoming {
-            Some(incoming) => proof.merge(incoming),
+            Some(incoming) => {
+                proof.merge(&incoming.generation, incoming.entries, incoming.overflowed);
+            }
             None => proof.overflow(),
         }
     }
@@ -1341,7 +1361,11 @@ impl EditingDoc {
                 if let Some(watch) = watch.as_mut() {
                     watch.disarm();
                 }
-                lock_provenance(&self.provenance).merge(incoming);
+                lock_provenance(&self.provenance).merge(
+                    &incoming.generation,
+                    incoming.entries,
+                    incoming.overflowed,
+                );
             }
         }
         result

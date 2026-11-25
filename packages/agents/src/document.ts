@@ -579,18 +579,7 @@ export class DocxAgentDocument {
       const vector = draft.encodeStateVector();
       this.apply(draft, held, options.tracked ? { name: held.value.author, date: options.date ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z') } : undefined);
       this.checkPending(held);
-      const update = draft.encodeStateAsUpdate(vector);
-      this.session.addUndoBoundary();
-      try {
-        const sidecar = this.session.version() === baseVersion
-          ? draft.encodeEditProvenanceForTransfer?.(update, vector)
-          : undefined;
-        if (sidecar !== undefined && typeof this.session.applyLocalUpdateWithProvenance === 'function') {
-          this.session.applyLocalUpdateWithProvenance(update, sidecar);
-        } else {
-          this.session.applyLocalUpdate(update);
-        }
-      } finally { this.session.addUndoBoundary(); }
+      this.adoptDraft(draft, vector, this.session.version() === baseVersion);
       held.value.status = 'accepted';
       return { id, status: 'accepted' as const, tracked: options.tracked ?? false, changes: held.value.changes.length };
     } catch (error) { throw release.failed(error); } finally { release.run(); }
@@ -994,6 +983,19 @@ export class DocxAgentDocument {
       }
       return draft;
     } catch (error) { throw cleanupGuard(() => draft.destroy()).failed(error); }
+  }
+
+  private adoptDraft(draft: YrsSession, vector: Uint8Array, carryProvenance: boolean) {
+    const update = draft.encodeStateAsUpdate(vector);
+    this.session.addUndoBoundary();
+    try {
+      const sidecar = carryProvenance ? draft.encodeEditProvenanceForTransfer?.(update, vector) : undefined;
+      if (sidecar !== undefined && typeof this.session.applyLocalUpdateWithProvenance === 'function') {
+        this.session.applyLocalUpdateWithProvenance(update, sidecar);
+      } else {
+        this.session.applyLocalUpdate(update);
+      }
+    } finally { this.session.addUndoBoundary(); }
   }
 
   private runRevision(p: Paragraph) {
@@ -1515,9 +1517,7 @@ export class DocxAgentDocument {
           if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
         }
         failed = undefined;
-        this.session.addUndoBoundary();
-        try { this.session.applyLocalUpdate(draft.encodeStateAsUpdate(vector)); }
-        finally { this.session.addUndoBoundary(); }
+        this.adoptDraft(draft, vector, edits.some(edit => edit.op === 'set_runs'));
         if (resolved) this.resolvedComments = resolved;
         for (const edit of edits) if (edit.op === 'replace_comment_text') this.textEditedComments.add(edit.comment);
         if (deleted) this.deletedComments = deleted;

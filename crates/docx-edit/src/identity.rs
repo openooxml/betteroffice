@@ -4314,6 +4314,13 @@ impl EditingDoc {
     /// exactly what it gave as seeded (see [`StoryState`]), so that its source
     /// bytes are what a save would write, IDs aside.
     pub fn paragraph_save_plan(&self) -> ParagraphSavePlan {
+        self.paragraph_save_plan_with_local_provenance(true)
+    }
+
+    pub(crate) fn paragraph_save_plan_with_local_provenance(
+        &self,
+        use_local_provenance: bool,
+    ) -> ParagraphSavePlan {
         let Some(source) = self.source_index() else {
             return ParagraphSavePlan::default();
         };
@@ -4360,7 +4367,11 @@ impl EditingDoc {
             touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
-        let provenance = self.provenance_snapshot();
+        let provenance = if use_local_provenance {
+            self.provenance_snapshot()
+        } else {
+            crate::provenance::Provenance::default()
+        };
         let seeded = if let Some(ready) = ready {
             ready
         } else {

@@ -91,7 +91,7 @@ export interface DocxSessionSave {
     plan: DocxParagraphSavePlan;
 }
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
-export declare function captureSessionSave(session: YrsSession, identities?: DocxParagraphIdentitySnapshot): DocxSessionSave;
+export declare function captureSessionSave(session: YrsSession, identities?: DocxParagraphIdentitySnapshot, useLocalProvenance?: boolean): DocxSessionSave;
 /**
  * Writes `document`, projected from `session` when `capture` was taken, and
  * records the Word paragraph IDs the bytes hold as saved. `patches` selects

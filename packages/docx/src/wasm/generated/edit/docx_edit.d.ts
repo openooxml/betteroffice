@@ -874,7 +874,7 @@ export class EditSession {
      * whose session keys the caller resolves to the model paragraphs it marks
      * with their ordinals.
      */
-    paragraph_save_plan(): string;
+    paragraph_save_plan(use_local_provenance?: boolean | null): string;
     /**
      * Compact paragraph-position projection built in one story traversal:
      * `[{"paraId","length"}, …]` in document order, where `length` counts the
@@ -2018,7 +2018,7 @@ export interface InitOutput {
     readonly editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
-    readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
+    readonly editsession_paragraph_save_plan: (a: number, b: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_style_numbers: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];

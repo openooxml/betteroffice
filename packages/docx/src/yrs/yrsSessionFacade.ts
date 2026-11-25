@@ -1627,8 +1627,8 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => {
-      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+    paragraphSavePlan: (useLocalProvenance) => {
+      const plan = JSON.parse(session.paragraph_save_plan(useLocalProvenance)) as DocxParagraphSavePlan;
       for (const part of plan.splicedParts ?? []) {
         if (!part.changed.length) continue;
         if (!part.paragraphPatches || !part.legacyParagraphs) {

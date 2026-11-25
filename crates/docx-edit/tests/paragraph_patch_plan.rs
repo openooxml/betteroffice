@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use docx_edit::session::{EditSessionCore, Host};
 use docx_edit::{
-    CellLoc, EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
-    FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphInput, ParagraphRef,
-    ParagraphTarget, Patch, Position, RawOp, StoryRange, StrikePatch, StyleResolver, TableRange,
-    TargetEdge, UnderlinePatch, UndoSession,
+    CellLoc, EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditTextView,
+    EditingDoc, FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphInput,
+    ParagraphRef, ParagraphTarget, Patch, Position, RawOp, StoryRange, StrikePatch, StyleResolver,
+    TableRange, TargetEdge, TextPosition, TextRange, TextTarget, UnderlinePatch, UndoSession,
     seed_from_docx, seed_from_docx_with_generation,
 };
 use docx_parse::paragraph_patch::{
@@ -562,6 +562,70 @@ fn replacement_spanning_runs_uses_first_text_donor() {
         Some(&json!(true))
     );
     assert!(!patch.text_edits[0].insert[0].attrs.contains_key("italic"));
+}
+
+#[test]
+fn a_single_cross_property_replacement_preserves_the_aligned_run_boundaries() {
+    let source = concat!(
+        r#"<w:r w:rsidR="000000F1"><w:rPr><w:b/><w:bCs/><w:color w:val="0066AA"/></w:rPr><w:t xml:space="preserve">Xray yankee </w:t></w:r>"#,
+        r#"<w:r w:rsidR="000000F2"><w:rPr><w:i/><w:iCs/><w:color w:val="C00000"/></w:rPr><w:t>zulu alpha.</w:t></w:r>"#,
+    );
+    let doc = open(source);
+    replace(&doc, 5, 16, "YANKEE ZULU");
+    let (saved, warnings) = save_paragraph(&doc, source, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(saved.matches("</w:r>").count(), 3, "{saved}");
+    for (run, (text, property, color)) in saved.split("</w:r>").zip([
+        ("Xray YANKEE ", "<w:bCs/>", "0066AA"),
+        ("ZULU", "<w:iCs/>", "0066AA"),
+        (" alpha.", "<w:i/>", "C00000"),
+    ]) {
+        assert!(run.contains(&format!(">{text}</w:t>")), "{run}");
+        assert!(run.contains(property) && run.contains(color), "{run}");
+    }
+}
+
+#[test]
+fn a_single_replacement_removes_emptied_runs_and_preserves_surrounding_xml() {
+    let run = |text: &str| format!("<w:r><w:rPr/><w:t>{text}</w:t></w:r>");
+    let value = |text: &str| format!(r#"<w:r><w:rPr/><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let italic = |text: &str| format!("<w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r>");
+    let middle = run("MRID") + &value(" xxxxxxxx");
+    let replaced = run("MRID") + &value(" 12345678");
+    let empty = r#"<w:r w:rsidR="12345678"><w:rPr/><w:t/></w:r>"#;
+    let tab = "<w:r><w:rPr/><w:t>]</w:t><w:tab/></w:r>";
+    for (source, start, expected) in [
+        (run("[") + &middle + &run("]"), 0, replaced.clone()),
+        (
+            value("Prefix ") + &italic("[") + &middle + &run("]"),
+            7,
+            value("Prefix ") + &italic("MRID")
+                + r#"<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> 12345678</w:t></w:r>"#,
+        ),
+        (
+            run("[") + &middle + &value("] suffix"),
+            0,
+            run("MRID")
+                + r#"<w:r><w:rPr/><w:t xml:space="preserve"> 12345678</w:t><w:t xml:space="preserve"> suffix</w:t></w:r>"#,
+        ),
+        (
+            empty.to_owned() + &run("[") + &middle + &run("]"),
+            0,
+            empty.to_owned() + &replaced,
+        ),
+        (
+            run("[") + &middle + tab,
+            0,
+            replaced + &tab.replace("]</w:t>", "</w:t>"),
+        ),
+    ] {
+        let source = format!("<w:pPr/>{source}");
+        let doc = open(&source);
+        replace(&doc, start, start + 15, "MRID 12345678");
+        let (saved, warnings) = save_paragraph(&doc, &source, |_| {});
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(saved.contains(&format!("<w:pPr/>{expected}</w:p>")), "{saved}");
+    }
 }
 
 #[test]
@@ -3094,6 +3158,65 @@ const ADJACENT_SOURCE: &str = concat!(
 );
 
 #[test]
+fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
+    let source = concat!(
+        r#"<w:pPr/><w:r w:rsidR="00000002"><w:rPr><w:b/><w:lang w:val="en-US"/></w:rPr><w:t>Alpha</w:t></w:r>"#,
+        r#"<w:r w:rsidRPr="00000003"><w:rPr><w:i/><w:color w:val="0066AA"/></w:rPr><w:t>Beta</w:t></w:r>"#,
+        r#"<w:r w:rsidR="00000004"><w:rPr><w:b/><w:lang w:val="en-US"/></w:rPr><w:t>Gamma</w:t></w:r>"#,
+        "<w:r><w:t>Plain</w:t></w:r>",
+    );
+    let control = open(source);
+    replace(&control, 9, 14, "Γάμμα 😀");
+    replace(&control, 6, 9, "");
+    replace(&control, 1, 1, " longer a");
+    let (expected, warnings) = save_paragraph(&control, source, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(expected.contains("<w:t>Γάμμα 😀</w:t>"), "{expected}");
+
+    for direct in [false, true] {
+        let owner = open_for_transfer(source, "set-runs");
+        let draft = open_for_transfer(source, "set-runs");
+        draft.set_direct_batches(direct);
+        let history = UndoSession::new();
+        let para_id = draft.paragraphs("body").unwrap()[0].para_id.clone();
+        for (from, to, text) in [(9, 14, "Γάμμα 😀"), (5, 9, "B"), (0, 5, "A longer alpha")] {
+            let position = |offset| TextPosition {
+                para_id: para_id.clone(),
+                offset,
+            };
+            let request = EditRequest {
+                expect_version: draft.version(),
+                source: EditSource::Agent,
+                history: EditHistory::None,
+                steps: vec![EditStep::new(EditOperation::ReplaceText {
+                    target: TextTarget::Range(TextRange {
+                        story: "body".to_owned(),
+                        start: position(from),
+                        end: position(to),
+                        view: EditTextView::Accepted,
+                    }),
+                    text: text.to_owned(),
+                    runs: None,
+                })],
+            };
+            assert!(draft.apply_edits(&request, &history).unwrap().unwrap().applied);
+        }
+        assert_eq!(draft.direct_batches_applied(), if direct { 3 } else { 0 });
+        let (update, sidecar) = transfer(&draft, &owner.encode_state_vector_v1());
+        owner
+            .apply_local_update_with_provenance(&update, &sidecar)
+            .unwrap();
+        assert_splices(
+            &owner,
+            &[(0, 5, 0, "A longer alpha"), (5, 9, 5, "B"), (9, 14, 9, "Γάμμα 😀")],
+        );
+        let (saved, warnings) = save_paragraph(&owner, source, |_| {});
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(saved, expected);
+    }
+}
+
+#[test]
 fn one_update_carries_adjacent_replacements_with_distinct_source_donors() {
     let receiver = open_for_transfer(ADJACENT_SOURCE, "adjacent");
     let sender = open_for_transfer(ADJACENT_SOURCE, "adjacent");
@@ -3771,6 +3894,38 @@ fn matching_bootstrap_sidecar_carries_adjacent_splice_records() {
         splice_summary(&patches[0]),
         owned_splices(&[(0, 3, 0, "X"), (3, 6, 3, "YZ")]),
     );
+}
+
+#[test]
+fn editor_save_plans_agree_after_unpaired_text_updates() {
+    let source = package("<w:r><w:t>Footnote text.</w:t></w:r>");
+    let seed = EditingDoc::new(71);
+    seed_from_docx_with_generation(&seed, &source, "editor-save").unwrap();
+    let para_id = seed.paragraphs("body").unwrap()[0].para_id.clone();
+    let state = seed.encode_state_as_update_v1();
+    let metadata = seed.encode_peer_metadata().unwrap();
+    let host = || Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let author = EditSessionCore::new(72, host());
+    let peer = EditSessionCore::new(73, host());
+    for session in [&author, &peer] {
+        session
+            .bootstrap_peer(&state, &metadata, Some(source.clone()))
+            .unwrap();
+    }
+    for (from, to, text) in [(8, 8, "X"), (8, 9, "Y"), (4, 5, "")] {
+        author
+            .replace_range("body", &para_id, from, &para_id, to, text, None, None)
+            .unwrap();
+    }
+    let update = author.encode_diff(&peer.encode_state_vector()).unwrap();
+    peer.apply_update(&update).unwrap();
+
+    let local = author.paragraph_save_plan().unwrap();
+    let editor = author.paragraph_save_plan_with_local_provenance(false).unwrap();
+    assert!(local.contains("ambiguous: unproven edit provenance"), "{local}");
+    assert_ne!(local, editor);
+    assert_eq!(editor, peer.paragraph_save_plan().unwrap());
+    assert_eq!(editor, peer.paragraph_save_plan_with_local_provenance(false).unwrap());
 }
 
 #[test]

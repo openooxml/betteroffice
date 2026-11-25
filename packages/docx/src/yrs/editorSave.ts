@@ -289,7 +289,7 @@ export async function saveEditorDocument(
     engineProgress();
     await yieldSave();
   }
-  const capture = projected.originalBuffer ? captureSessionSave(session, identities) : null;
+  const capture = projected.originalBuffer ? captureSessionSave(session, identities, false) : null;
   engineProgress();
   if (yieldSave) await yieldSave();
   const { document, injected } = checkedSaveModel((fallback) => {

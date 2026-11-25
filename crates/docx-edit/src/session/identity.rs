@@ -183,7 +183,18 @@ impl EditSessionCore {
     /// whose session keys the caller resolves to the model paragraphs it marks
     /// with their ordinals.
     pub fn paragraph_save_plan(&self) -> EngineResult<String> {
-        let plan = self.engine.doc().paragraph_save_plan();
+        self.paragraph_save_plan_with_local_provenance(true)
+    }
+
+    #[doc(hidden)]
+    pub fn paragraph_save_plan_with_local_provenance(
+        &self,
+        use_local_provenance: bool,
+    ) -> EngineResult<String> {
+        let plan = self
+            .engine
+            .doc()
+            .paragraph_save_plan_with_local_provenance(use_local_provenance);
         serde_json::to_string(&json!({
             "assignments": plan
                 .assignments
