@@ -4,7 +4,6 @@ import type { XlsxPngOptions } from './pngTarget';
 
 /** What an engine needs to draw one PNG. The workbook handle builds it; each engine reads what it uses. */
 export interface XlsxPngEngine {
-  reportedFontCdnErrors?: Set<Error>;
   /** Runs `read` with `sheet` active and puts the previous sheet back. */
   onSheet<T>(sheet: number, read: () => T): T;
   /** The engine document: `pngDisplayListJson` and `rangePngDisplayListJson`. */
@@ -28,7 +27,7 @@ export async function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget
   const { list, ...size } = pngDisplayList(engine, target, options);
   if (options.fonts !== undefined) return displayListToPng(list, { ...size, signal: options.signal, fonts: options.fonts });
   defaultFaces ??= await import('./enginePngFonts');
-  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal, engine.reportedFontCdnErrors);
+  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal);
   return displayListToPng(list, { ...size, signal: options.signal, fonts: faces, fallbacks });
 }
 

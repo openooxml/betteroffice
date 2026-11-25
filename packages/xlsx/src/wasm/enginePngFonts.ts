@@ -86,11 +86,12 @@ export interface DefaultSheetFaces {
  * as natively. An abort rejects at once without waiting for loads other exports may share.
  */
 export async function defaultSheetFaces(
-  requests: readonly SheetFontRequest[], signal?: AbortSignal, reported = new Set<Error>(),
+  requests: readonly SheetFontRequest[], signal?: AbortSignal,
 ): Promise<DefaultSheetFaces> {
   signal?.throwIfAborted();
   const loading = loadFonts().then(async (manager) => {
     const unavailable = new Set<string>();
+    const reported = new Set<Error>();
     const installedFace: InstalledFace = async (face) =>
       face && !unavailable.has(face.file) && await manager.bundledFaceInstalled(face).catch(() => true) ? face : undefined;
     const loadFace = async (face: BundledFontFace, family: string): Promise<PngFontFace | undefined> => {

@@ -1125,9 +1125,8 @@ function wrapWorkbookDocument(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
-  function pngEngine(reportedFontCdnErrors?: Set<Error>): XlsxPngEngine {
+  function pngEngine(): XlsxPngEngine {
     return {
-      reportedFontCdnErrors,
       doc: doc as unknown as XlsxPngEngine['doc'],
       onSheet: (sheet, read) => {
         const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
@@ -1416,8 +1415,7 @@ function wrapWorkbookDocument(
     renderPng(target: XlsxPngTarget, options: XlsxPngOptions = {}): Promise<Uint8Array> {
       try {
         const resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
-        const reported = Object.getOwnPropertyDescriptor(target, Symbol.for('@betteroffice/xlsx/reportedFontCdnErrors'))?.value as Set<Error> | undefined;
-        return renderEnginePng(pngEngine(reported), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
+        return renderEnginePng(pngEngine(), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
       } catch (error) {
         return Promise.reject(error);
       }
