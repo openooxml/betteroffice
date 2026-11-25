@@ -1,4 +1,5 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { missingWorkerRenderCapabilities } from '../../../../shared/office-session/render/workerCapabilities';
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -29,7 +30,7 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
  * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
  * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
  * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
- * `activeSlideIndex` the editor will use.
+ * `activeSlideIndex` and `slicedFonts` the editor will use.
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
   options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}): PreparedFontWorker {
@@ -37,7 +38,10 @@ export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
   if (!owner || owner.retired()) {
     owner = createPreparedFontWorker();
     preparedWorkers.set(source, owner);
-    if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, options.slicedFonts === true);
+    if (options.defaultFonts !== false) {
+      const sliced = options.slicedFonts ?? (typeof document === 'undefined' ? undefined : missingWorkerRenderCapabilities().length === 0);
+      owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, sliced);
+    }
   }
   return owner.handle();
 }
@@ -93,10 +97,11 @@ function createPreparedFontWorker() {
     retired: () => retired,
     shared: () => holders > 1,
     take,
-    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean): void {
+    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean | undefined): void {
       const fontCdn = getFontCdnConfiguration();
       void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
-        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: fontCdn ? [scripts, sliced, fontCdn] : sliced ? [scripts, true] : [scripts] }, []);
+        const args = fontCdn ? [scripts, sliced, fontCdn] : sliced === undefined ? [scripts] : [scripts, sliced];
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args }, []);
       }).catch(() => {});
     },
     /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */

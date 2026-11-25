@@ -47,7 +47,7 @@ export function prefetchCoverageFaces(
   void provider().then(async (source) => {
     for (const script of scripts) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
-      if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
+      if (load?.slices && sliced) {
         const { openSlicedFace } = await importProgressiveFonts();
         void openSlicedFace(load.slices).catch(() => {});
       } else void load?.().catch(() => {});
@@ -154,7 +154,7 @@ export function createCommandDefaultFonts(
         }
         if (!load) return undefined;
         available = true;
-        if (load.slices && sliced?.supported()) {
+        if (load.slices && sliced) {
           try {
             const { openSlicedFace } = await importProgressiveFonts();
             const opened = await openSlicedFace(load.slices);

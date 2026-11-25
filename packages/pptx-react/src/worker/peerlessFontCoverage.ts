@@ -95,27 +95,3 @@ export function createPeerlessFontCoverage(
   };
 }
 
-/** Installs complete faces for paints that do not prepare their text; callers during a load share it, and it reads again for them. */
-export function createWholeFontInstaller<Face extends { family: string }>(
-  read: (have: string[]) => Promise<readonly Face[]>,
-  install: (faces: Face[]) => Promise<readonly { family: string }[]>,
-  supplied: (family: string) => boolean,
-): () => Promise<void> {
-  const installed = new Set<string>();
-  let loading: Promise<void> | undefined;
-  let askedAgain = false;
-  return () => {
-    if (loading) {
-      askedAgain = true;
-      return loading;
-    }
-    return loading = (async () => {
-      do {
-        askedAgain = false;
-        const faces = (await read([...installed])).filter((face) => !supplied(face.family));
-        if (faces.length) for (const face of await install(faces)) installed.add(face.family);
-      } while (askedAgain);
-    })().finally(() => { loading = undefined; });
-  };
-}
-

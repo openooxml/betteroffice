@@ -84,8 +84,6 @@ export interface PeerlessPresentation {
   settlePrerendered?(slideId: string): void;
   /** Prepares a main-thread paint's text in the worker's sliced faces. */
   readonly fontCoverage?: PaintFontCoverage & { readonly thumbnails: PaintFontCoverage };
-  /** Installs complete faces for the paints that do not prepare their text: present mode and proposal review. */
-  ensureWholeFonts?(): Promise<void>;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
@@ -602,10 +600,6 @@ export function usePeerlessPresentation(
         if (fontCoverage) disposers.push(() => fontCoverage.dispose());
         run = {
           fontCoverage,
-          ensureWholeFonts: sliced?.createWholeFontInstaller(
-            async (have) => await client.wholeCoverageFonts?.(have) ?? [],
-            (faces) => installDefaultFonts(faces, installedFonts, current, warnFonts, (family) => !suppliedFamilies.has(family.trim().toLowerCase())),
-            (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual,

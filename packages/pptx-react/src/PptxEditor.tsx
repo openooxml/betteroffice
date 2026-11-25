@@ -8,6 +8,7 @@ import { LocaleProvider, useTranslation } from './i18n';
 import type { PptxCommandStore } from './commands/types';
 import type { PptxShortcuts } from './commands/shortcuts';
 import type { ShortcutIssue } from '../../../shared/keyboard/resolve';
+import { missingWorkerRenderCapabilities } from '../../../shared/office-session/render/workerCapabilities';
 import type { PptxEditorPluginProps, PptxPlugin } from './plugins/types';
 import type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 import type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -250,8 +251,8 @@ export interface PptxAsyncPresentationProps {
    */
   defaultFonts?: boolean;
   /**
-   * Loads bundled Chinese, Japanese and Korean faces in slices as text needs them, instead of whole, in Chromium and
-   * Firefox. Defaults to false.
+   * Loads bundled Chinese, Japanese and Korean faces in slices as text needs them.
+   * On by default in browsers that support worker rendering. Pass false to load whole faces.
    * @experimental
    */
   experimentalSlicedFonts?: boolean;
@@ -308,12 +309,16 @@ export function PptxEditor(props:
   CollaborationSessionProps | PptxLegacyEditorProps | GeneralEditorSessionProps): JSX.Element {
   const legacy = props[LEGACY_SYNC_API] === true;
   const descriptors = props.fonts.some((font) => 'face' in font);
+  const editorProps = { ...props,
+    experimentalSlicedFonts: !legacy && ((props as PptxAsyncEditorProps).experimentalSlicedFonts ??
+      (props.experimentalWorkerOpen !== false && missingWorkerRenderCapabilities().length === 0)),
+  };
   return (
     <LocaleProvider i18n={props.i18n}>
-      {descriptors ? <PptxBundledFontsEditor {...props} legacy={legacy} /> : legacy ? (
+      {descriptors ? <PptxBundledFontsEditor {...editorProps} legacy={legacy} /> : legacy ? (
         <PptxLegacySessionLoader editorProps={props as ResolvedFontProps<GeneralEditorSessionProps>} />
       ) : (
-        <PptxAsyncEditorRoot {...props as ResolvedFontProps<PptxAsyncEditorProps>} />
+        <PptxAsyncEditorRoot {...editorProps as ResolvedFontProps<PptxAsyncEditorProps>} />
       )}
     </LocaleProvider>
   );

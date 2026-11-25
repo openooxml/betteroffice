@@ -1731,8 +1731,11 @@ export function registerPresentationCommandHandlers(
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
       useFontCdn(configuration);
-      void commandDefaultFontModule.load().then((fonts) => {
-        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), sliced === true);
+      void commandDefaultFontModule.load().then(async (fonts) => {
+        const useSlices = sliced === undefined ? (await import('./commandSlicedFonts')).slicedFacesSupported() : sliced === true;
+        if (!disposed && !handle && !opening) {
+          fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices);
+        }
       }).catch(() => {});
     },
     readCoverageFont(_, family, text, have) {
