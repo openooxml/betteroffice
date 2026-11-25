@@ -1,5 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellValue, Error, NumberFormatMutation, SheetId, Workbook,
+    CalculationOptions, CellRange, CellRef, CellValue, Error, NumberFormatMutation, SheetId,
+    Workbook,
 };
 use xlsx_model::CellProvider;
 
@@ -568,14 +569,24 @@ fn assert_wrapped_a1_preserved(sheet_xml: &str, shared_strings: &[String]) {
 #[test]
 fn observe_wrapped_cells_after_save() {
     let cases = [
-        ("edit_sheet_keeps_wrapped_cell_once", SheetId(1), "B1", "=2+2"),
+        (
+            "edit_sheet_keeps_wrapped_cell_once",
+            SheetId(1),
+            "B1",
+            "=2+2",
+        ),
         (
             "recalc_dirtied_sheet_keeps_wrapped_cell_once",
             SheetId(0),
             "H1",
             "=2+3",
         ),
-        ("untouched_sheet_keeps_wrapper_bytes", SheetId(0), "A1", "20"),
+        (
+            "untouched_sheet_keeps_wrapper_bytes",
+            SheetId(0),
+            "A1",
+            "20",
+        ),
         (
             "edit_of_wrapped_cell_is_consistent_or_refused",
             SheetId(1),

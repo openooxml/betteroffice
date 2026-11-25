@@ -4422,9 +4422,12 @@ impl Workbook {
                 .iter()
                 .filter_map(|&row| row_at(row))
                 .map(|row| CellRef::new(row, range.start.col))
-                .chain(facts.alternate_cells.iter().filter_map(|&(row, col)| {
-                    Some(CellRef::new(row_at(row)?, col_at(col)?))
-                }))
+                .chain(
+                    facts
+                        .alternate_cells
+                        .iter()
+                        .filter_map(|&(row, col)| Some(CellRef::new(row_at(row)?, col_at(col)?))),
+                )
                 .find(|&at| range.contains(at))
         };
         if let Some(at) = blocked {

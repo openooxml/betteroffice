@@ -206,7 +206,8 @@ impl SheetPatch<'_> {
             element,
             rows,
             alternates,
-        }) = scan_sheet_data(source)? else {
+        }) = scan_sheet_data(source)?
+        else {
             return Ok(None);
         };
         #[cfg(any(test, feature = "test-oracle"))]
@@ -267,11 +268,16 @@ impl SheetPatch<'_> {
             let next_cell = cells.peek().map(|(at, _)| at.row);
             let next_height = heights.peek().copied();
             let next_style = row_styles.peek().copied();
-            let Some(row) = [next_source, next_cell, next_height, next_style, next_alternate]
-                .into_iter()
-                .flatten()
-                .min()
-            else {
+            let Some(row) = [
+                next_source,
+                next_cell,
+                next_height,
+                next_style,
+                next_alternate,
+            ]
+            .into_iter()
+            .flatten()
+            .min() else {
                 break;
             };
             if next_alternate == Some(row) {
@@ -1682,7 +1688,9 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<SourceSheetData>, ParseError> {
             },
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
-                if let Some((_, start, first)) = alternate.take_if(|(opened, _, _)| *opened == depth) {
+                if let Some((_, start, first)) =
+                    alternate.take_if(|(opened, _, _)| *opened == depth)
+                {
                     match &mut row {
                         Some(row) => row.alternates.push(SourceAlternate {
                             before: row.content_start(),

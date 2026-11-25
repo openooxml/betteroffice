@@ -23,7 +23,8 @@ pub(crate) enum PackageSlot {
 
 impl PackageSlot {
     pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts) -> Self {
-        let may_hold_alternate_cells = (0..PackageFactsView::from_facts(&facts).source_sheet_count())
+        let may_hold_alternate_cells = (0..PackageFactsView::from_facts(&facts)
+            .source_sheet_count())
             .map(|_| OnceLock::new())
             .collect();
         Self::Deferred {
@@ -221,9 +222,10 @@ impl PackageSlot {
         {
             return Ok(None);
         }
-        Ok(self.materialize()?.source_cell_facts(sheet).filter(|facts| {
-            !facts.alternate_cells.is_empty() || !facts.alternate_rows.is_empty()
-        }))
+        Ok(self
+            .materialize()?
+            .source_cell_facts(sheet)
+            .filter(|facts| !facts.alternate_cells.is_empty() || !facts.alternate_rows.is_empty()))
     }
 
     /// The parsed package, without parsing a deferred one.
