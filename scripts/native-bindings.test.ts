@@ -384,7 +384,21 @@ describe('native package release wiring', () => {
       );
       expect([...targets].sort()).toEqual([...manifest.napi.targets].sort());
     }
-    expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
+    expect(job.steps[0]).toEqual({
+      uses: 'actions/checkout@v7.0.1',
+      with: { ref: '${{ inputs.sha }}' }
+    });
+    expect(job.steps[1]).toEqual({
+      uses: 'actions/checkout@v7.0.1',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      with: {
+        ref: '${{ github.workflow_sha }}',
+        path: '.glibc-tools',
+        'sparse-checkout': 'scripts/cargo-glibc.sh\nscripts/glibc-floor.mjs\n',
+        'sparse-checkout-cone-mode': false,
+        'persist-credentials': false
+      }
+    });
     expect(publish.jobs.dist.uses).toBe('./.github/workflows/native-dist.yml');
     expect(publish.jobs.dist.with).toEqual({
       binding: '${{ inputs.binding }}',
@@ -408,21 +422,15 @@ describe('native package release wiring', () => {
     const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
     expect(cache.with.key).toBe(
       "${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && " +
-      "format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('scripts/cargo-glibc.sh', 'scripts/glibc-floor.mjs')) || '' }}"
+      "format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, " +
+      "hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}"
     );
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
     expect(job.steps[build - 1]).toEqual({
       name: 'Pin the glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: [
-        'if [[ ! -f scripts/cargo-glibc.sh ]]; then',
-        "  echo '::error::Missing scripts/cargo-glibc.sh. This commit predates the Zig glibc floor build.'",
-        '  exit 1',
-        'fi',
-        'echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"',
-        ''
-      ].join('\n')
+      run: 'echo "CARGO=$PWD/.glibc-tools/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"'
     });
     const wrapper = readFileSync(new URL('./cargo-glibc.sh', import.meta.url), 'utf8');
     expect(wrapper).toContain('import { GLIBC_FLOOR }');
@@ -433,7 +441,7 @@ describe('native package release wiring', () => {
       name: 'Check glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
+      run: 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
     });
     expect(GLIBC_FLOOR).toBe('2.17');
   });
@@ -486,13 +494,13 @@ describe('native package release wiring', () => {
       name: 'Smoke test on Debian 12',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
     });
     expect(steps[entries + 2]).toEqual({
       name: 'Smoke test on Debian 11',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: `docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+      run: `docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
     });
   });
 

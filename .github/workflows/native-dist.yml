@@ -52,6 +52,17 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
 
+      - uses: actions/checkout@v7.0.1
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .glibc-tools
+          sparse-checkout: |
+            scripts/cargo-glibc.sh
+            scripts/glibc-floor.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
@@ -65,7 +76,7 @@ jobs:
           workspaces: bindings
           key: >-
             ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') &&
-            format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('scripts/cargo-glibc.sh', 'scripts/glibc-floor.mjs')) || '' }}
+            format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig
@@ -83,12 +94,7 @@ jobs:
       - name: Pin the glibc floor
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: |
-          if [[ ! -f scripts/cargo-glibc.sh ]]; then
-            echo '::error::Missing scripts/cargo-glibc.sh. This commit predates the Zig glibc floor build.'
-            exit 1
-          fi
-          echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"
+        run: echo "CARGO=$PWD/.glibc-tools/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"
 
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked
@@ -96,7 +102,7 @@ jobs:
       - name: Check glibc floor
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
+        run: node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
 
       - name: Build the font packages
         shell: bash
@@ -112,12 +118,12 @@ jobs:
       - name: Smoke test on Debian 12
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Smoke test on Debian 11
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+        run: docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}

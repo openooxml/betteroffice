@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export const GLIBC_FLOOR = '2.17';
+const MAX_GCC_VERSION = '4.8.0';
 
 const PT_LOAD = 1;
 const PT_DYNAMIC = 2;
@@ -34,8 +35,13 @@ const ALLOWED_LIBRARIES = new Set([
 
 /** @param {string} a @param {string} b */
 export function compareGlibc(a, b) {
-  const left = a.replace(/^GLIBC_/, '').split('.').map(Number);
-  const right = b.replace(/^GLIBC_/, '').split('.').map(Number);
+  return compareVersionNumbers(a.replace(/^GLIBC_/, ''), b.replace(/^GLIBC_/, ''));
+}
+
+/** @param {string} a @param {string} b */
+function compareVersionNumbers(a, b) {
+  const left = a.split('.').map(Number);
+  const right = b.split('.').map(Number);
   for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
     const difference = (left[index] ?? 0) - (right[index] ?? 0);
     if (difference) return difference;
@@ -120,7 +126,7 @@ function readDynamic(bytes) {
 }
 
 /** @param {Uint8Array} bytes @returns {string[]} */
-export function requiredGlibcVersions(bytes) {
+function versionNeeds(bytes) {
   const dynamic = readDynamic(bytes);
   if (!dynamic) return [];
   const { tags, u16, u32, requireRange, mapAddress, stringReader } = dynamic;
@@ -145,9 +151,7 @@ export function requiredGlibcVersions(bytes) {
     if (auxOffset < VERNEED_SIZE) throw new Error('invalid ELF vn_aux offset');
     for (let item = 0, aux = need + auxOffset; item < count; item += 1) {
       requireRange(aux, VERNAUX_SIZE, 'Vernaux', needs.end);
-      const name = readString(u32(aux + 8), 'Vernaux name');
-      if (/^GLIBC_\d+\.\d+(?:\.\d+)?$/.test(name)) versions.add(name);
-      else if (name.startsWith('GLIBC_')) throw new Error(`unsupported glibc version need ${name}`);
+      versions.add(readString(u32(aux + 8), 'Vernaux name'));
 
       const next = u32(aux + 12);
       if (item + 1 < count ? next < VERNAUX_SIZE : next !== 0) {
@@ -161,7 +165,24 @@ export function requiredGlibcVersions(bytes) {
     }
     need += next;
   }
-  return [...versions].sort(compareGlibc);
+  return [...versions];
+}
+
+/** @param {string[]} versions @param {string} family */
+function numberedVersions(versions, family) {
+  const prefix = `${family.toUpperCase()}_`;
+  return versions.filter((name) => {
+    if (!name.startsWith(prefix)) return false;
+    if (!/^\d+\.\d+(?:\.\d+)?$/.test(name.slice(prefix.length))) {
+      throw new Error(`unsupported ${family} version need ${name}`);
+    }
+    return true;
+  }).sort((a, b) => compareVersionNumbers(a.slice(prefix.length), b.slice(prefix.length)));
+}
+
+/** @param {Uint8Array} bytes @returns {string[]} */
+export function requiredGlibcVersions(bytes) {
+  return numberedVersions(versionNeeds(bytes), 'glibc');
 }
 
 function dynamicSymbolCount({ tags, u32, requireRange, mapAddress }) {
@@ -259,7 +280,13 @@ function main(files) {
         console.error(`${file}: unversioned undefined symbol ${name}`);
         process.exitCode = 1;
       }
-      const version = requiredGlibcVersions(bytes).at(-1);
+      const versions = versionNeeds(bytes);
+      const gcc = numberedVersions(versions, 'GCC').at(-1);
+      if (gcc && compareVersionNumbers(gcc.slice('GCC_'.length), MAX_GCC_VERSION) > 0) {
+        console.error(`${file}: needs ${gcc} (maximum GCC_${MAX_GCC_VERSION})`);
+        process.exitCode = 1;
+      }
+      const version = numberedVersions(versions, 'glibc').at(-1);
       if (!version) throw new Error('no GLIBC version needs found');
       const max = version.slice('GLIBC_'.length);
       console.log(`${file}: needs GLIBC ${max} (floor ${GLIBC_FLOOR})`);

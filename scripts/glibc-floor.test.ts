@@ -237,6 +237,31 @@ test('the CLI checks every file, rejecting newer binaries and files without vers
   }
 });
 
+test('the CLI checks the GCC version ceiling and rejects unparseable GCC needs', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const file = join(directory, 'gcc.node');
+    for (const version of ['GCC_4.2.0', 'GCC_4.8', 'GCC_4.8.0']) {
+      writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], [version]]));
+      const result = cli(file);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+    }
+
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GCC_7.0.0', 'GCC_4.2.0']]));
+    const aboveCeiling = cli(file);
+    expect(aboveCeiling.status).toBe(1);
+    expect(aboveCeiling.stderr).toBe(`${file}: needs GCC_7.0.0 (maximum GCC_4.8.0)\n`);
+
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GCC_PRIVATE']]));
+    const unparseable = cli(file);
+    expect(unparseable.status).toBe(1);
+    expect(unparseable.stderr).toBe(`${file}: unsupported GCC version need GCC_PRIVATE\n`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('the CLI accepts the allowed shared libraries on x86_64 and aarch64', () => {
   const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
   try {
