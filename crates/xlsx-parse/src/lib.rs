@@ -53,7 +53,9 @@ pub use header_footer::{
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
-pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
+pub use package::{
+    PreservedPackage, SheetVisibility, SourceSheetKind, worksheet_has_alternate_content,
+};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
 pub use pictures::sheet_pictures;
@@ -73,7 +75,10 @@ pub use styles::legacy_style_reads;
 #[doc(hidden)]
 pub use styles::source_style_xml_markers;
 #[doc(hidden)]
-pub use write::{FragmentFailure, FragmentFailureReason, FragmentKind, PreservedFragmentFailure};
+pub use write::{
+    AlternateContentSources, FragmentFailure, FragmentFailureReason, FragmentKind,
+    PreservedFragmentFailure, validate_alternate_content,
+};
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

@@ -1,9 +1,11 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use ooxml_opc::SourceContainer;
-use xlsx_model::SheetPicture;
+use xlsx_model::{SheetPicture, Workbook as WorkbookModel};
 use xlsx_parse::{
-    PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage, SourceCellFacts,
+    AlternateContentSources, PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage,
+    SheetAxes,
 };
 
 use super::{SnapshotError, SnapshotResult};
@@ -17,29 +19,26 @@ pub(crate) enum PackageSlot {
         source: SourceContainer,
         facts: PackageFacts,
         rebuilt: OnceLock<std::result::Result<PreservedPackage, String>>,
-        may_hold_alternate_cells: Vec<OnceLock<bool>>,
+        alternate_validation: OnceLock<std::result::Result<AlternateContentSources, String>>,
     },
 }
 
 impl PackageSlot {
     pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts) -> Self {
-        let may_hold_alternate_cells = (0..PackageFactsView::from_facts(&facts)
-            .source_sheet_count())
-            .map(|_| OnceLock::new())
-            .collect();
         Self::Deferred {
             source,
             facts,
             rebuilt: OnceLock::new(),
-            may_hold_alternate_cells,
+            alternate_validation: OnceLock::new(),
         }
     }
 
     pub(crate) fn from_snapshot(
         source: SourceContainer,
-        facts: PackageFacts,
+        mut facts: PackageFacts,
     ) -> SnapshotResult<Self> {
         if PACKAGE_DEFERRED {
+            fill_legacy_alternate_content_facts(&source, &mut facts)?;
             Ok(Self::deferred(source, facts))
         } else {
             rebuild(&source)
@@ -204,28 +203,41 @@ impl PackageSlot {
         }
     }
 
-    pub(crate) fn alternate_cell_facts(&self, sheet: usize) -> Result<Option<&SourceCellFacts>> {
-        if self.materialized().is_none()
-            && let Self::Deferred {
-                may_hold_alternate_cells,
-                ..
-            } = self
-            && let Some(cached) = may_hold_alternate_cells.get(sheet)
-            && !cached.get_or_init(|| {
-                let marker = b"AlternateContent";
-                self.facts().source_sheet_part(sheet).is_none_or(|path| {
-                    self.part_bytes(path).is_none_or(|bytes| {
-                        bytes.windows(marker.len()).any(|window| window == marker)
-                    })
-                })
-            })
-        {
-            return Ok(None);
+    pub(crate) fn sheet_has_alternate_content(&self, sheet: usize) -> bool {
+        self.facts().source_sheet_has_alternate_content(sheet).unwrap_or(false)
+    }
+
+    pub(crate) fn validate_alternate_content(
+        &self,
+        workbook: &WorkbookModel,
+        origins: &[Option<usize>],
+        axes: &[Option<SheetAxes>],
+    ) -> Result<()> {
+        if let Some(package) = self.materialized() {
+            return Ok(xlsx_parse::validate_alternate_content(workbook, package, origins, axes)?);
         }
-        Ok(self
-            .materialize()?
-            .source_cell_facts(sheet)
-            .filter(|facts| !facts.alternate_cells.is_empty() || !facts.alternate_rows.is_empty()))
+        let Self::Deferred { source, facts, alternate_validation, .. } = self else {
+            unreachable!("a present package is materialized");
+        };
+        let sources = alternate_validation.get_or_init(|| {
+            let facts = PackageFactsView::from_facts(facts);
+            let mut omitted = HashSet::new();
+            let mut included = Vec::new();
+            for index in 0..facts.source_sheet_count() {
+                if let Some(path) = facts.source_sheet_part(index) {
+                    if self.sheet_has_alternate_content(index) {
+                        included.push((index, path));
+                    } else if facts.source_sheet_is_worksheet(index) {
+                        omitted.insert(path.trim_start_matches('/').to_ascii_lowercase());
+                    }
+                }
+            }
+            let parts = ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |path| {
+                !omitted.contains(&path.trim_start_matches('/').to_ascii_lowercase())
+            })?;
+            AlternateContentSources::from_parts(&parts, &included).map_err(|error| error.to_string())
+        }).as_ref().map_err(|error| Error::Package(error.clone()))?;
+        Ok(sources.validate(workbook, origins, axes)?)
     }
 
     /// The parsed package, without parsing a deferred one.
@@ -235,6 +247,39 @@ impl PackageSlot {
             Self::Deferred { rebuilt, .. } => rebuilt.get()?.as_ref().ok(),
         }
     }
+}
+
+fn fill_legacy_alternate_content_facts(
+    source: &SourceContainer,
+    facts: &mut PackageFacts,
+) -> SnapshotResult<()> {
+    let view = PackageFactsView::from_facts(facts);
+    let unknown = (0..view.source_sheet_count())
+        .filter(|&index| view.source_sheet_has_alternate_content(index).is_none())
+        .filter(|&index| view.source_sheet_is_worksheet(index))
+        .filter_map(|index| {
+            view.source_sheet_part(index)
+                .map(|path| (index, path.trim_start_matches('/').to_ascii_lowercase()))
+        })
+        .collect::<Vec<_>>();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let paths = unknown.iter().map(|(_, path)| path.clone()).collect::<HashSet<_>>();
+    let parts = ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |path| {
+        paths.contains(&path.trim_start_matches('/').to_ascii_lowercase())
+    }).map_err(SnapshotError::new)?;
+    let present = parts.iter().map(|(path, bytes)| {
+        xlsx_parse::worksheet_has_alternate_content(bytes)
+            .map(|present| (path.trim_start_matches('/').to_ascii_lowercase(), present))
+    }).collect::<std::result::Result<HashMap<_, _>, _>>()
+        .map_err(|error| SnapshotError::new(error.to_string()))?;
+    for (index, path) in unknown {
+        let present = present.get(&path)
+            .ok_or_else(|| SnapshotError::new(format!("Missing worksheet part {path}")))?;
+        facts.set_source_sheet_has_alternate_content(index, *present);
+    }
+    Ok(())
 }
 
 fn rebuild(source: &SourceContainer) -> std::result::Result<PreservedPackage, String> {
@@ -387,6 +432,37 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
                 inputs: vec![vec!["5".to_owned()]],
             })],
         }
+    }
+
+    #[test]
+    fn deferred_edit_does_not_probe_a_sheet_without_grid_wrappers() {
+        let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+        let (_, bytes) = parts.iter_mut()
+            .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+            .unwrap();
+        let xml = String::from_utf8(std::mem::take(bytes)).unwrap();
+        *bytes = xml.replace(
+            "</worksheet>",
+            concat!(
+                "<extLst><ext uri=\"urn:test\">",
+                "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\">",
+                "<mc:Choice Requires=\"x\" xmlns:x=\"urn:test:ext\"><x:item/></mc:Choice>",
+                "</mc:AlternateContent></ext></extLst></worksheet>",
+            ),
+        ).into_bytes();
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        workbook.defer_source_package_for_test().unwrap();
+        let before = rebuild_count();
+        let result = workbook.edit_cell(
+            SheetId(0), CellRef::new(0, 0), "5", CalculationOptions::default(),
+        ).unwrap();
+        assert!(result.applied);
+        assert_eq!(rebuild_count(), before);
+        assert!(workbook.source_package_is_unmaterialized_for_test());
+        let parts = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+        let reopened = xlsx_parse::parse_workbook(&parts).unwrap();
+        assert_eq!(reopened.sheets[0].cell(CellRef::new(0, 0)).unwrap().value, CellValue::Number { value: 5.0 });
+        assert_eq!(reopened.sheets[0].cell(CellRef::new(0, 1)).unwrap().value, CellValue::Number { value: 6.0 });
     }
 
     #[test]

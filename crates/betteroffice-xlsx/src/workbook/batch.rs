@@ -1337,21 +1337,6 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(ops.len());
         for (step, op) in &ops {
             validate_op(&preview, op)?;
-            match self.ensure_alternate_cell_op(&self.preserved.origins, &self.preserved.axes, op) {
-                Ok(()) => {}
-                Err(error @ Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
-                    let planned = &steps[*step as usize];
-                    return refuse(
-                        failure(
-                            EditFailureCode::Unsupported,
-                            error.to_string(),
-                            Some(planned.target.clone()),
-                        )
-                        .at(*step),
-                    );
-                }
-                Err(error) => return Err(error),
-            }
             let formats = preview.styles.cell_xfs.len();
             let inverse = match xlsx_ops::apply_in_place(&mut preview, op) {
                 Ok(inverse) => inverse.0,
@@ -1457,10 +1442,24 @@ impl Workbook {
         request: &EditRequest,
         allow_protected: bool,
     ) -> Result<ValidationOutcome> {
-        let plan = match self.plan(request, allow_protected)? {
+        let mut plan = match self.plan(request, allow_protected)? {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        if self.has_alternate_content() && let Some(prepared) = &mut plan.staged {
+            let seeds = edit_seeds(&plan.steps, &plan.changed);
+            self.recalculate_edit_preview(&mut prepared.model, &seeds, request.calculation.now_serial);
+            match self.validate_alternate_preview(&prepared.model, &self.preserved) {
+                Ok(()) => {}
+                Err(error @ Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
+                    return Ok(Err(refusal(
+                        plan.base_version,
+                        failure(EditFailureCode::Unsupported, error.to_string(), None),
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(Ok(EditValidation {
             base_version: plan.base_version,
             would_apply: plan.staged.is_some(),
@@ -1530,26 +1529,9 @@ impl Workbook {
                 calculation: EditCalculation::default(),
             }));
         };
-        let seeds = steps
-            .iter()
-            .zip(&changed)
-            .filter(|(planned, _)| planned.claims.content)
-            .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
-            .collect::<Vec<_>>();
-        let mut graph = DepGraph::build(&prepared.model);
-        // the staged values were computed before the batch, so a batch that
-        // changes the currency evidence recalculates every formula
-        graph.computed_with_currency_of(&self.model);
-        match &self.graph {
-            Some(previous) => graph.adopt_unevaluated(previous),
-            None => super::assume_unevaluated(&graph, &self.last_calculation),
-        }
-        let recalculated = recalc_after_with_seed(
-            &mut prepared.model,
-            &mut graph,
-            &seeds,
-            request.calculation.now_serial,
-            self.rand_seed,
+        let seeds = edit_seeds(&steps, &changed);
+        let (graph, recalculated) = self.recalculate_edit_preview(
+            &mut prepared.model, &seeds, request.calculation.now_serial,
         );
         let changed_sheets = steps
             .iter()
@@ -1593,7 +1575,16 @@ impl Workbook {
                 ),
             )));
         }
-        let update = self.commit_prepared(prepared)?;
+        let update = match self.commit_prepared(prepared) {
+            Ok(update) => update,
+            Err(error @ Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
+                return Ok(Err(refusal(
+                    self.version(),
+                    failure(EditFailureCode::Unsupported, error.to_string(), None),
+                )));
+            }
+            Err(error) => return Err(error),
+        };
         self.dirty_geometry_cells(&recalculated.changed);
         self.graph = Some(graph);
         self.mark_graph_current();
@@ -1601,6 +1592,30 @@ impl Workbook {
         self.calculated_now = request.calculation.now_serial;
         self.publish(update);
         Ok(Ok(application))
+    }
+
+    fn recalculate_edit_preview(
+        &self,
+        model: &mut xlsx_model::Workbook,
+        seeds: &[(SheetId, CellRef)],
+        now_serial: Option<f64>,
+    ) -> (DepGraph, RecalcResult) {
+        let mut graph = DepGraph::build(model);
+        // the staged values were computed before the batch, so a batch that
+        // changes the currency evidence recalculates every formula
+        graph.computed_with_currency_of(&self.model);
+        match &self.graph {
+            Some(previous) => graph.adopt_unevaluated(previous),
+            None => super::assume_unevaluated(&graph, &self.last_calculation),
+        }
+        let recalculated = recalc_after_with_seed(
+            model,
+            &mut graph,
+            seeds,
+            now_serial,
+            self.rand_seed,
+        );
+        (graph, recalculated)
     }
 
     /// [`Workbook::read_cells`] over JSON. An oversized request or response is refused with
@@ -1718,6 +1733,14 @@ fn encode<T: Serialize>(outcome: &std::result::Result<T, EditRefusal>) -> Result
 }
 
 /// Calculation diagnostics beyond the written `seeds`, each list capped.
+fn edit_seeds(steps: &[Planned], changed: &[Vec<CellRef>]) -> Vec<(SheetId, CellRef)> {
+    steps.iter()
+        .zip(changed)
+        .filter(|(planned, _)| planned.claims.content)
+        .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
+        .collect()
+}
+
 fn edit_calculation(
     keys: &[String],
     result: &RecalcResult,

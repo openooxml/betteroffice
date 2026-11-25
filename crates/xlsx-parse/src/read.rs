@@ -70,6 +70,13 @@ pub struct LegacySheetDimensions {
 pub(crate) fn parse_workbook_indexed(
     parts: &[(String, Vec<u8>)],
 ) -> Result<IndexedWorkbook, ParseError> {
+    parse_workbook_indexed_subset(parts, None)
+}
+
+pub(crate) fn parse_workbook_indexed_subset(
+    parts: &[(String, Vec<u8>)],
+    included: Option<&BTreeSet<usize>>,
+) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
     let meta = parse_workbook_xml(wb_xml)?;
@@ -94,6 +101,13 @@ pub(crate) fn parse_workbook_indexed(
     let mut tables = Vec::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
         xlsx_model::progress::pulse();
+        if included.is_some_and(|included| !included.contains(&idx)) {
+            sheets.push(Sheet::new(&entry.name));
+            shared_string_cells.push(SharedStringCells::new());
+            cell_facts.push(WorksheetCellFacts::default());
+            legacy_dimensions.push(LegacySheetDimensions::default());
+            continue;
+        }
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             let mut sheet = Sheet::new(&entry.name);
@@ -697,6 +711,15 @@ pub struct SourceCellFacts {
     pub alternate_formulas: bool,
     pub alternate_cells: BTreeSet<(u32, u32)>,
     pub alternate_rows: BTreeSet<u32>,
+    pub(crate) alternate_spans: Vec<crate::patch::AlternateSpan>,
+    pub(crate) non_inert_alternate: bool,
+    pub(crate) alternate_formula_texts: Vec<String>,
+}
+
+impl SourceCellFacts {
+    pub fn has_sheet_data_alternates(&self) -> bool {
+        self.non_inert_alternate || !self.alternate_spans.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -756,8 +779,6 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
-    let mut sheet_data_depth = None;
-    let mut grid_alternate = None;
     let mut seen_view = false;
 
     loop {
@@ -806,7 +827,6 @@ fn parse_worksheet(
                 }
             }
             Event::Start(e) => match local_name(&e).as_slice() {
-                b"sheetData" => sheet_data_depth = Some(depth),
                 b"row" => {
                     let row = match attr(&e, b"r")? {
                         Some(v) => parse_index(&v, MAX_ROWS)?,
@@ -814,9 +834,6 @@ fn parse_worksheet(
                     };
                     cur_row = Some(row);
                     col_cursor = 0;
-                    if grid_alternate.is_some() {
-                        facts.source.alternate_rows.insert(row);
-                    }
                     if attr(&e, b"customFormat")?.is_some_and(|value| is_truthy(&value)) {
                         let style = attr(&e, b"s")?
                             .and_then(|value| value.parse::<u32>().ok())
@@ -854,9 +871,6 @@ fn parse_worksheet(
                         None => CellRef::new(cur_row.unwrap_or(0), col_cursor),
                     };
                     col_cursor = addr.col;
-                    if grid_alternate.is_some() {
-                        facts.source.alternate_cells.insert((addr.row, addr.col));
-                    }
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
                         depth,
@@ -868,13 +882,6 @@ fn parse_worksheet(
                 }
                 b"AlternateContent" => {
                     alternate_depth += 1;
-                    if grid_alternate.is_none()
-                        && sheet_data_depth.is_some_and(|open| {
-                            depth == open + 1 || (depth == open + 2 && cur_row.is_some())
-                        })
-                    {
-                        grid_alternate = Some(depth);
-                    }
                 }
                 b"mergeCell" => {
                     if let Some(r) = attr(&e, b"ref")? {
@@ -941,12 +948,8 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
-                    b"sheetData" if sheet_data_depth == Some(depth + 1) => sheet_data_depth = None,
                     b"AlternateContent" => {
                         alternate_depth = alternate_depth.saturating_sub(1);
-                        if grid_alternate == Some(depth + 1) {
-                            grid_alternate = None;
-                        }
                     }
                     _ => {}
                 }

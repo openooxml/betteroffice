@@ -63,7 +63,7 @@ impl PackageFactsEncoder {
             match self.record_index {
                 0 => {
                     writer.uint(0);
-                    writer.uint(2);
+                    writer.uint(3);
                     writer.bool(any_uncached_formula(package));
                     writer.usize(sheets);
                     writer.usize(references.len());
@@ -125,7 +125,7 @@ impl PackageFactsEncoder {
             match self.record_index {
                 0 => {
                     writer.uint(0);
-                    writer.uint(2);
+                    writer.uint(3);
                     writer.bool(facts.any_uncached_formula);
                     writer.usize(sheets);
                     writer.usize(references);
@@ -364,7 +364,7 @@ impl PackageFactsBuilder {
         match self.expected {
             None => {
                 self.version = reader.uint()?;
-                if tag != 0 || !matches!(self.version, 1 | 2) {
+                if tag != 0 || !matches!(self.version, 1..=3) {
                     return Err(malformed("invalid facts header"));
                 }
                 self.facts.any_uncached_formula = reader.bool()?;
@@ -432,6 +432,7 @@ fn encode_sheet(writer: &mut Writer, sheet: &SheetFacts) {
         protected,
         format_cells,
         header_footer,
+        sheet_data_alternates,
     } = sheet;
     writer.string(path);
     writer.uint(match kind {
@@ -461,11 +462,17 @@ fn encode_sheet(writer: &mut Writer, sheet: &SheetFacts) {
             writer.bytes(bytes);
         }
     }
+    writer.uint(match sheet_data_alternates {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    });
 }
 
 fn decode_sheet(reader: &mut Reader<'_>, version: u64) -> Result<SheetFacts, ParseError> {
     let mut sheet = SheetFacts {
         header_footer: None,
+        sheet_data_alternates: None,
         path: reader.string()?,
         kind: match reader.uint()? {
             0 => SourceSheetKind::Worksheet,
@@ -498,6 +505,14 @@ fn decode_sheet(reader: &mut Reader<'_>, version: u64) -> Result<SheetFacts, Par
             1 => Some(None),
             2 => Some(Some(reader.bytes()?.to_vec())),
             _ => return Err(malformed("invalid facts header footer")),
+        };
+    }
+    if version >= 3 {
+        sheet.sheet_data_alternates = match reader.uint()? {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err(malformed("invalid sheet alternate content fact")),
         };
     }
     Ok(sheet)
@@ -667,7 +682,7 @@ mod tests {
         let mut framed = Writer::default();
         let mut header = Writer::default();
         header.uint(0);
-        header.uint(2);
+        header.uint(3);
         header.bool(*any_uncached_formula);
         header.usize(sheets.len());
         header.usize(references.len());
@@ -711,11 +726,19 @@ mod tests {
                 "<headerFooter><oddHeader>&amp;P</oddHeader></headerFooter></worksheet>",
             )
             .into_bytes();
+        let sheet = parts.iter_mut()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        sheet.1 = concat!(
+            r#"<worksheet xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test:ext">"#,
+            r#"<sheetData><row r="1"><mc:AlternateContent><mc:Choice Requires="x">"#,
+            r#"<c r="A1"><v>1</v></c></mc:Choice></mc:AlternateContent></row></sheetData></worksheet>"#,
+        ).as_bytes().to_vec();
         crate::parse_workbook_with_package(&parts).unwrap().package
     }
 
     #[test]
-    fn facts_v2_keeps_header_footer_bytes_through_both_encoders() {
+    fn facts_keep_header_footer_bytes_and_grid_wrapper_flags_through_both_encoders() {
         let package = header_footer_facts_fixture();
         let facts = PackageFacts::from_package(&package);
         for from_facts in [false, true] {
@@ -741,6 +764,8 @@ mod tests {
             );
             assert_eq!(view.source_sheet_header_footer(1), Some(None));
             assert_eq!(view.source_sheet_header_footer(2), None);
+            assert_eq!(view.source_sheet_has_alternate_content(0), Some(false));
+            assert_eq!(view.source_sheet_has_alternate_content(1), Some(true));
             assert_eq!(decoded, facts);
         }
         let mut encoder = PackageFactsEncoder::new();
@@ -748,11 +773,11 @@ mod tests {
         let mut frame = Reader::new(&bytes);
         let mut header = Reader::new(frame.bytes().unwrap());
         assert_eq!(header.uint().unwrap(), 0);
-        assert_eq!(header.uint().unwrap(), 2);
+        assert_eq!(header.uint().unwrap(), 3);
     }
 
     #[test]
-    fn facts_v1_sheet_records_have_unknown_header_footer() {
+    fn facts_v1_sheet_records_have_unknown_header_footer_and_grid_wrappers() {
         let mut header = Writer::default();
         header.uint(0);
         header.uint(1);
@@ -779,13 +804,14 @@ mod tests {
             Some(SheetVisibility::Visible)
         );
         assert_eq!(view.source_sheet_header_footer(0), None);
+        assert_eq!(view.source_sheet_has_alternate_content(0), None);
     }
 
     #[test]
-    fn facts_v3_header_is_rejected() {
+    fn facts_unknown_version_is_rejected() {
         let mut header = Writer::default();
         header.uint(0);
-        header.uint(3);
+        header.uint(4);
         header.bool(false);
         header.usize(0);
         header.usize(0);
@@ -897,6 +923,7 @@ mod tests {
         expected.sheets.extend([
             SheetFacts {
                 header_footer: None,
+                sheet_data_alternates: None,
                 path: String::new(),
                 kind: SourceSheetKind::Dialogsheet,
                 visibility: SheetVisibility::VeryHidden,
@@ -906,6 +933,7 @@ mod tests {
             },
             SheetFacts {
                 header_footer: None,
+                sheet_data_alternates: None,
                 path: "macro".to_owned(),
                 kind: SourceSheetKind::Macrosheet,
                 visibility: SheetVisibility::Unknown,
@@ -915,6 +943,7 @@ mod tests {
             },
             SheetFacts {
                 header_footer: None,
+                sheet_data_alternates: None,
                 path: "other".to_owned(),
                 kind: SourceSheetKind::Other,
                 visibility: SheetVisibility::Visible,

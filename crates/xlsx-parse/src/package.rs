@@ -98,15 +98,18 @@ impl PreservedPackage {
             let relationship_type = relationship
                 .and_then(|relationship| relationship.attribute("Type"))
                 .map(str::to_owned);
+            let template = XmlTemplate::capture(bytes)?;
+            let mut facts = cell_facts.next().unwrap_or_default();
+            template.capture_sheet_data_alternates(bytes, &mut facts.source)?;
             sheets.push(PreservedSheet {
                 path,
                 relationship_id: entry.relationship_id,
                 relationship_type,
                 sheet_id: entry.sheet_id.unwrap_or((index + 1) as u32),
                 attributes: entry.attributes,
-                template: XmlTemplate::capture(bytes)?,
+                template,
                 shared_string_cells: shared_string_cells.get(index).cloned().unwrap_or_default(),
-                cell_facts: cell_facts.next().unwrap_or_default(),
+                cell_facts: facts,
             });
         }
 
@@ -886,6 +889,7 @@ pub(crate) struct XmlTemplate {
     root_prefix: Option<String>,
     root_namespace: Option<String>,
     namespaces: Vec<(Option<String>, String)>,
+    has_sheet_data_alternates: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -894,6 +898,42 @@ pub(crate) struct XmlChild {
     pub(crate) local_name: String,
     pub(crate) bytes: Vec<u8>,
     namespace: Option<String>,
+}
+
+#[doc(hidden)]
+pub fn worksheet_has_alternate_content(bytes: &[u8]) -> Result<bool, ParseError> {
+    let mut reader = Reader::from_reader(bytes);
+    let mut depth = 0;
+    let mut grid = false;
+    loop {
+        let event = reader.read_event().map_err(xml_err)?;
+        match event {
+            Event::Start(element) => {
+                let name = element.local_name();
+                if depth == 1 {
+                    grid = name.as_ref() == b"sheetData";
+                }
+                if grid && name.as_ref() == b"AlternateContent" {
+                    return Ok(true);
+                }
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return Err(ParseError::DepthExceeded);
+                }
+            }
+            Event::Empty(element) if grid && element.local_name().as_ref() == b"AlternateContent" => {
+                return Ok(true);
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 1 {
+                    grid = false;
+                }
+            }
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
 }
 
 impl XmlTemplate {
@@ -985,6 +1025,7 @@ impl XmlTemplate {
         let mut namespaces = Vec::new();
         let mut active_child: Option<(usize, String, Option<String>)> = None;
         let mut spans = Vec::new();
+        let mut has_sheet_data_alternates = false;
 
         loop {
             let before = bom + reader.buffer_position() as usize - context_len;
@@ -992,6 +1033,12 @@ impl XmlTemplate {
             xlsx_model::progress::tick();
             let namespace = resolved_namespace(namespace);
             let after = bom + reader.buffer_position() as usize - context_len;
+            if active_child.as_ref().is_some_and(|(_, name, _)| name == "sheetData")
+                && matches!(&event, Event::Start(element) | Event::Empty(element)
+                    if element.local_name().as_ref() == b"AlternateContent")
+            {
+                has_sheet_data_alternates = true;
+            }
             match event {
                 Event::Start(element) => {
                     if depth == 0 {
@@ -1071,6 +1118,7 @@ impl XmlTemplate {
             root_prefix,
             root_namespace,
             namespaces,
+            has_sheet_data_alternates,
         })
     }
 
@@ -1101,7 +1149,47 @@ impl XmlTemplate {
             root_name,
             root_namespace: namespace,
             namespaces: namespace_bindings(element)?,
+            has_sheet_data_alternates: false,
         })
+    }
+
+    pub(crate) fn capture_sheet_data_alternates(
+        &self,
+        bytes: &[u8],
+        facts: &mut SourceCellFacts,
+    ) -> Result<(), ParseError> {
+        if self.has_sheet_data_alternates {
+            crate::patch::scan_alternate_content(bytes, self.sheet_data_namespace_stable()?, facts)?;
+            if !facts.non_inert_alternate {
+                facts.non_inert_alternate = match self.child("sheetData") {
+                    Some(child) => !crate::patch::patchable_alternate_grid(
+                        &child.bytes,
+                        facts.alternate_spans.len(),
+                    )?,
+                    None => true,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    fn sheet_data_namespace_stable(&self) -> Result<bool, ParseError> {
+        let Some(grid) = self.child("sheetData") else {
+            return Ok(false);
+        };
+        let mut reader = Reader::from_reader(grid.bytes.as_slice());
+        let Event::Start(tag) = reader.read_event().map_err(xml_err)? else {
+            return Ok(false);
+        };
+        let local = namespace_bindings(&tag)?;
+        let default = local
+            .iter()
+            .chain(&self.namespaces)
+            .find(|(prefix, _)| prefix.is_none())
+            .map(|(_, namespace)| namespace.as_str())
+            .filter(|namespace| !namespace.is_empty());
+        Ok(self.root_namespace.as_deref() == default
+            && self.root_prefix.as_ref().is_none_or(|_| default.is_some()))
     }
 
     /// Replaces modeled children in place; children outside the root namespace
@@ -1119,8 +1207,12 @@ impl XmlTemplate {
                 replacements.insert(name, bytes);
                 replacements
             });
-        for bytes in replacements.values_mut().flatten() {
-            *bytes = self.qualify_fragment(bytes)?;
+        for (name, bytes) in &mut replacements {
+            if let Some(bytes) = bytes
+                && !(name == "sheetData" && self.has_sheet_data_alternates)
+            {
+                *bytes = self.qualify_fragment(bytes)?;
+            }
         }
         let source_names = self
             .children

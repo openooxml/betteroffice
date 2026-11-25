@@ -6,7 +6,7 @@ use xlsx_ops::Op;
 
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
-    retain_array_formulas, retain_formula_caches, validate_collaboration_size,
+    retain_array_formulas, retain_formula_caches, retain_hidden_row_heights, validate_collaboration_size,
     validate_collaboration_state,
 };
 use crate::Result;
@@ -103,6 +103,7 @@ impl Workbook {
                 let mut model = std::mem::take(&mut authority.model);
                 retain_formula_caches(&self.model, &mut model);
                 retain_array_formulas(&self.model, &mut model);
+                retain_hidden_row_heights(&self.model, &mut model);
                 model
             }
             WorkbookMode::Standalone => staged.model,
@@ -152,6 +153,24 @@ impl Workbook {
             }
             _ => None,
         };
+        if self.has_alternate_content() {
+            let mut preserved = self.preserved.clone();
+            for op in &ops {
+                match *op {
+                    Op::AddSheet { index, .. } => preserved.insert(index),
+                    Op::RemoveSheet { index } => preserved.remove(index),
+                    Op::MoveSheet { from, to } => preserved.move_sheet(from, to),
+                    Op::InsertRows { sheet, .. }
+                    | Op::DeleteRows { sheet, .. }
+                    | Op::InsertCols { sheet, .. }
+                    | Op::DeleteCols { sheet, .. }
+                    | Op::MoveRows { sheet, .. }
+                    | Op::MoveCols { sheet, .. } => preserved.shift(sheet, op),
+                    _ => {}
+                }
+            }
+            self.validate_alternate_preview(&model, &preserved)?;
+        }
         let recorded = history == CommitHistory::Separate;
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
         let rebased = self.rebased_proposals(&ops);
