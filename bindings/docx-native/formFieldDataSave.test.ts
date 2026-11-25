@@ -46,24 +46,49 @@ async function docx(body: string, namespaces = ''): Promise<Uint8Array> {
 
 const documentXml = async (bytes: Uint8Array) => (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string');
 
-test('native model writers without a plan keep every unedited part', async () => {
-  const source = await docx(FORM_PARAGRAPH + '<w:p><w:proofErr w:type="spellStart"/></w:p>');
+test('native model writers preserve an unedited archive and reopen a model edit', async () => {
+  const sourceBody = FORM_PARAGRAPH + OTHER_PARAGRAPH + '<w:p><w:proofErr w:type="spellStart"/></w:p>';
+  const zip = await JSZip.loadAsync(await docx(sourceBody));
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>',
+    "<Override PartName='/word/header1.xml' ContentType='application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'/></Types>"));
+  zip.file('word/_rels/document.xml.rels', "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>" +
+    "<Relationship Id='rId7' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/header' Target='header1.xml'/></Relationships>");
+  zip.file('word/header1.xml', `<w:hdr xmlns:w="${W}"><w:p>${text('Header')}</w:p></w:hdr>`);
+  const source = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
   const { document: { package: pkg } } = JSON.parse(parse_docx_s9(source, ''));
-  const { content, finalSectionProperties, customRootBindings, comments } = pkg.document;
-  const request = JSON.stringify({
+  const request = {
     determinism: { seed: '0'.repeat(64), now: '2030-01-02T03:04:05.006Z' },
-    document: { content, finalSectionProperties, customRootBindings, comments },
+    document: pkg.document,
+    headerEntries: pkg.headerEntries,
     relationshipEntries: pkg.relationshipEntries,
     options: { updateModifiedDate: false },
-  });
-  const framed = write_docx_s13_wasm_with_warnings(request, source);
-  const frameLength = new DataView(framed.buffer, framed.byteOffset).getBigUint64(0, true);
+  };
+  const withWarnings = () => {
+    const framed = write_docx_s13_wasm_with_warnings(JSON.stringify(request), source);
+    const length = Number(new DataView(framed.buffer, framed.byteOffset).getBigUint64(0, true));
+    return {
+      bytes: framed.subarray(8 + length),
+      warnings: JSON.parse(new TextDecoder().decode(framed.subarray(8, 8 + length))) as string[],
+    };
+  };
+  expect(write_docx_s13_wasm(JSON.stringify(request), source)).toEqual(source);
+  expect(withWarnings().bytes).toEqual(source);
+
+  request.document.content[1].content[0].content[0].text = 'Other edited';
+  const reported = withWarnings();
+  expect(reported.warnings.some(warning => warning.startsWith('DOCX_PART_REWRITTEN word/document.xml '))).toBe(true);
   const before = await JSZip.loadAsync(source);
-  for (const bytes of [write_docx_s13_wasm(request, source), framed.subarray(8 + Number(frameLength))]) {
+  for (const bytes of [write_docx_s13_wasm(JSON.stringify(request), source), reported.bytes]) {
+    const reopened = JSON.parse(parse_docx_s9(bytes, '')).document.package.document;
+    expect(reopened.content[1].content[0].content[0].text).toBe('Other edited');
     const after = await JSZip.loadAsync(bytes);
-    expect(Object.keys(after.files).sort()).toEqual(Object.keys(before.files).sort());
+    const members = (archive: JSZip) => Object.values(archive.files).filter(entry => !entry.dir).map(entry => entry.name).sort();
+    expect(members(after)).toEqual(members(before));
     for (const [path, entry] of Object.entries(before.files)) {
-      expect(await after.files[path]!.async('uint8array')).toEqual(await entry.async('uint8array'));
+      if (path !== 'word/document.xml' && !entry.dir) {
+        expect(await after.files[path]!.async('uint8array')).toEqual(await entry.async('uint8array'));
+      }
     }
   }
 });

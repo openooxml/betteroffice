@@ -68,13 +68,14 @@ impl Default for SaveOptions {
 #[derive(Clone, Debug)]
 pub struct SaveReport {
     pub bytes: Vec<u8>,
+    /// Non-fatal save diagnostics.
+    pub warnings: Vec<String>,
     pub kept_unchanged: Option<KeptUnchanged>,
     /// Structure the save dropped from the body, header, footer and note parts it wrote whole,
     /// part by part; comment parts are not checked. `None` means none was found only when
     /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     pub structure_dropped: Option<Vec<DroppedStructure>>,
-    /// The save had no session plan and wrote the document's stories from the model:
-    /// structure the model does not carry may be gone and is not itemised in `structure_dropped`.
+    /// The save fell back to writing stories from the model without a verified part plan.
     pub whole_model_write: bool,
 }
 

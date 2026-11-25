@@ -488,8 +488,62 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
     build_media_map_with_warnings(parts).0
 }
 
+pub(crate) fn build_save_media_map(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
+    use quick_xml::events::Event;
+
+    if !parts.iter().any(|(path, _)| is_media_path(path)) {
+        return (MediaMap::new(), Vec::new());
+    }
+    let mut targets = std::collections::HashSet::new();
+    for (path, xml) in parts {
+        if !path.to_ascii_lowercase().ends_with(".rels") {
+            continue;
+        }
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(tag) | Event::Empty(tag))
+                    if tag.local_name().as_ref() == b"Relationship" =>
+                {
+                    for attribute in tag.attributes().flatten() {
+                        if attribute.key.as_ref() != b"Target" {
+                            continue;
+                        }
+                        #[allow(deprecated)]
+                        let Ok(value) = attribute.decode_and_unescape_value(reader.decoder()) else {
+                            return build_media_map_with_warnings(parts);
+                        };
+                        let target = normalize_media_path(&value);
+                        if is_media_path(&target) {
+                            targets.insert(target.to_ascii_lowercase());
+                        }
+                        let target = value.trim_start_matches('/');
+                        if is_media_path(target) {
+                            targets.insert(target.to_ascii_lowercase());
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => return build_media_map_with_warnings(parts),
+                _ => {}
+            }
+        }
+    }
+    if targets.is_empty() {
+        return (MediaMap::new(), Vec::new());
+    }
+    build_media_map_for(parts, |path| targets.contains(&path.to_ascii_lowercase()))
+}
+
 /// Media map plus one warning per part that could not be transcoded for display.
 pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
+    build_media_map_for(parts, |_| true)
+}
+
+fn build_media_map_for(
+    parts: &[(String, Vec<u8>)],
+    include: impl Fn(&str) -> bool,
+) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
     let mut warnings = Vec::new();
     let mut budget = DisplayBudget::default();
@@ -497,10 +551,13 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         if !is_media_path(path) {
             continue;
         }
-        let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
         let (data, mime_type, warning) =
             display_form(data, media_mime_type(path), path, &mut budget);
+        if !include(path) {
+            continue;
+        }
         warnings.extend(warning);
+        let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
         let file = Arc::new(MediaFile {

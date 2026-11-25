@@ -969,6 +969,9 @@ impl PyPng {
 #[pyclass(module = "betteroffice_docx", name = "SaveReport", frozen)]
 pub struct PySaveReport {
     data: Vec<u8>,
+    /// Non-fatal save diagnostics.
+    #[pyo3(get)]
+    warnings: Vec<String>,
     #[pyo3(get)]
     kept_unchanged: Option<PyKeptUnchanged>,
     /// Structure the save dropped from the body, header, footer and note parts it wrote whole,
@@ -976,8 +979,7 @@ pub struct PySaveReport {
     /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     #[pyo3(get)]
     structure_dropped: Option<Vec<PyDroppedStructure>>,
-    /// The save had no session plan and wrote the document's stories from the model:
-    /// structure the model does not carry may be gone and is not itemised in `structure_dropped`.
+    /// The save fell back to writing stories from the model without a verified part plan.
     #[pyo3(get)]
     whole_model_write: bool,
 }
@@ -986,6 +988,7 @@ impl PySaveReport {
     fn from_core(report: SaveReport) -> Self {
         Self {
             data: report.bytes,
+            warnings: report.warnings,
             kept_unchanged: report.kept_unchanged.map(PyKeptUnchanged::from_core),
             structure_dropped: report.structure_dropped.map(|structures| {
                 structures

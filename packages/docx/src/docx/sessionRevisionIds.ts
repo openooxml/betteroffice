@@ -13,13 +13,15 @@ const ANNOTATIONS = new Set([
 ]);
 const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 
-const sessionInfos = new WeakSet<object>();
+const sessionInfos = new WeakMap<object, unknown>();
 let marked = false;
 
 /** Notes `info` for the save; a `session` info's id is a placeholder until then. @internal */
 export function markRevisionInfo<T extends object>(info: T, session: boolean): T {
-  if (session) sessionInfos.add(info);
-  marked = true;
+  if (session) {
+    sessionInfos.set(info, (info as { id?: unknown }).id);
+    marked = true;
+  }
   return info;
 }
 
@@ -29,15 +31,7 @@ interface Site {
   info: { id: unknown };
 }
 
-/**
- * Runs `write` with each session revision in `tree` given one Word id, shared
- * by all its elements, then restores the placeholders. Ids are numbered in
- * document order above every non-comment annotation id the tree holds,
- * skipping any id already in use and wrapping to the lowest free id past 2^31 - 1.
- * @internal
- */
-export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
-  if (!marked) return write();
+function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number> } {
   const sites: Site[] = [];
   let max = 0;
   const used = new Set<number>();
@@ -56,6 +50,10 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
       sites.push({ holder, key, info: value as Site['info'] });
       return;
     }
+    if (value instanceof Map) {
+      for (const child of value.values()) visit(child, {}, '');
+      return;
+    }
     if (Array.isArray(value)) {
       value.forEach((entry, index) => visit(entry, value as unknown as Site['holder'], index));
       return;
@@ -71,21 +69,76 @@ export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
     for (const child of Object.keys(record)) visit(record[child], record, child);
   };
   visit(tree, {}, '');
-  if (sites.length === 0) return write();
   let next = max;
   const ids = new Map<unknown, number>();
   for (const { info } of sites) {
-    if (ids.has(info.id)) continue;
+    const key = sessionInfos.get(info);
+    if (ids.has(key)) continue;
     do {
       next = next + 1 < MAX_ID ? next + 1 : 1;
       if (next === max) throw new RangeError('no Word revision ids left in range');
     } while (used.has(next));
-    ids.set(info.id, next);
+    ids.set(key, next);
   }
-  for (const site of sites) site.holder[site.key] = { ...site.info, id: ids.get(site.info.id) };
+  return { sites, ids };
+}
+
+/**
+ * Runs `write` with each session revision in `tree` given one Word id, shared
+ * by all its elements, then restores the placeholders. Ids are numbered in
+ * document order above every non-comment annotation id the tree holds,
+ * skipping any id already in use and wrapping to the lowest free id past 2^31 - 1.
+ * @internal
+ */
+export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
+  if (!marked) return write();
+  const { sites, ids } = revisionSites(tree);
+  for (const site of sites) site.holder[site.key] = { ...site.info, id: ids.get(sessionInfos.get(site.info)) };
   try {
     return write();
   } finally {
     for (const site of sites) site.holder[site.key] = site.info;
   }
+}
+
+export function materializeSessionRevisionIds<T extends object>(
+  tree: T,
+  onClone: (source: object, clone: object) => void
+): T {
+  if (!marked) return tree;
+  const { sites, ids } = revisionSites(tree);
+  if (!sites.length) return tree;
+  const copies = new WeakMap<object, object>();
+  for (const { info } of sites) {
+    const key = sessionInfos.get(info);
+    const copy = { ...info, id: ids.get(key) };
+    copies.set(info, copy);
+    sessionInfos.set(copy, key);
+  }
+  const replace = (value: unknown): unknown => {
+    if (value === null || typeof value !== 'object' ||
+        value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
+    const existing = copies.get(value);
+    if (existing) return existing;
+    let clone = value;
+    if (value instanceof Map) {
+      for (const [key, child] of value) {
+        const next = replace(child);
+        if (next === child) continue;
+        if (clone === value) clone = new Map(value);
+        (clone as Map<unknown, unknown>).set(key, next);
+      }
+    } else {
+      for (const [key, child] of Object.entries(value)) {
+        const next = replace(child);
+        if (next === child) continue;
+        if (clone === value) clone = Array.isArray(value) ? value.slice() : { ...value };
+        (clone as Record<string, unknown>)[key] = next;
+      }
+    }
+    if (clone !== value) onClone(value, clone);
+    copies.set(value, clone);
+    return clone;
+  };
+  return replace(tree) as T;
 }

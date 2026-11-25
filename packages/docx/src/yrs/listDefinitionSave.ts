@@ -511,23 +511,25 @@ const blankedOut = (xml: string, spans: readonly ElementSpan[]) =>
  * of the package, of the opened package, of `model` and of every earlier save. The numIds reserved
  * include every one an XML part of the main document's folder names, and `referenced`.
  */
+export function captureListSaveState(session: YrsSession) {
+  return {
+    opened: openedIds.get(session),
+    assigned: assigned.get(session) ?? new Map<string, DocxListDefinitionIds>(),
+  };
+}
+
 export function plannedListDefinitions(
   session: YrsSession,
   definitions: ReturnType<YrsSession['createdListDefinitions']>,
   parts: Readonly<Record<string, Uint8Array>>,
   model?: NumberingDefinitions,
   referenced: Iterable<number> = [],
-  opened?: () => Readonly<Record<string, Uint8Array>> | undefined
+  opened?: () => Readonly<Record<string, Uint8Array>> | undefined,
+  state = captureListSaveState(session)
 ): { definitions: DocxSavedListDefinition[]; commit(): void } {
   if (definitions.length === 0) return { definitions: [], commit: () => {} };
-  let source = openedIds.get(session);
-  let firstWritten: NumberingIds | undefined;
-  if (source === undefined) {
-    const openedParts = opened?.();
-    source = packageNumberingIds(openedParts ?? parts);
-    if (openedParts === undefined) firstWritten = source;
-    else openedIds.set(session, source);
-  }
+  const source = state.opened ?? packageNumberingIds(opened?.() ?? parts);
+  const previous = state.assigned;
   const located = numberingPart(parts);
   const xml = decode(parts[located.path]) ?? '';
   const scan = scanNumbering(xml);
@@ -535,7 +537,6 @@ export function plannedListDefinitions(
     .filter(path => path.startsWith(located.folder) && path.toLowerCase().endsWith('.xml'))
     .flatMap(path => referencedNumIds(decode(parts[path]) ?? ''));
   const unmarked = [...referenced];
-  const previous = assigned.get(session) ?? new Map<string, DocxListDefinitionIds>();
   const recorded = [...previous.values()];
   const sourceNumIds = new Set([...source.numIds, ...(model?.nums ?? []).map(num => num.numId)]);
   const sourceAbstractNumIds = new Set([
@@ -597,11 +598,12 @@ export function plannedListDefinitions(
     return [{ ...definition, ...given, abstractNumId: carried.get(definition.key) ?? given.abstractNumId }];
   });
   const commit = () => {
-    if (firstWritten !== undefined && !openedIds.has(session)) openedIds.set(session, firstWritten);
-    assigned.set(session, new Map([
-      ...(assigned.get(session) ?? new Map<string, DocxListDefinitionIds>()),
-      ...saved.map(definition => [definition.key, { numId: definition.numId, abstractNumId: definition.abstractNumId }] as const),
-    ]));
+    if (!openedIds.has(session)) openedIds.set(session, source);
+    const current = new Map(assigned.get(session));
+    for (const { key, numId, abstractNumId } of saved) {
+      if (current.get(key) === previous.get(key)) current.set(key, { numId, abstractNumId });
+    }
+    assigned.set(session, current);
   };
   return { definitions: saved, commit };
 }

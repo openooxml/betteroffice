@@ -4,6 +4,8 @@ pub(crate) mod comment_references;
 mod comment_splice;
 pub mod context;
 pub mod foundation;
+#[doc(hidden)]
+pub mod model_save;
 pub mod numbering;
 pub mod paragraph;
 pub mod paragraph_ids;

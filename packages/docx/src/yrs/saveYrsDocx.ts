@@ -19,7 +19,7 @@ import { checkedProjection } from './commentRangeCheck';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
-import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
+import { publishSessionParagraphIds, sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
 import { refuseUnavailableTables } from './tableUnavailable';
 import type {
   DocxParagraphIdentitySnapshot,
@@ -31,7 +31,7 @@ import {
   assertCommentBookmarkReplacement, projectedSessionKey, restoreBlockBookmarks, yrsToDocument,
 } from './yrsToDocument';
 import {
-  createdListReferences, plannedListDefinitions, RelationshipTargetError, withCreatedListIds, writeListDefinitionParts,
+  captureListSaveState, createdListReferences, plannedListDefinitions, RelationshipTargetError, withCreatedListIds, writeListDefinitionParts,
 } from './listDefinitionSave';
 
 /** A saved paragraph's session anchor and the persisted anchor that resolves to it once reopened. */
@@ -404,6 +404,28 @@ export interface DocxSessionSave {
   plan: DocxParagraphSavePlan;
 }
 
+function captureSaveState(session: YrsSession) {
+  const definitions = session.createdListDefinitions?.() ?? [];
+  const styleLanguages = session.styleLanguages?.();
+  return {
+    version: session.version(),
+    definitions,
+    listKeys: definitions.length
+      ? session.listDefinitionKeysInUse?.() ?? definitions.map(definition => definition.key)
+      : [],
+    listState: captureListSaveState(session),
+    sections: session.listSections?.(),
+    styleLanguages: styleLanguages && Object.keys(styleLanguages).length ? styleLanguages : undefined,
+  };
+}
+
+const saveStates = new WeakMap<DocxSessionSave, ReturnType<typeof captureSaveState>>();
+const publishedVersions = new WeakMap<DocxSavedDocument, string>();
+
+export function publishedSaveVersion(saved: DocxSavedDocument): string | undefined {
+  return publishedVersions.get(saved);
+}
+
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
 export function captureSessionSave(
   session: YrsSession,
@@ -412,7 +434,9 @@ export function captureSessionSave(
   engineProgress();
   const plan = session.paragraphSavePlan();
   engineProgress();
-  return { identities, plan };
+  const capture = { identities, plan };
+  saveStates.set(capture, captureSaveState(session));
+  return capture;
 }
 
 function sectionSaveMetadata(document: Document): string {
@@ -457,8 +481,7 @@ function sectionsModeled(xml: string): boolean {
  * paragraphs the model does not list, which the ordinary save would rewrite.
  * Undefined when the session changed no section.
  */
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
-  const source = sessionMaterializedSource(session);
+async function sectionSavePlan(source: Readonly<Document> | null, sections: ReturnType<YrsSession['listSections']> | undefined, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
   if (!source) return undefined;
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
   const sourceParagraphs: Paragraph[] = [];
@@ -478,7 +501,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const structural = plannedSplices.some(part => part.inserted?.length || part.removed?.length);
   const contiguous = sourceParagraphs.every((paragraph, index) => (paragraph.sourceOrdinal ?? index) === index);
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
-  const sectionChanges = session.listSections?.().some(section => {
+  const sectionChanges = sections?.some(section => {
     const before = section.closingParagraphId === 'final' ? source.package.document.finalSectionProperties ?? {}
       : byOrdinal.get(originalByKey.get(section.closingParagraphId) ?? -1)?.sectionProperties;
     return !sectionPropertiesEqual(before, section.authored);
@@ -592,26 +615,27 @@ async function writeSessionSaveWithWarnings(
   splices: (part: string) => boolean = patches,
   yieldSave?: () => Promise<void>
 ): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
+  const state = saveStates.get(capture) ?? captureSaveState(session);
+  const opened = sessionSourcePackage(session);
+  const openedModel = sessionMaterializedSource(session);
+  const openedNumbering = openedModel?.package.numbering;
+  const sourceSeparators = (document.package.footnotes || document.package.endnotes)
+    ? sessionSourceNoteSeparators(session) : undefined;
   refuseUnavailableTables(session, document);
-  if (yieldSave) await yieldSave();
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
+  if (yieldSave) await yieldSave();
   engineProgress();
-  const openedBuffer = sessionSourcePackage(session)?.buffer;
+  const openedBuffer = opened?.buffer;
   const sourceBuffer = openedBuffer ?? originalBuffer;
   const bodyPart = capture.identities.paragraphs.find(identity => identity.session?.story === 'body' && identity.source)?.source?.partUri.replace(/^\//, '') ?? 'word/document.xml';
   const separators = noteSeparatorKeys(document);
-  let sourceSeparators: ReturnType<typeof noteSeparatorKeys> | null | undefined;
   const rewritten = (part: string): boolean => {
     if (options.commentDeletion) return false;
     const kind = (['footnotes', 'endnotes'] as const).find(
       (name) => part.replace(/^\//, '') === `word/${name}.xml`
     );
     if (!kind) return false;
-    if (sourceSeparators === undefined) {
-      sourceSeparators = sessionSourceNoteSeparators(session);
-      engineProgress();
-    }
     return sourceSeparators?.[kind] !== separators[kind];
   };
   const unspliced = (capture.plan.splicedParts ?? [])
@@ -624,14 +648,14 @@ async function writeSessionSaveWithWarnings(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(openedModel, state.sections, output, capture, sourceBuffer);
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
-  const defined = session.createdListDefinitions?.() ?? [];
+  const defined = state.definitions;
   const references = defined.length ? createdListReferences(output) : undefined;
   const inUse = references
-    ? new Set([...(session.listDefinitionKeysInUse?.() ?? defined.map(definition => definition.key)), ...references.keys])
+    ? new Set([...state.listKeys, ...references.keys])
     : undefined;
   const created = defined.filter(definition => inUse?.has(definition.key));
   if (created.length) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
@@ -642,7 +666,7 @@ async function writeSessionSaveWithWarnings(
     const plan: RustParagraphIds = {
       ...(options.commentBaseline ? {
         removedCommentIds: [...new Set([
-          ...(sessionMaterializedSource(session)?.package.document.comments ?? []).map(comment => String(comment.id)),
+          ...(openedModel?.package.document.comments ?? []).map(comment => String(comment.id)),
           ...[...(options.commentIdentities?.values() ?? [])].map(identity => String(identity.id)),
         ])].filter(id => !output.package.document.comments?.some(comment => String(comment.id) === id)),
       } : {}),
@@ -677,15 +701,16 @@ async function writeSessionSaveWithWarnings(
         : sectionEdits ? sourceBuffer : originalBuffer;
     const listPlan = created.length
       ? plannedListDefinitions(
-        session, created, unzipContainer(new Uint8Array(source)), sessionMaterializedSource(session)?.package.numbering,
-        references?.numIds, () => (openedBuffer === undefined ? undefined : unzipContainer(new Uint8Array(openedBuffer)))
+        session, created, unzipContainer(new Uint8Array(source)), openedNumbering,
+        references?.numIds, () => (openedBuffer === undefined ? undefined : unzipContainer(new Uint8Array(openedBuffer))),
+        state.listState
       )
       : undefined;
     const lists = listPlan?.definitions ?? [];
     const modelled = withSourceOrdinals(output, spliced);
     const numIds = new Map(lists.map(definition => [definition.key, definition.numId]));
     const { buffer, warnings } = await writeDocumentWithRust(
-      lists.length ? withCreatedListIds(modelled, numIds) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave
+      lists.length ? withCreatedListIds(modelled, numIds) : modelled, source, options, undefined, undefined, plan, skipMutations, yieldSave, state.styleLanguages
     );
     let structure = 0;
     const keptParagraphs: DocxKeptParagraph[] = [];
@@ -726,13 +751,6 @@ async function writeSessionSaveWithWarnings(
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
-  if (Object.keys(session.styleLanguages?.() ?? {}).length) {
-    const parts = unzipContainer(bytes);
-    const source = parts['word/styles.xml'];
-    if (!source) throw new Error('Language edits require a styles part');
-    parts['word/styles.xml'] = new TextEncoder().encode(session.patchStyleLanguagesXml(new TextDecoder().decode(source)));
-    bytes = rezipContainer(parts);
-  }
   if (lists.length) {
     const parts = unzipContainer(bytes);
     if (writeListDefinitionParts(parts, lists)) bytes = rezipContainer(parts);
@@ -746,31 +764,28 @@ async function writeSessionSaveWithWarnings(
   const written = paragraphs.filter(({ persisted }) =>
     isWritten(persisted.story.partUri, persisted.paraId)
   );
-  const stale = new Set(
-    session
-      .recordSavedParagraphIds([
-        ...written.map(
-          ({ session: anchor, persisted }) => [anchor.paraId, persisted.paraId] as const
-        ),
-        ...plan.assignments
-          .filter(({ part, paraId }) => isWritten(`/${part}`, paraId))
-          .map(({ part, ordinal, paraId }) => [`/${part}#${ordinal}`, paraId] as const),
-      ])
-      .map(([owner, paraId]) => `${owner}\u0000${paraId}`)
-  );
+  const canRefreshVersion = state.version === session.version();
+  const publication = publishSessionParagraphIds(session, [
+    ...written.map(({ session: anchor, persisted }) => [anchor.paraId, persisted.paraId] as const),
+    ...plan.assignments
+      .filter(({ part, paraId }) => isWritten(`/${part}`, paraId))
+      .map(({ part, ordinal, paraId }) => [`/${part}#${ordinal}`, paraId] as const),
+  ]);
+  const stale = new Set(publication.stale.map(([owner, paraId]) => `${owner}\u0000${paraId}`));
   const isStale = ({ session: anchor, persisted }: DocxSavedParagraph) =>
     stale.has(`${anchor.paraId}\u0000${persisted.paraId}`);
-  listPlan?.commit();
-  return {
-    warnings,
-    saved: {
-      bytes,
-      paragraphs: written.filter((paragraph) => !isStale(paragraph)),
-      conflicts: written.filter(isStale),
-      ...(structure > 0 ? { keptUnchanged: { structure, paragraphs: keptParagraphs } } : {}),
-      ...(structureDropped.length > 0 ? { structureDropped } : {}),
-    },
+  if (opened?.buffer === sessionSourcePackage(session)?.buffer) listPlan?.commit();
+  const saved = {
+    bytes,
+    paragraphs: written.filter((paragraph) => !isStale(paragraph)),
+    conflicts: written.filter(isStale),
+    ...(structure > 0 ? { keptUnchanged: { structure, paragraphs: keptParagraphs } } : {}),
+    ...(structureDropped.length > 0 ? { structureDropped } : {}),
   };
+  if (canRefreshVersion && publication.version === session.version()) {
+    publishedVersions.set(saved, publication.version);
+  }
+  return { warnings, saved };
 }
 
 /**
@@ -797,26 +812,26 @@ export async function saveYrsDocxWithWarnings(
   session: YrsSession,
   options: DocxSaveOptions
 ): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
+  if (options.commentBaseline) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   let base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
   if (options.commentDeletion && !options.commentBaseline) throw new Error('Comment deletion requires a saved comment baseline');
-  let capture = captureSessionSave(session);
+  const capture = captureSessionSave(session);
   if (options.commentBaseline) {
-    await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
     const source = options.commentDeletion ? Uint8Array.from(options.commentBaseline.bytes).buffer
       : commentSourceBuffer(base.originalBuffer!, options.commentBaseline.bytes);
     const saved = parseDocumentWithRust(source, {
       parseHeadersFooters: false, parseNotes: false, detectVariables: false, includeCanonical: false,
     }).document.package.document.comments;
     base = { ...base, package: { ...base.package, document: { ...base.package.document, comments: saved } } };
-    capture = { ...capture, plan: { ...capture.plan,
+    capture.plan = { ...capture.plan,
       assignments: capture.plan.assignments.filter(entry => entry.part !== COMMENTS_PART),
       patchedParts: capture.plan.patchedParts.filter(entry => entry.part !== COMMENTS_PART),
       splicedParts: capture.plan.splicedParts?.filter(entry => entry.part !== COMMENTS_PART),
       wholeParts: capture.plan.wholeParts?.filter(entry => entry.part !== COMMENTS_PART),
-    } };
+    };
     if (options.commentDeletion) {
       capture.plan = {
         assignments: [],

@@ -160,6 +160,8 @@ export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHos
   return decodeDocxHost(json, source);
 }
 
+const hostPackageDigests = new WeakMap<YrsDocxHost, string>();
+
 function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   const value: unknown = JSON.parse(json);
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -180,7 +182,7 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
     throw new TypeError('DOCX host unusedScriptFonts must be a string array');
   }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
-  return {
+  const host: YrsDocxHost = {
     document: result.document,
     referencedFonts: wire.referencedFonts,
     unusedScriptFonts,
@@ -190,6 +192,8 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
       ? {}
       : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
   };
+  if (typeof wire.packageSha256 === 'string') hostPackageDigests.set(host, wire.packageSha256);
+  return host;
 }
 
 export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
@@ -275,6 +279,7 @@ export function wrapSession(
   let residentFontsRevision = 0;
   let residentFontsClearRevision = 0;
   let docxSource: Uint8Array | null = opened?.source ?? null;
+  let docxSourceDigest = opened && hostPackageDigests.get(opened.host);
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
     ? editorSaveKeys(opened.host.document)
     : null;
@@ -377,6 +382,12 @@ export function wrapSession(
       }
     }
   };
+
+  const publishParagraphIds = (saved: readonly (readonly [string, string])[]) =>
+    mutate(() => {
+      const stale = JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<[string, string]>;
+      return { stale, version: session.version() };
+    });
 
   const cloneSelection = (value: YrsSelection | null): YrsSelection | null =>
     value
@@ -495,6 +506,7 @@ export function wrapSession(
     }
     withHostMedia(host);
     docxSource = source;
+    docxSourceDigest = hostPackageDigests.get(host);
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
     partialDocument = false;
@@ -841,6 +853,7 @@ export function wrapSession(
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
         resetMedia();
+        docxSourceDigest = hostPackageDigests.get(workerHost) ?? (source === docxSource ? docxSourceDigest : undefined);
         docxSource = source;
         docxSourceKeys = keys;
         sourceClosing = sectionClosingParaIds(facade);
@@ -1619,13 +1632,7 @@ export function wrapSession(
       }
       return plan;
     },
-    recordSavedParagraphIds: (saved) =>
-      mutate(
-        () =>
-          JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<
-            [string, string]
-          >
-      ),
+    recordSavedParagraphIds: saved => publishParagraphIds(saved).stale,
     writtenParagraphIds: (bytes) =>
       JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
     runInheritance: (styles) => {
@@ -1814,6 +1821,7 @@ export function wrapSession(
       residentFonts.length = 0;
       forgetMaterializedSource(session);
       docxSource = null;
+      docxSourceDigest = undefined;
       docxSourceKeys = null;
       sourceClosing = null;
       resetMedia();
@@ -1837,6 +1845,8 @@ export function wrapSession(
     unavailableTablesFrom: (roots) => JSON.parse(session.unavailable_tables_from(JSON.stringify(roots))) as YrsTableLoc[] | null,
     mediaSources: () => session.media_sources_json(),
     materializedSource,
+    sourceDigest: () => docxSourceDigest,
+    publishParagraphIds,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
@@ -1864,6 +1874,7 @@ export function wrapSession(
         return compared;
       });
       docxSource = original.slice();
+      docxSourceDigest = undefined;
       docxSourceKeys = null;
       sourceClosing = null;
       return json;

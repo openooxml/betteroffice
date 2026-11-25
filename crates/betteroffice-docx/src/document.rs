@@ -12,7 +12,8 @@ use docx_edit::content_controls::{
     ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
     find_package_content_controls, list_package_content_controls,
 };
-use docx_edit::save::{session_paragraph_ids, write_model_with_report};
+use docx_edit::save::session_paragraph_ids;
+use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_report};
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
@@ -585,6 +586,7 @@ impl Document {
             determinism.validate()?;
             return Ok(SaveReport {
                 bytes: self.source.clone(),
+                warnings: Vec::new(),
                 kept_unchanged: None,
                 structure_dropped: None,
                 whole_model_write: false,
@@ -623,7 +625,7 @@ impl Document {
     /// The editing session's paragraph save plan for the current model, as the
     /// product's session save writes it.
     fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
-        if self.dirty == Dirty::ModelChanged {
+        if self.dirty != Dirty::LoggedEdits {
             return Ok(None);
         }
         let Some(baseline) = &self.session_baseline else {
@@ -1321,13 +1323,14 @@ fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
         .fold(0u32, |sum, count| sum.saturating_add(*count));
     SaveReport {
         bytes,
+        whole_model_write: report.warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)),
+        warnings: report.warnings,
         kept_unchanged: (structure > 0).then_some(KeptUnchanged {
             structure,
             paragraphs: report.kept_paragraphs,
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
             .then_some(report.structure_dropped),
-        whole_model_write: false,
     }
 }
 
@@ -1375,7 +1378,6 @@ mod save_report_tests {
                 ],
                 structure_dropped: vec![dropped("word/footer1.xml"), dropped("word/document.xml")],
             },
-            false,
         );
         assert_eq!(report.bytes, [1, 2, 3]);
         let kept_unchanged = report.kept_unchanged.expect("kept is reported");
@@ -1410,7 +1412,6 @@ mod save_report_tests {
                 kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
                 ..S13SaveReport::default()
             },
-            false,
         );
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
@@ -1453,6 +1454,7 @@ fn has_floating_zones(
 mod session_save_tests {
     use super::{
         Document, EditCtx, InlineNode, Locator, Paragraph, ParagraphContent, SessionEdit,
+        WHOLE_MODEL_WARNING,
         find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
     };
 
@@ -1677,12 +1679,12 @@ mod session_save_tests {
     #[test]
     fn an_unedited_save_writes_every_source_entry_as_it_is() {
         let source = package(&source());
-        let saved = Document::open(&source).unwrap().save().unwrap();
-        assert_eq!(
-            ooxml_opc::unzip_parts(&saved).unwrap(),
-            ooxml_opc::unzip_parts(&source).unwrap()
-        );
-        assert_eq!(saved, source);
+        let mut document = Document::open(&source).unwrap();
+        document.model_mut();
+        let report = document.save_report().unwrap();
+        assert_eq!(report.bytes, source);
+        assert!(report.warnings.is_empty());
+        assert!(!report.whole_model_write);
     }
 
     #[test]
@@ -1723,6 +1725,21 @@ mod session_save_tests {
             parts.into_iter().filter(|(path, _)| path != "word/document.xml").collect::<Vec<_>>()
         };
         assert_eq!(other_parts(ooxml_opc::unzip_parts(&saved).unwrap()), other_parts(parts));
+    }
+
+    #[test]
+    fn a_guard_parse_budget_failure_falls_back_to_the_model_writer() {
+        let mut document = open();
+        document.replace_paragraph_text("0000000B", "Budget edit").unwrap();
+        document.model_mut();
+        document.parse_limits.max_xml_bytes = 128;
+        let report = document.save_report().unwrap();
+        assert!(report.whole_model_write);
+        assert!(report.kept_unchanged.is_none());
+        assert!(report.structure_dropped.is_none());
+        assert!(report.warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)));
+        let reopened = Document::open(&report.bytes).unwrap();
+        assert_eq!(get_paragraph_text(reopened.paragraph("0000000B").unwrap()), "Budget edit");
     }
 
     #[test]

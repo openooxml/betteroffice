@@ -8,7 +8,7 @@ import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
 import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
-import { markRevisionInfo } from '../docx/sessionRevisionIds';
+import { markRevisionInfo, materializeSessionRevisionIds } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
 import { rememberSaveProjection } from './saveProjection';
 import {
@@ -4958,7 +4958,17 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const projection = projectDocument(session, base, options);
+  let projection = projectDocument(session, base, options);
+  if (options.commentIds === undefined) {
+    projection = materializeSessionRevisionIds(projection, (source, clone) => {
+      const block = projectedBlocks.get(source as BlockContent);
+      if (block) projectedBlocks.set(clone as BlockContent, block);
+      const cells = projectedTableCells.get(source as Table);
+      if (cells) projectedTableCells.set(clone as Table, cells);
+      const alias = headerFooterAliasOf(source as HeaderFooter);
+      if (alias !== undefined) markHeaderFooterAlias(clone as HeaderFooter, alias);
+    });
+  }
   if (options.storyIds === undefined && options.commentIds === undefined) {
     rememberSaveProjection(session, base, projection);
   }
@@ -5083,13 +5093,9 @@ function projectStories(
     if (!shouldProjectNotes) return notes;
     return notes?.map((note) => {
       const storyId = `${prefix}${note.id}`;
-      return context.storyIds.has(storyId) && shouldProject(storyId)
-        ? {
-            ...note,
-            content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
-            verbatimXml: undefined,
-          }
-        : note;
+      if (!context.storyIds.has(storyId) || !shouldProject(storyId)) return note;
+      const content = restoreNoteMarks(context.storyToBlocks(storyId), note.content);
+      return sameJson(content, note.content) ? note : { ...note, content, verbatimXml: undefined };
     });
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');

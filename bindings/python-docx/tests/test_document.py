@@ -393,12 +393,8 @@ def test_an_unedited_save_keeps_every_other_part_and_authored_paragraph_id(
     saved = document.save()
     before, after = _parts(duplicate_id_bytes), _parts(saved)
     assert list(after) == list(before)
-    serialized = {"word/document.xml", "word/header1.xml"}
-    for name in before.keys() - serialized:
-        assert after[name] == before[name], name
-    written, authored = _written_ids(saved), _written_ids(duplicate_id_bytes)
-    for name in serialized:
-        assert written[name] == authored[name], name
+    assert after == before
+    written = _written_ids(saved)
     assert written["word/document.xml"] == [
         REPEATED,
         REPEATED,

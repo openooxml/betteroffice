@@ -395,13 +395,12 @@ pub fn paragraph_patch_writer_version() -> u32 {
 }
 
 pub fn write_docx_s13_json(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, String> {
-    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
-    write_docx_s13(request, original_docx).map_err(|error| error.to_string())
+    serializer::model_save::write_json(request_json, original_docx).map(|(bytes, _)| bytes)
 }
 
 /// Writes a DOCX from a typed model and original package.
 #[cfg(feature = "wasm")]
-#[cfg_attr(not(feature = "wasm-save-in-edit"), wasm_bindgen)]
+#[wasm_bindgen]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
     write_docx_s13_json(request_json, original_docx).map_err(js_error)
 }
@@ -410,10 +409,8 @@ pub fn write_docx_s13_with_warnings_json(
     request_json: &str,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
-    let (bytes, warnings) =
-        write_docx_s13_with_warnings(request, original_docx).map_err(|error| error.to_string())?;
-    let warnings = serde_json::to_vec(&warnings).map_err(|error| error.to_string())?;
+    let (bytes, report) = serializer::model_save::write_json(request_json, original_docx)?;
+    let warnings = serde_json::to_vec(&report.warnings).map_err(|error| error.to_string())?;
     let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
     framed.extend_from_slice(&warnings);
     framed.extend_from_slice(&bytes);
@@ -423,7 +420,7 @@ pub fn write_docx_s13_with_warnings_json(
 /// [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
 /// bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
 #[cfg(feature = "wasm")]
-#[cfg_attr(not(feature = "wasm-save-in-edit"), wasm_bindgen)]
+#[wasm_bindgen]
 pub fn write_docx_s13_wasm_with_warnings(
     request_json: &str,
     original_docx: &[u8],

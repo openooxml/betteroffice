@@ -51,24 +51,6 @@ use wasm_bindgen::prelude::*;
 
 use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host, UpdateSubscription};
 
-/// Writes a DOCX from a typed model and original package.
-#[wasm_bindgen]
-pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
-    crate::save::write_docx_json(request_json, original_docx)
-        .map_err(|error| JsValue::from_str(&error))
-}
-
-/// [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
-/// bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
-#[wasm_bindgen]
-pub fn write_docx_s13_wasm_with_warnings(
-    request_json: &str,
-    original_docx: &[u8],
-) -> Result<Vec<u8>, JsValue> {
-    crate::save::write_docx_with_warnings_json(request_json, original_docx)
-        .map_err(|error| JsValue::from_str(&error))
-}
-
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
     r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;

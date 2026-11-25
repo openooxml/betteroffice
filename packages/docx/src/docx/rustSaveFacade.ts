@@ -120,13 +120,10 @@ export async function writeDocumentWithRust(
   determinism?: RustSaveDeterminism,
   paragraphIds?: RustParagraphIds,
   skipMutations = false,
-  yieldSave?: () => Promise<void>
+  yieldSave?: () => Promise<void>,
+  styleLanguages?: Readonly<Record<string, unknown>>
 ): Promise<RustSaveResult> {
   const guarded = paragraphIds === undefined && selective === undefined;
-  if (guarded) {
-    const { preloadEditWasm } = await import('../wasm/edit');
-    await preloadEditWasm();
-  }
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
@@ -149,6 +146,7 @@ export async function writeDocumentWithRust(
   const request = {
     ...modelSaveFields(document),
     determinism: fixed,
+    ...(styleLanguages === undefined ? {} : { styleLanguages }),
     ...(!guarded && {
       headerEntries: headerFooterSaveEntries(document.package.headers),
       footerEntries: headerFooterSaveEntries(document.package.footers),
@@ -330,7 +328,7 @@ function relationshipTags(xml: string): string[] {
 }
 
 function relationshipAttribute(tag: string, name: string): string | undefined {
-  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+  return tag.match(new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`))?.[2];
 }
 
 function relationshipForId(xml: string, id: string | undefined): string | undefined {

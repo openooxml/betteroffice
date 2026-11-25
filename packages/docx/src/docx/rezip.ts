@@ -50,7 +50,7 @@ export interface RepackOptions {
   modifiedBy?: string;
 }
 
-/** Repack a public Document through the Rust package writer. */
+/** Repack a document. A current live projection also saves session state such as new comments. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
   return (await repackDocxWithWarnings(doc, options)).buffer;
 }
@@ -80,6 +80,7 @@ export async function repackDocxFromRaw(
   rawContent: RawDocxContent,
   options: RepackOptions = {}
 ): Promise<ArrayBuffer> {
+  if (doc.originalBuffer === rawContent.originalBuffer) return repackDocx(doc, options);
   return repackDocx({ ...doc, originalBuffer: rawContent.originalBuffer }, options);
 }
 

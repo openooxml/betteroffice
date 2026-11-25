@@ -1,20 +1,34 @@
 import type { RepackOptions, RepackResult } from '../docx/rezip';
 import { modelSaveFields, sha256Hex } from '../docx/rustSaveFacade';
-import { withSessionRevisionIds } from '../docx/sessionRevisionIds';
 import type { Document } from '../types/document';
 import type { YrsSession } from './index';
-import { sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import { sessionMaterializedSource, sessionSourceDigest, sessionSourcePackage } from './sessionInternals';
 
 const projections = new WeakMap<Document, {
   session: YrsSession;
   version: string;
   sourceDigest: string;
-  baseline: string;
+  baseline: Promise<string | undefined>;
 }>();
 
-function saveSnapshot(document: Document): string {
-  const fields = modelSaveFields(document);
-  return withSessionRevisionIds(fields, () => JSON.stringify(fields));
+const snapshotDigest = (document: Document): Promise<string | undefined> =>
+  sha256Hex(new TextEncoder().encode(JSON.stringify(modelSaveFields(document), (key, value) =>
+    key === 'sourceOrdinal' ? undefined : value
+  ))).catch(() => undefined);
+
+function sameSaveTree(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameSaveTree(value, right[index]));
+  }
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const keys = (value: Record<string, unknown>) =>
+    Object.keys(value).filter(key => key !== 'sourceOrdinal' && value[key] !== undefined);
+  const fields = keys(a);
+  return fields.length === keys(b).length && fields.every(key => sameSaveTree(a[key], b[key]));
 }
 
 function sameBytes(bytes: Uint8Array, buffer: ArrayBuffer): boolean {
@@ -24,18 +38,17 @@ function sameBytes(bytes: Uint8Array, buffer: ArrayBuffer): boolean {
 
 export function rememberSaveProjection(session: YrsSession, base: Document, projection: Document): void {
   const source = sessionSourcePackage(session);
-  if (!source || !base.originalBuffer) return;
+  const sourceDigest = sessionSourceDigest(session);
+  if (!source || !sourceDigest || !base.originalBuffer) return;
   if (base.originalBuffer !== source.buffer &&
       !sameBytes(new Uint8Array(source.buffer), base.originalBuffer)) return;
   const materialized = sessionMaterializedSource(session);
-  if (!materialized || saveSnapshot(base) !== saveSnapshot(materialized)) return;
-  const sourceDigest = session.paragraphIdentities().packageSha256;
-  if (!sourceDigest) return;
+  if (!materialized || !sameSaveTree(modelSaveFields(base), modelSaveFields(materialized))) return;
   projections.set(projection, {
     session,
     version: session.version(),
     sourceDigest,
-    baseline: saveSnapshot(projection),
+    baseline: snapshotDigest(projection),
   });
 }
 
@@ -49,16 +62,17 @@ export async function saveCurrentProjection(
   const { session, version, sourceDigest, baseline } = provenance;
   if (!sessionSourcePackage(session) || version !== session.version()) return undefined;
   const bytes = new Uint8Array(buffer).slice();
-  const [digest, { saveYrsDocxWithWarnings }] = await Promise.all([
-    sha256Hex(bytes),
-    import('./saveYrsDocx'),
+  const [digest, savedModel, currentModel, save] = await Promise.all([
+    sha256Hex(bytes), baseline, snapshotDigest(document), import('./saveYrsDocx'),
   ]);
   const source = sessionSourcePackage(session);
   if (!source || version !== session.version() || digest !== sourceDigest ||
       document.originalBuffer !== buffer || !sameBytes(bytes, buffer) ||
       (source.buffer !== buffer && !sameBytes(bytes, source.buffer)) ||
-      baseline !== saveSnapshot(document)) return undefined;
-  const { saved, warnings } = await saveYrsDocxWithWarnings(session, options);
+      savedModel === undefined || savedModel !== currentModel) return undefined;
+  const { saved, warnings } = await save.saveYrsDocxWithWarnings(session, options);
+  const published = save.publishedSaveVersion(saved);
+  if (published === session.version() && provenance.version === version) provenance.version = published;
   return {
     buffer: Uint8Array.from(saved.bytes).buffer,
     warnings: [...(document.warnings ?? []).filter(warning => !warnings.includes(warning)), ...warnings],

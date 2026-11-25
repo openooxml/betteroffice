@@ -961,9 +961,8 @@ if (!result.ok) console.warn(result.failure.code);
 const { bytes: saved } = await saveYrsDocx(session);
 ```
 
-`parseDocx` followed by `repackDocx` uses the same save engine for document-model workflows.
-You can also pass a current projection from `yrsToDocument(session, session.materializeDocx()!)`
-to `repackDocx` to save the session.
+Use `saveYrsDocx(session)` to save editing-session changes and preserve source markup.
+For document-model workflows, use `parseDocx` followed by `repackDocx`.
 
 Offsets are UTF-16 positions in the paragraph text, where each inline atom (hard
 break, image, content control, note reference, field) is one U+FFFC. Steps insert,

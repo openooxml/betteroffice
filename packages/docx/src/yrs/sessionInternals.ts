@@ -9,6 +9,8 @@ export interface YrsSessionInternals {
   setHeaderFooterAliases(json: string): void;
   sourcePackage(): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null;
   materializedSource(): Readonly<Document> | null;
+  sourceDigest(): string | undefined;
+  publishParagraphIds(saved: readonly (readonly [string, string])[]): { stale: Array<[string, string]>; version: string };
   /** The `data:` sources this session seeded, as `media:{n}` tokens; empty when none. */
   mediaSources(): string;
   /** The opened source's note separators, keyed as `noteSeparatorKeys` does. */
@@ -30,6 +32,19 @@ export function sessionSourcePackage(
   session: YrsSession
 ): { buffer: ArrayBuffer; keys: ReturnType<typeof editorSaveKeys> } | null {
   return registry.get(session)?.sourcePackage() ?? null;
+}
+
+export function sessionSourceDigest(session: YrsSession): string | undefined {
+  return registry.get(session)?.sourceDigest();
+}
+
+export function publishSessionParagraphIds(
+  session: YrsSession,
+  saved: readonly (readonly [string, string])[]
+): { stale: Array<[string, string]>; version: string } {
+  const internals = registry.get(session);
+  if (internals) return internals.publishParagraphIds(saved);
+  return { stale: session.recordSavedParagraphIds(saved), version: session.version() };
 }
 
 export function sessionMaterializedSource(session: YrsSession): Readonly<Document> | null {

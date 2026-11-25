@@ -260,6 +260,8 @@ class SaveReport:
     @property
     def bytes(self) -> bytes: ...
     @property
+    def warnings(self) -> list[str]: ...
+    @property
     def kept_unchanged(self) -> KeptUnchanged | None: ...
     @property
     def structure_dropped(self) -> list[DroppedStructure] | None:
@@ -268,8 +270,7 @@ class SaveReport:
         `whole_model_write` is false; when it is true, `None` means this was not computed."""
     @property
     def whole_model_write(self) -> bool:
-        """The save had no session plan and wrote the document's stories from the model:
-        structure the model does not carry may be gone and is not itemised in `structure_dropped`."""
+        """The save fell back to writing stories from the model without a verified part plan."""
 
 @final
 class Document:
