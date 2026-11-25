@@ -117,9 +117,17 @@ jobs:
         if: inputs.dry_run
         run: bunx napi pre-publish --cwd bindings/${{ inputs.binding }}-native --tag-style npm --dry-run --no-gh-release
 
+      - name: Note the npm fallback token
+        if: ${{ !inputs.dry_run }}
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Publish packages
         if: ${{ !inputs.dry_run }}
         working-directory: bindings/${{ inputs.binding }}-native
         env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FALLBACK_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
         run: npm publish --access public

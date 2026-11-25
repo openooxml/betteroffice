@@ -1147,3 +1147,74 @@ describe('release plan', () => {
       .toEqual(['@betteroffice/fonts', '@betteroffice/fonts-cjk']);
   });
 });
+
+describe('npm fallback token', () => {
+  const nativePublish = Bun.YAML.parse(
+    readFileSync(fileURLToPath(new URL('../.github/workflows/publish-native.yml', import.meta.url)), 'utf8')
+  ) as any;
+  const fallback = '${{ secrets.NPM_FALLBACK_TOKEN }}';
+  const note = 'if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi\n';
+  const steps = release.jobs.release.steps;
+  const names = steps.map((step: any) => step.name);
+
+  function stepsReading(workflow: any, secret: string) {
+    return Object.entries(workflow.jobs).flatMap(([job, body]: [string, any]) =>
+      (body.steps ?? [])
+        .filter((step: any) => JSON.stringify(step).includes(`secrets.${secret}`))
+        .map((step: any) => `${job}: ${step.name}`)
+    );
+  }
+
+  test('reaches only the npm publish steps and the notes before them', () => {
+    expect(stepsReading(release, 'NPM_FALLBACK_TOKEN')).toEqual([
+      'release: Note the npm fallback token',
+      'release: Release PR or publish',
+      'held-npm: Note the npm fallback token',
+      'held-npm: Publish held packages and create releases'
+    ]);
+    expect(stepsReading(nativePublish, 'NPM_FALLBACK_TOKEN')).toEqual([
+      'publish: Note the npm fallback token',
+      'publish: Publish packages'
+    ]);
+  });
+
+  test('is passed as NODE_AUTH_TOKEN, only on the publish path, with provenance on', () => {
+    const changesets = steps.find((step: any) => step.name === 'Release PR or publish');
+    expect(changesets.env.NODE_AUTH_TOKEN).toBe(
+      "${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}"
+    );
+    expect(changesets.env.NPM_CONFIG_PROVENANCE).toBe('true');
+    expect(changesets.env.NPM_TOKEN).toBeUndefined();
+    const held = release.jobs['held-npm'].steps.find((step: any) => step.name === 'Publish held packages and create releases');
+    expect(held.env.NODE_AUTH_TOKEN).toBe(fallback);
+    const upload = nativePublish.jobs.publish.steps.find((step: any) => step.name === 'Publish packages');
+    expect(upload.env).toEqual({ NODE_AUTH_TOKEN: fallback, NPM_CONFIG_PROVENANCE: 'true' });
+    expect(upload.if).toBe('${{ !inputs.dry_run }}');
+  });
+
+  test('each note sees only whether the secret is set, prints a fixed line, and runs right before publishing', () => {
+    const jobs: Array<[any, string, string | undefined]> = [
+      [release.jobs.release, 'Release PR or publish', "steps.pending.outputs.publishing == 'true'"],
+      [release.jobs['held-npm'], 'Publish held packages and create releases', undefined],
+      [nativePublish.jobs.publish, 'Publish packages', '${{ !inputs.dry_run }}']
+    ];
+    for (const [job, publish, gate] of jobs) {
+      const jobNames = job.steps.map((step: any) => step.name);
+      const step = job.steps.find((candidate: any) => candidate.name === 'Note the npm fallback token');
+      expect(step.env).toEqual({ FALLBACK: "${{ secrets.NPM_FALLBACK_TOKEN != '' }}" });
+      expect(step.run).toBe(note);
+      expect(step.if).toBe(gate);
+      expect(jobNames.indexOf('Note the npm fallback token')).toBeLessThan(jobNames.indexOf(publish));
+    }
+    expect(JSON.stringify(release.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    expect(JSON.stringify(nativePublish.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    for (const job of [release.jobs.release, release.jobs['held-npm'], nativePublish.jobs.publish]) {
+      expect(JSON.stringify(job.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    }
+  });
+
+  test('NPM_TOKEN stays refused and unused', () => {
+    expect(stepsReading(release, 'NPM_TOKEN')).toEqual([]);
+    expect(stepsReading(nativePublish, 'NPM_TOKEN')).toEqual(['publish: Refuse an npm token']);
+  });
+});

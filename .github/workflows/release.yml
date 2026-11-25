@@ -138,6 +138,13 @@ jobs:
 
       # changesets does not rewrite the workspace: protocol here, so pin it to
       # concrete versions before publish (ephemeral checkout; source is unchanged).
+      - name: Note the npm fallback token
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
         run: bun scripts/rewrite-workspace-deps.ts
@@ -159,9 +166,11 @@ jobs:
           commit: "chore: release"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No npm token: auth is OIDC Trusted Publishing (configured per
-          # package after the first manual publish creates it). id-token: write
-          # above authorizes the exchange and signs provenance.
+          # Auth is OIDC Trusted Publishing (configured per package after the
+          # first manual publish creates it). id-token: write above authorizes
+          # the exchange and signs provenance. npm uses NPM_FALLBACK_TOKEN only
+          # for a package whose exchange fails; it is unset unless publishing.
+          NODE_AUTH_TOKEN: ${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}
           NPM_CONFIG_PROVENANCE: "true"
 
       - name: Upload held npm tarballs
@@ -367,11 +376,18 @@ jobs:
           name: held-npm
           path: ${{ runner.temp }}/held-npm
 
+      - name: Note the npm fallback token
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Publish held packages and create releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HELD_NPM_PACKAGES: ${{ needs.release.outputs.held }}
           NATIVE_NPM_RESULT: ${{ needs.native-npm.result }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FALLBACK_TOKEN }}
         run: node scripts/held-npm-packages.mjs --publish "$RUNNER_TEMP/held-npm"
 
   # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without
