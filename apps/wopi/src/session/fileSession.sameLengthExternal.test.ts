@@ -32,16 +32,14 @@ test("without X-WOPI-ItemVersion, a same-length file seen right after PutFile ke
   client.edit("first-edit ", 0);
   const replica = session.replica!;
   expect(session.applyUpdate(joined.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
-  const apply = (marker: string, slot: number) => {
-    client.edit(marker, slot);
-    expect(session.applyUpdate(joined.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted).toBe(true);
-  };
   const first = await session.requestSave(joined.user.id);
-  apply("second-edit ", 1);
+  client.edit("second-edit ", 1);
+  const secondAccepted = session.applyUpdate(joined.user.id, client.encodeStateAsUpdate(replica.encodeStateVector())).accepted;
   const second = await session.requestSave(joined.user.id);
   client.destroy();
   const outcome = {
     firstSaved: first.saved,
+    secondAccepted,
     secondSaved: second.saved,
     plainPuts: h.putCount(),
     relativePuts: h.callsFor("PUT_RELATIVE").length,
