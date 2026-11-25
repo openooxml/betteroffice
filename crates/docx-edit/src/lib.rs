@@ -2241,7 +2241,11 @@ impl EditingDoc {
         result
     }
 
-    fn integrate_updates_inner(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
+    fn integrate_updates_inner(
+        &self,
+        updates: Vec<Update>,
+        origin: UpdateOrigin,
+    ) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self.yrs_doc());

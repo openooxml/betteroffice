@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use yrs::types::Attrs;
-use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
+use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact, TransactionMut};
 
 use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};

@@ -1689,7 +1689,9 @@ fn plan_paragraph(
     for &(i, j) in retained.iter().chain(std::iter::once(&end)) {
         while i != previous.0 || j != previous.1 {
             let (i, j, recorded_donor) = if let Some(edits) = &mut recorded {
-                let edit = edits.next().ok_or_else(|| unproven_paragraph(context.ordinal))?;
+                let edit = edits
+                    .next()
+                    .ok_or_else(|| unproven_paragraph(context.ordinal))?;
                 if edit.old_end > i || edit.new_end > j {
                     return Err(unproven_paragraph(context.ordinal));
                 }

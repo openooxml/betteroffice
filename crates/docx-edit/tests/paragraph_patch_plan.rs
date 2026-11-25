@@ -2083,7 +2083,10 @@ fn a_whole_run_anchor_in_inserted_text_keeps_the_three_recorded_spans() {
     replace(&doc, 9, 11, "wyBBBB");
     replace(&doc, 2, 6, "z");
     replace(&doc, 0, 1, "r");
-    assert_splices(&doc, &[(0, 1, 0, "r"), (2, 6, 2, "z"), (9, 11, 9, "wyBBBB")]);
+    assert_splices(
+        &doc,
+        &[(0, 1, 0, "r"), (2, 6, 2, "z"), (9, 11, 9, "wyBBBB")],
+    );
 }
 
 #[test]
@@ -2315,7 +2318,12 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
         let exact: Vec<_> = edits
             .iter()
             .map(|(_, span, value)| {
-                (span.start as u32, span.end as u32, span.start as u32, value.as_str())
+                (
+                    span.start as u32,
+                    span.end as u32,
+                    span.start as u32,
+                    value.as_str(),
+                )
             })
             .collect();
         assert_eq!(splice_summary(patch), owned_splices(&exact), "{case_info}");
@@ -2354,7 +2362,10 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
         completed > CASES / 2,
         "seed {SEED:#x}, completed {completed}/{CASES}"
     );
-    assert_eq!(minimal, completed, "seed {SEED:#x}, recordable cases fell back");
+    assert_eq!(
+        minimal, completed,
+        "seed {SEED:#x}, recordable cases fell back"
+    );
 }
 
 #[test]
@@ -3097,7 +3108,9 @@ fn one_update_carries_adjacent_replacements_with_distinct_source_donors() {
 
     let (saved, warnings) = save_paragraph(&receiver, ADJACENT_SOURCE, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
-    let expected = ADJACENT_SOURCE.replace(">abc<", ">X<").replace(">def<", ">YZ<");
+    let expected = ADJACENT_SOURCE
+        .replace(">abc<", ">X<")
+        .replace(">def<", ">YZ<");
     assert!(saved.contains(&expected), "{saved}");
 }
 
@@ -3151,8 +3164,7 @@ fn redoing_a_deletion_saves_the_whole_paragraph() {
     let content = text("abc");
     let doc = open(&content);
     let mut history = doc.undo_manager();
-    doc
-        .delete_range(&ctx(), StoryRange::new("body", 1, 2))
+    doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
         .unwrap();
     assert!(history.undo());
     assert!(history.redo());
@@ -3180,8 +3192,7 @@ fn format_only_undo_and_pilcrow_undo_mark_the_occurrence() {
         let mut history = doc.undo_manager();
         if pilcrow {
             let key = doc.paragraphs("body").unwrap()[0].para_id.clone();
-            doc
-                .set_paragraph_attr(&key, "alignment", Any::from("right"))
+            doc.set_paragraph_attr(&key, "alignment", Any::from("right"))
                 .unwrap();
         } else {
             format(
@@ -3221,7 +3232,10 @@ fn split_uses_the_whole_paragraph_path_for_the_source_occurrence() {
         paragraph.remove("sourceOrdinal");
         paragraph.remove("paraId");
         second["content"][0]["content"][0]["text"] = json!("cd");
-        document["content"].as_array_mut().unwrap().push(second.clone());
+        document["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(second.clone());
         if let Some(sections) = document["sections"].as_array_mut() {
             sections[0]["content"].as_array_mut().unwrap().push(second);
         }
@@ -3259,7 +3273,9 @@ fn reopening_saved_bytes_starts_without_records() {
 
     let reopened = EditingDoc::new(71);
     seed_from_docx(&reopened, &saved).unwrap();
-    reopened.encode_diff_v1(&reopened.encode_state_vector_v1()).unwrap();
+    reopened
+        .encode_diff_v1(&reopened.encode_state_vector_v1())
+        .unwrap();
     assert!(reopened.encode_edit_provenance().is_empty());
     replace(&reopened, 1, 2, "Y");
     assert_text_edit(&reopened, 1, 2, "Y", 1, target("aYc"));
@@ -3332,7 +3348,14 @@ fn swapped_sidecar_from_the_same_client_marks_the_update_unproven() {
 
 #[test]
 fn stale_garbled_missing_or_overbound_sidecars_mark_the_update_unproven() {
-    for bad in ["generation", "base", "version", "garbled", "missing", "overbound"] {
+    for bad in [
+        "generation",
+        "base",
+        "version",
+        "garbled",
+        "missing",
+        "overbound",
+    ] {
         let receiver = open_for_transfer(ADJACENT_SOURCE, "current");
         let sender = open_for_transfer(ADJACENT_SOURCE, "current");
         let base = receiver.encode_state_vector_v1();
@@ -3476,11 +3499,15 @@ fn invalid_sidecar_leaves_another_occurrences_records_intact() {
 fn insertion_abutting_a_deletion_keeps_the_occurrence_unproven() {
     for (from, to) in [(0, 2), (1, 3), (2, 4)] {
         let doc = open(&text("aaaa"));
-        doc
-            .delete_range(&ctx(), StoryRange::new("body", from, to))
+        doc.delete_range(&ctx(), StoryRange::new("body", from, to))
             .unwrap();
-        doc.insert_text(&ctx(), Position::new("body", from), "b", FormatPolicy::Inherit)
-            .unwrap();
+        doc.insert_text(
+            &ctx(),
+            Position::new("body", from),
+            "b",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
         assert_unproven(&doc);
     }
 }

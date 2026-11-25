@@ -4517,7 +4517,11 @@ impl EditingDoc {
                 }
             }
             if stories_of(seeded, part) != stories_of(&live, part)
-                || part.backed.values().flatten().any(|key| provenance.has_entry(key))
+                || part
+                    .backed
+                    .values()
+                    .flatten()
+                    .any(|key| provenance.has_entry(key))
             {
                 let mut touched: Vec<u32> = part
                     .backed

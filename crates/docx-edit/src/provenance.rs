@@ -9,8 +9,8 @@ use yrs::types::{DeepObservable, Delta, EntryChange, Event, Events, PathSegment}
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ClientID, Doc, ID, IndexedSequence, Map, Out, ReadTxn, StateVector, StickyIndex,
-    Subscription, Text, TextRef, Transact, TransactionMut,
+    Any, Assoc, ClientID, Doc, ID, IndexedSequence, Observable, Out, ReadTxn, StateVector,
+    StickyIndex, Subscription, Text, TextRef, Transact, TransactionMut,
 };
 
 use crate::identity::{GENERATION, SESSION};
@@ -60,7 +60,9 @@ impl Span {
 
     fn matches<T: ReadTxn>(self, story: &TextRef, txn: &T, at: u32) -> bool {
         if self.end().is_none()
-            || at.checked_add(self.len).is_none_or(|end| end > story.len(txn))
+            || at
+                .checked_add(self.len)
+                .is_none_or(|end| end > story.len(txn))
         {
             return false;
         }
@@ -158,8 +160,12 @@ struct Incoming {
 }
 
 fn encoded_entry_size(key: &str, records: &Option<Records>) -> usize {
-    serde_json::to_vec(key).expect("encode provenance key").len()
-        + serde_json::to_vec(records).expect("encode provenance entry").len()
+    serde_json::to_vec(key)
+        .expect("encode provenance key")
+        .len()
+        + serde_json::to_vec(records)
+            .expect("encode provenance entry")
+            .len()
         + 2
 }
 
@@ -173,9 +179,7 @@ impl Provenance {
     }
 
     fn set(&mut self, key: String, mut records: Option<Records>) {
-        if key.is_empty()
-            || self.overflowed
-            || self.entries.get(&key).is_some_and(Option::is_none)
+        if key.is_empty() || self.overflowed || self.entries.get(&key).is_some_and(Option::is_none)
         {
             return;
         }
@@ -221,7 +225,11 @@ impl Provenance {
         if self.unproven(&key) {
             return;
         }
-        if self.generation.as_ref().is_some_and(|old| *old != generation) {
+        if self
+            .generation
+            .as_ref()
+            .is_some_and(|old| *old != generation)
+        {
             self.overflow();
             return;
         }
@@ -242,7 +250,10 @@ impl Provenance {
             });
         if records.story != story
             || records.seed != seed
-            || records.splices.iter().any(|other| splice.conflicts(other, seed))
+            || records
+                .splices
+                .iter()
+                .any(|other| splice.conflicts(other, seed))
         {
             self.mark(key);
         } else {
@@ -259,11 +270,16 @@ impl Provenance {
         for (key, records) in incoming.entries {
             if let Some(records) = records {
                 for splice in records.splices {
-                    if self.entries.get(&key).and_then(Option::as_ref).is_some_and(|old| {
-                        old.seed == records.seed
-                            && old.story == records.story
-                            && old.splices.contains(&splice)
-                    }) {
+                    if self
+                        .entries
+                        .get(&key)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|old| {
+                            old.seed == records.seed
+                                && old.story == records.story
+                                && old.splices.contains(&splice)
+                        })
+                    {
                         continue;
                     }
                     self.record(
@@ -295,9 +311,10 @@ fn references_older_insertions(
 ) -> bool {
     entries.values().flatten().any(|records| {
         records.splices.iter().any(|splice| {
-            splice.inserted.iter().any(|span| {
-                span.first.1 < base.get(&ClientID::new(span.first.0))
-            })
+            splice
+                .inserted
+                .iter()
+                .any(|span| span.first.1 < base.get(&ClientID::new(span.first.0)))
         })
     })
 }
@@ -307,7 +324,8 @@ fn generation<T: ReadTxn>(txn: &T) -> Option<String> {
 }
 
 fn unit_id<T: ReadTxn>(story: &TextRef, txn: &T, at: u32) -> Option<UnitId> {
-    story.sticky_index(txn, at, Assoc::After)?
+    story
+        .sticky_index(txn, at, Assoc::After)?
         .id()
         .copied()
         .map(UnitId::from)
@@ -467,7 +485,10 @@ fn capture_splice(
                 (at < end.min(chunk.end()) && matches!(chunk.kind, ChunkKind::Text(_)))
                     .then_some(at)
             })
-            .map(|at| seed.offset(unit_id(story, txn, at)?).map(|at| DonorV1::At { at }))
+            .map(|at| {
+                seed.offset(unit_id(story, txn, at)?)
+                    .map(|at| DonorV1::At { at })
+            })
             .unwrap_or(Some(DonorV1::Pilcrow))?;
         (from, Some(removed), donor)
     } else if start == bounds.start {
@@ -553,7 +574,9 @@ impl Provenance {
         let mut edits = Vec::new();
         for ((from, to), splice) in ordered {
             if from < seed_at
-                || edits.last().is_some_and(|edit: &ProvenEdit| edit.from == from)
+                || edits
+                    .last()
+                    .is_some_and(|edit: &ProvenEdit| edit.from == from)
                 || !seed.slice(seed_at, from).matches(&story, txn, live_at)
             {
                 return None;
@@ -694,10 +717,12 @@ impl Watch {
         let before = Arc::new(before);
         let touched = Arc::clone(&watch.touched);
         let prior = Arc::clone(&before);
-        watch.subscriptions.push(stories.observe_deep(move |txn, events| {
-            let mut touched = touched.lock().unwrap();
-            collect_touched(txn, events, &prior, kind, &mut touched);
-        }));
+        watch
+            .subscriptions
+            .push(stories.observe_deep(move |txn, events| {
+                let mut touched = touched.lock().unwrap();
+                collect_touched(txn, events, &prior, kind, &mut touched);
+            }));
         if let Some(removed) = txn.get_map(crate::REMOVED_STORIES) {
             let touched = Arc::clone(&watch.touched);
             watch.subscriptions.push(removed.observe(move |txn, event| {
@@ -732,27 +757,29 @@ impl Watch {
         if let Some(comments) = txn.get_map(crate::COMMENTS) {
             let touched = Arc::clone(&watch.touched);
             let before = crate::canonical::comment_anchors_by_story(&txn);
-            watch.subscriptions.push(comments.observe_deep(move |txn, events| {
-                let keys = changed_comment_anchors(txn, events);
-                if keys.is_empty() {
-                    return;
-                }
-                let after = crate::canonical::comment_anchors_by_story(txn);
-                let mut touched = touched.lock().unwrap();
-                for (story, anchors) in before.iter().chain(&after) {
-                    let Some(text) = crate::story_text(txn, story) else {
-                        continue;
-                    };
-                    let bounds = crate::op::para_bounds(&text, txn);
-                    for anchor in keys.iter().filter_map(|key| anchors.get(key)).flatten() {
-                        if let (Some(start), Some(end)) =
-                            (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-                        {
-                            touched.range(&bounds, start.index, end.index);
+            watch
+                .subscriptions
+                .push(comments.observe_deep(move |txn, events| {
+                    let keys = changed_comment_anchors(txn, events);
+                    if keys.is_empty() {
+                        return;
+                    }
+                    let after = crate::canonical::comment_anchors_by_story(txn);
+                    let mut touched = touched.lock().unwrap();
+                    for (story, anchors) in before.iter().chain(&after) {
+                        let Some(text) = crate::story_text(txn, story) else {
+                            continue;
+                        };
+                        let bounds = crate::op::para_bounds(&text, txn);
+                        for anchor in keys.iter().filter_map(|key| anchors.get(key)).flatten() {
+                            if let (Some(start), Some(end)) =
+                                (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
+                            {
+                                touched.range(&bounds, start.index, end.index);
+                            }
                         }
                     }
-                }
-            }));
+                }));
         }
         watch
     }
@@ -784,10 +811,7 @@ impl Drop for Watch {
     }
 }
 
-fn changed_comment_anchors(
-    txn: &TransactionMut<'_>,
-    events: &Events,
-) -> BTreeSet<String> {
+fn changed_comment_anchors(txn: &TransactionMut<'_>, events: &Events) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
     for event in events.iter() {
         let Event::Map(event) = event else {
@@ -811,8 +835,7 @@ fn touch_raw_mark(txn: &TransactionMut<'_>, value: &Out, touched: &mut Touched) 
         let Out::Any(Any::Map(mark)) = value else {
             return None;
         };
-        let (Some(Any::String(story)), Some(Any::Buffer(at))) =
-            (mark.get("story"), mark.get("at"))
+        let (Some(Any::String(story)), Some(Any::Buffer(at))) = (mark.get("story"), mark.get("at"))
         else {
             return None;
         };
@@ -877,9 +900,9 @@ fn collect_touched(
                         }
                         Delta::Deleted(len) if *len != 0 => {
                             touched.range(old, was, was + len - 1);
-                            let closes_paragraph = old.iter().any(|bounds| {
-                                was <= bounds.pilcrow && bounds.pilcrow < was + len
-                            });
+                            let closes_paragraph = old
+                                .iter()
+                                .any(|bounds| was <= bounds.pilcrow && bounds.pilcrow < was + len);
                             if closes_paragraph {
                                 touched.range(now, is, is);
                             }
@@ -1070,7 +1093,9 @@ impl EditingDoc {
         } else if let Some(incoming) = incoming {
             let txn = self.doc.transact();
             if generation(&txn).as_deref() == Some(incoming.generation.as_str())
-                && incoming.state_digest.is_none_or(|digest| digest == state_digest(&txn))
+                && incoming
+                    .state_digest
+                    .is_none_or(|digest| digest == state_digest(&txn))
             {
                 if let Some(watch) = watch.as_mut() {
                     watch.disarm();
