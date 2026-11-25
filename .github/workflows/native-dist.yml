@@ -75,6 +75,21 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Set N-API cross toolchain environment
+        if: matrix.platform.napi_cross
+        shell: bash
+        env:
+          TARGET: ${{ matrix.platform.target }}
+        run: |
+          version=$(node -p 'require("node:module").createRequire(require.resolve("@napi-rs/cli/package.json"))("@napi-rs/cross-toolchain/package.json").version')
+          target_env=${TARGET//-/_}
+          tool_prefix="$HOME/.napi-rs/cross-toolchain/$version/$TARGET/bin/$TARGET"
+          printf '%s\n' \
+            "CC_${target_env}=$tool_prefix-gcc" \
+            "CXX_${target_env}=$tool_prefix-g++" \
+            "AR_${target_env}=$tool_prefix-ar" \
+            "RANLIB_${target_env}=$tool_prefix-ranlib" >> "$GITHUB_ENV"
+
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || matrix.platform.napi_cross && '--use-napi-cross' || '' }} -- --locked
 
@@ -93,6 +108,11 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=8192
         run: bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js
+
+      - name: Smoke test on Debian 12
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}
@@ -146,37 +166,3 @@ jobs:
 
       - name: Smoke test on Alpine
         run: docker run --rm -v "$PWD:/work" -w /work node:24-alpine node scripts/native-raw-smoke.mjs ${{ inputs.binding }}
-
-  gnu-smoke:
-    name: ${{ matrix.target }} on Debian 12
-    needs: bindings
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    defaults:
-      run:
-        shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.sha }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ inputs.binding }}-native.${{ matrix.target }}
-          path: bindings/${{ inputs.binding }}-native
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: ${{ inputs.binding }}-native-loader
-          path: bindings/${{ inputs.binding }}-native
-
-      - name: Smoke test on Debian 12
-        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'

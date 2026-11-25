@@ -406,6 +406,20 @@ describe('native package release wiring', () => {
       { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', napi_cross: true }
     ]);
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
+    const toolchain = job.steps[build - 1];
+    expect(toolchain.name).toBe('Set N-API cross toolchain environment');
+    expect(toolchain.if).toBe('matrix.platform.napi_cross');
+    expect(toolchain.shell).toBe('bash');
+    expect(toolchain.env).toEqual({ TARGET: '${{ matrix.platform.target }}' });
+    expect(toolchain.run).toContain(
+      `node -p 'require("node:module").createRequire(require.resolve("@napi-rs/cli/package.json"))("@napi-rs/cross-toolchain/package.json").version'`
+    );
+    expect(toolchain.run).toContain('target_env=${TARGET//-/_}');
+    expect(toolchain.run).toContain('tool_prefix="$HOME/.napi-rs/cross-toolchain/$version/$TARGET/bin/$TARGET"');
+    for (const [variable, tool] of [['CC', 'gcc'], ['CXX', 'g++'], ['AR', 'ar'], ['RANLIB', 'ranlib']]) {
+      expect(toolchain.run).toContain(`"${variable}_\${target_env}=$tool_prefix-${tool}"`);
+    }
+    expect(toolchain.run).toContain('>> "$GITHUB_ENV"');
     expect(job.steps[build + 1]).toEqual({
       name: 'Check glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
@@ -455,23 +469,15 @@ describe('native package release wiring', () => {
   });
 
   test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {
-    const job = dist.jobs['gnu-smoke'];
-    expect(job.name).toBe('${{ matrix.target }} on Debian 12');
-    expect(job.needs).toBe('bindings');
-    expect(job['runs-on']).toBe('${{ matrix.os }}');
-    expect(job.strategy.matrix.include).toEqual([
-      { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu' },
-      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' }
-    ]);
-    expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
-    expect(job.steps.filter((step: any) => step.uses === 'actions/download-artifact@v8').map((step: any) => step.with)).toEqual([
-      { name: '${{ inputs.binding }}-native.${{ matrix.target }}', path: 'bindings/${{ inputs.binding }}-native' },
-      { name: '${{ inputs.binding }}-native-loader', path: 'bindings/${{ inputs.binding }}-native' }
-    ]);
-    const smoke = job.steps.find((step: any) => step.name === 'Smoke test on Debian 12');
-    expect(smoke.run).toBe(
-      `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
-    );
+    expect(dist.jobs['gnu-smoke']).toBeUndefined();
+    const steps = dist.jobs.bindings.steps;
+    const entries = steps.findIndex((step: any) => step.name === 'Build the JS entries');
+    expect(steps[entries + 1]).toEqual({
+      name: 'Smoke test on Debian 12',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+    });
   });
 
   test('dist uploads the generated loader from GNU Linux x64 after testing', () => {
@@ -499,7 +505,7 @@ describe('native package release wiring', () => {
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
     expect(steps.indexOf(fontPackages)).toBe(steps.indexOf(entries) - 1);
     expect(entries.run).toBe('bun run --cwd bindings/${{ inputs.binding }}-native --if-present build:js');
-    expect(steps.indexOf(entries)).toBe(steps.indexOf(testing) - 1);
+    expect(steps.indexOf(entries)).toBeLessThan(steps.indexOf(testing));
     const fonts = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fonts.run).toContain("bun run --filter '@betteroffice/fonts-latin' --filter '@betteroffice/fonts-intl' --filter '@betteroffice/fonts-cjk' build");
     expect(fonts.run).toContain('(cd packages/fonts && bunx tsup)');
