@@ -763,10 +763,13 @@ fn parse_worksheet(
                     continue;
                 };
                 let name = local_name(&e);
-                if depth == c.depth + 1 && name.as_slice() == b"AlternateContent" {
-                    c.alternate = Some(depth);
+                if depth == c.depth + 1 {
+                    let alternate = name.as_slice() == b"AlternateContent";
+                    c.alternate = alternate.then_some(depth);
                     c.fallback = None;
-                    continue;
+                    if alternate {
+                        continue;
+                    }
                 }
                 if c.alternate.is_some_and(|at| depth == at + 1) {
                     c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
@@ -779,6 +782,9 @@ fn parse_worksheet(
                     b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
                     b"f" => {
                         let text = collect_text(&mut reader, &mut buf, &mut depth)?;
+                        if c.formula.is_some() {
+                            continue;
+                        }
                         if let Some(origin) = c.addr {
                             shared_formulas.record(&e, origin, &text)?;
                             record_array_formula(&e, origin, &mut sheet, facts)?;
