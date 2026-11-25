@@ -1455,7 +1455,7 @@ fn recorded_pairs(
             return None;
         }
         for (old_at, new_at) in (i..old_end).zip(j..new_end) {
-            if old[old_at].content != new[new_at].content {
+            if old.get(old_at)?.content != new.get(new_at)?.content {
                 return None;
             }
             retained.push((old_at, new_at));
@@ -1467,6 +1467,11 @@ fn recorded_pairs(
         let old_end = donors.offsets.binary_search(&edit.to).ok()?;
         let new_start = live.offsets.binary_search(&edit.live_from).ok()?;
         let new_end = live.offsets.binary_search(&edit.live_to).ok()?;
+        if old_end < old_start || new_end < new_start
+            || (old_start == old_end && new_start == new_end)
+        {
+            return None;
+        }
         keep(i, j, old_start, new_start)?;
         edits.push(RecordedEdit {
             old_end,
@@ -1656,25 +1661,29 @@ fn plan_paragraph(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
+    let align = || match alignment(&old, &new, &context) {
+        Ok(retained) => Ok(retained),
+        Err(detail @ "ambiguous: nonunique content alignment") => drawing_text_alignment(&old, &new)
+            .or_else(|| {
+                patchable_restyle
+                    .then(|| single_run_insertion_alignment(&before, &after))
+                    .flatten()
+            })
+            .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+        Err(detail) => Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+    };
     let (retained, recorded, donors) = if let Some(proof) = proof {
+        if let [edit] = proof.edits.as_slice()
+            && edit.from == edit.to
+        {
+            align()?;
+        }
         let donors = DonorIndex::new(&old);
         let (retained, edits) = recorded_pairs(proof, &old, &new, &donors)
             .ok_or_else(|| unproven_paragraph(context.ordinal))?;
         (retained, Some(edits), donors)
     } else {
-        let retained = match alignment(&old, &new, &context) {
-            Ok(retained) => retained,
-            Err(detail @ "ambiguous: nonunique content alignment") => {
-                drawing_text_alignment(&old, &new)
-                    .or_else(|| {
-                        patchable_restyle
-                            .then(|| single_run_insertion_alignment(&before, &after))
-                            .flatten()
-                    })
-                    .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
-            }
-            Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
-        };
+        let retained = align()?;
         (retained, None, DonorIndex::new(&old))
     };
     let mut recorded = recorded.map(Vec::into_iter);
@@ -1692,15 +1701,20 @@ fn plan_paragraph(
                 let edit = edits
                     .next()
                     .ok_or_else(|| unproven_paragraph(context.ordinal))?;
-                if edit.old_end > i || edit.new_end > j {
+                if !(previous.0..=i).contains(&edit.old_end)
+                    || !(previous.1..=j).contains(&edit.new_end)
+                    || (edit.old_end, edit.new_end) == previous
+                {
                     return Err(unproven_paragraph(context.ordinal));
                 }
                 (edit.old_end, edit.new_end, Some(edit.donor))
             } else {
                 (i, j, None)
             };
-            let removed = &old[previous.0..i];
-            let inserted = &new[previous.1..j];
+            let removed = old.get(previous.0..i)
+                .ok_or_else(|| unproven_paragraph(context.ordinal))?;
+            let inserted = new.get(previous.1..j)
+                .ok_or_else(|| unproven_paragraph(context.ordinal))?;
             if removed.iter().chain(inserted).any(complex_field) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
@@ -1804,6 +1818,9 @@ fn plan_paragraph(
             previous = (i, j);
         }
         if i < old.len() {
+            if j >= new.len() {
+                return Err(unproven_paragraph(context.ordinal));
+            }
             if old[i].attrs.get("runStyle") != new[j].attrs.get("runStyle")
                 || (!patchable_restyle && !same_attrs(&old_inherit[i], &new_inherit[j]))
             {
@@ -2232,6 +2249,25 @@ mod tests {
             { "id": 1, "name": "mark", "kind": "start", "offset": start },
             { "id": 1, "kind": "end", "offset": end }
         ] })
+    }
+
+    #[test]
+    fn reversed_recorded_ranges_fail_closed() {
+        let paragraph = paragraph("abc", json!({}));
+        let proof = Proof {
+            seed_width: 3,
+            live_width: 3,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 1,
+                to: 0,
+                live_from: 1,
+                live_to: 0,
+                donor: DonorV1::At { at: 0 },
+            }],
+        };
+        let error = diff_paragraph_with_proof(&paragraph, &paragraph, context(), Some(&proof))
+            .unwrap_err();
+        assert_eq!(error.detail, "ambiguous: unproven edit provenance");
     }
 
     #[test]

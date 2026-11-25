@@ -3629,7 +3629,7 @@ impl EditingDoc {
         }
         history.add_undo_barrier();
         let valued = {
-            let _watch = self.watch_provenance(crate::provenance::WatchKind::Batch);
+            let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
             let mut txn = match history_mode {
                 EditHistory::Separate => self.yrs_doc().transact_mut_with(self.client_id),
                 EditHistory::None => self.yrs_doc().transact_mut_with(HOST_ORIGIN),
@@ -3668,7 +3668,7 @@ impl EditingDoc {
         }
         history.add_undo_barrier();
         let (changed_stories, receipts) = {
-            let _watch = self.watch_provenance(crate::provenance::WatchKind::Batch);
+            let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
             let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
             if self.epoch.load(Ordering::Relaxed) != plan.epoch
                 || self.version_nonce.load(Ordering::Relaxed) != plan.nonce

@@ -411,7 +411,7 @@ impl DocUndoManager {
         let provenance = crate::provenance::Watch::new(
             &self.doc,
             &self.provenance,
-            crate::provenance::WatchKind::All,
+            crate::provenance::WatchKind::History,
         );
         let applied = if undoing {
             self.inner.undo_blocking()

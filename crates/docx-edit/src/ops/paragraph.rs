@@ -589,6 +589,8 @@ impl EditingDoc {
 
         if revision_id.is_some() || own_insert.is_some() || !needs_boundary {
             self.mark_provenance_key(&txn, &boundary.bounds.para_id);
+        }
+        if revision_id.is_none() && !needs_boundary {
             self.mark_provenance_key(&txn, &survivor.bounds.para_id);
         }
         let carry = (revision_id.is_none() && !needs_boundary)
@@ -1786,8 +1788,16 @@ impl EditingDoc {
         let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
         let story = story_ref(&txn, story_id)?;
         check_position(&story, &txn, at)?;
-        if !records.is_empty() {
-            self.mark_provenance_range(&txn, &story, at, at);
+        if !records.is_empty()
+            && let Some(bounds) = crate::op::para_bounds(&story, &txn)
+                .into_iter()
+                .find(|bounds| {
+                    bounds.start < at
+                        && at <= bounds.pilcrow
+                        && crate::ops::past_leading_blocks(&story, &txn, bounds.start) < at
+                })
+        {
+            self.mark_provenance_key(&txn, &bounds.para_id);
         }
         if at + 1 >= story.len(&txn) {
             identity::promote_story(self, &mut txn, story_id);

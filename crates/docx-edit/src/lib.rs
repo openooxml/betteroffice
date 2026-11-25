@@ -2245,14 +2245,8 @@ impl EditingDoc {
     /// Applies updates in order in one transaction, then repairs any paragraph identities
     /// they duplicated.
     fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
-        let watch = self.watch_provenance(provenance::WatchKind::Recorded);
-        let result = self.integrate_updates_inner(updates, origin);
-        if (result.is_err() || self.holds_pending_update())
-            && watch.as_ref().is_some_and(provenance::Watch::is_active)
-        {
-            self.provenance.lock().unwrap().overflow();
-        }
-        result
+        let _watch = self.watch_provenance(provenance::WatchKind::Recorded);
+        self.integrate_updates_inner(updates, origin)
     }
 
     fn integrate_updates_inner(

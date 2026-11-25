@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use docx_edit::session::{EditSessionCore, Host};
 use docx_edit::{
-    EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
-    FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
-    Patch, Position, StoryRange, StrikePatch, StyleResolver, UnderlinePatch, UndoSession,
+    CellLoc, EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
+    FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphInput, ParagraphRef,
+    ParagraphTarget, Patch, Position, RawOp, StoryRange, StrikePatch, StyleResolver, TableRange,
+    TargetEdge, UnderlinePatch, UndoSession,
     seed_from_docx, seed_from_docx_with_generation,
 };
 use docx_parse::paragraph_patch::{
@@ -3187,7 +3188,7 @@ fn undo_of_equal_output_is_checked_before_the_digest_gate() {
 }
 
 #[test]
-fn format_only_undo_and_pilcrow_undo_mark_the_occurrence() {
+fn undo_to_source_formatting_preserves_the_paragraph() {
     for pilcrow in [false, true] {
         let doc = open(&text("abc"));
         let mut history = doc.undo_manager();
@@ -3207,8 +3208,200 @@ fn format_only_undo_and_pilcrow_undo_mark_the_occurrence() {
             );
         }
         assert!(history.undo());
-        assert_unproven(&doc);
+        let plan = doc.paragraph_save_plan();
+        assert!(body_plan(&plan).changed.is_empty());
+        assert!(plan.patched_parts.iter().any(|(part, _)| part == "word/document.xml"));
     }
+}
+
+#[test]
+fn undo_to_source_text_and_raw_inlines_keeps_the_source_bytes() {
+    let content = r#"<w:r><w:t xml:space="preserve">abc</w:t></w:r><w:subDoc r:id="raw"/><w:r><w:t>def</w:t></w:r>"#;
+    let doc = open(content);
+    let mut history = doc.undo_manager();
+    doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
+        .unwrap();
+    assert!(history.undo());
+    assert!(body_plan(&doc.paragraph_save_plan()).changed.is_empty());
+    let (saved, _) = save_paragraph(&doc, content, |_| {});
+    assert!(saved.contains(content), "{saved}");
+}
+
+#[test]
+fn inserting_or_deleting_a_complete_paragraph_does_not_mark_its_neighbor() {
+    let content = format!(
+        r#"{}</w:p><w:p w14:paraId="00000003">{}"#,
+        text("abc"),
+        text("def"),
+    );
+    for insert in [true, false] {
+        let doc = open(&content);
+        let paragraphs = doc.paragraphs("body").unwrap();
+        let operation = if insert {
+            EditOperation::InsertParagraphs {
+                target: ParagraphTarget {
+                    story: "body".to_owned(),
+                    para_id: paragraphs[1].para_id.clone(),
+                },
+                at: TargetEdge::Start,
+                paragraphs: vec![ParagraphInput {
+                    text: "new".to_owned(),
+                    runs: None,
+                    style_id: None,
+                }],
+            }
+        } else {
+            EditOperation::DeleteParagraphs {
+                story: "body".to_owned(),
+                first_para_id: paragraphs[0].para_id.clone(),
+                last_para_id: paragraphs[0].para_id.clone(),
+            }
+        };
+        doc.apply_edits(
+            &EditRequest {
+                expect_version: doc.version(),
+                source: EditSource::Host,
+                history: EditHistory::Separate,
+                steps: vec![EditStep::new(operation)],
+            },
+            &UndoSession::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let plan = doc.paragraph_save_plan();
+        let body = body_plan(&plan);
+        assert!(body.changed.is_empty(), "{:?}", body.changed);
+        assert_eq!(body.inserted.len(), insert as usize);
+        assert_eq!(body.removed.len(), (!insert) as usize);
+
+        let start = if insert { 8 } else { 0 };
+        replace(&doc, start + 1, start + 2, "X");
+        let plan = doc.paragraph_save_plan();
+        let body = body_plan(&plan);
+        assert_eq!(body.changed, [1]);
+        assert!(body.legacy_paragraphs.is_empty(), "{:?}", body.legacy_paragraphs);
+        assert_eq!(body.paragraph_patches[0].ordinal, 1);
+    }
+}
+
+#[test]
+fn deleting_a_table_row_leaves_the_body_paragraphs_unchanged() {
+    let content = concat!(
+        r#"<w:r><w:t>Before</w:t></w:r></w:p>"#,
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid>"#,
+        r#"<w:tr><w:tc><w:p w14:paraId="00000003"><w:r><w:t>One</w:t></w:r></w:p></w:tc></w:tr>"#,
+        r#"<w:tr><w:tc><w:p w14:paraId="00000004"><w:r><w:t>Two</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        r#"<w:p w14:paraId="00000005"><w:r><w:t>After</w:t></w:r>"#,
+    );
+    let doc = open(content);
+    let row = TableRange::cell(CellLoc::new("body", 0, 0, 0));
+    doc.delete_row(&ctx(), &row)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let body = body_plan(&plan);
+    assert_eq!(body.removed, [1]);
+    assert!(body.changed.is_empty(), "{:?}", body.changed);
+    assert!(body.legacy_paragraphs.is_empty());
+}
+
+#[test]
+fn unproven_text_edits_keep_the_bookmark_fallback_reason() {
+    let doc = open(&text("abc"));
+    let bookmark = Any::Map(Arc::new(std::collections::HashMap::from([
+        ("id".to_owned(), Any::Number(7.0)),
+        ("kind".to_owned(), Any::from("start")),
+        ("name".to_owned(), Any::from("Boundary")),
+        ("offset".to_owned(), Any::Number(0.0)),
+    ])));
+    doc.apply_raw_ops(
+        "body",
+        vec![
+            RawOp::Insert {
+                index: 1,
+                text: "X".to_owned(),
+                attrs: Default::default(),
+            },
+            RawOp::SetEmbedAttr {
+                index: 4,
+                key: "bookmarks".to_owned(),
+                value: Any::Array(vec![bookmark].into()),
+            },
+        ],
+        &ctx(),
+    )
+    .unwrap();
+    assert_legacy(&doc, PatchErrorCode::UnsupportedStructure, "marker:");
+}
+
+#[test]
+fn watched_run_formatting_alone_still_patches() {
+    let doc = open(&text("abc"));
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::Format {
+            index: 1,
+            len: 1,
+            attrs: [(Arc::from("bold"), Any::Bool(true))].into_iter().collect(),
+        }],
+        &ctx(),
+    )
+    .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let body = body_plan(&plan);
+    assert_eq!(body.format_only, [0]);
+    assert!(body.legacy_paragraphs.is_empty());
+    assert_eq!(body.paragraph_patches[0].run_edits.len(), 1);
+}
+
+#[test]
+fn a_projected_seed_without_item_ids_uses_alignment_for_local_text_edits() {
+    let content = text("abc");
+    let source = package(&content);
+    let sender = open_for_transfer(&content, "projected");
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let projected = EditSessionCore::new(72, host);
+    projected
+        .open_docx(&source, false, Some("projected".to_owned()), None)
+        .unwrap();
+    projected.load(&sender.encode_state_as_update_v1()).unwrap();
+    projected.insert_text("body", "00000001", 1, "X", None, None).unwrap();
+
+    let plan: serde_json::Value =
+        serde_json::from_str(&projected.paragraph_save_plan().unwrap()).unwrap();
+    let body = plan["splicedParts"].as_array().unwrap().iter()
+        .find(|part| part["part"] == "word/document.xml").unwrap();
+    assert_eq!(body["changed"], json!([0]));
+    assert_eq!(body["paragraphPatches"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn ambiguous_single_typing_keeps_the_model_save_path() {
+    let doc = open(r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#);
+    doc.insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+        .unwrap();
+    assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+}
+
+#[test]
+fn a_pending_update_does_not_invalidate_records_in_another_paragraph() {
+    let content = format!(
+        r#"{}</w:p><w:p w14:paraId="00000003">{}"#,
+        text("abc"),
+        text("def"),
+    );
+    let doc = open(&content);
+    let peer = EditingDoc::new(72);
+    peer.apply_update_v1(&doc.encode_state_as_update_v1()).unwrap();
+    replace(&doc, 1, 2, "X");
+
+    peer.insert_text(&ctx(), Position::new("body", 5), "Y", FormatPolicy::Inherit)
+        .unwrap();
+    let base = peer.encode_state_vector_v1();
+    peer.insert_text(&ctx(), Position::new("body", 6), "Z", FormatPolicy::Inherit)
+        .unwrap();
+    doc.apply_update_v1(&peer.encode_diff_v1(&base).unwrap()).unwrap();
+    assert_eq!(doc.paragraphs("body").unwrap()[1].text, "def");
+    assert_splices(&doc, &[(1, 2, 1, "X")]);
 }
 
 #[test]
