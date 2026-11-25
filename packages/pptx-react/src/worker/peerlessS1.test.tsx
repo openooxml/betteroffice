@@ -108,6 +108,31 @@ afterEach(async () => {
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
+test('the editor defaults to sliced fonts with worker rendering support and honors an explicit opt-out', async () => {
+  const opener = spyOn(peerlessSessionOpener, 'open');
+  for (const [target, property, value] of [
+    [globalThis, 'navigator', { userAgent: 'Chrome/149.0' }],
+    [globalThis, 'createImageBitmap', () => {}],
+    [HTMLCanvasElement.prototype, 'transferControlToOffscreen', () => {}],
+  ] as const) {
+    const original = Object.getOwnPropertyDescriptor(target, property);
+    Object.defineProperty(target, property, { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(target, property, original);
+      else Reflect.deleteProperty(target, property);
+    });
+  }
+  for (const [supported, option, expected] of [[true, undefined, true], [true, false, false], [false, undefined, false]] as const) {
+    if (!supported) Reflect.deleteProperty(globalThis, 'createImageBitmap');
+    const file = await deck(0);
+    const view = render(<PptxEditor file={file} fonts={[]} experimentalSlicedFonts={option} />);
+    try {
+      await waitFor(() => expect(opener).toHaveBeenCalledWith(file, expect.anything()));
+      expect(opener.mock.calls.find(([source]) => source === file)?.[1]?.slicedFonts === true).toBe(expected);
+    } finally { view.unmount(); }
+  }
+});
+
 test('default fonts gate the initial paint and background navigation on browser installation', async () => {
   const active = deferred<void>();
   const background = deferred<void>();

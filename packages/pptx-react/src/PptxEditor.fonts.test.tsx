@@ -58,7 +58,7 @@ test('bundled descriptors wait for the prepared decoder and open with byte faces
   const boldItalic = { ...face, weight: 700 as const, style: 'italic' as const };
   const { view, file, ready } = await mount([{ face: boldItalic, baseUrl }], { loadingIndicator: 'Loading fonts' });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
-  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: false, activeSlideIndex: 0 });
+  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: false, activeSlideIndex: 0, slicedFonts: false });
   expect(load).toHaveBeenCalledWith(boldItalic, { baseUrl }, { decoder });
   expect(load.mock.calls.every((call) => call[2]?.decoder === decoder && !('retain' in call[2]!))).toBe(true);
   expect(opener).not.toHaveBeenCalled();
@@ -114,7 +114,7 @@ test('mixed byte and bundled faces preserve both in input order', async () => {
 test('the prepared decoder gets the default fonts and opening slide the editor will use', async () => {
   const { ready, file } = await mount([{ face, baseUrl }], { defaultFonts: undefined, initialSlide: 3 });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
-  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 2 });
+  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 2, slicedFonts: false });
 });
 
 test('metric-compatible descriptors open as the font they substitute', async () => {
@@ -171,7 +171,7 @@ test('changing the file releases the old worker and ignores its pending fonts', 
   await act(async () => { view.rerender(<PptxEditor {...props} file={nextFile} />); });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
   expect(release).toHaveBeenCalledTimes(1);
-  expect(prepare).toHaveBeenNthCalledWith(2, nextFile, { defaultFonts: false, activeSlideIndex: 0 });
+  expect(prepare).toHaveBeenNthCalledWith(2, nextFile, { defaultFonts: false, activeSlideIndex: 0, slicedFonts: false });
   await act(async () => { first.resolve(fontBytes.slice().buffer as ArrayBuffer); });
   expect(opener).not.toHaveBeenCalled();
   await act(async () => { second.resolve(fontBytes.slice().buffer as ArrayBuffer); });

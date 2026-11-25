@@ -150,7 +150,29 @@ test('coverage prefetch forwards configured CDN and explicit disable state', asy
     const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1 });
     try {
       for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
-      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], false, { baseUrl, timeoutMs: 6789 }]]);
+      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], undefined, { baseUrl, timeoutMs: 6789 }]]);
+    } finally { prepared.release(); }
+  }
+});
+
+test('prepared workers follow browser support and preserve an explicit whole-face opt-out', async () => {
+  const globals = { document: {}, OffscreenCanvas: class {}, createImageBitmap: () => {},
+    HTMLCanvasElement: class { transferControlToOffscreen() {} } };
+  for (const [name, value] of Object.entries(globals)) {
+    const original = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(globalThis, name, original);
+      else Reflect.deleteProperty(globalThis, name);
+    });
+  }
+  for (const [supported, slicedFonts, expected] of [[true, undefined, true], [true, false, false], [false, undefined, false]] as const) {
+    if (!supported) Reflect.deleteProperty(globalThis, 'createImageBitmap');
+    const h = factory();
+    const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1, slicedFonts });
+    try {
+      for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], expected]]);
     } finally { prepared.release(); }
   }
 });

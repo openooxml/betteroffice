@@ -5,7 +5,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
-const { createPeerlessFontCoverage, createWholeFontInstaller } = await import('./peerlessFontCoverage');
+const { createPeerlessFontCoverage } = await import('./peerlessFontCoverage');
 import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
 
 let added: string[];
@@ -96,32 +96,6 @@ test('a case variant of a sliced family is sliced too', async () => {
   expect(asked).toEqual(['noto sans jp']);
 });
 
-test('whole faces load once for callers at the same moment, and not again once installed', async () => {
-  const reads: string[][] = [];
-  const installs: string[][] = [];
-  const ensure = createWholeFontInstaller(async (have) => {
-    reads.push(have);
-    return have.includes('Noto Sans JP') ? [] : [{ family: 'Noto Sans JP' }];
-  }, async (faces) => { installs.push(faces.map((face) => face.family)); return faces; }, () => false);
-  await Promise.all([ensure(), ensure(), ensure()]);
-  expect(installs).toEqual([['Noto Sans JP']]);
-  await ensure();
-  expect(reads[0]).toEqual([]);
-  expect(reads.slice(1).every((have) => have.includes('Noto Sans JP'))).toBe(true);
-  expect(installs).toHaveLength(1);
-});
-
-test('a whole face arriving after the host supplied its family is dropped', async () => {
-  const supplied = new Set<string>();
-  const installs: string[] = [];
-  const ensure = createWholeFontInstaller(async () => {
-    supplied.add('Noto Sans JP');
-    return [{ family: 'Noto Sans JP' }];
-  }, async (faces) => { installs.push(...faces.map((face) => face.family)); return faces; }, (family) => supplied.has(family));
-  await ensure();
-  expect(installs).toEqual([]);
-});
-
 test('toolbar PNG export paints through coverage, so it never depends on a whole face loading', async () => {
   const { readFile } = await import('node:fs/promises');
   const source = await readFile(new URL('./peerlessFrameSource.ts', import.meta.url), 'utf8');
@@ -139,27 +113,6 @@ test('a right-to-left page asks for its text as right-to-left, since a page canv
   document.documentElement.dir = 'rtl';
   try { await coverage.prepare('Noto Sans JP', '\u2208'); } finally { document.documentElement.dir = ''; }
   expect(asked).toEqual(['\u2208\u200f']);
-});
-
-test('a family that arrives during a whole-face load is installed before that load settles', async () => {
-  const available = ['Noto Sans JP'];
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const installs: string[] = [];
-  let reads = 0;
-  const ensure = createWholeFontInstaller(async (have) => {
-    const faces = available.filter((family) => !have.includes(family)).map((family) => ({ family }));
-    reads += 1;
-    if (reads === 1) await held;
-    return faces;
-  }, async (faces) => { installs.push(...faces.map((face) => face.family)); return faces; }, () => false);
-  const first = ensure();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  available.push('Noto Sans SC');
-  const second = ensure();
-  release();
-  await Promise.all([first, second]);
-  expect(installs).toEqual(['Noto Sans JP', 'Noto Sans SC']);
 });
 
 test('a style that loaded whole under a sliced family is not covered, and the rest of the family is', () => {
