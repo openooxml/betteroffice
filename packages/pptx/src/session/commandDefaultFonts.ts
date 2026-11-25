@@ -155,8 +155,10 @@ export function createCommandDefaultFonts(
 
   const retryable = (id: string) => !attempted.has(id) ||
     ((attempts.get(id) ?? 0) < DEFAULT_FONT_MAX_ATTEMPTS && Date.now() >= (retryAt.get(id) ?? Infinity));
-  const failed = (id: string) => retryAt.set(id,
-    Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[(attempts.get(id) ?? 1) - 1] ?? Infinity));
+  const failed = (id: string) => {
+    if (!retryAt.has(id)) retryAt.set(id,
+      Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[(attempts.get(id) ?? 1) - 1] ?? Infinity));
+  };
 
   function publish(wanted: FontRequest[], faces: (DefaultFontFace | undefined)[]): DefaultFontLanding[] {
     if (disposed) return [];
@@ -191,6 +193,10 @@ export function createCommandDefaultFonts(
     attempted.add(id);
     attempts.set(id, (previousAttempts ?? 0) + 1);
     retryAt.delete(id);
+    const retryCoverage = (error: { retryAt?: number }) => {
+      attempts.set(id, previousAttempts ?? 0);
+      retryAt.set(id, error.retryAt ?? Date.now() + DEFAULT_FONT_RETRY_DELAYS_MS[0]);
+    };
     const task = new Promise<DefaultFontFace | undefined>((resolve) => {
       let finished = false;
       const finish = (value?: DefaultFontFace) => {
@@ -239,8 +245,11 @@ export function createCommandDefaultFonts(
             const arabic = source.resolveScriptFallback('arabic', bold, italic, face.family);
             if (arabic) {
               const bytes = await session.loadCoverage(arabic).catch(async (error: unknown) => {
-                if (settledHttpMiss(error) || (await importFonts()).isMissingFontAddon(error)) return undefined;
-                throw error;
+                if (!settledHttpMiss(error) && !(await importFonts()).isMissingFontAddon(error)) {
+                  if (isImplicitFontCdnError(error)) retryCoverage(error);
+                  else failed(id);
+                }
+                return undefined;
               });
               if (bytes && await scriptFontFace('arabic', bold, italic, bytes, face.family)) {
                 await waitForPrimary;
@@ -253,7 +262,9 @@ export function createCommandDefaultFonts(
         }
         if (!load && !preferred) return undefined;
         available = true;
+        let triedSlices = false;
         if (load?.slices && sliced?.supported()) {
+          triedSlices = true;
           try {
             const opened = await session.openSlices(load.slices);
             if (disposed || suppliedFamily(face)) return undefined;
@@ -270,24 +281,17 @@ export function createCommandDefaultFonts(
               return disposed ? undefined : skeleton;
             }
           } catch (error) {
-            const implicit = isImplicitFontCdnError(error);
-            if (settledHttpMiss(error) && (face.kind === 'coverage' || !implicit)) {
-              available = false;
-              return undefined;
-            }
-            if (implicit && error.diagnostic.pack === 'latin') throw error;
+            if (isImplicitFontCdnError(error) && error.diagnostic.pack === 'latin') throw error;
           }
         }
         const loading = load && (face.kind === 'coverage' ? session.loadCoverage(load) : load());
         const bytes = preferred?.bytes ?? await loading?.catch(async (error: unknown) => {
           const implicit = isImplicitFontCdnError(error);
           if (implicit) session.report(error);
-          if (face.kind === 'coverage') {
-            if (settledHttpMiss(error) ||
-              (!implicit && (await importFonts()).isMissingFontAddon(error))) {
-              available = false;
-              return undefined;
-            }
+          if ((settledHttpMiss(error) && (face.kind === 'coverage' || (triedSlices && !implicit))) ||
+              (face.kind === 'coverage' && !implicit && (await importFonts()).isMissingFontAddon(error))) {
+            available = false;
+            return undefined;
           }
           throw error;
         });
@@ -322,8 +326,7 @@ export function createCommandDefaultFonts(
         pending.delete(id);
         if (isImplicitFontCdnError(error)) {
           if (face.kind === 'coverage' || (face.kind === 'primary' && face.preferArabic)) {
-            attempts.set(id, previousAttempts ?? 0);
-            retryAt.set(id, error.retryAt ?? Date.now() + DEFAULT_FONT_RETRY_DELAYS_MS[0]);
+            retryCoverage(error);
           } else if (previousAttempts === undefined) {
             attempted.delete(id);
             attempts.delete(id);
