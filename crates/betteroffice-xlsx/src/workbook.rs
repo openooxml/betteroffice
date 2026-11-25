@@ -3103,7 +3103,8 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let update = if self.defers_staging() {
+        let deferred = self.defers_staging();
+        let update = if deferred {
             self.defer_apply(&ops, SyncOrigin::Undo)?;
             None
         } else {
@@ -3117,7 +3118,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
-        self.apply_model_history(|undo, model| undo.undo(model))?;
+        self.apply_model_history(deferred, |undo, model| undo.undo(model))?;
         self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
@@ -3167,7 +3168,8 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let update = if self.defers_staging() {
+        let deferred = self.defers_staging();
+        let update = if deferred {
             self.defer_apply(&ops, SyncOrigin::Redo)?;
             None
         } else {
@@ -3181,7 +3183,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
-        self.apply_model_history(|undo, model| undo.redo(model))?;
+        self.apply_model_history(deferred, |undo, model| undo.redo(model))?;
         self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
@@ -4401,10 +4403,13 @@ impl Workbook {
             return Ok(());
         }
         let origin = origins.get(sheet.0 as usize).copied().flatten();
+        let package = package.materialize()?;
+        let source_sheet = origin
+            .and_then(|index| package.source_sheet_name(index))
+            .unwrap_or(&model.sheets[sheet.0 as usize].name);
         let location = package
-            .materialize()?
-            .table_header_reference(origin, &table.name, |formula, local| {
-                xlsx_ops::references_table_column(formula, &table.name, local, old)
+            .table_header_reference(origin, |formula, local| {
+                xlsx_ops::references_table_column(formula, &table.name, source_sheet, local, old)
             })
             .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
         if let Some(location) = location {
@@ -4415,6 +4420,9 @@ impl Workbook {
             ))
             .into());
         }
+        package
+            .validate_table_column_rename(model, origins, table, column, &name)
+            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
         Ok(())
     }
 
@@ -4476,19 +4484,32 @@ impl Workbook {
 
     fn apply_model_history<T>(
         &mut self,
+        deferred: bool,
         apply: impl FnOnce(
             &mut UndoStack,
             &mut WorkbookModel,
         ) -> std::result::Result<T, xlsx_ops::OpError>,
     ) -> std::result::Result<T, xlsx_ops::OpError> {
         #[cfg(test)]
-        if crate::authority::force_full_materialization() {
+        let result = if crate::authority::force_full_materialization() {
             let mut model = self.model.clone();
-            let result = apply(&mut self.undo, &mut model)?;
-            self.model = model;
-            return Ok(result);
+            let result = apply(&mut self.undo, &mut model);
+            if result.is_ok() {
+                self.model = model;
+            }
+            result
+        } else {
+            apply(&mut self.undo, &mut self.model)
+        };
+        #[cfg(not(test))]
+        let result = apply(&mut self.undo, &mut self.model);
+        if result.is_err()
+            && deferred
+            && let Some(deferred) = self.authority.deferred.as_deref_mut()
+        {
+            deferred.changes.pop();
         }
-        apply(&mut self.undo, &mut self.model)
+        result
     }
 
     /// Makes a committed change visible: advances [`Workbook::version`], then hands observers
@@ -4595,7 +4616,8 @@ impl Workbook {
                 | Op::RemoveSheet { .. }
                 | Op::MoveSheet { .. }
                 | Op::RenameSheet { .. }
-                | Op::RestoreSheet { .. } => {
+                | Op::RestoreSheet { .. }
+                | Op::RestoreTableColumn { .. } => {
                     *slot = None;
                     return;
                 }
@@ -5721,6 +5743,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. }
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. } => None,
     }
@@ -6051,6 +6074,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. }
         | Op::SetCharts { .. }
         | Op::SetConditionalFormats { .. }
         | Op::RestoreAutoFilter { .. }
@@ -7381,6 +7405,7 @@ impl CalculationScope {
             | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. }
             | Op::AddSheet { .. }
@@ -7429,6 +7454,12 @@ fn reached_sheets(ops: &[Op]) -> BTreeSet<SheetId> {
                 sheets.insert(*sheet);
                 sheets.extend(formulas.iter().map(|(sheet, ..)| *sheet));
             }
+            Op::RestoreTableColumn {
+                sheet, formulas, ..
+            } => {
+                sheets.insert(*sheet);
+                sheets.extend(formulas.iter().map(|(sheet, ..)| *sheet));
+            }
             op => sheets.extend(worksheet_edit_target(op)),
         }
     }
@@ -7438,15 +7469,25 @@ fn reached_sheets(ops: &[Op]) -> BTreeSet<SheetId> {
 /// The formula cells whose text a batch's renames rewrote: its inverse
 /// restores each of them.
 fn rewritten_formulas(inverse: &[Op]) -> Vec<(SheetId, CellRef)> {
-    inverse
-        .iter()
-        .filter_map(|op| match op {
-            Op::RestoreSheet { formulas, .. } => Some(formulas),
-            _ => None,
-        })
-        .flatten()
-        .map(|(sheet, at, _)| (*sheet, *at))
-        .collect()
+    let mut rewritten = Vec::new();
+    for op in inverse {
+        match op {
+            Op::RestoreSheet { formulas, .. } => {
+                rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+            }
+            Op::RestoreTableColumn {
+                sheet,
+                at,
+                formulas,
+                ..
+            } => {
+                rewritten.push((*sheet, *at));
+                rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+            }
+            _ => {}
+        }
+    }
+    rewritten
 }
 
 /// What the engine reads that a batch can reach: the workbook-level inputs

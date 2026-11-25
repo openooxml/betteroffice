@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditFailureCode, EditOperation,
-    EditRequest, EditStep, Error, Op, RangeAddress, RangeTarget, SheetId, StylePatch, Workbook,
-    WorkbookModel,
+    CalculationOptions, CellInput, CellRange, CellRef, CellValue, EditFailureCode, EditHistory,
+    EditOperation, EditRequest, EditStep, Error, Op, RangeAddress, RangeTarget, SheetId,
+    StylePatch, Workbook, WorkbookModel,
 };
 use xlsx_model::CellProvider;
 use xlsx_ops::{CellState, OpError};
@@ -435,6 +435,79 @@ fn undo_and_redo_restore_the_header_cell_and_column_name() {
 }
 
 #[test]
+fn undo_keeps_a_later_header_rename_outside_history() {
+    let source = replace_part(
+        &book(),
+        "xl/workbook.xml",
+        "</workbook>",
+        concat!(
+            r#"<definedNames><definedName name="Keys">Table2[Key]</definedName>"#,
+            r#"<definedName name="Both">COUNTA(Table1[Status],Table2[Key])</definedName>"#,
+            "</definedNames></workbook>",
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "H1", "=COUNTA(Table1[Status],Table2[Key])");
+    edit(&mut workbook, "B1", "State");
+    workbook
+        .apply_edits(&EditRequest {
+            expect_version: workbook.version(),
+            source: Default::default(),
+            history: EditHistory::None,
+            calculation: Default::default(),
+            steps: vec![EditStep::new(EditOperation::SetCellInputs {
+                target: RangeTarget {
+                    sheet_id: "sheet:0".into(),
+                    range: RangeAddress::A1 { a1: "E1".into() },
+                },
+                inputs: vec![vec!["Id".into()]],
+            })],
+        })
+        .unwrap()
+        .unwrap();
+    for (undo, caption) in [(true, "Status"), (false, "State")] {
+        if undo {
+            workbook.undo(CalculationOptions::default()).unwrap();
+        } else {
+            workbook.redo(CalculationOptions::default()).unwrap();
+        }
+        let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", caption, "Rev"]);
+        let model = reopened.model();
+        let formula = format!("COUNTA(Table1[{caption}],Table2[Id])");
+        assert_eq!(model.table("Table2").unwrap().columns[0], "Id");
+        assert_eq!(model.defined_names[0].formula, "Table2[Id]");
+        assert_eq!(model.defined_names[1].formula, formula);
+        assert_eq!(
+            model.sheets[0].cell(at("H1")).unwrap().formula.as_deref(),
+            Some(formula.as_str())
+        );
+    }
+}
+
+#[test]
+fn an_untouched_header_can_differ_from_its_caption_in_case() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        "<t>Name</t>",
+        "<t>NAME</t>",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        reopened.model().table("Table1").unwrap().columns,
+        ["Name", "State", "Rev"]
+    );
+    assert_eq!(
+        reopened.model().value(SHEET1, at("A1")),
+        CellValue::Text {
+            value: "NAME".into()
+        }
+    );
+}
+
+#[test]
 fn a_header_edit_preserves_other_table_parts_byte_for_byte() {
     let source = book();
     let mut workbook = Workbook::open(&source).unwrap();
@@ -650,6 +723,142 @@ fn an_existing_structured_reference_follows_a_header_rename_and_undo() {
 }
 
 #[test]
+fn escaped_table_captions_keep_structured_references_evaluable() {
+    for (caption, escaped) in [
+        ("Q1:Q2", "Q1:Q2"),
+        ("a'b", "a''b"),
+        ("x[1]", "x'[1']"),
+        ("#n", "'#n"),
+    ] {
+        let mut workbook = Workbook::open(&book()).unwrap();
+        edit(
+            &mut workbook,
+            "H1",
+            "=COUNTA(Table1[Status])+COUNTA(Table1[[Status]:[Rev]])",
+        );
+        edit(
+            &mut workbook,
+            "C2",
+            "=COUNTA(Table1[@Status])+COUNTA(Table1[[#This Row],[Status]])",
+        );
+        let values = ["H1", "C2"].map(|cell| workbook.model().value(SHEET1, at(cell)));
+        assert_eq!(
+            values,
+            [
+                CellValue::Number { value: 9.0 },
+                CellValue::Number { value: 2.0 },
+            ]
+        );
+        edit(&mut workbook, "B1", caption);
+        let mut reopened =
+            assert_saved_headers(&workbook.save().unwrap(), ["Name", caption, "Rev"]);
+        reopened.recalculate_all(CalculationOptions::default());
+        let formulas = [
+            format!("COUNTA(Table1[[{escaped}]])+COUNTA(Table1[[{escaped}]:[Rev]])"),
+            format!("COUNTA(Table1[@[{escaped}]])+COUNTA(Table1[[#This Row],[{escaped}]])"),
+        ];
+        for ((address, value), formula) in ["H1", "C2"].into_iter().zip(values).zip(formulas) {
+            assert_eq!(
+                reopened.model().sheets[0]
+                    .cell(at(address))
+                    .unwrap()
+                    .formula
+                    .as_deref(),
+                Some(formula.as_str())
+            );
+            assert_eq!(reopened.model().value(SHEET1, at(address)), value);
+        }
+    }
+}
+
+#[test]
+fn a_rewrite_over_the_formula_character_limit_refuses_the_rename() {
+    let limit = xlsx_calc::lexer::MAX_FORMULA_CHARS;
+    let mut formula = "COUNTA(Table1[Status])".to_owned();
+    let empty = r#"+LEN("")"#;
+    let term = format!(r#"+LEN("{}")"#, "x".repeat(200));
+    while formula.len() + term.len() + empty.len() <= limit {
+        formula.push_str(&term);
+    }
+    let remaining = limit - formula.len() - empty.len();
+    formula.push_str(&format!(r#"+LEN("{}")"#, "x".repeat(remaining)));
+    for defined_name in [false, true] {
+        let source = if defined_name {
+            replace_part(
+                &book(),
+                "xl/workbook.xml",
+                "</workbook>",
+                &format!(
+                    "<definedNames><definedName name=\"Statuses\">{formula}</definedName>\
+                     </definedNames></workbook>"
+                ),
+            )
+        } else {
+            book()
+        };
+        let mut workbook = Workbook::open(&source).unwrap();
+        if !defined_name {
+            edit(&mut workbook, "H1", &format!("={formula}"));
+        }
+        edit(&mut workbook, "G1", "=COUNTA(Table1[Status])");
+        let version = workbook.version();
+        let model = workbook.model().clone();
+        let error = workbook
+            .edit_cell(SHEET1, at("B1"), "LongStatus", CalculationOptions::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(OpError::TableHeaderUnsupported(reason))
+                if reason.contains("8192-character limit")
+        ));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.model(), &model);
+        assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
+    }
+}
+
+#[test]
+fn a_header_rename_rewrites_only_the_matching_qualified_table_reference() {
+    let source = replace_part(
+        &book(),
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="C2"><v>1</v></c>"#,
+        r#"<c r="C2"><f>COUNTA(Sheet2!Table3[Status])</f><v>1</v></c>"#,
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet2.xml",
+        r#"<c r="B1" t="inlineStr"><is><t>Y</t></is></c>"#,
+        concat!(
+            r#"<c r="B1" t="inlineStr"><is><t>Status</t></is></c>"#,
+            r#"<c r="D1"><f>COUNTA('Sheet1'!Table1[Status])</f><v>3</v></c>"#,
+        ),
+    );
+    let source = replace_part(
+        &source,
+        "xl/tables/table3.xml",
+        r#"name="Y""#,
+        r#"name="Status""#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+    for (sheet, address, formula) in [
+        (0, "C2", "COUNTA(Sheet2!Table3[Status])"),
+        (1, "D1", "COUNTA('Sheet1'!Table1[State])"),
+    ] {
+        assert_eq!(
+            reopened.model().sheets[sheet]
+                .cell(at(address))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some(formula)
+        );
+    }
+}
+
+#[test]
 fn another_sheets_formula_and_a_defined_name_follow_a_header_rename() {
     let source = replace_part(
         &book(),
@@ -756,23 +965,71 @@ fn a_control_character_in_a_referenced_caption_is_refused() {
 }
 
 #[test]
-fn a_reference_in_a_preserved_table_formula_refuses_the_rename() {
+fn a_header_rename_patches_local_and_cross_table_formulas() {
+    let table1 = "xl/tables/table1.xml";
+    let table2 = "xl/tables/table2.xml";
+    let table3 = "xl/tables/table3.xml";
     let source = replace_part(
         &book(),
-        "xl/tables/table1.xml",
+        table1,
         r#"<tableColumn id="3" name="Rev"/>"#,
-        r#"<tableColumn id="3" name="Rev"><calculatedColumnFormula>[@Status]</calculatedColumnFormula></tableColumn>"#,
+        concat!(
+            r#"<tableColumn id="3" name="Rev"><calculatedColumnFormula array="0">"#,
+            "[@Status]</calculatedColumnFormula>",
+            "<totalsRowFormula>SUM(Table1[Status])</totalsRowFormula></tableColumn>",
+        ),
+    );
+    let source = replace_part(
+        &source,
+        table2,
+        r#"<tableColumn id="2" name="Val"/>"#,
+        concat!(
+            r#"<tableColumn id="2" name="Val"><calculatedColumnFormula>"#,
+            "COUNTA(Table1[Status])</calculatedColumnFormula></tableColumn>",
+        ),
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="C2"><v>1</v></c>"#,
+        r#"<c r="C2"><f>[@Status]</f><v>1</v></c>"#,
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="F2"><v>10</v></c>"#,
+        r#"<c r="F2"><f>COUNTA(Table1[Status])</f><v>3</v></c>"#,
     );
     let mut workbook = Workbook::open(&source).unwrap();
-    let error = workbook
-        .edit_cell(SHEET1, at("B1"), "State", CalculationOptions::default())
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        Error::Operation(OpError::TableHeaderUnsupported(reason))
-            if reason.contains("xl/tables/table1.xml")
-    ));
-    assert_saved_headers(&workbook.save().unwrap(), ["Name", "Status", "Rev"]);
+    edit(&mut workbook, "B1", "State & Code");
+    let saved = workbook.save().unwrap();
+    let reopened = assert_saved_headers(&saved, ["Name", "State & Code", "Rev"]);
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    let expected1 = std::str::from_utf8(part(&before, table1))
+        .unwrap()
+        .replace(r#"name="Status""#, r#"name="State &amp; Code""#)
+        .replace("[@Status]", "[@[State &amp; Code]]")
+        .replace("Table1[Status]", "Table1[[State &amp; Code]]");
+    let expected2 = std::str::from_utf8(part(&before, table2))
+        .unwrap()
+        .replace("Table1[Status]", "Table1[[State &amp; Code]]");
+    assert_eq!(part(&after, table1), expected1.as_bytes());
+    assert_eq!(part(&after, table2), expected2.as_bytes());
+    assert_eq!(part(&after, table3), part(&before, table3));
+    for (address, formula) in [
+        ("C2", "[@[State & Code]]"),
+        ("F2", "COUNTA(Table1[[State & Code]])"),
+    ] {
+        assert_eq!(
+            reopened.model().sheets[0]
+                .cell(at(address))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some(formula)
+        );
+    }
 }
 
 #[test]

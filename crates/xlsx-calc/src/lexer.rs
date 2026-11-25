@@ -10,6 +10,12 @@ use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
+pub const MAX_FORMULA_CHARS: usize = 8192;
+const TABLE_ESCAPE_CHARS: &[char] = &['[', ']', '#', '@', '\''];
+const TABLE_BRACKET_CHARS: &[char] = &[
+    '\t', '\n', '\r', ' ', ',', ':', '.', '[', ']', '#', '@', '\'', '"', '{', '}', '$', '^', '&',
+    '*', '+', '=', '-', '>', '<', '/',
+];
 /// how many significant digits of a number literal excel keeps; the rest
 /// read as zeros.
 const LITERAL_DIGITS: usize = 15;
@@ -127,8 +133,10 @@ pub enum TokKind {
     },
     /// `Table[...]`: a structured reference to a table's rows and columns.
     TableRef {
+        sheet: Option<String>,
         table: String,
         spec: TableSpec,
+        selector_start: usize,
     },
     Plus,
     Minus,
@@ -196,21 +204,45 @@ pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
 pub fn rewrite_table_column(
     input: &str,
     table: &str,
+    sheet: &str,
     local: bool,
     old: &str,
     new: &str,
 ) -> Result<Option<String>, ParseError> {
-    if !input.contains('[') {
+    if !may_reference_table_column(input, table, local, old) {
         return Ok(None);
     }
     let table = table.to_lowercase();
+    let sheet = sheet.to_lowercase();
     let old = old.to_lowercase();
-    let folded = input.to_lowercase();
-    if (!local && !folded.contains(&table))
-        || (!folded.contains(&old) && !folded.replace('\'', "").contains(&old.replace('\'', "")))
-    {
-        return Ok(None);
+    rewrite_table_columns(input, |scope, name, column| {
+        let same_table = if name.is_empty() {
+            local
+        } else {
+            name.to_lowercase() == table
+                && scope.is_none_or(|scope| scope.to_lowercase() == sheet)
+        };
+        (same_table && column.to_lowercase() == old).then_some(new)
+    })
+}
+
+#[doc(hidden)]
+pub fn may_reference_table_column(input: &str, table: &str, local: bool, column: &str) -> bool {
+    if !input.contains('[') {
+        return false;
     }
+    let folded = input.to_lowercase();
+    let column = column.to_lowercase();
+    (local || folded.contains(&format!("{}[", table.to_lowercase())))
+        && (folded.contains(&column)
+            || folded.replace('\'', "").contains(&column.replace('\'', "")))
+}
+
+#[doc(hidden)]
+pub fn rewrite_table_columns<'a>(
+    input: &str,
+    caption: impl Fn(Option<&str>, &str, &str) -> Option<&'a str>,
+) -> Result<Option<String>, ParseError> {
     if input.len() > MAX_FORMULA_BYTES {
         return Err(ParseError::new(
             MAX_FORMULA_BYTES,
@@ -226,57 +258,79 @@ pub fn rewrite_table_column(
     let tokens = lexer.run()?;
     let mut spans = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
-        let TokKind::TableRef { table: name, spec } = &token.kind else {
+        let TokKind::TableRef {
+            sheet,
+            table,
+            selector_start,
+            ..
+        } = &token.kind
+        else {
             continue;
         };
-        let external = index > 0
-            && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('['));
-        let matches = |column: &str| column.to_lowercase() == old;
-        let same_table = if name.is_empty() {
-            local
-        } else {
-            name.to_lowercase() == table
-        };
-        if external
-            || !same_table
-            || ![&spec.first_column, &spec.last_column]
-                .into_iter()
-                .flatten()
-                .any(|column| matches(column))
-        {
+        let external = (index > 0
+            && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('[')))
+            || sheet.as_deref().is_some_and(|sheet| sheet.starts_with('['));
+        if external {
             continue;
         }
-        lexer.pos = token.start + name.len();
+        lexer.pos = *selector_start;
         lexer.read_table_spec(token.start, |column, span| {
-            if matches(column) {
-                spans.push(span);
+            if let Some(new) = caption(sheet.as_deref(), table, column) {
+                let prefix = &input[*selector_start + 1..span.start];
+                let needs_brackets = new.contains(TABLE_BRACKET_CHARS);
+                let bare = matches!(prefix, "" | "@");
+                let span = if !needs_brackets
+                    && matches!(prefix, "[" | "@[")
+                    && token.end == span.end + 2
+                {
+                    span.start - 1..span.end + 1
+                } else {
+                    span
+                };
+                spans.push((span, new, bare && needs_brackets));
             }
         })?;
     }
     if spans.is_empty() {
         return Ok(None);
     }
-    let mut escaped = String::new();
-    for ch in new.chars() {
-        if matches!(ch, '[' | ']' | '#' | '@' | '\'') {
-            escaped.push('\'');
+    let mut chars = input.chars().count();
+    for (span, new, bracket) in &spans {
+        if !new.chars().all(|ch| {
+            matches!(ch, '\t' | '\n' | '\r') || (ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}')
+        }) {
+            return Err(ParseError::new(
+                span.start,
+                "the new caption contains a character XML cannot carry in a formula",
+            ));
         }
-        escaped.push(ch);
+        chars -= input[span.clone()].chars().count();
+        chars += new.chars().count()
+            + new.matches(TABLE_ESCAPE_CHARS).count()
+            + 2 * usize::from(*bracket);
     }
-    let length = spans.iter().fold(input.len(), |length, span| {
-        (length - span.len()).saturating_add(escaped.len())
-    });
-    if length > MAX_FORMULA_BYTES {
+    if chars > MAX_FORMULA_CHARS {
         return Err(ParseError::new(
-            MAX_FORMULA_BYTES,
-            "formula length exceeded cap",
+            0,
+            format!("formula exceeds Excel's {MAX_FORMULA_CHARS}-character limit"),
         ));
     }
-    let mut result = String::with_capacity(length);
+    let mut result = String::with_capacity(input.len());
     let mut cursor = 0;
-    for span in spans {
+    for (span, new, bracket) in spans {
         result.push_str(&input[cursor..span.start]);
-        result.push_str(&escaped);
+        if bracket {
+            result.push('[');
+        }
+        for ch in new.chars() {
+            if TABLE_ESCAPE_CHARS.contains(&ch) {
+                result.push('\'');
+            }
+            result.push(ch);
+        }
+        if bracket {
+            result.push(']');
+        }
         cursor = span.end;
     }
     result.push_str(&input[cursor..]);
@@ -305,7 +359,7 @@ impl Lexer<'_> {
                 '\'' => self.lex_quoted_sheet_ref()?,
                 '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
-                '[' if self.local_table_refs => self.lex_table_ref(String::new(), start)?,
+                '[' if self.local_table_refs => self.lex_table_ref(None, String::new(), start)?,
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -557,7 +611,7 @@ impl Lexer<'_> {
         }
 
         if self.peek() == Some('[') {
-            return self.lex_table_ref(word, start);
+            return self.lex_table_ref(None, word, start);
         }
 
         // a name followed by `(` is a function even when ref-shaped (e.g. LOG10)
@@ -585,9 +639,20 @@ impl Lexer<'_> {
 
     /// `Table[...]`: either one bare item (`Table[Col]`, `Table[#Headers]`,
     /// `Table[@Col]`) or a bracketed list (`Table[[#This Row],[Col]]`).
-    fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
+    fn lex_table_ref(
+        &mut self,
+        sheet: Option<String>,
+        table: String,
+        start: usize,
+    ) -> Result<TokKind, ParseError> {
+        let selector_start = self.pos;
         let spec = self.read_table_spec(start, |_, _| {})?;
-        Ok(TokKind::TableRef { table, spec })
+        Ok(TokKind::TableRef {
+            sheet,
+            table,
+            spec,
+            selector_start,
+        })
     }
 
     fn read_table_spec(
@@ -696,6 +761,9 @@ impl Lexer<'_> {
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
         }
+        if self.local_table_refs && self.peek() == Some('[') {
+            return self.lex_table_ref(sheet, word, start);
+        }
         if let Some(kind) = self.try_range_token(&sheet, &word) {
             return Ok(kind);
         }
@@ -791,16 +859,36 @@ mod tests {
     fn rewrites_only_the_matching_structured_reference_columns() {
         let source =
             r#"T[Old]+t[[#This Row], [old]]+T[[Old]:[X]]+T[@OLD]+[@Old]+Other[Old]+"T[Old]""#;
-        let expected = r#"T['#New']]+t[[#This Row], ['#New']]]+T[['#New']]:[X]]+T[@'#New']]+[@'#New']]+Other[Old]+"T[Old]""#;
-        let rewritten = rewrite_table_column(source, "T", true, "Old", "#New]")
+        let expected = concat!(
+            "T[['#New']]]+t[[#This Row], ['#New']]]+T[['#New']]:[X]]",
+            r#"+T[@['#New']]]+[@['#New']]]+Other[Old]+"T[Old]""#,
+        );
+        let rewritten = rewrite_table_column(source, "T", "Data", true, "Old", "#New]")
             .unwrap()
             .unwrap();
         assert_eq!(rewritten, expected);
         assert_eq!(
-            rewrite_table_column(&rewritten, "T", true, "#New]", "New")
+            rewrite_table_column(&rewritten, "T", "Data", true, "#New]", "New")
                 .unwrap()
                 .unwrap(),
             r#"T[New]+t[[#This Row], [New]]+T[[New]:[X]]+T[@New]+[@New]+Other[Old]+"T[Old]""#
+        );
+    }
+
+    #[test]
+    fn a_qualified_table_reference_keeps_its_qualifier_and_table_identity() {
+        let source = "Sheet2!Other[Old]+'Sales Data'!T[Old]+Sheet2!T[Old]+[1]!T[Old]+[@Old]";
+        assert_eq!(
+            rewrite_table_column(source, "T", "Sales Data", true, "Old", "New")
+                .unwrap()
+                .as_deref(),
+            Some("Sheet2!Other[Old]+'Sales Data'!T[New]+Sheet2!T[Old]+[1]!T[Old]+[@New]")
+        );
+        assert_eq!(
+            rewrite_table_column("Sheet2!T[Old]", "T", "Sheet2", false, "Old", "New")
+                .unwrap()
+                .as_deref(),
+            Some("Sheet2!T[New]")
         );
     }
 

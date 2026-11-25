@@ -462,7 +462,6 @@ impl PreservedPackage {
     pub fn table_header_reference(
         &self,
         origin: Option<usize>,
-        table: &str,
         matches: impl Fn(&str, bool) -> bool,
     ) -> Result<Option<&str>, ParseError> {
         for (index, sheet) in self.sheets.iter().enumerate() {
@@ -480,19 +479,6 @@ impl PreservedPackage {
                 )? {
                     return Ok(Some(&sheet.path));
                 }
-            }
-        }
-        for (source, path) in self.original_workbook.tables.iter().zip(&self.table_parts) {
-            let local =
-                origin == Some(source.sheet.0 as usize) && source.name.eq_ignore_ascii_case(table);
-            if let Some(bytes) = self.part_bytes(path)
-                && contains_formula(
-                    bytes,
-                    &[b"calculatedColumnFormula", b"totalsRowFormula"],
-                    |formula| matches(formula, local),
-                )?
-            {
-                return Ok(Some(path));
             }
         }
         let model_charts = self

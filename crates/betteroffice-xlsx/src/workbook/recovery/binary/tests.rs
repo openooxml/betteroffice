@@ -374,6 +374,23 @@ fn all_ops() -> Vec<Op> {
                 }],
             }],
         },
+        Op::RestoreTableColumn {
+            sheet,
+            at,
+            table: "Sales".into(),
+            caption: "Old".into(),
+            cell: CellState::default(),
+            formulas: vec![(sheet, at, ("Sales[Old]".into(), "Sales[New]".into()))],
+            defined_names: vec![(
+                DefinedName {
+                    name: "Amounts".into(),
+                    formula: "Sales[Old]".into(),
+                    local_sheet: None,
+                    hidden: false,
+                },
+                "Sales[New]".into(),
+            )],
+        },
     ]
 }
 
@@ -394,7 +411,7 @@ fn recoverable_ops() -> Vec<Op> {
 #[test]
 fn every_op_has_a_fixed_tag_and_round_trips() {
     let ops = all_ops();
-    assert_eq!(ops.len(), 45);
+    assert_eq!(ops.len(), 46);
     for (tag, op) in ops.into_iter().enumerate() {
         assert_eq!(encoded(&op)[0], tag as u8);
         if refused_on_recovery(&op) {

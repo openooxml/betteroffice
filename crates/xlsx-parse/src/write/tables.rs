@@ -2,11 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use xlsx_calc::lexer::{may_reference_table_column, rewrite_table_columns};
 use xlsx_model::{CellRef, CellValue, Table, Workbook};
 
 use crate::ParseError;
 use crate::package::{PreservedPackage, normalized_part_name};
-use crate::xml::{xml_err, xstring_attribute_value};
+use crate::xml::{
+    collect_text, formula_text, next_event, reader, utf8_bom_len, xml_err, xstring_attribute_value,
+};
 
 use super::PartStore;
 
@@ -32,8 +35,25 @@ pub(super) fn changed_tables<'a>(
     {
         return Vec::new();
     }
+    table_pairs(workbook, package, origins)
+        .into_iter()
+        .filter(|(table, source, _)| table.columns != source.columns)
+        .collect()
+}
+
+fn table_pairs<'a>(
+    workbook: &'a Workbook,
+    package: &'a PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<(&'a Table, &'a Table, &'a str)> {
     let mut sources = HashMap::<_, Vec<_>>::new();
-    for (source, path) in originals.iter().zip(&package.table_parts).rev() {
+    for (source, path) in package
+        .original_workbook
+        .tables
+        .iter()
+        .zip(&package.table_parts)
+        .rev()
+    {
         sources
             .entry((source.sheet.0 as usize, source.name.to_lowercase()))
             .or_default()
@@ -52,9 +72,176 @@ pub(super) fn changed_tables<'a>(
                 Some(index) => matches.remove(index),
                 None => matches.pop()?,
             };
-            (table.columns != source.columns).then_some((table, source, path))
+            Some((table, source, path))
         })
         .collect()
+}
+
+impl PreservedPackage {
+    #[doc(hidden)]
+    pub fn validate_table_column_rename(
+        &self,
+        workbook: &Workbook,
+        origins: &[Option<usize>],
+        table: &Table,
+        column: usize,
+        caption: &str,
+    ) -> Result<(), ParseError> {
+        let pairs = table_pairs(workbook, self, origins);
+        let renames = caption_renames(self, &pairs, Some((table, column, caption)));
+        self.patch_table_formulas(&renames, |_, _| Ok(()))
+    }
+
+    fn patch_table_formulas(
+        &self,
+        renames: &[CaptionRename<'_>],
+        mut patched: impl FnMut(&str, Vec<u8>) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        if renames.is_empty() {
+            return Ok(());
+        }
+        for (table, path) in self.original_workbook.tables.iter().zip(&self.table_parts) {
+            let bytes = self
+                .part_bytes(path)
+                .ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+            if let Some(output) = patch_formulas(path, bytes, table, renames)? {
+                reject_shared_part(self, path, &table.name)?;
+                let normalized = normalized_part_name(path);
+                if self
+                    .parts
+                    .iter()
+                    .filter(|(path, _)| {
+                        path.trim_start_matches('/').eq_ignore_ascii_case(&normalized)
+                    })
+                    .nth(1)
+                    .is_some()
+                {
+                    return Err(ParseError::UnsupportedEdit(format!(
+                        "cannot patch table {}: table part {path} has multiple destinations",
+                        table.name
+                    )));
+                }
+                patched(path, output)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct CaptionRename<'a> {
+    table: &'a Table,
+    sheet: &'a str,
+    old: &'a str,
+    new: &'a str,
+}
+
+fn caption_renames<'a>(
+    package: &'a PreservedPackage,
+    pairs: &[(&'a Table, &'a Table, &str)],
+    proposal: Option<(&Table, usize, &'a str)>,
+) -> Vec<CaptionRename<'a>> {
+    let mut renames = Vec::new();
+    for &(table, source, _) in pairs {
+        let sheet = &package.original_workbook.sheets[source.sheet.0 as usize].name;
+        for (index, (old, current)) in source.columns.iter().zip(&table.columns).enumerate() {
+            let new = proposal
+                .filter(|(target, column, _)| std::ptr::eq(table, *target) && *column == index)
+                .map_or(current.as_str(), |(_, _, caption)| caption);
+            if old.to_lowercase() != new.to_lowercase() {
+                renames.push(CaptionRename {
+                    table: source,
+                    sheet,
+                    old,
+                    new,
+                });
+            }
+        }
+    }
+    renames
+}
+
+fn patch_formulas(
+    path: &str,
+    bytes: &[u8],
+    table: &Table,
+    renames: &[CaptionRename<'_>],
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let mut xml = reader(bytes);
+    let bom = utf8_bom_len(bytes);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut root = false;
+    let mut columns = false;
+    let mut column = false;
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    loop {
+        match next_event(&mut xml, &mut buffer, &mut depth)? {
+            Event::Start(element) => {
+                let name = element.local_name();
+                let name = name.as_ref();
+                match depth {
+                    1 => root = name == b"table",
+                    2 => columns = root && name == b"tableColumns",
+                    3 => column = columns && name == b"tableColumn",
+                    _ => {}
+                }
+                if !matches!(name, b"calculatedColumnFormula" | b"totalsRowFormula") {
+                    continue;
+                }
+                let direct = depth == 4 && column;
+                let start = bom + xml.buffer_position() as usize;
+                let formula = collect_text(&mut xml, &mut buffer, &mut depth)?;
+                if !renames.iter().any(|rename| {
+                    may_reference_table_column(
+                        &formula,
+                        &rename.table.name,
+                        std::ptr::eq(table, rename.table),
+                        rename.old,
+                    )
+                }) {
+                    continue;
+                }
+                let rewritten = rewrite_table_columns(&formula, |scope, name, caption| {
+                    renames.iter().find_map(|rename| {
+                        let matches = if name.is_empty() {
+                            std::ptr::eq(table, rename.table)
+                        } else {
+                            name.to_lowercase() == rename.table.name.to_lowercase()
+                                && scope.is_none_or(|scope| {
+                                    scope.to_lowercase() == rename.sheet.to_lowercase()
+                                })
+                        };
+                        (matches && caption.to_lowercase() == rename.old.to_lowercase())
+                            .then_some(rename.new)
+                    })
+                })
+                .map_err(|error| {
+                    ParseError::UnsupportedEdit(format!(
+                        "cannot rewrite formula in {path}: {error}"
+                    ))
+                })?;
+                if let Some(rewritten) = rewritten {
+                    let tail = &bytes[start..bom + xml.buffer_position() as usize];
+                    let end = tail.iter().rposition(|&byte| byte == b'<');
+                    let Some(end) = end.filter(|&end| direct && !tail[..end].contains(&b'<')) else {
+                        return Err(ParseError::UnsupportedEdit(format!(
+                            "cannot patch formula text in {path}"
+                        )));
+                    };
+                    output.extend_from_slice(&bytes[cursor..start]);
+                    output.extend_from_slice(formula_text(&rewritten).as_bytes());
+                    cursor = start + end;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok((cursor != 0).then(|| {
+        output.extend_from_slice(&bytes[cursor..]);
+        output
+    }))
 }
 
 pub(super) fn patch_table_parts(
@@ -74,6 +261,7 @@ pub(super) fn patch_table_parts(
             .or_insert(Some((path, bytes)));
     }
     let originals = &package.original_workbook.tables;
+    let mut names = HashMap::new();
     for &(table, source, path) in changes {
         let name = table.name.to_lowercase();
         let duplicate = |tables: &[Table]| {
@@ -93,21 +281,7 @@ pub(super) fn patch_table_parts(
             return Err(column_count_error(path));
         }
         let normalized = normalized_part_name(path);
-        if package
-            .table_parts
-            .iter()
-            .filter(|path| {
-                path.trim_start_matches('/')
-                    .eq_ignore_ascii_case(&normalized)
-            })
-            .nth(1)
-            .is_some()
-        {
-            return Err(ParseError::UnsupportedEdit(format!(
-                "cannot patch table {}: table part {path} is shared",
-                table.name
-            )));
-        }
+        reject_shared_part(package, path, &table.name)?;
         let destination = destinations
             .get(&normalized)
             .ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
@@ -117,16 +291,46 @@ pub(super) fn patch_table_parts(
                 table.name
             )));
         };
-        validate_headers(workbook, table)?;
+        validate_headers(workbook, table, source)?;
+        names.insert(normalized, (destination, bytes, source, table));
+    }
+    let renames = caption_renames(package, changes, None);
+    package.patch_table_formulas(&renames, |path, mut bytes| {
+        if let Some((_, _, source, table)) = names.remove(&normalized_part_name(path)) {
+            bytes = patch_names(path, &bytes, &source.columns, &table.columns)?;
+        }
+        parts.set(path.to_owned(), bytes)
+    })?;
+    for (_, (path, bytes, source, table)) in names {
         parts.set(
-            (*destination).clone(),
+            (*path).clone(),
             patch_names(path, bytes, &source.columns, &table.columns)?,
         )?;
     }
     Ok(())
 }
 
-fn validate_headers(workbook: &Workbook, table: &Table) -> Result<(), ParseError> {
+fn reject_shared_part(
+    package: &PreservedPackage,
+    path: &str,
+    table_name: &str,
+) -> Result<(), ParseError> {
+    let normalized = normalized_part_name(path);
+    if package
+        .table_parts
+        .iter()
+        .filter(|path| path.trim_start_matches('/').eq_ignore_ascii_case(&normalized))
+        .nth(1)
+        .is_some()
+    {
+        return Err(ParseError::UnsupportedEdit(format!(
+            "cannot patch table {table_name}: table part {path} is shared"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_headers(workbook: &Workbook, table: &Table, source: &Table) -> Result<(), ParseError> {
     let sheet = &workbook.sheets[table.sheet.0 as usize];
     let start = table.range.start;
     let width = table.range.end.col - start.col + 1;
@@ -137,14 +341,22 @@ fn validate_headers(workbook: &Workbook, table: &Table) -> Result<(), ParseError
         )));
     }
     let mut seen = HashSet::new();
-    for (col, caption) in (start.col..=table.range.end.col).zip(&table.columns) {
+    for (col, (caption, original)) in
+        (start.col..=table.range.end.col).zip(table.columns.iter().zip(&source.columns))
+    {
         let at = CellRef::new(start.row, col);
+        let folded = caption.to_lowercase();
         if caption.is_empty()
-            || !seen.insert(caption.to_lowercase())
             || !sheet.cell(at).is_some_and(|cell| {
                 cell.formula.is_none()
-                    && matches!(&cell.value, CellValue::Text { value } if value == caption)
+                    && matches!(
+                        &cell.value,
+                        CellValue::Text { value }
+                            if value == caption
+                                || caption == original && value.to_lowercase() == folded
+                    )
             })
+            || !seen.insert(folded)
         {
             return Err(ParseError::UnsupportedEdit(format!(
                 "table {} column {} ({}) needs non-empty, unique text matching its caption",

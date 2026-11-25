@@ -18,7 +18,7 @@ use crate::remap::{
     remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
     rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
 };
-use crate::table_header::{normalize_table_header, rename_table_column};
+use crate::table_header::{normalize_table_header, rename_table_column, restore_table_column};
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
 /// order, restores the prior workbook state.
@@ -192,40 +192,22 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             let (state, inverse) = if let Some((table, column, name)) =
                 normalize_table_header(wb, *sheet, *at, cell)?
             {
-                let mut restores = vec![(*sheet, *at, old)];
-                let mut inverse = Vec::new();
-                if wb.tables[table].columns[column] != name {
-                    if wb.tables[table].columns[column].to_lowercase() != name.to_lowercase() {
-                        rename_table_column(
-                            wb,
-                            table,
-                            column,
-                            *at,
-                            &name,
-                            &mut restores,
-                            &mut inverse,
-                        )?;
-                    }
-                    inverse.push(Op::SetTables {
-                        tables: wb.tables.clone(),
-                    });
-                    wb.tables[table].columns[column] = name.clone();
-                }
-                inverse.insert(
-                    0,
+                let inverse = if wb.tables[table].columns[column] == name {
                     Op::RestoreSheet {
                         sheet: *sheet,
                         name: wb.sheets[sheet.0 as usize].name.clone(),
-                        formulas: restores,
-                    },
-                );
+                        formulas: vec![(*sheet, *at, old)],
+                    }
+                } else {
+                    rename_table_column(wb, table, column, *at, &name, old)?
+                };
                 (
                     CellState {
                         value: CellValue::Text { value: name },
                         formula: None,
                         style: cell.style,
                     },
-                    inverse,
+                    vec![inverse],
                 )
             } else {
                 (
@@ -915,6 +897,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 tables: std::mem::replace(&mut wb.tables, tables.clone()),
             }]))
         }
+        Op::RestoreTableColumn { .. } => Ok(InvertedOp(vec![restore_table_column(wb, op)?])),
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
         Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
         Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),

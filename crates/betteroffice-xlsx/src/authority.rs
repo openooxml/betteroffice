@@ -1757,10 +1757,9 @@ impl WorkbookAuthority {
             batch
                 .apply_with_inverse(op, |inverse| {
                     if matches!(op, Op::SetCell { .. })
-                        && let Some(Op::RestoreSheet { formulas, .. }) = inverse.first()
+                        && let Some(Op::RestoreTableColumn { formulas, .. }) = inverse.first()
                     {
-                        rewritten
-                            .extend(formulas.iter().skip(1).map(|(sheet, at, _)| (*sheet, *at)));
+                        rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
                     }
                 })
                 .map_err(|error| {
@@ -4062,6 +4061,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5126,6 +5126,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5171,6 +5172,7 @@ fn targeted_sheet_keys(
             }
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
@@ -5258,7 +5260,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. }
-        | Op::SetTables { .. } => None,
+        | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. } => None,
     }
 }
 
@@ -5716,6 +5719,16 @@ fn remap_styles<'a>(
                     sheet: *sheet,
                     name: name.clone(),
                     formulas: restored,
+                })
+            }
+            Op::RestoreTableColumn { cell, .. } => {
+                let style = resolve(cell.style)?;
+                (style != cell.style).then(|| {
+                    let mut rewritten = op.clone();
+                    if let Op::RestoreTableColumn { cell, .. } = &mut rewritten {
+                        cell.style = style;
+                    }
+                    rewritten
                 })
             }
             _ => None,

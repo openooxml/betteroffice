@@ -3,12 +3,9 @@
 //! text literal such a character is written as `CHAR(n)` instead, which keeps
 //! the formula's value; anywhere else the text is refused.
 
-use xlsx_calc::lexer::{TokKind, lex};
+use xlsx_calc::lexer::{MAX_FORMULA_CHARS, TokKind, lex};
 
 use crate::{Error, Result};
-
-/// Excel's limit on a formula's length, in characters.
-const MAX_FORMULA_CHARS: usize = 8192;
 
 fn storable(ch: char) -> bool {
     matches!(ch, '\t' | '\n' | '\r') || (ch >= ' ' && ch != '\u{fffe}' && ch != '\u{ffff}')
