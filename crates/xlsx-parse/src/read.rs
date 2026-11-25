@@ -722,6 +722,10 @@ struct CellBuild {
     inline_text: Option<String>,
     inline_runs: bool,
     formula: Option<String>,
+    /// Depth of an `mc:AlternateContent` directly under the cell.
+    alternate: Option<usize>,
+    /// Depth of that block's `mc:Fallback`, whose children are read as the cell's own.
+    fallback: Option<usize>,
 }
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
@@ -755,10 +759,23 @@ fn parse_worksheet(
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if cur.is_some() => {
-                let Some(c) = cur.as_mut().filter(|cell| depth == cell.depth + 1) else {
+                let Some(c) = cur.as_mut() else {
                     continue;
                 };
-                match local_name(&e).as_slice() {
+                let name = local_name(&e);
+                if depth == c.depth + 1 && name.as_slice() == b"AlternateContent" {
+                    c.alternate = Some(depth);
+                    c.fallback = None;
+                    continue;
+                }
+                if c.alternate.is_some_and(|at| depth == at + 1) {
+                    c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
+                    continue;
+                }
+                if depth != c.depth + 1 && !c.fallback.is_some_and(|at| depth == at + 1) {
+                    continue;
+                }
+                match name.as_slice() {
                     b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
                     b"f" => {
                         let text = collect_text(&mut reader, &mut buf, &mut depth)?;
@@ -767,7 +784,8 @@ fn parse_worksheet(
                             record_array_formula(&e, origin, &mut sheet, facts)?;
                         }
                         c.formula = Some(text);
-                        facts.source.alternate_formulas |= alternate_depth > 0;
+                        facts.source.alternate_formulas |=
+                            alternate_depth > 0 || c.fallback.is_some();
                     }
                     b"is" => {
                         let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
