@@ -11,7 +11,12 @@ type ElfSymbol = { name: string; binding?: number; section?: number; version?: n
 function elf(
   libraries: string[][],
   machine = 62,
-  { symbols = [], hash = 'sysv', versym = true }: { symbols?: ElfSymbol[]; hash?: 'sysv' | 'gnu'; versym?: boolean } = {}
+  { symbols = [], hash = 'sysv', versym = true, needed = [] }: {
+    symbols?: ElfSymbol[];
+    hash?: 'sysv' | 'gnu';
+    versym?: boolean;
+    needed?: string[];
+  } = {}
 ) {
   let names = '\0';
   const addName = (name: string) => {
@@ -23,6 +28,7 @@ function elf(
     file: addName(index === 0 ? 'libc.so.6' : 'libm.so.6'),
     versions: versions.map(addName)
   }));
+  const neededOffsets = needed.map(addName);
   const symbolRecords = symbols.map(({ name, binding = 1, section = 0, version = 1 }) => ({
     name: addName(name), binding, section, version
   }));
@@ -50,6 +56,7 @@ function elf(
     [5, loadAddress + stringsOffset],
     [10, names.length]
   ];
+  for (const offset of neededOffsets) dynamic.push([1, offset]);
   if (needs.length) dynamic.push([0x6ffffffe, loadAddress + needsOffset], [0x6fffffff, needs.length]);
   if (symbolRecords.length) {
     dynamic.push([6, loadAddress + symbolsOffset], [11, symbolSize], [hash === 'gnu' ? 0x6ffffef5 : 4, loadAddress + hashOffset]);
@@ -225,6 +232,36 @@ test('the CLI checks every file, rejecting newer binaries and files without vers
     expect(missing.stderr).toContain(`${noNeeds}: no GLIBC version needs found`);
     expect(cli(join(directory, 'missing.*.node')).status).toBe(1);
     expect(cli().status).toBe(1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the CLI accepts the allowed shared libraries on x86_64 and aarch64', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const libraries = ['libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1', 'libgcc_s.so.1'];
+    for (const [machine, loader] of [[62, 'ld-linux-x86-64.so.2'], [183, 'ld-linux-aarch64.so.1']] as const) {
+      const file = join(directory, `${machine}.node`);
+      writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`]], machine, { needed: [...libraries, loader] }));
+      const result = cli(file);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(['libmvec.so.1', 'libstdc++.so.6'])('the CLI rejects a dependency on %s', (library) => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const file = join(directory, 'unsupported.node');
+    const needed = ['libc.so.6', library, 'libm.so.6'];
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`]], 62, { needed }));
+    const result = cli(file);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(`${file}: unsupported shared library "${library}"\n`);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

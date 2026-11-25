@@ -405,12 +405,24 @@ describe('native package release wiring', () => {
       { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu', zig: true },
       { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu', zig: true }
     ]);
+    const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
+    expect(cache.with.key).toBe(
+      "${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && " +
+      "format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('scripts/cargo-glibc.sh', 'scripts/glibc-floor.mjs')) || '' }}"
+    );
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
     expect(job.steps[build - 1]).toEqual({
       name: 'Pin the glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: 'echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"'
+      run: [
+        'if [[ ! -f scripts/cargo-glibc.sh ]]; then',
+        "  echo '::error::Missing scripts/cargo-glibc.sh. This commit predates the Zig glibc floor build.'",
+        '  exit 1',
+        'fi',
+        'echo "CARGO=$PWD/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"',
+        ''
+      ].join('\n')
     });
     const wrapper = readFileSync(new URL('./cargo-glibc.sh', import.meta.url), 'utf8');
     expect(wrapper).toContain('import { GLIBC_FLOOR }');
@@ -438,7 +450,8 @@ describe('native package release wiring', () => {
     const zigbuild = steps.find((step: any) => step.uses?.startsWith('taiki-e/install-action@'));
     expect(zig.if).toBe('matrix.platform.zig');
     expect(zigbuild.if).toBe('matrix.platform.zig');
-    expect(zigbuild.with.tool).toStartWith('cargo-zigbuild@');
+    expect(zig.with.version).toBe('${{ env.ZIG_VERSION }}');
+    expect(zigbuild.with.tool).toBe('cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}');
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.if).toBe('${{ !matrix.platform.cross }}');
     const config = readFileSync(new URL('../bindings/.cargo/config.toml', import.meta.url), 'utf8');
@@ -659,6 +672,7 @@ describe('native package release wiring', () => {
       'scripts/native-bindings-smoke.mjs',
       'scripts/native-raw-smoke.mjs',
       'scripts/glibc-floor.mjs',
+      'scripts/cargo-glibc.sh',
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',

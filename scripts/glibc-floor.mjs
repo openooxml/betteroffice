@@ -6,6 +6,7 @@ export const GLIBC_FLOOR = '2.17';
 const PT_LOAD = 1;
 const PT_DYNAMIC = 2;
 const DT_NULL = 0n;
+const DT_NEEDED = 1n;
 const DT_HASH = 4n;
 const DT_STRTAB = 5n;
 const DT_SYMTAB = 6n;
@@ -20,6 +21,16 @@ const STB_WEAK = 2;
 const SYM_SIZE = 24;
 const VERNEED_SIZE = 16;
 const VERNAUX_SIZE = 16;
+const ALLOWED_LIBRARIES = new Set([
+  'libc.so.6',
+  'libm.so.6',
+  'libdl.so.2',
+  'libpthread.so.0',
+  'librt.so.1',
+  'libgcc_s.so.1',
+  'ld-linux-x86-64.so.2',
+  'ld-linux-aarch64.so.1'
+]);
 
 /** @param {string} a @param {string} b */
 export function compareGlibc(a, b) {
@@ -81,12 +92,15 @@ function readDynamic(bytes) {
   };
 
   const tags = new Map();
+  const neededOffsets = [];
   const dynamicEnd = Number(dynamic.offset + dynamic.size);
   for (let entry = Number(dynamic.offset); ; entry += 16) {
     requireRange(entry, 16, 'dynamic table', dynamicEnd);
     const tag = u64(entry);
     if (tag === DT_NULL) break;
-    tags.set(tag, u64(entry + 8));
+    const value = u64(entry + 8);
+    if (tag === DT_NEEDED) neededOffsets.push(Number(value));
+    else tags.set(tag, value);
   }
 
   const stringReader = (address) => {
@@ -102,7 +116,7 @@ function readDynamic(bytes) {
     };
   };
 
-  return { tags, u16, u32, requireRange, mapAddress, stringReader };
+  return { tags, neededOffsets, u16, u32, requireRange, mapAddress, stringReader };
 }
 
 /** @param {Uint8Array} bytes @returns {string[]} */
@@ -214,6 +228,21 @@ export function unversionedUndefinedSymbols(bytes) {
   return names;
 }
 
+/** @param {Uint8Array} bytes */
+function unsupportedNeededLibraries(bytes) {
+  const dynamic = readDynamic(bytes);
+  const libraries = new Set();
+  if (!dynamic?.neededOffsets.length) return libraries;
+  const stringAddress = dynamic.tags.get(DT_STRTAB);
+  if (stringAddress === undefined) throw new Error('ELF DT_NEEDED requires DT_STRTAB');
+  const readString = dynamic.stringReader(stringAddress);
+  for (const offset of dynamic.neededOffsets) {
+    const library = readString(offset, 'DT_NEEDED name');
+    if (!ALLOWED_LIBRARIES.has(library)) libraries.add(library);
+  }
+  return libraries;
+}
+
 function main(files) {
   if (files.length === 0) {
     console.error('usage: node scripts/glibc-floor.mjs <file.node>...');
@@ -222,6 +251,10 @@ function main(files) {
   for (const file of files) {
     try {
       const bytes = readFileSync(file);
+      for (const library of unsupportedNeededLibraries(bytes)) {
+        console.error(`${file}: unsupported shared library ${JSON.stringify(library)}`);
+        process.exitCode = 1;
+      }
       for (const name of unversionedUndefinedSymbols(bytes)) {
         console.error(`${file}: unversioned undefined symbol ${name}`);
         process.exitCode = 1;
