@@ -103,8 +103,11 @@ export async function runWithTee(command, args, { env = {} } = {}) {
 }
 
 export function newCrateRateLimitRetryAt(output, nowMs) {
-  if (!/\b429\b/.test(output) || !/\btoo many new crates\b/i.test(output)) return null;
-  const retryDate = output.match(/\btry again after\s+([^\r\n]*?\bGMT\b)/i)?.[1];
+  const refusal = output
+    .split(/\r?\n/)
+    .find((line) => /\bstatus 429\b.*\btoo many new crates\b/i.test(line));
+  if (!refusal) return null;
+  const retryDate = refusal.match(/\btry again after\s+(.*?\bGMT\b)/i)?.[1];
   const retryAt = Date.parse(retryDate ?? '');
   return Number.isNaN(retryAt) ? nowMs + NEW_CRATE_REFILL_MS : retryAt;
 }
@@ -342,16 +345,13 @@ async function publish() {
     return;
   }
 
-  const crates = [];
   const rateLimitBudget = { waitedMs: 0, newCratesLeft: 0 };
   for (const { name } of RUST_PUBLISH_CRATES) {
-    const existing = await crateVersion(name, version);
-    const exists = Boolean(existing) || (await crateExists(name));
-    if (!exists) rateLimitBudget.newCratesLeft += 1;
-    crates.push({ name, existing, exists });
+    if (!(await crateExists(name))) rateLimitBudget.newCratesLeft += 1;
   }
 
-  for (const { name, existing, exists } of crates) {
+  for (const { name } of RUST_PUBLISH_CRATES) {
+    const existing = await crateVersion(name, version);
     if (existing) {
       if (existing.yanked) throw new Error(`${name}@${version} is yanked`);
       console.log(`${name}@${version} is already published.`);
@@ -368,6 +368,7 @@ async function publish() {
       await waitForRegistry(dependency.name, version);
     }
 
+    const exists = await crateExists(name);
     await publishOneCrate({
       name,
       version,
