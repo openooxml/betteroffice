@@ -1937,6 +1937,7 @@ impl FloatFlowStep {
 #[derive(Clone, Debug, Default)]
 pub struct FloatFlowReplay {
     state: FlowState,
+    started: bool,
 }
 
 impl FloatFlowReplay {
@@ -1948,6 +1949,7 @@ impl FloatFlowReplay {
             None,
         );
         self.state.cumulative_y = step.cumulative_y;
+        self.started = true;
     }
 }
 
@@ -1968,7 +1970,7 @@ impl FloatSegmentFlow {
     pub fn resume(replay: &FloatFlowReplay) -> Self {
         Self {
             state: replay.state.clone(),
-            started: true,
+            started: replay.started,
         }
     }
 
@@ -2108,9 +2110,6 @@ impl FloatFlow {
             true,
         )?;
         let (paragraph_zones, zones_by_anchor) = group_floating_zones(extracted);
-        let steps = zones_by_anchor
-            .is_empty()
-            .then(|| Vec::with_capacity(blocks.len()));
         Ok(Self {
             default_width,
             paragraph_zones,
@@ -2120,8 +2119,17 @@ impl FloatFlow {
             measured: Vec::with_capacity(blocks.len()),
             font_dependencies: Vec::with_capacity(blocks.len()),
             zone_dependencies,
-            steps,
+            steps: None,
         })
+    }
+
+    /// Enables replay recording before measurement, except for margin-relative zones.
+    pub fn record_steps(mut self) -> Self {
+        assert!(self.measured.is_empty(), "enable replay before measuring");
+        if self.zones_by_anchor.is_empty() {
+            self.steps = Some(Vec::with_capacity(self.measured.capacity()));
+        }
+        self
     }
 
     /// Blocks measured so far.
@@ -2138,9 +2146,14 @@ impl FloatFlow {
         &self.font_dependencies
     }
 
-    /// Replay records for measured blocks, or `None` for margin-relative zones.
+    /// Replay records for measured blocks, if recording is enabled.
     pub fn steps(&self) -> Option<&[FloatFlowStep]> {
         self.steps.as_deref()
+    }
+
+    /// Takes the replay records and stops recording.
+    pub fn take_steps(&mut self) -> Option<Vec<FloatFlowStep>> {
+        self.steps.take()
     }
 
     /// Measures the next blocks up to `end`, exclusive. `blocks` and `widths`
@@ -2153,7 +2166,7 @@ impl FloatFlow {
         end: usize,
     ) -> Result<(), String> {
         for index in self.measured.len()..end.min(blocks.len()) {
-            let starts = index == 0 || resets_float_flow(&blocks[index]);
+            let starts = self.steps.is_some() && (index == 0 || resets_float_flow(&blocks[index]));
             let (extent, mut dependencies) = FontChainDependencies::capture(|| {
                 self.state.measure(
                     index,
@@ -5798,19 +5811,6 @@ mod tests {
     }
 
     #[test]
-    fn a_float_segment_flow_resumed_from_earlier_steps_measures_as_the_whole_segment() {
-        let fonts = crate::MeasureFonts::default();
-        let _scope = fonts.enter();
-        let config = cache_measurement_config();
-        // A wrapped image in every paragraph: the 201st zone re-seats the flow.
-        let blocks: Vec<LayoutBlock> = (0..260)
-            .map(|index| {
-                serde_json::from_value(json!({
-                    "kind": "paragraph", "id": format!("p{index}"),
-                    "runs": [
-                        {"kind": "text", "text": format!("Paragraph {index} wraps beside its image.")},
-                        {"kind": "image", "src": "image", "width": 120,
-    #[test]
     fn float_flow_does_not_record_replay_steps_by_default() {
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -5898,6 +5898,19 @@ mod tests {
         assert!(flow.steps().is_none());
     }
 
+    #[test]
+    fn a_float_segment_flow_resumed_from_earlier_steps_measures_as_the_whole_segment() {
+        let fonts = crate::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let config = cache_measurement_config();
+        // A wrapped image in every paragraph: the 201st zone re-seats the flow.
+        let blocks: Vec<LayoutBlock> = (0..260)
+            .map(|index| {
+                serde_json::from_value(json!({
+                    "kind": "paragraph", "id": format!("p{index}"),
+                    "runs": [
+                        {"kind": "text", "text": format!("Paragraph {index} wraps beside its image.")},
+                        {"kind": "image", "src": "image", "width": 120,
                          "height": if index % 7 == 0 { 60 } else { 8 },
                          "wrapType": "square", "distLeft": 12, "distRight": 12,
                          "position": {"horizontal": {"relativeTo": "column", "align": "left"},

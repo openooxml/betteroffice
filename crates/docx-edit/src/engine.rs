@@ -481,14 +481,14 @@ impl PreparedRegionLayout {
         if body.flow.measured() < body.blocks.len() {
             return Ok(false);
         }
-        let body = self.body.take().expect("body measure present");
+        let mut body = self.body.take().expect("body measure present");
         // Header and footer measurement later widens only the section breaks,
         // which the pass fingerprints again.
         self.measured_font_dependencies = body.flow.font_dependencies().to_vec();
         self.float_flow = body
             .flow
-            .steps()
-            .map_or_else(Vec::new, |steps| steps.iter().cloned().map(Some).collect());
+            .take_steps()
+            .map_or_else(Vec::new, |steps| steps.into_iter().map(Some).collect());
         self.block_fingerprints = Some(body.fingerprints);
         self.input.measured = body
             .blocks
@@ -1415,22 +1415,22 @@ fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
     })
 }
 
-fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<bool> {
-    let region_indices =
-        section_region_indices(input.measured.iter().map(|measured| &measured.block));
-    let breaks: Vec<_> = input
-        .measured
-        .iter()
-        .filter_map(|measured| match &measured.block {
+fn unequal_column_blocks<'a>(
+    blocks: impl Iterator<Item = &'a LayoutBlock> + Clone,
+    options: &docx_layout::types::LayoutOptions,
+    regions: &DocumentRegions,
+) -> Vec<bool> {
+    let region_indices = section_region_indices(blocks.clone());
+    let breaks: Vec<_> = blocks
+        .clone()
+        .filter_map(|block| match block {
             LayoutBlock::SectionBreak(section) => Some(section),
             _ => None,
         })
         .collect();
     let mut section_index = 0;
-    input
-        .measured
-        .iter()
-        .map(|measured| {
+    blocks
+        .map(|block| {
             let region_index = region_indices
                 .as_ref()
                 .map_or(section_index, |indices| indices[section_index]);
@@ -1445,10 +1445,10 @@ fn unequal_column_blocks(input: &LayoutInput, regions: &DocumentRegions) -> Vec<
                         .get(section_index)
                         .and_then(|section| section.columns.as_ref())
                 })
-                .or(input.options.columns.as_ref());
+                .or(options.columns.as_ref());
             let unequal = columns
                 .is_some_and(|columns| columns.count > 1.0 && columns.equal_width == Some(false));
-            if matches!(measured.block, LayoutBlock::SectionBreak(_)) {
+            if matches!(block, LayoutBlock::SectionBreak(_)) {
                 section_index += 1;
             }
             unequal
@@ -1537,31 +1537,35 @@ fn placed_column_measurement_frames(
 /// Wrap phases each pinned picture frame adds to the phase budget.
 const PIN_RECOVERY_PHASES: usize = 2;
 
-/// Whether [`stabilize_flow_wrapping`] can measure `input`'s blocks again,
-/// with frames, offsets or bands body measurement does not know.
-fn flow_wrapping_remeasures(input: &LayoutInput, regions: &DocumentRegions) -> bool {
-    input.measured.iter().any(|measured| {
-        matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
-    }) || unequal_column_blocks(input, regions)
-        .iter()
-        .any(|unequal| *unequal)
-        || continuous_pictures(input)
+/// Whether wrapping stabilization can remeasure these blocks.
+fn flow_wrapping_remeasures<'a>(
+    blocks: impl Iterator<Item = &'a LayoutBlock> + Clone,
+    options: &docx_layout::types::LayoutOptions,
+    regions: &DocumentRegions,
+) -> bool {
+    blocks.clone().any(|block| {
+        matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+    }) || unequal_column_blocks(blocks.clone(), options, regions).contains(&true)
+        || continuous_pictures(blocks, options)
 }
 
-/// Whether `input` holds a continuous section break and a picture.
-fn continuous_pictures(input: &LayoutInput) -> bool {
-    let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
-        || input.measured.iter().any(|measured| {
+/// Whether the body holds a continuous section break and a picture.
+fn continuous_pictures<'a>(
+    mut blocks: impl Iterator<Item = &'a LayoutBlock> + Clone,
+    options: &docx_layout::types::LayoutOptions,
+) -> bool {
+    let has_continuous = options.body_break_type == Some(SectionBreakType::Continuous)
+        || blocks.clone().any(|block| {
             matches!(
-                &measured.block,
+                block,
                 LayoutBlock::SectionBreak(section)
                     if section.break_type == Some(SectionBreakType::Continuous)
             )
         });
     has_continuous
-        && input.measured.iter().any(|measured| {
+        && blocks.any(|block| {
             matches!(
-                &measured.block,
+                block,
                 LayoutBlock::Paragraph(paragraph)
                     if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
             )
@@ -1588,9 +1592,10 @@ where
             _ => None,
         })
         .collect::<Vec<_>>();
-    let unequal = unequal_column_blocks(input, regions);
+    let blocks = input.measured.iter().map(|measured| &measured.block);
+    let unequal = unequal_column_blocks(blocks.clone(), &input.options, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
-    let has_continuous_pictures = continuous_pictures(input);
+    let has_continuous_pictures = continuous_pictures(blocks, &input.options);
     if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
@@ -2293,9 +2298,7 @@ fn measure_float_segment_from_change(
     if let Some(replay) = earlier.as_mut() {
         let mut skipped = replay.clone();
         if let Some(next) = skip(&mut skipped, segment.start) {
-            if next > segment.start {
-                flow = FloatSegmentFlow::resume(&skipped);
-            }
+            flow = FloatSegmentFlow::resume(&skipped);
             *replay = skipped;
             index = next;
         }
@@ -2370,6 +2373,7 @@ struct PaginationState {
     /// The widths, table frames, float geometry and width policy used to measure the arena,
     /// and whether floating zones shaped it.
     measured_widths: Vec<f64>,
+    measured_grid_pitches: Vec<Option<f64>>,
     measured_font_dependencies: Vec<FontChainDependencies>,
     measured_font_chains: Option<BTreeMap<String, Vec<u32>>>,
     measured_table_wrap_frames: Vec<TableMeasurementFrame>,
@@ -4157,6 +4161,20 @@ fn normalize_measurement_block(
     owned
 }
 
+fn section_grid_pitches(regions: &DocumentRegions) -> Vec<Option<f64>> {
+    (0..regions.sections.len())
+        .map(|section| regions.doc_grid_snap_pitch_px(section))
+        .collect()
+}
+
+fn retained_grid_pitch(pitches: &[Option<f64>], section: usize) -> Option<f64> {
+    pitches
+        .get(section)
+        .or_else(|| pitches.last())
+        .copied()
+        .flatten()
+}
+
 fn normalize_retained_block(
     blocks: &(impl BlockSource + ?Sized),
     index: usize,
@@ -5461,6 +5479,7 @@ impl EngineSession {
             pagination.checkpoints.clear();
             pagination.block_fingerprints.clear();
             pagination.measured_spacing.clear();
+            pagination.float_flow.clear();
         }
         pagination.retain_matches = Vec::new();
         pagination.region_placements = Vec::new();
@@ -5519,6 +5538,7 @@ impl EngineSession {
         pagination.retain_matches = Vec::new();
         pagination.moved_blocks = BTreeSet::new();
         pagination.measured_widths = Vec::new();
+        pagination.measured_grid_pitches = Vec::new();
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.measured_table_wrap_frames = Vec::new();
         pagination.measured_side_margin_changes = Vec::new();
@@ -8184,7 +8204,6 @@ impl EngineSession {
             }
             match arena {
                 Arena::Reused((measured, fingerprints, records)) => {
-                    float_flow = records;
                     if trigger.uses_region_path() {
                         retain_matches =
                             std::mem::take(&mut self.pagination.borrow_mut().retain_matches);
@@ -8194,6 +8213,15 @@ impl EngineSession {
                     input.measured = measured;
                     block_fingerprints = Some(fingerprints);
                     apply_section_geometry(&mut input, &regions);
+                    if !records.is_empty()
+                        && !flow_wrapping_remeasures(
+                            input.measured.iter().map(|measured| &measured.block),
+                            &input.options,
+                            &regions,
+                        )
+                    {
+                        float_flow = records;
+                    }
                 }
                 Arena::Full(mut blocks, coupled) => {
                     self.pagination.borrow_mut().measured_shift_safe.clear();
@@ -8317,6 +8345,18 @@ impl EngineSession {
                                 &measurement,
                                 Some(&geometry),
                             )?;
+                            let flow = if has_floats
+                                && !coupled
+                                && !flow_wrapping_remeasures(
+                                    blocks.iter(),
+                                    &input.options,
+                                    &regions,
+                                )
+                            {
+                                flow.record_steps()
+                            } else {
+                                flow
+                            };
                             body = Some(BodyMeasure {
                                 blocks,
                                 widths,
@@ -8464,11 +8504,6 @@ impl EngineSession {
             self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env, cut)?
         } else {
             None
-        };
-        let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
-            Vec::new()
-        } else {
-            float_flow
         };
         if resident_body
             && stabilize_flow_wrapping(&mut input, &regions, &measurement, |input, _| {
@@ -8736,7 +8771,14 @@ impl EngineSession {
         let unequal_columns = pagination
             .input
             .as_ref()
-            .is_some_and(|input| unequal_column_blocks(input, &regions).contains(&true));
+            .is_some_and(|input| {
+                unequal_column_blocks(
+                    input.measured.iter().map(|measured| &measured.block),
+                    &input.options,
+                    &regions,
+                )
+                .contains(&true)
+            });
         drop(pagination);
         let regional = match (
             resident_body && single_section && !unequal_columns && !provisional,
@@ -8749,6 +8791,7 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measured_grid_pitches = section_grid_pitches(&regions);
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json,
             request_fingerprint,
@@ -8777,6 +8820,7 @@ impl EngineSession {
         pagination.measurement_patch = None;
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
+        pagination.measured_grid_pitches = measured_grid_pitches;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
@@ -8886,11 +8930,6 @@ impl EngineSession {
             previous: std::mem::take(&mut self.pagination.borrow_mut().region_placements),
             next: Vec::new(),
             placed_blocks: 0,
-        };
-        let float_flow = if !has_floats || flow_wrapping_remeasures(&input, &regions) {
-            Vec::new()
-        } else {
-            float_flow
         };
         if resident_body
             && self
@@ -9323,7 +9362,14 @@ impl EngineSession {
         let unequal_columns = pagination
             .input
             .as_ref()
-            .is_some_and(|input| unequal_column_blocks(input, &regions).contains(&true));
+            .is_some_and(|input| {
+                unequal_column_blocks(
+                    input.measured.iter().map(|measured| &measured.block),
+                    &input.options,
+                    &regions,
+                )
+                .contains(&true)
+            });
         drop(pagination);
         let regional = match (
             resident_body && single_section && !unequal_columns && !provisional,
@@ -9351,6 +9397,7 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measured_grid_pitches = section_grid_pitches(&regions);
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json,
             request_fingerprint,
@@ -9380,6 +9427,7 @@ impl EngineSession {
         pagination.retain_matches = retain_matches;
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
+        pagination.measured_grid_pitches = measured_grid_pitches;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
         pagination.measured_side_margin_changes = measured_side_margin_changes;
         pagination.measured_float_geometry = measured_float_geometry;
@@ -10841,6 +10889,8 @@ impl EngineSession {
         let mut marks = Vec::with_capacity(blocks.len());
         let mut measure_calls = 0_u64;
         let mut section_index = 0_usize;
+        let mut grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
+        let mut previous_section = 0;
         for index in 0..blocks.len() {
             let next_block = blocks.get(index).expect("body block");
             let section_break_mark = docx_layout::measure_blocks::is_section_break_mark(
@@ -10862,6 +10912,9 @@ impl EngineSession {
             sections.push(section_index);
             marks.push(section_break_mark);
             let previous_entry = &previous.measured[index];
+            let previous_grid_pitch =
+                retained_grid_pitch(&pagination.measured_grid_pitches, previous_section);
+            previous_section += usize::from(advances_region_section(&previous_entry.block));
             let certificate = pagination
                 .retain_matches
                 .get(index)
@@ -10886,7 +10939,8 @@ impl EngineSession {
                 &dependencies[index],
                 &measurement.font_chains,
                 font_chains_unchanged,
-            ) && section_break_mark == retained_section_break_mark
+            ) && grid_pitch == previous_grid_pitch
+                && section_break_mark == retained_section_break_mark
                 && pagination.measured_spacing[index].matches(
                     next_block,
                     Some(regions.paragraph_spacing_line_px(section_index)),
@@ -11021,6 +11075,7 @@ impl EngineSession {
             }
             if advances_region_section(next_block) {
                 section_index += 1;
+                grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
             }
         }
         let mut float_flow = Vec::new();
@@ -11295,6 +11350,8 @@ impl EngineSession {
         #[cfg(test)]
         let mut reused = vec![false; blocks.len()];
         let mut section_index = 0_usize;
+        let mut grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
+        let mut previous_section = 0;
         for index in 0..blocks.len() {
             let next_block = blocks.get(index).expect("body block");
             let section_break_mark = docx_layout::measure_blocks::is_section_break_mark(
@@ -11319,6 +11376,9 @@ impl EngineSession {
                 *section = section_index;
             }
             let previous_entry = &mut previous.measured[index];
+            let previous_grid_pitch =
+                retained_grid_pitch(&pagination.measured_grid_pitches, previous_section);
+            previous_section += usize::from(advances_region_section(&previous_entry.block));
             let shifted = measurement_patch
                 .as_ref()
                 .and_then(|patch| patch.shifted_block(index, &previous_entry.block));
@@ -11331,7 +11391,8 @@ impl EngineSession {
                 &dependencies[index],
                 &measurement.font_chains,
                 font_chains_unchanged,
-            ) && section_break_mark == retained_section_break_mark
+            ) && grid_pitch == previous_grid_pitch
+                && section_break_mark == retained_section_break_mark
                 && pagination.measured_spacing[index].matches(
                     next_block,
                     Some(regions.paragraph_spacing_line_px(section_index)),
@@ -11472,6 +11533,7 @@ impl EngineSession {
             }
             if advances_region_section(next_block) {
                 section_index += 1;
+                grid_pitch = regions.doc_grid_snap_pitch_px(section_index);
             }
         }
         let mut float_flow = Vec::new();
@@ -21880,68 +21942,6 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
     }
 
     #[test]
-    fn resident_float_flow_keys_measure_from_the_key_and_match_cold() {
-        let fonts = docx_layout::MeasureFonts::default();
-        let _scope = fonts.enter();
-        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-        for key in FloatFlowKey::ALL {
-            // Segments 0..40 and 40..60: a picture anchored in paragraph 10,
-            // a shape beside paragraph 25, a floating table before paragraph
-            // 32, and a picture in the second segment's first paragraph.
-            let (engine, request) = float_flow_engine(
-                font,
-                60,
-                &[40],
-                |index| {
-                    if index == 32 {
-                        floating_table(r#"w:vertAnchor="text""#, 1)
-                    } else {
-                        String::new()
-                    }
-                },
-                |index| match index {
-                    10 => float_flow_picture(10, 1828800, 914400),
-                    25 => float_flow_shape(25),
-                    40 => float_flow_picture(40, 1828800, 457200),
-                    _ => String::new(),
-                },
-                key.trigger(),
-            );
-            let mut retained = HashMap::new();
-            assert_certified_float_cold(&engine, &request, &mut retained);
-            let segment_end = float_flow_slot(&engine, 40);
-            let body_end = engine.render.borrow().stories["body"].blocks.len();
-            // (paragraph, text, whether its line count stays)
-            for (paragraph, text, keeps_lines) in [
-                // before the first zone, and the first block of a segment
-                (3, "x", true),
-                (0, "x", true),
-                // in the picture's anchor paragraph, beside and past its zone
-                (10, "x", true),
-                (12, "y", true),
-                (12, "z", true),
-                (20, "x", true),
-                // beside the shape and the floating table
-                (26, "x", true),
-                (33, "x", true),
-                // the second segment's first block, anchoring a picture
-                (40, "x", true),
-                (45, "x", true),
-                // more lines push everything after the key down
-                (12, &"wrapping words ".repeat(12), false),
-                (12, "w", true),
-                (33, &"wrapping words ".repeat(12), false),
-            ] {
-                // A paragraph holding a picture takes no measurement patch.
-                if key == FloatFlowKey::Patched && [10, 40].contains(&paragraph) {
-                    continue;
-                }
-                let slot = float_flow_slot(&engine, paragraph);
-                let lowered = engine.render.borrow().stories["body"].blocks.to_vec();
-                let measured = key.type_text(&engine, &request, paragraph, text);
-                assert_certified_float_cold(&engine, &request, &mut retained);
-                assert!(measured.contains(&slot), "{key:?} {paragraph} {measured:?}");
-    #[test]
     fn resident_float_flow_remeasures_the_prefix_when_section_grid_changes() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
@@ -22031,6 +22031,68 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         assert!(pagination.float_flow.is_empty());
     }
 
+    #[test]
+    fn resident_float_flow_keys_measure_from_the_key_and_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for key in FloatFlowKey::ALL {
+            // Segments 0..40 and 40..60: a picture anchored in paragraph 10,
+            // a shape beside paragraph 25, a floating table before paragraph
+            // 32, and a picture in the second segment's first paragraph.
+            let (engine, request) = float_flow_engine(
+                font,
+                60,
+                &[40],
+                |index| {
+                    if index == 32 {
+                        floating_table(r#"w:vertAnchor="text""#, 1)
+                    } else {
+                        String::new()
+                    }
+                },
+                |index| match index {
+                    10 => float_flow_picture(10, 1828800, 914400),
+                    25 => float_flow_shape(25),
+                    40 => float_flow_picture(40, 1828800, 457200),
+                    _ => String::new(),
+                },
+                key.trigger(),
+            );
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            let segment_end = float_flow_slot(&engine, 40);
+            let body_end = engine.render.borrow().stories["body"].blocks.len();
+            // (paragraph, text, whether its line count stays)
+            for (paragraph, text, keeps_lines) in [
+                // before the first zone, and the first block of a segment
+                (3, "x", true),
+                (0, "x", true),
+                // in the picture's anchor paragraph, beside and past its zone
+                (10, "x", true),
+                (12, "y", true),
+                (12, "z", true),
+                (20, "x", true),
+                // beside the shape and the floating table
+                (26, "x", true),
+                (33, "x", true),
+                // the second segment's first block, anchoring a picture
+                (40, "x", true),
+                (45, "x", true),
+                // more lines push everything after the key down
+                (12, &"wrapping words ".repeat(12), false),
+                (12, "w", true),
+                (33, &"wrapping words ".repeat(12), false),
+            ] {
+                // A paragraph holding a picture takes no measurement patch.
+                if key == FloatFlowKey::Patched && [10, 40].contains(&paragraph) {
+                    continue;
+                }
+                let slot = float_flow_slot(&engine, paragraph);
+                let lowered = engine.render.borrow().stories["body"].blocks.to_vec();
+                let measured = key.type_text(&engine, &request, paragraph, text);
+                assert_certified_float_cold(&engine, &request, &mut retained);
+                assert!(measured.contains(&slot), "{key:?} {paragraph} {measured:?}");
                 assert!(
                     measured.windows(2).all(|pair| pair[0] < pair[1]),
                     "{key:?} {paragraph} {measured:?}"
