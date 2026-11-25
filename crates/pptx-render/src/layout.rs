@@ -1213,7 +1213,9 @@ impl RenderedSlide {
             let inside_shape = region
                 .bent_connector
                 .as_ref()
-                .map_or(inside_frame, |connector| connector.contains(shape_x, shape_y));
+                .map_or(inside_frame, |connector| {
+                    connector.contains(shape_x, shape_y)
+                });
             if !inside_text && !inside_shape {
                 continue;
             }
@@ -7076,12 +7078,10 @@ impl BentConnectorHit {
             .iter()
             .map(|command| match *command {
                 GeometryPathCommand::Move { x: px, y: py }
-                | GeometryPathCommand::Line { x: px, y: py } => {
-                    (
-                        f64::from(*x) + px * f64::from(*w),
-                        f64::from(*y) + py * f64::from(*h),
-                    )
-                }
+                | GeometryPathCommand::Line { x: px, y: py } => (
+                    f64::from(*x) + px * f64::from(*w),
+                    f64::from(*y) + py * f64::from(*h),
+                ),
                 _ => unreachable!("bent connector paths contain only straight segments"),
             })
             .collect();

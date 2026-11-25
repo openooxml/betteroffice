@@ -4117,7 +4117,11 @@ mod tests {
             ),
         ] {
             let commands: Vec<ShapePathCommand> = serde_json::from_value(commands).unwrap();
-            assert_eq!(path_endpoints(&commands).unwrap(), Some(expected), "{preset}");
+            assert_eq!(
+                path_endpoints(&commands).unwrap(),
+                Some(expected),
+                "{preset}"
+            );
         }
     }
 

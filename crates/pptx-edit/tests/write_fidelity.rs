@@ -2495,12 +2495,30 @@ fn a_batch_bent_connector_edit_preserves_the_authored_detour() {
         .unwrap()
     };
     let unchanged = request(serde_json::json!(shape.adjust_values));
-    assert!(!session.validate_edits(&unchanged).unwrap().unwrap().would_apply);
+    assert!(
+        !session
+            .validate_edits(&unchanged)
+            .unwrap()
+            .unwrap()
+            .would_apply
+    );
     let partial = || request(serde_json::json!({"adj2": -0.25}));
-    assert!(session.validate_edits(&partial()).unwrap().unwrap().would_apply);
+    assert!(
+        session
+            .validate_edits(&partial())
+            .unwrap()
+            .unwrap()
+            .would_apply
+    );
     assert!(session.apply_edits(&partial()).unwrap().unwrap().applied);
     assert_bent_connector_reopens(&session);
-    assert!(!session.validate_edits(&partial()).unwrap().unwrap().would_apply);
+    assert!(
+        !session
+            .validate_edits(&partial())
+            .unwrap()
+            .unwrap()
+            .would_apply
+    );
 }
 
 #[test]

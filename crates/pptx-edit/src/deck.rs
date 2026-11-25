@@ -3286,8 +3286,10 @@ fn validate_coordinate(value: i64) -> EditResult<()> {
 fn is_bent_connector_guide(geometry: &str, name: &str) -> bool {
     matches!(
         (geometry, name),
-        ("bentConnector3" | "bentConnector4" | "bentConnector5", "adj1")
-            | ("bentConnector4" | "bentConnector5", "adj2")
+        (
+            "bentConnector3" | "bentConnector4" | "bentConnector5",
+            "adj1"
+        ) | ("bentConnector4" | "bentConnector5", "adj2")
             | ("bentConnector5", "adj3")
     )
 }
