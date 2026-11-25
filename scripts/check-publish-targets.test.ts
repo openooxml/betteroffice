@@ -1153,7 +1153,7 @@ describe('npm fallback token', () => {
     readFileSync(fileURLToPath(new URL('../.github/workflows/publish-native.yml', import.meta.url)), 'utf8')
   ) as any;
   const fallback = '${{ secrets.NPM_FALLBACK_TOKEN }}';
-  const note = 'if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi\n';
+  const note = 'if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi\n';
   const steps = release.jobs.release.steps;
   const names = steps.map((step: any) => step.name);
 
@@ -1192,17 +1192,25 @@ describe('npm fallback token', () => {
     expect(upload.if).toBe('${{ !inputs.dry_run }}');
   });
 
-  test('each note prints a fixed line and never the value', () => {
-    const notes = [
-      steps.find((step: any) => step.name === 'Note the npm fallback token'),
-      release.jobs['held-npm'].steps.find((step: any) => step.name === 'Note the npm fallback token'),
-      nativePublish.jobs.publish.steps.find((step: any) => step.name === 'Note the npm fallback token')
+  test('each note sees only whether the secret is set, prints a fixed line, and runs right before publishing', () => {
+    const jobs: Array<[any, string, string | undefined]> = [
+      [release.jobs.release, 'Release PR or publish', "steps.pending.outputs.publishing == 'true'"],
+      [release.jobs['held-npm'], 'Publish held packages and create releases', undefined],
+      [nativePublish.jobs.publish, 'Publish packages', '${{ !inputs.dry_run }}']
     ];
-    for (const step of notes) {
-      expect(step.env).toEqual({ FALLBACK: fallback });
+    for (const [job, publish, gate] of jobs) {
+      const jobNames = job.steps.map((step: any) => step.name);
+      const step = job.steps.find((candidate: any) => candidate.name === 'Note the npm fallback token');
+      expect(step.env).toEqual({ FALLBACK: "${{ secrets.NPM_FALLBACK_TOKEN != '' }}" });
       expect(step.run).toBe(note);
+      expect(step.if).toBe(gate);
+      expect(jobNames.indexOf('Note the npm fallback token')).toBeLessThan(jobNames.indexOf(publish));
     }
-    expect(names.indexOf('Note the npm fallback token')).toBeLessThan(names.indexOf('Release PR or publish'));
+    expect(JSON.stringify(release.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    expect(JSON.stringify(nativePublish.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    for (const job of [release.jobs.release, release.jobs['held-npm'], nativePublish.jobs.publish]) {
+      expect(JSON.stringify(job.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    }
   });
 
   test('NPM_TOKEN stays refused and unused', () => {
