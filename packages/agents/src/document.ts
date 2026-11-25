@@ -6,6 +6,7 @@ import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type Do
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
 import { cleanupGuard } from './cleanup';
+import { boundary, spliceChange } from './proposal-splices';
 import {
   DocumentToolError,
   AcceptDateUnsupportedError,
@@ -86,6 +87,7 @@ type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' |
 
 interface HeldProposal {
   value: Proposal;
+  splices: ProposalChange[];
   targets: Map<string, { story: string; paraId: string; fingerprint: string }>;
   engine: DocxProposalRecord[];
   registered: Set<string>;
@@ -101,32 +103,6 @@ function integer(value: number, min: number, max: number, name: string): number 
     throw new DocumentToolError('INVALID_ARGUMENT', `${name} must be an integer from ${min} to ${max}.`);
   }
   return value;
-}
-
-function boundary(text: string, offset: number): boolean {
-  return offset === 0 || offset === text.length ||
-    !(text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff &&
-      text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
-}
-
-const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
-
-function graphemeCuts(text: string): Set<number> {
-  const cuts = new Set([text.length]);
-  for (const { index } of graphemes.segment(text)) cuts.add(index);
-  return cuts;
-}
-
-function trimChange(change: ProposalChange): ProposalChange {
-  const { oldText, newText } = change;
-  let left = 0;
-  while (left < oldText.length && left < newText.length && oldText[left] === newText[left]) left++;
-  const oldCuts = graphemeCuts(oldText), newCuts = graphemeCuts(newText);
-  while (left > 0 && !(oldCuts.has(left) && newCuts.has(left))) left--;
-  let right = 0;
-  while (right < oldText.length - left && right < newText.length - left && oldText[oldText.length - right - 1] === newText[newText.length - right - 1]) right++;
-  while (right > 0 && !(oldCuts.has(oldText.length - right) && newCuts.has(newText.length - right))) right--;
-  return { ...change, start: change.start + left, oldText: oldText.slice(left, oldText.length - right), newText: newText.slice(left, newText.length - right) };
 }
 
 function visibleFormatting(attributes: Record<string, unknown>): Record<string, unknown> {
@@ -472,7 +448,7 @@ export class DocxAgentDocument {
       targets.set(p.ref, { story: p.story, paraId: p.paraId, fingerprint: p.fingerprint });
     }
     const value: Proposal = { id: `proposal${this.nextProposal++}`, author: input.author, note: input.note ?? '', status: 'pending', changes, staleRefs: [] };
-    return { value, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
+    return { value, splices: changes.flatMap(spliceChange), targets, engine: [], registered: new Set(), editorDecisions: new Map() };
   }
 
   propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
@@ -484,7 +460,7 @@ export class DocxAgentDocument {
     if (this.proposalPeer) throw new DocumentToolError('UNSUPPORTED', 'Use proposeAsync with a DOCX editor edit peer.');
     const plan = this.prepareProposal(input);
     try {
-      const snapshot = this.proposalResult(this.session.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals }), plan.held.value.changes);
+      const snapshot = this.proposalResult(this.session.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals }), plan.held.splices);
       return this.recordProposal(plan, snapshot);
     } catch (error) {
       this.forgetProposalOwnership(plan.held);
@@ -499,7 +475,7 @@ export class DocxAgentDocument {
     try {
       const result = await this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
       this.synchronizeProposals(this.session.getProposals());
-      const snapshot = this.proposalResult(result, plan.held.value.changes);
+      const snapshot = this.proposalResult(result, plan.held.splices);
       const value = this.recordProposal(plan, snapshot);
       if (!plan.held.editorDecisions.size) this.checkDecisionReferences(plan.references, plan.held);
       return value;
@@ -525,12 +501,11 @@ export class DocxAgentDocument {
   private prepareProposal(input: { author: string; note?: string; edits: TextEdit[] }) {
     const held = this.prepareChanges(input);
     const { value, targets } = held;
-    const changes = value.changes;
     const references = this.captureReferences();
     const sessionId = this.session.paragraphIdentities().sessionId;
     const date = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
     held.suggest = { author: input.author, date };
-    const proposals = changes.map(trimChange).map((change, index): DocxProposalInput => {
+    const proposals = held.splices.map((change, index): DocxProposalInput & Pick<DocxProposalRecord, 'paragraph'> => {
       const { story, paraId } = targets.get(change.ref)!;
       const paragraph = { kind: 'session' as const, sessionId, story, paraId };
       const id = `${this.proposalPrefix}:${value.id}:${index}`;
@@ -539,10 +514,7 @@ export class DocxAgentDocument {
       if (!change.oldText) return { id, paragraph, suggest, op: 'insertText', at: { offset }, text: change.newText };
       return { id, paragraph, suggest, op: 'replaceText', at: { offset }, search: change.oldText, replaceWith: change.newText };
     });
-    held.engine = proposals.map((proposal, index): DocxProposalRecord => {
-      const target = targets.get(changes[index].ref)!;
-      return { id: proposal.id, state: 'proposed', paragraph: { kind: 'session', sessionId, story: target.story, paraId: target.paraId }, revisionIds: [], changed: false };
-    });
+    held.engine = proposals.map(({ id, paragraph }): DocxProposalRecord => ({ id, state: 'proposed', paragraph, revisionIds: [], changed: false }));
     this.proposals.set(value.id, held);
     const snapshot = this.proposalSnapshot ?? this.session.getProposals();
     return { held, proposals, references, version: snapshot.version, previewVersion: snapshot.previewVersion };
@@ -627,7 +599,7 @@ export class DocxAgentDocument {
         entries: snapshot.proposals.map(record => ({ record, key: record.id, suggest: held.suggest! })),
       } });
       trial.mirrorWorkerDocument(null);
-      this.proposalResult(trial.withdrawProposals({ ids, expectVersion: trial.version(), expectPreviewVersion: snapshot.previewVersion, keepRevisions: false }), held.value.changes);
+      this.proposalResult(trial.withdrawProposals({ ids, expectVersion: trial.version(), expectPreviewVersion: snapshot.previewVersion, keepRevisions: false }), held.splices);
       this.apply(trial, held, author);
     } catch (error) { throw trialRelease.failed(error); } finally { trialRelease.run(); }
     const draft = await this.fork();
@@ -645,7 +617,7 @@ export class DocxAgentDocument {
         this.setLocalDecision(held, 'rejected');
       }
       this.finishProposalOperation(result);
-      const settled = this.proposalResult(result, held.value.changes);
+      const settled = this.proposalResult(result, held.splices);
       this.checkDecisionReferences(before, held);
       draft.applyUpdate(this.session.encodeStateAsUpdate(draft.encodeStateVector()));
       const stale = this.staleRefs(held);
@@ -1053,8 +1025,9 @@ export class DocxAgentDocument {
         const target = held.targets.get(p.ref);
         if (target?.fingerprint !== previous.fingerprint) continue;
         target.fingerprint = p.fingerprint;
-        if (held.value.status === 'pending') for (const change of held.value.changes) {
-          if (change.ref === p.ref) change.start = shift(p.ref, change.start);
+        if (held.value.status === 'pending') {
+          for (const change of held.value.changes) if (change.ref === p.ref) change.start = shift(p.ref, change.start);
+          for (const splice of held.splices) if (splice.ref === p.ref) splice.start = shift(p.ref, splice.start, true);
         }
       }
     }
@@ -1109,7 +1082,7 @@ export class DocxAgentDocument {
 
   private proposalResult(result: DocxProposalResult, changes?: ProposalChange[]): DocxProposalSnapshot {
     if (!result.ok && result.failure.code === 'tracked-revision-conflict') {
-      const affected = changes ?? [...this.proposals.values()].filter(held => held.value.status === 'pending').flatMap(held => held.value.changes);
+      const affected = changes ?? [...this.proposals.values()].filter(held => held.value.status === 'pending').flatMap(held => held.splices);
       const conflicts = this.revisionConflicts(affected);
       if (conflicts.length) throw new TrackedRevisionConflictError(conflicts);
       throw new DocumentToolError('PROTECTED_CONTENT', result.failure.message, result.failure);
@@ -1259,13 +1232,13 @@ export class DocxAgentDocument {
       this.finishProposalOperation(result);
       decided = result.ok ? result.snapshot : undefined;
       this.checkEditorDecision(held);
-      decided = this.proposalResult(result, held.value.changes);
+      decided = this.proposalResult(result, held.splices);
       this.checkDecisionReferences(before, held);
       const ids = held.engine.map(record => record.id);
       this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: decided, snapshots: [] };
       const withdrawal = this.session.withdrawProposals({ ids, expectVersion: decided.version, expectPreviewVersion: decided.previewVersion, keepRevisions });
       this.finishProposalOperation(withdrawal);
-      settled = this.proposalResult(withdrawal, held.value.changes);
+      settled = this.proposalResult(withdrawal, held.splices);
       this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions));
       this.checkDecisionReferences(before, held);
     } catch (error) {
@@ -1302,13 +1275,13 @@ export class DocxAgentDocument {
       this.finishProposalOperation(result);
       decided = result.ok ? result.snapshot : undefined;
       this.checkEditorDecision(held);
-      decided = this.proposalResult(result, held.value.changes);
+      decided = this.proposalResult(result, held.splices);
       this.checkDecisionReferences(before, held);
       const ids = held.engine.map(record => record.id);
       this.proposalOperation = { withdrawal: ids, withdrawalSnapshot: decided, snapshots: [] };
       const withdrawal = await peer.withdrawProposals({ ids, expectVersion: decided.version, expectPreviewVersion: decided.previewVersion, keepRevisions });
       this.finishProposalOperation(withdrawal);
-      settled = this.proposalResult(withdrawal, held.value.changes);
+      settled = this.proposalResult(withdrawal, held.splices);
       this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions));
       this.checkDecisionReferences(before, held);
     } catch (error) {
@@ -1332,7 +1305,7 @@ export class DocxAgentDocument {
   }
 
   private agentDecisionChanges(held: HeldProposal, state: 'accepted' | 'rejected', keepRevisions: boolean) {
-    return state === 'rejected' ? [] : held.value.changes.map(trimChange).map(change => ({ ...change, newText: keepRevisions ? change.oldText + change.newText : change.newText }));
+    return state === 'rejected' ? [] : held.splices.map(change => ({ ...change, newText: keepRevisions ? change.oldText + change.newText : change.newText }));
   }
 
   private previewDecisions(snapshot: DocxProposalSnapshot) {
@@ -1406,10 +1379,8 @@ export class DocxAgentDocument {
     const ids = new Set(held.engine.map(record => record.id));
     const snapshot = this.attached ? this.proposalSnapshot ?? this.session.getProposals() : undefined;
     const previews = snapshot && { ...snapshot, proposals: snapshot.proposals.filter(record => !ids.has(record.id)) };
-    const changes = held.value.changes.map(original => ({ original, change: trimChange(original) }))
-      .sort((a, b) => a.change.ref.localeCompare(b.change.ref) || b.change.start - a.change.start);
-    for (const { original, change } of changes) {
-      if (!change.oldText && !change.newText) continue;
+    const changes = [...held.splices].sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
+    for (const change of changes) {
       const { story, paraId } = held.targets.get(change.ref)!;
       const mapped = previews?.proposals.some(record => record.paragraph.story === story && record.paragraph.paraId === paraId) ? previews : undefined;
       let segments: YrsStorySegment[] = [];
@@ -1420,13 +1391,13 @@ export class DocxAgentDocument {
         segments = [];
       }
       const text = (mapped ? this.projectSegments(segments, mapped) : segments).map(segment => segment.kind === 'text' ? segment.text : '\ufffc').join('');
-      const expected = change.oldText ? change : original;
-      if (!found || expected.start < 0 || expected.start + expected.oldText.length > text.length
-        || text.slice(expected.start, expected.start + expected.oldText.length) !== expected.oldText) {
+      const endOffset = change.start + change.oldText.length;
+      if (!found || change.start < 0 || endOffset > text.length || !boundary(text, change.start) || !boundary(text, endOffset)
+        || text.slice(change.start, endOffset) !== change.oldText) {
         throw new DocumentToolError('STALE_TARGET', 'Target text changed. Read fresh targets and create a new proposal.');
       }
       const start = mapped ? this.previewOffset(draft, story, paraId, change.start, mapped, true) : change.start;
-      const end = !change.oldText ? start : mapped ? this.previewOffset(draft, story, paraId, change.start + change.oldText.length, mapped) : change.start + change.oldText.length;
+      const end = !change.oldText ? start : mapped ? this.previewOffset(draft, story, paraId, endOffset, mapped) : endOffset;
       draft.replaceRange({ story, start: { paraId, offset: start }, end: { paraId, offset: end } }, change.newText, author);
     }
   }

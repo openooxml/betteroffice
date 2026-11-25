@@ -1419,30 +1419,14 @@ pub(crate) fn diff_paragraph_with_proof(
     proof: Option<&Proof>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let widened = Cell::new(false);
-    let patch = plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof)
-        .map_err(|legacy| {
-            if !widened.get() {
-                return legacy;
-            }
-            plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
-                .err()
-                .unwrap_or(legacy)
-        })?;
-    if let Some(proof) = proof
-        && let [edit] = proof.edits.as_slice()
-        && edit.from < edit.to
-        && edit.live_from < edit.live_to
-        && let Ok(aligned) = plan_paragraph(seeded, live, context, RunRules::Full, &widened, None)
-        && aligned.text_edits.len() > 1
-        && aligned.text_edits.iter().all(|text| {
-            edit.from <= text.from
-                && text.to <= edit.to
-                && matches!(text.donor, DonorV1::At { at } if edit.from <= at && at < edit.to)
-        })
-    {
-        return Ok(aligned);
-    }
-    Ok(patch)
+    plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof).map_err(|legacy| {
+        if !widened.get() {
+            return legacy;
+        }
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
+            .err()
+            .unwrap_or(legacy)
+    })
 }
 
 struct RecordedEdit {

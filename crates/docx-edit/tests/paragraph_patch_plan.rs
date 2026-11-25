@@ -565,20 +565,21 @@ fn replacement_spanning_runs_uses_first_text_donor() {
 }
 
 #[test]
-fn a_single_cross_property_replacement_preserves_the_aligned_run_boundaries() {
+fn recorded_replacements_use_each_runs_properties() {
     let source = concat!(
         r#"<w:r w:rsidR="000000F1"><w:rPr><w:b/><w:bCs/><w:color w:val="0066AA"/></w:rPr><w:t xml:space="preserve">Xray yankee </w:t></w:r>"#,
         r#"<w:r w:rsidR="000000F2"><w:rPr><w:i/><w:iCs/><w:color w:val="C00000"/></w:rPr><w:t>zulu alpha.</w:t></w:r>"#,
     );
     let doc = open(source);
-    replace(&doc, 5, 16, "YANKEE ZULU");
+    replace(&doc, 12, 16, "ZULU");
+    replace(&doc, 5, 11, "YANKEE");
+    assert_splices(&doc, &[(5, 11, 5, "YANKEE"), (12, 16, 12, "ZULU")]);
     let (saved, warnings) = save_paragraph(&doc, source, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(saved.matches("</w:r>").count(), 3, "{saved}");
+    assert_eq!(saved.matches("</w:r>").count(), 2, "{saved}");
     for (run, (text, property, color)) in saved.split("</w:r>").zip([
         ("Xray YANKEE ", "<w:bCs/>", "0066AA"),
-        ("ZULU", "<w:iCs/>", "0066AA"),
-        (" alpha.", "<w:i/>", "C00000"),
+        ("ZULU alpha.", "<w:iCs/>", "C00000"),
     ]) {
         assert!(run.contains(&format!(">{text}</w:t>")), "{run}");
         assert!(run.contains(property) && run.contains(color), "{run}");
@@ -586,7 +587,7 @@ fn a_single_cross_property_replacement_preserves_the_aligned_run_boundaries() {
 }
 
 #[test]
-fn a_single_replacement_removes_emptied_runs_and_preserves_surrounding_xml() {
+fn recorded_splices_remove_emptied_runs_and_preserve_surrounding_xml() {
     let run = |text: &str| format!("<w:r><w:rPr/><w:t>{text}</w:t></w:r>");
     let value = |text: &str| format!(r#"<w:r><w:rPr/><w:t xml:space="preserve">{text}</w:t></w:r>"#);
     let italic = |text: &str| format!("<w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r>");
@@ -599,8 +600,7 @@ fn a_single_replacement_removes_emptied_runs_and_preserves_surrounding_xml() {
         (
             value("Prefix ") + &italic("[") + &middle + &run("]"),
             7,
-            value("Prefix ") + &italic("MRID")
-                + r#"<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> 12345678</w:t></w:r>"#,
+            value("Prefix ") + &replaced,
         ),
         (
             run("[") + &middle + &value("] suffix"),
@@ -621,7 +621,9 @@ fn a_single_replacement_removes_emptied_runs_and_preserves_surrounding_xml() {
     ] {
         let source = format!("<w:pPr/>{source}");
         let doc = open(&source);
-        replace(&doc, start, start + 15, "MRID 12345678");
+        replace(&doc, start + 14, start + 15, "");
+        replace(&doc, start + 6, start + 14, "12345678");
+        replace(&doc, start, start + 1, "");
         let (saved, warnings) = save_paragraph(&doc, &source, |_| {});
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(saved.contains(&format!("<w:pPr/>{expected}</w:p>")), "{saved}");

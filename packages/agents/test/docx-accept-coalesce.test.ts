@@ -65,6 +65,9 @@ async function savedParagraph(doc: DocxAgentDocument, preserveBytes = true) {
   return paragraphsOf(xml)[1]!;
 }
 
+const sharedSpace = '<w:r><w:t xml:space="preserve"> </w:t></w:r>';
+const sharedSuffix = '<w:r><w:t xml:space="preserve"> alpha.</w:t></w:r>';
+
 const shapes = [
   { name: 'inside one run', source: run('000000A1', 'Alpha bravo charlie delta.'), query: 'bravo',
     replacement: 'BRAVO', expected: 'Alpha BRAVO charlie delta.', runs: 1 },
@@ -76,8 +79,9 @@ const shapes = [
     query: 'romeo', replacement: 'ROMEO', expected: 'Quebec ROMEO sierra.', runs: 3 },
   { name: 'crosses identical properties', source: run('000000E1', 'Tango uniform ') + run('000000E2', 'victor whiskey.'),
     query: 'uniform victor', replacement: 'UNIFORM VICTOR', expected: 'Tango UNIFORM VICTOR whiskey.', runs: 1 },
-  { name: 'crosses different properties', source: run('000000F1', 'Xray yankee ') + run('000000F2', 'zulu alpha.', RPR_ALT),
-    query: 'yankee zulu', replacement: 'YANKEE ZULU', expected: 'Xray YANKEE ZULU alpha.', runs: 3 },
+  { name: 'keeps the original properties of each replaced word',
+    source: run('000000F1', 'Xray yankee') + sharedSpace + run('000000F2', 'zulu', RPR_ALT) + sharedSuffix,
+    query: 'yankee zulu', replacement: 'YANKEE ZULU', expected: 'Xray YANKEE ZULU alpha.', runs: 4 },
   { name: 'untouched source split', source: run('00000061', 'Guard first ') + run('00000062', 'second part.'),
     query: 'first', replacement: 'FIRST', expected: 'Guard FIRST second part.', runs: 2 },
 ];
@@ -144,16 +148,18 @@ for (const legacy of [false, true]) {
           expect(saved).toContain(`<w:rPr>${RPR}</w:rPr>`);
           expect(saved).not.toContain('000000E2');
         }
-        if (shape.name === 'crosses different properties') {
+        if (shape.name === 'keeps the original properties of each replaced word') {
           const runs = saved.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)!;
-          expect(runs.map(textOf)).toEqual(['Xray YANKEE ', 'ZULU', ' alpha.']);
+          expect(runs.map(textOf)).toEqual(['Xray YANKEE', ' ', 'ZULU', ' alpha.']);
           expect(runs[0]).toContain('0066AA');
+          expect(runs[0]).toContain('<w:b/>');
           expect(runs[0]).toContain('<w:bCs/>');
-          expect(runs[1]).toContain('0066AA');
-          expect(runs[1]).toContain('<w:iCs/>');
-          expect(runs[1]).not.toContain('<w:bCs');
-          expect(runs[2]).toContain('<w:i/>');
+          expect(runs[1]).toBe(sharedSpace);
           expect(runs[2]).toContain('C00000');
+          expect(runs[2]).toContain('<w:i/>');
+          expect(runs[2]).toContain('<w:iCs/>');
+          expect(runs[2]).not.toContain('<w:bCs');
+          expect(runs[3]).toBe(sharedSuffix);
         }
         if (shape.name === 'untouched source split' && !legacy) {
           expect(saved).toContain(run('00000062', 'second part.'));
@@ -161,6 +167,22 @@ for (const legacy of [false, true]) {
       } finally { doc.close(); }
     }, 30_000);
   }
+}
+
+for (const [donor, newText] of [
+  ['following run at paragraph start', '(Left'],
+  ['preceding run at a run boundary', 'Left!'],
+] as const) {
+  test(`accepted insertion inherits the ${donor}`, async () => {
+    const right = run('00000072', ' right.', RPR_ALT);
+    const doc = await openDocx(await fixture(run('00000071', 'Left') + right));
+    try {
+      await replace(doc, 'Left', newText);
+      const saved = await savedParagraph(doc);
+      const runs = saved.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)!;
+      expect(runs).toEqual([run('00000071', newText), right]);
+    } finally { doc.close(); }
+  }, 30_000);
 }
 
 const barriers = [
