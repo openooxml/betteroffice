@@ -33,9 +33,9 @@ impl SessionIds {
     pub(crate) fn draw<T: ReadTxn>(&self, txn: &T) -> String {
         if !self.floored.swap(true, Ordering::Relaxed) {
             let floor = self.floor(txn);
-            if floor >= MAX_FLOOR {
+            if floor >= CAPTURE_FLOOR {
                 let before = self.counter.load(Ordering::Relaxed);
-                if before < MAX_FLOOR {
+                if before < CAPTURE_FLOOR {
                     self.unused.fetch_max(before, Ordering::Relaxed);
                 }
                 let mut seen = self.seen.lock().unwrap();
@@ -72,17 +72,16 @@ impl SessionIds {
     /// The smallest `{client_id}:N` from the last one drawn here that no live id uses and this
     /// session has not drawn, for when the floor has reached the cap.
     fn draw_unused<T: ReadTxn>(&self, txn: &T) -> String {
-        let mut used = HashSet::new();
+        let mut seen = self.seen.lock().unwrap();
         self.scan(txn, &mut |n| {
-            used.insert(n);
+            seen.insert(n);
         });
         let drawn = self.drawn.lock().unwrap();
-        let seen = self.seen.lock().unwrap();
         let mut next = self.unused.load(Ordering::Relaxed);
         loop {
             if let Some(run) = drawn.iter().find(|run| run.contains(&next)) {
                 next = run.end;
-            } else if used.contains(&next) || seen.contains(&next) {
+            } else if seen.contains(&next) {
                 next += 1;
             } else {
                 break;
@@ -182,6 +181,9 @@ fn note_any(any: &Any, prefix: &str, seen: &mut dyn FnMut(u64)) {
 }
 
 const MAX_FLOOR: u64 = 1 << 53;
+
+/// A floor at or above this keeps the ids its scan saw for the fallback; real ids stay far below.
+const CAPTURE_FLOOR: u64 = 1 << 52;
 
 /// Passes each `N` below [`MAX_FLOOR`] in `text` written as `prefix` then digits to `seen`,
 /// where `prefix` does not continue a longer number.
