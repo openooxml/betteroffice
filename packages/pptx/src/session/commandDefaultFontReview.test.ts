@@ -394,7 +394,7 @@ function slicedCapableBrowser() {
   return open;
 }
 
-async function openWith(wire: ReturnType<typeof connection>, options: { slicedFonts?: boolean }) {
+async function openWith(wire: ReturnType<typeof connection>, options: { defaultFonts?: boolean; slicedFonts?: boolean }) {
   const sent: unknown[] = [];
   const client = await createPresentationCommandClient(Uint8Array.of(0), Object.assign({ session: 'fonts', incarnation: 'worker',
     fonts: [], ...options }, { [defaultFontInstaller]: async () => {} }),
@@ -403,6 +403,28 @@ async function openWith(wire: ReturnType<typeof connection>, options: { slicedFo
   await client.flush();
   return { client, sent };
 }
+
+test.each(['opened', 'disposed'] as const)('a delayed coverage prefetch stops when its worker has %s', async (state) => {
+  const wire = connection(['target']);
+  const started = deferred<void>();
+  const provider = deferred<Awaited<ReturnType<typeof fontModule.commandFontProvider.load>>>();
+  const load = mock(async () => bytes);
+  wire.provider.mockImplementation(() => { started.resolve(); return provider.promise; });
+  const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts', args: [['cjk-jp'], false] };
+  wire.transport.post(prefetch);
+  await withinTestBudget(started.promise, 'prepared font provider');
+  if (state === 'opened') await openWith(wire, { defaultFonts: false });
+  else {
+    wire.transport.post({ protocol: 1, kind: 'dispose' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  provider.resolve({
+    resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => load,
+    resolveLastResort: () => { throw new Error('Unexpected substitution'); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(load).not.toHaveBeenCalled();
+});
 
 function namedFont(family: string): ArrayBuffer {
   const font = new ArrayBuffer(46 + family.length * 2);

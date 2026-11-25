@@ -129,7 +129,7 @@ async function kanaDeck(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-const prefetches = (h: ReturnType<typeof factory>) => h.workers[0]!.requests
+const prefetches = (h: ReturnType<typeof factory>, index = 0) => h.workers[index]!.requests
   .filter(message => message.kind === 'call' && message.method === 'prefetchCoverageFonts')
   .map(message => message as { id: number; args: unknown[] });
 
@@ -155,9 +155,9 @@ test('coverage prefetch forwards configured CDN and explicit disable state', asy
   }
 });
 
-test('prepared workers follow browser support and preserve an explicit whole-face opt-out', async () => {
-  const globals = { document: {}, OffscreenCanvas: class {}, createImageBitmap: () => {},
-    HTMLCanvasElement: class { transferControlToOffscreen() {} }, navigator: { userAgent: 'Chrome/149.0' } };
+function setWorkerRendering(userAgent = 'Chrome/149.0') {
+  const globals = { OffscreenCanvas: class {}, createImageBitmap: () => {},
+    HTMLCanvasElement: class { transferControlToOffscreen() {} }, navigator: { userAgent } };
   for (const [name, value] of Object.entries(globals)) {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
     Object.defineProperty(globalThis, name, { configurable: true, value });
@@ -166,14 +166,20 @@ test('prepared workers follow browser support and preserve an explicit whole-fac
       else Reflect.deleteProperty(globalThis, name);
     });
   }
+  return globals.navigator;
+}
+
+test('prepared workers follow browser support and preserve an explicit whole-face opt-out', async () => {
+  const navigator = setWorkerRendering();
   for (const [userAgent, capable, slicedFonts, expected] of [
     ['Chrome/149.0', true, undefined, true],
     ['Chrome/149.0', true, false, false],
     ['Version/18.0 Safari/605.1.15', true, undefined, false],
     ['Version/18.0 Safari/605.1.15', true, true, false],
     ['Chrome/149.0', false, undefined, false],
+    ['Chrome/149.0', false, true, false],
   ] as const) {
-    globals.navigator.userAgent = userAgent;
+    navigator.userAgent = userAgent;
     if (!capable) Reflect.deleteProperty(globalThis, 'createImageBitmap');
     const h = factory();
     const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1, slicedFonts });
@@ -181,6 +187,28 @@ test('prepared workers follow browser support and preserve an explicit whole-fac
       for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
       expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], expected]]);
     } finally { prepared.release(); }
+  }
+});
+
+test('preparing one file in different font modes keeps the workers and prefetches separate', async () => {
+  setWorkerRendering();
+  const h = factory();
+  const source = await kanaDeck();
+  const disabled = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, defaultFonts: false });
+  const whole = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, slicedFonts: false });
+  const sliced = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, slicedFonts: true });
+  try {
+    expect(h.workers).toHaveLength(3);
+    for (let tick = 0; tick < 200 && (!prefetches(h, 1).length || !prefetches(h, 2).length); tick++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect(h.workers.map((_, index) => prefetches(h, index).map(message => message.args)))
+      .toEqual([[], [[['cjk-jp'], false]], [[['cjk-jp'], true]]]);
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[1]);
+    expect(sliced.take() as unknown).toBe(h.workers[2]);
+  } finally {
+    disabled.release(); whole.release(); sliced.release();
+    for (const worker of h.workers) worker.terminate();
   }
 });
 

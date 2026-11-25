@@ -136,6 +136,21 @@ test('the prepared decoder gets the default fonts and opening slide the editor w
   expect(opener).toHaveBeenCalledWith(file, expect.objectContaining({ slicedFonts: false }));
 });
 
+test.each(['slice option', 'default fonts'] as const)('changing the %s refreshes preparation for the same file', async (option) => {
+  setWorkerRendering('Chrome/149.0');
+  const { view, props, ready, file } = await mount([{ face, baseUrl }], { defaultFonts: true, experimentalSlicedFonts: true });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
+  expect(prepare).toHaveBeenNthCalledWith(1, file, { defaultFonts: true, activeSlideIndex: 0, slicedFonts: true });
+  const next = option === 'slice option' ? { experimentalSlicedFonts: false } : { defaultFonts: false };
+  await act(async () => { view.rerender(<PptxEditor {...props} {...next} />); });
+  await waitFor(() => expect(prepare).toHaveBeenNthCalledWith(2, file, {
+    defaultFonts: option === 'default fonts' ? false : true,
+    activeSlideIndex: 0,
+    slicedFonts: option === 'slice option' ? false : true,
+  }), MOUNTED);
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(2), MOUNTED);
+});
+
 test('metric-compatible descriptors open as the font they substitute', async () => {
   const arial = { ...face, metricCompatWith: 'Arial', weight: 700 as const };
   const { ready } = await mount([{ face: arial, baseUrl }]);

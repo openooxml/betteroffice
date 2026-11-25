@@ -56,6 +56,28 @@ test('a sliced family under a named font asks too, and a worker with no face dra
   expect(readCoverageFont.mock.calls).toEqual([['MS Gothic', 'abc', null]]);
 });
 
+test.each(['rejected face', 'missing FontFace', 'missing font set'] as const)('the page uses the browser font with a %s', async (failure) => {
+  const fontFace = Object.getOwnPropertyDescriptor(globalThis, 'FontFace')!;
+  const fontSet = Object.getOwnPropertyDescriptor(document, 'fonts')!;
+  if (failure === 'missing font set') Object.defineProperty(document, 'fonts', { configurable: true, value: undefined });
+  else Object.defineProperty(globalThis, 'FontFace', { configurable: true,
+    value: failure === 'missing FontFace' ? undefined : class {
+      async load() { throw new Error('Browser refused the face'); }
+    },
+  });
+  const coverage = createPeerlessFontCoverage({
+    state: sliced, readCoverageFont: async () => ({ revision: 2, bytes: new ArrayBuffer(8) }),
+  }, () => true);
+  try {
+    await expect(coverage.prepare('Noto Sans JP', '日')).resolves.toBe('Noto Sans JP');
+    expect(added).toEqual([]);
+  } finally {
+    coverage.dispose();
+    Object.defineProperty(globalThis, 'FontFace', fontFace);
+    Object.defineProperty(document, 'fonts', fontSet);
+  }
+});
+
 test('two editors on one page never share a revision family', async () => {
   const read = async () => ({ revision: 2, bytes: new ArrayBuffer(8) });
   const one = createPeerlessFontCoverage({ readCoverageFont: read, state: sliced }, () => true);
