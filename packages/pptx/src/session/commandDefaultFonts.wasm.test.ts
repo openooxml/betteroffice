@@ -41,7 +41,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function deck(families = ['Calibri', 'Cambria'], text = 'alpha', traits = ''): Promise<Uint8Array> {
+async function deck(families = ['Calibri', 'Cambria'], text: string | readonly string[] = 'alpha', traits = ''): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -49,7 +49,11 @@ async function deck(families = ['Calibri', 'Cambria'], text = 'alpha', traits = 
   zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>`);
   zip.file('ppt/presentation.xml', `<p:presentation ${ns}><p:sldIdLst>${families.map((_, index) => `<p:sldId id="${256 + index}" r:id="rId${index + 1}"/>`).join('')}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`);
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${families.map((_, index) => `<Relationship Id="rId${index + 1}" Type="${rel}/slide" Target="slides/slide${index + 1}.xml"/>`).join('')}</Relationships>`);
-  for (const [index, family] of families.entries()) zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400" ${traits}><a:latin typeface="${family}"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+  for (const [index, family] of families.entries()) {
+    const runs = (typeof text === 'string' ? [text] : text).map((value) =>
+      `<a:r><a:rPr sz="2400" ${traits}><a:latin typeface="${family}"/></a:rPr><a:t>${value}</a:t></a:r>`).join('');
+    zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
+  }
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -715,13 +719,40 @@ test('inserting script text loads coverage after the family attempt and repaints
   expect(runs.some((run) => /[\u3040-\u309f]/.test(run.text) && run.fontFamily === 'Noto Sans JP')).toBe(true);
 });
 
-test('scripts other than CJK keep the browser font without a script default', async () => {
+test('Arabic and Thai runs in Arial load and use their script defaults', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
+    { codec: 'zstd' })).font;
+  const loaders = new Map([['arabic', async () => arabic], ['thai', async () => thai]]);
+  const manager = source({ Arial: async () => font }, (script) => loaders.get(script));
+  const installed: DefaultFontFace[] = [];
+  const client = await createPresentationCommandClient(await deck(['Arial'], ['وتين', ' ภาษาไทย']), Object.assign({ ...options }, {
+    [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
+  }), connection().transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('thai', false, false);
+  expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
+    .toEqual(['Noto Sans Arabic', 'Noto Sans Thai']);
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs));
+  for (const [script, family] of [[/[\u0600-\u06ff]/, 'Noto Sans Arabic'], [/[\u0e00-\u0e7f]/, 'Noto Sans Thai']] as const) {
+    const covered = runs.filter((run) => script.test(run.text));
+    expect(covered.length).toBeGreaterThan(0);
+    expect(covered.every((run) => run.fontFamily === family && run.fontId !== 0xffffffff)).toBe(true);
+  }
+});
+
+test('wrong script face bytes keep the browser font', async () => {
   const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
   const manager = source({ Calibri: async () => carlito }, () => async () => font);
   const wire = connection();
   const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha مرحبا שלום नमस्ते ไทย'), options, wire.transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback).not.toHaveBeenCalled();
+  for (const script of ['arabic', 'hebrew', 'devanagari', 'thai']) {
+    expect(manager.resolveScriptFallback).toHaveBeenCalledWith(script, false, false);
+  }
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
     .flatMap((box) => box.lines.flatMap((line) => line.runs)).filter((run) => /[\u0590-\u06ff\u0900-\u097f\u0e00-\u0e7f]/.test(run.text));
