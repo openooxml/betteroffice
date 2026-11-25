@@ -1,4 +1,6 @@
+import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { readFontTraits } from '../../../../shared/fontTraits';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 
 /** What the session needs from a progressive face. */
@@ -37,10 +39,12 @@ export function slicedFacesSupported(
   return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
 }
 
+type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
+
 interface Entry {
   family: string;
   face: SlicedFontFace;
-  whole(): Promise<ArrayBuffer>;
+  whole: WholeFaceLoader;
   wholeBytes?: ArrayBuffer;
   wholeLoad?: Promise<ArrayBuffer>;
   /** `chunks` is what the revision's bytes hold; a whole face holds everything. */
@@ -88,11 +92,16 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     return family;
   }
 
-  const wholeBytes = (entry: Entry): Promise<ArrayBuffer> => entry.wholeLoad ??= entry.whole().then((bytes) => {
-    entry.wholeBytes = bytes;
-    return bytes;
-  }, (error: unknown) => {
-    entry.wholeLoad = undefined;
+  const wholeBytes = (entry: Entry): Promise<ArrayBuffer> => entry.wholeLoad ??=
+    (entry.whole.slices?.loadWholeForExport?.() ?? entry.whole()).then((bytes) => {
+      entry.wholeBytes = bytes;
+      return bytes;
+    }, (error: unknown) => {
+      entry.wholeLoad = undefined;
+      throw error;
+    });
+  const replacementBytes = (entry: Entry) => wholeBytes(entry).catch((error: unknown) => {
+    if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
     throw error;
   });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
@@ -114,9 +123,10 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   async function present(entry: Entry, text: string): Promise<string> {
     try {
       await entry.face.ensureText(text);
-    } catch {
+    } catch (error) {
+      if (isImplicitFontCdnError(error)) return latestOf(entry)?.family ?? entry.family;
       let bytes: ArrayBuffer;
-      try { bytes = await wholeBytes(entry); } catch { return entry.family; }
+      try { bytes = await replacementBytes(entry); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
@@ -172,7 +182,11 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   function wholeFaces(names: readonly string[]): Promise<{ family: string; bytes: ArrayBuffer }[]> {
     return Promise.all(names.flatMap((family) => {
       const entry = entries.get(keyOf(family)) ?? retired.get(keyOf(family))?.entry;
-      return entry ? [wholeBytes(entry).then((bytes) => ({ family: entry.family, bytes: bytes.slice(0) }))] : [];
+      if (!entry) return [];
+      return [wholeBytes(entry).then((bytes) => ({ family: entry.family, bytes: bytes.slice(0) }), (error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new PngExportError('font-unavailable', `${entry.family} could not load: ${reason}`);
+      })];
     }));
   }
 
@@ -235,7 +249,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       const known = new Set(Array.isArray(have) ? have : []);
       const faces = await Promise.all(families().filter((family) => !known.has(family)).map(async (family) => {
         const entry = entries.get(keyOf(family));
-        const bytes = await (entry ? wholeBytes(entry).then((whole) => whole.slice(0)) : undefined)?.catch(() => undefined);
+        const bytes = await (entry ? replacementBytes(entry).then((whole) => whole.slice(0)) : undefined)?.catch(() => undefined);
         return bytes ? { family, bold: false, italic: false, bytes, kind: 'coverage' as const } : undefined;
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
@@ -257,16 +271,21 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
           try {
             const revision = await entry.face.ensureText(text);
             return revision === have ? { revision } : { revision, bytes: entry.face.bytes() };
-          } catch {}
+          } catch (error) {
+            if (isImplicitFontCdnError(error)) return undefined;
+          }
         }
-        const bytes = await wholeBytes(entry);
+        const bytes = await replacementBytes(entry).catch((error: unknown) => {
+          if (!isImplicitFontCdnError(error)) throw error;
+        });
+        if (!bytes) return undefined;
         return have === WHOLE ? { revision: WHOLE } : { revision: WHOLE, bytes: bytes.slice(0) };
       })();
     },
     /** The complete face, for paints that cannot wait on coverage. */
     whole(family: string): Promise<ArrayBuffer> | undefined {
       const entry = entries.get(keyOf(family));
-      return entry && wholeBytes(entry).then((bytes) => bytes.slice(0));
+      return entry && replacementBytes(entry).then((bytes) => bytes.slice(0));
     },
     /** Records a style of `family` that loaded as its own whole face, so it draws under its own name. */
     plain(family: string, bold: boolean, italic: boolean): void {

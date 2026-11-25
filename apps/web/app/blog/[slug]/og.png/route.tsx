@@ -32,12 +32,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ slu
       >
         <img
           src={logoUri}
-          width={760}
+          width={567}
           height={567}
           style={{ position: "absolute", right: -170, top: -80, opacity: 0.045, transform: "rotate(-6deg)" }}
         />
         <div style={{ display: "flex", alignItems: "center", gap: 20, fontSize: 28, color: "#5c5c5c" }}>
-          <img src={logoUri} width={64} height={48} />
+          <img src={logoUri} width={48} height={48} />
           BetterOffice blog
         </div>
         <div style={{ display: "flex", fontSize: size, fontWeight: 700, letterSpacing: -2, lineHeight: 1.08, maxWidth: 980 }}>

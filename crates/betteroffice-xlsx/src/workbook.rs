@@ -546,6 +546,12 @@ struct AuthoritySlot {
     deferred: Option<Box<DeferredAuthority>>,
 }
 
+enum AuthorityBuild {
+    Eager,
+    Deferred,
+    RecoverySource,
+}
+
 struct DeferredAuthority {
     legacy_dimensions: Vec<xlsx_parse::LegacySheetDimensions>,
     legacy_styles: Option<Stylesheet>,
@@ -865,6 +871,15 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        Self::open_source(bytes, build_graph, client_id, AuthorityBuild::Deferred)
+    }
+
+    fn open_source(
+        bytes: &[u8],
+        build_graph: bool,
+        client_id: Option<u64>,
+        authority_build: AuthorityBuild,
+    ) -> Result<Self> {
         xlsx_model::open_timing! {
             let timing_parse = xlsx_model::open_timing::span("package_parse");
         }
@@ -885,7 +900,11 @@ impl Workbook {
             client_id,
             &parsed.legacy_dimensions,
             (parsed.legacy_styles.as_ref(), &[]),
-            client_id.is_none() && !eager_authority(),
+            if client_id.is_some() || eager_authority() {
+                AuthorityBuild::Eager
+            } else {
+                authority_build
+            },
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -1003,12 +1022,10 @@ impl Workbook {
             client_id,
             legacy_dimensions,
             legacy_styles,
-            false,
+            AuthorityBuild::Eager,
         )
     }
 
-    /// `defer` leaves the authority to be built from `source_package`'s parsed model, which
-    /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
         mut model: WorkbookModel,
@@ -1018,7 +1035,7 @@ impl Workbook {
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
-        defer: bool,
+        authority_build: AuthorityBuild,
     ) -> Result<Self> {
         model.styles.read_declared_number_formats();
         validate_model(&model)?;
@@ -1031,9 +1048,16 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let deferred =
-            defer && client_id.is_none() && source_package.is_some() && legacy_styles.1.is_empty();
-        let (authority, model, structure) = if deferred {
+        let deferred_source = source_package.as_ref().filter(|_| {
+            !matches!(authority_build, AuthorityBuild::Eager)
+                && client_id.is_none()
+                && legacy_styles.1.is_empty()
+        });
+        let (authority, model, structure) = if let Some(package) = deferred_source {
+            if matches!(authority_build, AuthorityBuild::Deferred) {
+                WorkbookAuthority::check_source_admission(package.original_workbook())
+                    .map_err(Error::CollaborativeState)?;
+            }
             let slot = AuthoritySlot {
                 built: OnceLock::new(),
                 deferred: Some(Box::new(DeferredAuthority {

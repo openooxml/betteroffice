@@ -11,9 +11,9 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://betteroffice.dev/api/badge?label=license&amp;message=Apache-2.0&amp;color=4ade80" alt="license"></a>
-  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 484,591/month (snapshot 2026-10-27)"></a>
-  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 203,294/month (snapshot 2026-10-27)"></a>
-  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 2,063/month (snapshot 2026-10-27)"></a>
+  <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 4,440,154/month (snapshot 2026-11-25)"></a>
+  <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 77,018/month (snapshot 2026-11-25)"></a>
+  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 70,844/month (snapshot 2026-11-25)"></a>
   <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
   <a href="https://betteroffice.dev/blog"><img src="https://betteroffice.dev/api/badge?label=&amp;message=blog&amp;color=0a0a0a" alt="BetterOffice blog"></a>
 </p>
@@ -58,6 +58,7 @@
 More packages:
 
 - **Agent tools:** [`@betteroffice/agents`](https://www.npmjs.com/package/@betteroffice/agents), the TypeScript SDK and `betteroffice-mcp` server.
+- **WOPI app (alpha):** a self-hosted container that serves the BetterOffice editors to a WOPI host (your file platform), so it can open DOCX, XLSX and PPTX files in them and save them back. See [WOPI app](https://docs.betteroffice.dev/docs/wopi) for running it and for setup notes for OpenCloud, Nextcloud and Seafile.
 - **Fonts:** [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/fonts), [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk), [`@betteroffice/fonts-intl`](https://www.npmjs.com/package/@betteroffice/fonts-intl), [`@betteroffice/fonts-latin`](https://www.npmjs.com/package/@betteroffice/fonts-latin).
 - **i18n:** [`@betteroffice/docx-i18n`](https://www.npmjs.com/package/@betteroffice/docx-i18n), [`@betteroffice/xlsx-i18n`](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n).
 
@@ -81,6 +82,8 @@ GDPR-compliant Google Fonts alternative; switch to Google Fonts or your own URL,
 fonts off. The spreadsheet editor paints with those fetched faces today; the document and
 presentation editors use a generic fallback for them until they measure with the fetched faces.
 You can also bundle the font packs yourself.
+Browser pages load uninstalled packs from jsDelivr unless you call `configureFontCdn({ baseUrl: false })`;
+with it off, nothing is fetched and fonts from uninstalled packs fall back, exports included.
 
 **Headless engines (`-native`, Python, Rust).** All fonts are included by default, so nothing is
 fetched.

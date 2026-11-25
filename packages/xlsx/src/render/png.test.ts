@@ -250,13 +250,15 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
   const nativeFace = (family: string, bold: boolean) => bundled.resolveBundledFamilyFace(family, bold, false)
     ?? bundled.resolveGlyphFallbackFace(family, bold, false, 'word') ?? bundled.resolveLastResortChoice(family, bold, false, 'word').face;
 
-  test('without fonts, a bold run on a regular face installs it regular so the bold is synthesized as natively', async () => {
-    const calls = stubBrowser();
-    await renderPng(sheetOf('Calibri Light', true), box, {});
-    expect(nativeFace('Calibri Light', true).weight).toBe(400);
-    expect(calls.faces.map((installed) => installed.weight)).toEqual(['400']);
-    expect(calls.painted.some((font) => font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
-  });
+  for (const [family, weight] of [['Calibri Light', 700], ['DM Serif Display Light', 400]] as const) {
+    test(`without fonts, a bold ${family} run installs its substitute at weight ${weight}`, async () => {
+      const calls = stubBrowser();
+      await renderPng(sheetOf(family, true), box, {});
+      expect(nativeFace(family, true).weight).toBe(weight);
+      expect(calls.faces.map((installed) => installed.weight)).toEqual([String(weight)]);
+      expect(calls.painted.some((font) => font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
+    });
+  }
 
   test('without fonts, a regular run on a bold face paints with that face, installed bold', async () => {
     const calls = stubBrowser();

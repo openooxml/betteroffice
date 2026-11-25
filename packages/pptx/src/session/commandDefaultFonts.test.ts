@@ -1,7 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { sleep } from 'bun';
 import { readFile } from 'node:fs/promises';
 import * as fonts from '@betteroffice/fonts';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
 import * as progressive from '@betteroffice/fonts/progressive';
+import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
@@ -27,7 +32,7 @@ function provider(
   const resolveLastResort = mock((_family: string, _bold: boolean, _italic: boolean, _office?: string) =>
     async (): Promise<ArrayBuffer> => { throw new Error('No substitute'); });
   const source = { resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
-  const imported = spyOn(commandFontProvider, 'load').mockResolvedValue(source);
+  const imported = spyOn(commandFontProvider, 'load').mockImplementation(async () => ({ ...source }));
   restorers.push(() => imported.mockRestore());
   return { imported, resolve, resolveFamily, resolveScriptFallback, resolveLastResort };
 }
@@ -242,6 +247,53 @@ test('a transient failure retries after backoff and registers the second load', 
     expect(settled).toHaveBeenCalledTimes(1);
     expect(settled).toHaveBeenCalledWith([regular]);
   } finally { fonts.dispose(); }
+});
+
+test('coverage prefetch and slide switches share a CDN failure and retry in the same session', async () => {
+  const previous = getFontCdnConfiguration();
+  configureTestFontCdn({ baseUrl: false });
+  const restore = withBrowserFontGlobals(false);
+  const advance = retryClock();
+  const requests: string[] = [];
+  let online = false;
+  const fetch = spyOnFontFetch(async (input) => {
+    if (String(input).includes('cdn.jsdelivr.net')) {
+      requests.push(String(input));
+      if (!online) throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const current = { ...regular, scripts: ['cjk-jp'] };
+  const next = { ...regular, scripts: ['cjk-kr'] };
+  const register = mock(() => {});
+  setFontCdnConfiguration({ baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true });
+  const source = fontRuntimeWithoutPacks().createFontProvider(undefined, { strict: true, retain: false });
+  const shared = async () => source;
+  const manager = createCommandDefaultFonts([regular], (slide) => [slide === 'next' ? next : current],
+    register, () => {}, undefined, undefined, shared);
+  try {
+    prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), shared);
+    await sleep(0);
+    expect(requests).toHaveLength(1);
+    expect(await manager.load('opening')).toEqual([]);
+    expect(await manager.load('next')).toEqual([]);
+    expect(requests).toHaveLength(1);
+    expect(register).not.toHaveBeenCalled();
+
+    online = true;
+    advance(60_000);
+    expect(await manager.load('opening')).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    expect(register).toHaveBeenCalledTimes(1);
+  } finally {
+    manager.dispose();
+    fetch.mockRestore();
+    warn.mockRestore();
+    configureTestFontCdn({ baseUrl: false });
+    restore();
+    setFontCdnConfiguration(previous);
+  }
 });
 
 test('rejected faces back off for two and eight seconds and stop after three attempts', async () => {
@@ -574,6 +626,18 @@ test('a worker provider applies its session CDN snapshot before creating loaders
     expect(fonts.fontCdnConfiguration()).toEqual(configured);
     await commandFontProvider.load({ baseUrl: false, timeoutMs: 30_000 });
     expect(fonts.fontCdnConfiguration().baseUrl).toBe(false);
-    expect(create).toHaveBeenCalledTimes(2);
+    await commandFontProvider.load(undefined);
+    expect(getFontCdnConfiguration()).toBeUndefined();
+    expect(create).toHaveBeenCalledTimes(3);
   } finally { fonts.configureFontCdn({ baseUrl: false }); }
+});
+
+test('a PPTX worker font provider preserves the implicit CDN marker from session prefetch', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const inherited = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  try {
+    await commandFontProvider.load(inherited);
+    expect(fonts.fontCdnConfiguration()).toEqual(inherited);
+  } finally { restore(); setFontCdnConfiguration(previous); }
 });

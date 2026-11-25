@@ -56,6 +56,7 @@ const RUNTIME_ALLOWED = new Set([
   "/app/packages/xlsx/tsconfig.json",
   "/app/shared/collaboration-limits.ts",
   "/app/shared/collaboration-pipe",
+  "/app/shared/fontCdnDiagnostics.ts",
   "/app/shared/media.ts",
   "/app/shared/office-session",
   "/app/shared/safeHref.ts",
