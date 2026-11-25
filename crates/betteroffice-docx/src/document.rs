@@ -12,13 +12,14 @@ use docx_edit::content_controls::{
     ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
     find_package_content_controls, list_package_content_controls,
 };
+use docx_edit::save::{session_paragraph_ids, write_model_with_report};
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
 };
 use docx_edit::{
-    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
-    SegmentContent, SpliceAnchor, StoryRange, StorySegment, seed_from_docx_with_generation,
+    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, Receipt, SegmentContent,
+    StoryRange, StorySegment, seed_from_docx_with_generation,
 };
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
@@ -35,10 +36,9 @@ use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
-use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::{
-    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveReport, S13SaveRequest,
-    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts_with_report,
+    S13ParagraphId, S13ParagraphIds, S13SaveOptions, S13SaveReport, S13SaveRequest,
+    SerializerDeterminism,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -69,6 +69,7 @@ pub struct Document {
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
     dirty: Dirty,
+    parse_limits: ParseLimits,
     #[cfg(feature = "raster")]
     default_limits: bool,
     #[cfg(any(feature = "fonts", feature = "raster"))]
@@ -136,6 +137,7 @@ impl Document {
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
+            parse_limits: limits.clone(),
             #[cfg(feature = "raster")]
             default_limits: *limits == ParseLimits::default(),
             model,
@@ -589,7 +591,6 @@ impl Document {
             });
         }
         let paragraph_ids = self.session_save_plan()?;
-        let whole_model_write = paragraph_ids.is_none();
         let request = S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
@@ -610,13 +611,17 @@ impl Document {
         };
         #[cfg(test)]
         session_save_tests::count_package_write();
-        let (bytes, report) =
-            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        Ok(save_report(bytes, report, whole_model_write))
+        let (bytes, report) = write_model_with_report(
+            request,
+            &self.source,
+            &self.original_parts,
+            &self.parse_limits,
+        )?;
+        Ok(save_report(bytes, report))
     }
 
     /// The editing session's paragraph save plan for the current model, as the
-    /// product's session save writes it; `None` saves the whole model.
+    /// product's session save writes it.
     fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
         if self.dirty == Dirty::ModelChanged {
             return Ok(None);
@@ -1044,69 +1049,6 @@ fn body_part(identities: &ParagraphIdentities) -> String {
         .unwrap_or_else(|| "word/document.xml".to_owned())
 }
 
-/// `plan` as the package writer's request field, every planned part kept.
-fn session_paragraph_ids(plan: ParagraphSavePlan) -> S13ParagraphIds {
-    S13ParagraphIds {
-        removed_comment_ids: Vec::new(),
-        section_edits: None,
-        assignments: plan
-            .assignments
-            .into_iter()
-            .map(|(part, ordinal, para_id)| S13ParagraphId {
-                part,
-                ordinal,
-                para_id,
-            })
-            .collect(),
-        patched_parts: plan
-            .patched_parts
-            .into_iter()
-            .map(|(part, para_ids)| S13PatchedPart { part, para_ids })
-            .collect(),
-        spliced_parts: plan
-            .spliced_parts
-            .into_iter()
-            .map(|part| S13SplicedPart {
-                part: part.part,
-                sha256: part.sha256,
-                paragraphs: part
-                    .paragraphs
-                    .into_iter()
-                    .map(|(ordinal, _)| ordinal)
-                    .collect(),
-                changed: part.changed,
-                inserted: part
-                    .inserted
-                    .into_iter()
-                    .map(|anchor| match anchor {
-                        SpliceAnchor::Before(ordinal) => S13SpliceAnchor::Before(ordinal),
-                        SpliceAnchor::After(ordinal) => S13SpliceAnchor::After(ordinal),
-                    })
-                    .collect(),
-                removed: part.removed,
-                paragraph_patches: part.paragraph_patches,
-                legacy_paragraphs: part.legacy_paragraphs,
-                table_patches: part.table_patches,
-                format_only: part.format_only,
-            })
-            .collect(),
-        whole_parts: plan
-            .whole_parts
-            .into_iter()
-            .map(|part| S13WholePart {
-                part: part.part,
-                sha256: part.sha256,
-                changed: part.changed,
-            })
-            .collect(),
-        touched_parts: plan
-            .touched_parts
-            .into_iter()
-            .map(|(part, touched)| S13TouchedPart { part, touched })
-            .collect(),
-    }
-}
-
 fn replace_section_paragraphs(
     body: &mut DocumentBody,
     locator: Locator<'_>,
@@ -1372,7 +1314,7 @@ fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
 }
 
-fn save_report(bytes: Vec<u8>, report: S13SaveReport, whole_model_write: bool) -> SaveReport {
+fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
     let structure = report
         .kept_unchanged
         .values()
@@ -1385,7 +1327,7 @@ fn save_report(bytes: Vec<u8>, report: S13SaveReport, whole_model_write: bool) -
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
             .then_some(report.structure_dropped),
-        whole_model_write,
+        whole_model_write: false,
     }
 }
 
@@ -1744,13 +1686,43 @@ mod session_save_tests {
     }
 
     #[test]
-    fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
+    fn model_mut_borrow_without_change_keeps_the_source_parts() {
         let mut document = open();
         document.model_mut();
-        let counts = counted(|| {
-            document.save().unwrap();
+        let saved = ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap();
+        assert_eq!(saved, document.original_parts);
+    }
+
+    #[test]
+    fn model_mut_saves_a_body_edit_and_keeps_other_parts() {
+        let mut parts = ooxml_opc::unzip_parts(&package(&source())).unwrap();
+        let header = "word/header1.xml";
+        let types = String::from_utf8(parts[0].1.clone()).unwrap().replace(
+            "</Types>",
+            r#"<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#,
+        );
+        parts[0].1 = types.into_bytes();
+        parts.push((
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parts.push((
+            header.to_owned(),
+            format!("<w:hdr {NAMESPACES}>{}</w:hdr>", paragraph("0000000F", &run("Header"))).into_bytes(),
+        ));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut document = Document::open(&source).unwrap();
+        change_model(&mut document, "0000000B", |paragraph| {
+            replace_plain_run(paragraph, "Charlie by model".to_owned(), None);
         });
-        assert_eq!(counts, (0, 1));
+
+        let saved = document.save().unwrap();
+        let reopened = Document::open(&saved).unwrap();
+        assert_eq!(get_paragraph_text(reopened.paragraphs()[1]), "Charlie by model");
+        let other_parts = |parts: Vec<(String, Vec<u8>)>| {
+            parts.into_iter().filter(|(path, _)| path != "word/document.xml").collect::<Vec<_>>()
+        };
+        assert_eq!(other_parts(ooxml_opc::unzip_parts(&saved).unwrap()), other_parts(parts));
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { serializeRun } from '../docx/serializer';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import { rememberSaveProjection } from './saveProjection';
 import {
   crossingFallback,
   crossStoryComments,
@@ -4957,7 +4958,11 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  return projectDocument(session, base, options);
+  const projection = projectDocument(session, base, options);
+  if (options.storyIds === undefined && options.commentIds === undefined) {
+    rememberSaveProjection(session, base, projection);
+  }
+  return projection;
 }
 
 /**

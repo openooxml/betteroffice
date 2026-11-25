@@ -202,9 +202,19 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let envelope = parse_s9_package(&parts, data, options, limits, None, None)?
-        .expect("a whole body is never refused");
+    let envelope = parse_docx_s9_wire_from_parts(data, &parts, options, limits)?;
     Ok((envelope, parts))
+}
+
+#[doc(hidden)]
+pub fn parse_docx_s9_wire_from_parts(
+    data: &[u8],
+    parts: &[(String, Vec<u8>)],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<S9WireEnvelope, ParseError> {
+    Ok(parse_s9_package(parts, data, options, limits, None, None)?
+        .expect("a whole body is never refused"))
 }
 
 /// [`parse_docx_s9_wire_parts_with_limits`] leaving the media in the package:

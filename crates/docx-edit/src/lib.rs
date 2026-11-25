@@ -138,6 +138,8 @@ mod update_chunks;
 pub mod canonical;
 pub mod engine;
 pub mod frame_delta;
+#[doc(hidden)]
+pub mod save;
 pub mod session;
 
 pub use batch::{

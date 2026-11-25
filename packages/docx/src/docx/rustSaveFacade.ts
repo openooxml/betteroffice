@@ -91,9 +91,24 @@ function headerFooterSaveEntries(
     : [];
 }
 
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function modelSaveFields(document: Document) {
+  const pkg = document.package;
+  return {
+    document: pkg.document,
+    headerEntries: [...(pkg.headers ?? [])],
+    footerEntries: [...(pkg.footers ?? [])],
+    footnotes: pkg.footnotes,
+    endnotes: pkg.endnotes,
+    footnoteSeparators: pkg.footnoteSeparators,
+    endnoteSeparators: pkg.endnoteSeparators,
+    relationshipEntries: [...(pkg.relationships ?? [])],
+    numbering: pkg.numbering,
+  };
 }
 
 /** Encode the public Document through the inverse allowlisted package wire. */
@@ -107,6 +122,11 @@ export async function writeDocumentWithRust(
   skipMutations = false,
   yieldSave?: () => Promise<void>
 ): Promise<RustSaveResult> {
+  const guarded = paragraphIds === undefined && selective === undefined;
+  if (guarded) {
+    const { preloadEditWasm } = await import('../wasm/edit');
+    await preloadEditWasm();
+  }
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
@@ -126,18 +146,13 @@ export async function writeDocumentWithRust(
   validateDeterminism(fixed);
   if (yieldSave) await yieldSave();
 
-  const pkg = document.package;
   const request = {
+    ...modelSaveFields(document),
     determinism: fixed,
-    document: pkg.document,
-    headerEntries: headerFooterSaveEntries(pkg.headers),
-    footerEntries: headerFooterSaveEntries(pkg.footers),
-    footnotes: pkg.footnotes ?? [],
-    endnotes: pkg.endnotes ?? [],
-    footnoteSeparators: pkg.footnoteSeparators ?? [],
-    endnoteSeparators: pkg.endnoteSeparators ?? [],
-    relationshipEntries: [...(pkg.relationships?.entries() ?? [])],
-    ...(pkg.numbering === undefined ? {} : { numbering: pkg.numbering }),
+    ...(!guarded && {
+      headerEntries: headerFooterSaveEntries(document.package.headers),
+      footerEntries: headerFooterSaveEntries(document.package.footers),
+    }),
     options: {
       updateModifiedDate: options.updateModifiedDate ?? true,
       ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),

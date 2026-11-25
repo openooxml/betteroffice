@@ -10,6 +10,7 @@
 
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
+import { saveCurrentProjection } from '../yrs/saveProjection';
 import type { RawDocxContent } from './unzip';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
@@ -69,7 +70,8 @@ export async function repackDocxWithWarnings(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
+  const result = await saveCurrentProjection(doc, options)
+    ?? await writeDocumentWithRust(doc, doc.originalBuffer, options);
   return { buffer: result.buffer, warnings: result.warnings };
 }
 
@@ -268,8 +270,8 @@ export function isDocxBuffer(buffer: ArrayBuffer): boolean {
 }
 
 export async function createDocx(doc: Document): Promise<ArrayBuffer> {
-  const originalBuffer = await createEmptyDocx();
-  return repackDocx({ ...doc, originalBuffer });
+  if (doc.originalBuffer) return repackDocx(doc);
+  return repackDocx({ ...doc, originalBuffer: await createEmptyDocx() });
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

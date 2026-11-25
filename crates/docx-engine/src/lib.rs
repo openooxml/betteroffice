@@ -249,14 +249,14 @@ pub fn paragraph_patch_writer_version() -> u32 {
 }
 
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> EngineResult<Vec<u8>> {
-    docx_parse::write_docx_s13_json(request_json, original_docx).map_err(EngineError::message)
+    docx_edit::save::write_docx_json(request_json, original_docx).map_err(EngineError::message)
 }
 
 pub fn write_docx_s13_wasm_with_warnings(
     request_json: &str,
     original_docx: &[u8],
 ) -> EngineResult<Vec<u8>> {
-    docx_parse::write_docx_s13_with_warnings_json(request_json, original_docx)
+    docx_edit::save::write_docx_with_warnings_json(request_json, original_docx)
         .map_err(EngineError::message)
 }
 

@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import * as wasmYrs from '../../packages/docx/src/yrs';
 import * as nativeYrs from '@betteroffice/docx-native/yrs';
 import { attemptSelectiveSave } from '../../packages/docx/src/docx/selectiveSave';
+import { parse_docx_s9, write_docx_s13_wasm, write_docx_s13_wasm_with_warnings } from './js/engineParse';
 
 type Yrs = typeof wasmYrs;
 type Session = Awaited<ReturnType<Yrs['createYrsSession']>>;
@@ -44,6 +45,28 @@ async function docx(body: string, namespaces = ''): Promise<Uint8Array> {
 }
 
 const documentXml = async (bytes: Uint8Array) => (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string');
+
+test('native model writers without a plan keep every unedited part', async () => {
+  const source = await docx(FORM_PARAGRAPH + '<w:p><w:proofErr w:type="spellStart"/></w:p>');
+  const { document: { package: pkg } } = JSON.parse(parse_docx_s9(source, ''));
+  const { content, finalSectionProperties, customRootBindings, comments } = pkg.document;
+  const request = JSON.stringify({
+    determinism: { seed: '0'.repeat(64), now: '2030-01-02T03:04:05.006Z' },
+    document: { content, finalSectionProperties, customRootBindings, comments },
+    relationshipEntries: pkg.relationshipEntries,
+    options: { updateModifiedDate: false },
+  });
+  const framed = write_docx_s13_wasm_with_warnings(request, source);
+  const frameLength = new DataView(framed.buffer, framed.byteOffset).getBigUint64(0, true);
+  const before = await JSZip.loadAsync(source);
+  for (const bytes of [write_docx_s13_wasm(request, source), framed.subarray(8 + Number(frameLength))]) {
+    const after = await JSZip.loadAsync(bytes);
+    expect(Object.keys(after.files).sort()).toEqual(Object.keys(before.files).sort());
+    for (const [path, entry] of Object.entries(before.files)) {
+      expect(await after.files[path]!.async('uint8array')).toEqual(await entry.async('uint8array'));
+    }
+  }
+});
 
 const ROUTES: Record<string, (yrs: Yrs, session: Session) => Promise<Uint8Array>> = {
   'product save': async (yrs, session) => (await yrs.saveYrsDocx(session, { updateModifiedDate: false })).bytes,

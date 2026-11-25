@@ -73,13 +73,12 @@ def test_one_edited_paragraph_reports_nothing_and_keeps_the_smart_tag(
     assert SMART_TAG_PARAGRAPH in saved
 
 
-def test_a_whole_write_without_a_save_plan_says_so(report_bytes: bytes) -> None:
+def test_a_model_fallback_writes_the_edit_with_a_save_plan(report_bytes: bytes) -> None:
     document = Document.open(report_bytes)
     document.replace_text("0000000E", "X")
     report = _report(document)
     assert report.kept_unchanged is None
-    assert report.whole_model_write is True
-    assert report.structure_dropped is None
+    assert report.whole_model_write is False
     assert ">X<" in _main_part(report.bytes)
 
 

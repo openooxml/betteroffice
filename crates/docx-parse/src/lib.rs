@@ -401,7 +401,7 @@ pub fn write_docx_s13_json(request_json: &str, original_docx: &[u8]) -> Result<V
 
 /// Writes a DOCX from a typed model and original package.
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-save-in-edit"), wasm_bindgen)]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
     write_docx_s13_json(request_json, original_docx).map_err(js_error)
 }
@@ -423,7 +423,7 @@ pub fn write_docx_s13_with_warnings_json(
 /// [`write_docx_s13_wasm`], framing save diagnostics ahead of the package
 /// bytes: `u64 LE warnings_len || warnings_json || docx_bytes`.
 #[cfg(feature = "wasm")]
-#[wasm_bindgen]
+#[cfg_attr(not(feature = "wasm-save-in-edit"), wasm_bindgen)]
 pub fn write_docx_s13_wasm_with_warnings(
     request_json: &str,
     original_docx: &[u8],

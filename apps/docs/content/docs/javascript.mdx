@@ -941,8 +941,7 @@ a batch against that version: every step commits in one transaction and one undo
 step, or the batch returns a typed refusal and nothing changes.
 
 ```ts
-import { repackDocx } from "@betteroffice/docx/docx";
-import { createYrsSession, yrsToDocument } from "@betteroffice/docx/yrs";
+import { createYrsSession, saveYrsDocx } from "@betteroffice/docx/yrs";
 
 const session = await createYrsSession();
 session.openDocx(bytes, true);
@@ -959,8 +958,12 @@ const result = session.applyEdits({
 });
 if (!result.ok) console.warn(result.failure.code);
 
-const saved = await repackDocx(yrsToDocument(session, session.materializeDocx()!));
+const { bytes: saved } = await saveYrsDocx(session);
 ```
+
+`parseDocx` followed by `repackDocx` uses the same save engine for document-model workflows.
+You can also pass a current projection from `yrsToDocument(session, session.materializeDocx()!)`
+to `repackDocx` to save the session.
 
 Offsets are UTF-16 positions in the paragraph text, where each inline atom (hard
 break, image, content control, note reference, field) is one U+FFFC. Steps insert,

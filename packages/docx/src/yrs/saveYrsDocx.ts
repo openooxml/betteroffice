@@ -575,6 +575,23 @@ export async function writeSessionSave(
   splices: (part: string) => boolean = patches,
   yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
+  const { saved } = await writeSessionSaveWithWarnings(
+    session, document, capture, originalBuffer, options, patches, skipMutations, splices, yieldSave
+  );
+  return saved;
+}
+
+async function writeSessionSaveWithWarnings(
+  session: YrsSession,
+  document: Document,
+  capture: DocxSessionSave,
+  originalBuffer: ArrayBuffer,
+  options: DocxSaveOptions,
+  patches: (part: string) => boolean,
+  skipMutations = false,
+  splices: (part: string) => boolean = patches,
+  yieldSave?: () => Promise<void>
+): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
   refuseUnavailableTables(session, document);
   if (yieldSave) await yieldSave();
   engineProgress();
@@ -689,7 +706,7 @@ export async function writeSessionSave(
         console.warn(warning);
       }
     }
-    return { buffer, plan, structure, keptParagraphs, structureDropped, lists, listPlan };
+    return { buffer, warnings, plan, structure, keptParagraphs, structureDropped, lists, listPlan };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -705,7 +722,7 @@ export async function writeSessionSave(
     if (sectionPlan?.strict) throw refuse('Cannot safely locate section boundaries after this structural edit');
     result = await write(undefined);
   }
-  const { buffer, plan, structure, keptParagraphs, structureDropped, lists, listPlan } = result;
+  const { buffer, warnings, plan, structure, keptParagraphs, structureDropped, lists, listPlan } = result;
   if (yieldSave) await yieldSave();
   const paragraphs = savedParagraphs(output, capture.identities);
   let bytes: Uint8Array = new Uint8Array(buffer);
@@ -745,11 +762,14 @@ export async function writeSessionSave(
     stale.has(`${anchor.paraId}\u0000${persisted.paraId}`);
   listPlan?.commit();
   return {
-    bytes,
-    paragraphs: written.filter((paragraph) => !isStale(paragraph)),
-    conflicts: written.filter(isStale),
-    ...(structure > 0 ? { keptUnchanged: { structure, paragraphs: keptParagraphs } } : {}),
-    ...(structureDropped.length > 0 ? { structureDropped } : {}),
+    warnings,
+    saved: {
+      bytes,
+      paragraphs: written.filter((paragraph) => !isStale(paragraph)),
+      conflicts: written.filter(isStale),
+      ...(structure > 0 ? { keptUnchanged: { structure, paragraphs: keptParagraphs } } : {}),
+      ...(structureDropped.length > 0 ? { structureDropped } : {}),
+    },
   };
 }
 
@@ -769,6 +789,14 @@ export async function saveYrsDocx(
   session: YrsSession,
   options: DocxSaveOptions = {}
 ): Promise<DocxSavedDocument> {
+  const { saved } = await saveYrsDocxWithWarnings(session, options);
+  return saved;
+}
+
+export async function saveYrsDocxWithWarnings(
+  session: YrsSession,
+  options: DocxSaveOptions
+): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
   let base = session.materializeDocx();
   if (!base?.originalBuffer) {
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
@@ -813,7 +841,7 @@ export async function saveYrsDocx(
   const document = checkedProjection(session, () =>
     yrsToDocument(session, projectionBase, { commentIds: comments.sessionIds })
   );
-  return writeSessionSave(
+  return writeSessionSaveWithWarnings(
     session,
     document,
     capture,

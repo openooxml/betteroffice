@@ -13,18 +13,23 @@ No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency
 
 ## Usage
 
-Parse a DOCX and save it while preserving untouched package parts:
+Open a DOCX in an editing session and save it while preserving untouched package parts.
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';
-import { parseDocx, repackDocx } from '@betteroffice/docx';
+import { createYrsSession, saveYrsDocx } from '@betteroffice/docx/yrs';
 
-const document = await parseDocx(await readFile('input.docx'));
-// document.package.document.content: the body's paragraphs and tables
-// document.package also holds styles, numbering, theme, media, headers and footers
-const bytes = await repackDocx(document);
-await writeFile('output.docx', new Uint8Array(bytes));
+const session = await createYrsSession();
+try {
+  session.openDocx(await readFile('input.docx'), true);
+  const { bytes } = await saveYrsDocx(session);
+  await writeFile('output.docx', bytes);
+} finally {
+  session.destroy();
+}
 ```
+
+For document-model workflows, `parseDocx` followed by `repackDocx` uses the same save engine.
 
 ## Entry points
 
@@ -32,7 +37,7 @@ await writeFile('output.docx', new Uint8Array(bytes));
 | --- | --- |
 | `parseDocx` | Read an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File` into a document model. |
 | `repackDocx`, `repackDocxWithWarnings` | Save a parsed model against its original package; the latter also returns save warnings. |
-| `createDocx` | Write a new document model without an original package. |
+| `createDocx` | Write a document model, preserving its original package when present. |
 | `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `createYrsSession` (from `@betteroffice/docx/yrs`) | Asynchronously create a CRDT editing session. |
 | `saveYrsDocx` (from `@betteroffice/docx/yrs`) | Save a session opened from DOCX bytes, returning bytes and persisted paragraph anchors. |

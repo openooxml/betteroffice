@@ -88,20 +88,6 @@ fn assert_nothing_reported(report: &SaveReport) {
     assert!(!report.whole_model_write);
 }
 
-fn assert_whole_model_write(report: &SaveReport) {
-    assert!(report.whole_model_write);
-    assert!(
-        report.kept_unchanged.is_none(),
-        "{:?}",
-        report.kept_unchanged
-    );
-    assert!(
-        report.structure_dropped.is_none(),
-        "{:?}",
-        report.structure_dropped
-    );
-}
-
 #[test]
 fn an_unedited_save_reports_nothing_kept_or_dropped() {
     let source = source();
@@ -154,11 +140,11 @@ fn one_edited_paragraph_with_options_reports_the_bytes_save_with_options_writes(
 }
 
 #[test]
-fn a_whole_write_without_a_save_plan_says_so() {
+fn a_model_fallback_writes_the_edit_with_a_save_plan() {
     let mut document = open();
     document.replace_paragraph_text("0000000E", "X").unwrap();
     let report = report_of(&document);
-    assert_whole_model_write(&report);
+    assert!(!report.whole_model_write);
     assert!(saved_main_part(&report.bytes).contains(">X<"));
 }
 
@@ -174,7 +160,7 @@ fn a_model_edit_that_drops_a_smart_tag_does_not_report_nothing_dropped() {
     assert!(saved.contains("Delta edited."), "{saved}");
     assert!(!saved.contains("<w:smartTag"), "{saved}");
     assert!(
-        report.whole_model_write || report.structure_dropped.is_some(),
+        report.structure_dropped.is_some(),
         "the save dropped w:smartTag and reported nothing dropped: {:?}",
         report.structure_dropped
     );
@@ -191,7 +177,7 @@ fn a_whole_write_with_options_reports_the_bytes_save_with_options_writes() {
     };
     let report = document.save_report_with_options(options.clone()).unwrap();
     assert_eq!(report.bytes, document.save_with_options(options).unwrap());
-    assert_whole_model_write(&report);
+    assert!(!report.whole_model_write);
 }
 
 /// A body whose text edit to 0000000D leaves it out of the save plan, written whole.
