@@ -249,6 +249,41 @@ test('a transient failure retries after backoff and registers the second load', 
   } finally { fonts.dispose(); }
 });
 
+test.each([false, true])('an absent intl pack settles without fetching a substitute (CDN blocked: %s)', async (blocked) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const requests: string[] = [];
+  const fetch = spyOnFontFetch(async (input) => {
+    requests.push(String(input));
+    if (String(input).includes('/fonts-intl@')) return new Response(null, { status: 403 });
+    return fontAssetResponse(input);
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://script-fallback.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const register = mock(() => {});
+  const manager = createCommandDefaultFonts([regular], () => [{ ...regular, scripts: ['thai'] }], register, () => {},
+    undefined, undefined, () => commandFontProvider.load(blocked ? cdn : { baseUrl: false, timeoutMs: 10_000 }));
+  try {
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    expect(requests).toEqual(blocked ? [expect.stringContaining('/fonts-intl@')] : []);
+    expect(warn).toHaveBeenCalledTimes(blocked ? 1 : 0);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test('coverage prefetch and slide switches share a CDN failure and retry in the same session', async () => {
   const previous = getFontCdnConfiguration();
   configureTestFontCdn({ baseUrl: false });
@@ -280,6 +315,8 @@ test('coverage prefetch and slide switches share a CDN failure and retry in the 
     expect(await manager.load('next')).toEqual([]);
     expect(requests).toHaveLength(1);
     expect(register).not.toHaveBeenCalled();
+    expect(manager.hasPending('opening')).toBe(false);
+    expect(manager.hasPending('next')).toBe(false);
 
     online = true;
     advance(60_000);
