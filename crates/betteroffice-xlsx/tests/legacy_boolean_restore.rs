@@ -16,68 +16,32 @@ const TRUE_BOOLEAN: &str = r#"<c r="A1" t="b"><v>1</v></c>"#;
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const PKG: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
-const DECL: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#;
-const STYLES: &str = concat!(
-    r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
-    r#"<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>"#,
-    r#"<fills count="1"><fill><patternFill patternType="none"/></fill></fills>"#,
-    r#"<borders count="1"><border/></borders>"#,
-    r#"<cellStyleXfs count="1">"#,
-    r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>"#,
-    r#"<cellXfs count="1">"#,
-    r#"<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>"#,
-    "</styleSheet>",
-);
-const CONTENT_TYPES: &str = r#"<Types
- xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/xl/workbook.xml"
- ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-<Override PartName="/xl/worksheets/sheet1.xml"
- ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-<Override PartName="/xl/styles.xml"
- ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>"#;
-
 fn package(a1: &str, extra_cells: &str, calc_pr: &str) -> Vec<u8> {
     let parts = [
-        ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
+        (
+            "[Content_Types].xml",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#.to_owned(),
+        ),
         (
             "_rels/.rels",
-            format!(
-                r#"<Relationships xmlns="{PKG}">
-<Relationship Id="rId1" Type="{RELS}/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>"#
-            ),
+            format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#),
         ),
         (
             "xl/workbook.xml",
-            format!(
-                r#"<workbook xmlns="{MAIN}" xmlns:r="{RELS}">
-<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#
-            ),
+            format!(r#"<workbook xmlns="{MAIN}" xmlns:r="{RELS}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#),
         ),
         (
             "xl/_rels/workbook.xml.rels",
-            format!(
-                r#"<Relationships xmlns="{PKG}">
-<Relationship Id="rId1" Type="{RELS}/worksheet" Target="worksheets/sheet1.xml"/>
-<Relationship Id="rId2" Type="{RELS}/styles" Target="styles.xml"/>
-</Relationships>"#
-            ),
+            format!(r#"<Relationships xmlns="{PKG}"><Relationship Id="rId1" Type="{RELS}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#),
         ),
         (
             "xl/worksheets/sheet1.xml",
-            format!(
-                r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1">{a1}<c r="B1"><v>1</v></c>{extra_cells}</row></sheetData></worksheet>"#
-            ),
+            format!(r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1">{a1}<c r="B1"><v>1</v></c>{extra_cells}</row></sheetData></worksheet>"#),
         ),
-        ("xl/styles.xml", STYLES.to_owned()),
     ];
     let parts: Vec<_> = parts
         .into_iter()
-        .map(|(name, xml)| (name.to_owned(), [DECL, &xml].concat().into_bytes()))
+        .map(|(name, xml)| (name.to_owned(), xml.into_bytes()))
         .collect();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
