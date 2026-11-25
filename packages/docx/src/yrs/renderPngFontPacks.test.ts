@@ -9,6 +9,7 @@ import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureDefaultFonts, resolveCompleteFontProvider, resolveDefaultFontProvider } from '../layout/measure';
 import { getGoogleFontEquivalent } from '../utils/fontLoader';
+import { decodeFontFace } from '../wasm/fontDecoder';
 import { engineKind } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
 import { ENGINES, preloadEngines, restoreBrowser, runsDocument, scriptDocument, stubBrowser, type TextRun } from './renderPngTestSupport';
@@ -223,6 +224,22 @@ for (const { kind } of ENGINES) {
         restore();
         setFontCdnConfiguration(previous);
       }
+    });
+
+    test.skipIf(kind !== 'wasm')('DOCX PNG draws Han glyphs with supplied Latin-only Arial', async () => {
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      const bytes = new Uint8Array(await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
+      const run = { family: 'Arial', text: 'Ab 漢字 cd', paragraphFamily: 'Arial' };
+      stubBrowser();
+      const contours = spyOn(Path2D.prototype, 'moveTo');
+      try {
+        await exported([run]);
+        expect(contours).toHaveBeenCalled();
+        const expected = [...contours.mock.calls];
+        contours.mockClear();
+        await exported([run], { fonts: [{ family: 'Arial', bytes }] });
+        expect(contours.mock.calls).toEqual(expected);
+      } finally { contours.mockRestore(); }
     });
 
     test.each(['default', 'supplied'] as const)('DOCX PNG with absent optional packs and %s fonts', async (source) => {

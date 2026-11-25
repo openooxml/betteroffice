@@ -3,9 +3,12 @@ import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../sh
 import { importFonts } from '../../../../shared/office-session/fontModules';
 import { ImplicitFontAbsentError } from '../layout/measure/defaultFontProvider';
 import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
-import { fontUnavailable } from '../layout/render/png';
+import { fontUnavailable, type DocxPngFontFace } from '../layout/render/png';
 
 type Fonts = typeof import('@betteroffice/fonts');
+type SuppliedFace = Pick<DocxPngFontFace, 'family' | 'bold' | 'italic'>;
+
+const faceKey = (family: string, bold = false, italic = false) => JSON.stringify([family.trim().toLowerCase(), bold, italic]);
 
 /** A face the layout could not load: the face, the family it was resolved for, and why. */
 export interface FailedFaceLoad {
@@ -51,7 +54,7 @@ function resolvedFace(fonts: Fonts, method: PropertyKey, args: unknown[]): Resol
  * that is not installed from one that fails rejects with `font-unavailable`.
  */
 export function recordFaceLoads(
-  provider: BundledFontProvider, fonts: Fonts, suppliedFamilies?: ReadonlySet<string>,
+  provider: BundledFontProvider, fonts: Fonts, supplied?: readonly SuppliedFace[],
 ): RecordedFontProvider {
   if (typeof fonts.isMissingFontAddon !== 'function') {
     throw fontUnavailable('PNG export needs the @betteroffice/fonts release @betteroffice/docx depends on; this one is older.');
@@ -60,6 +63,7 @@ export function recordFaceLoads(
   const pending = new Set<Promise<void>>();
   const loaders = new WeakMap<BundledFontLoader, BundledFontLoader>();
   const methods = new Map<PropertyKey, unknown>();
+  const suppliedFaces = new Set(supplied?.map((face) => faceKey(face.family, face.bold, face.italic)));
 
   const watch = (loader: BundledFontLoader, resolved: () => Resolved): BundledFontLoader => {
     let watched = loaders.get(loader);
@@ -102,8 +106,9 @@ export function recordFaceLoads(
       let method = methods.get(key);
       if (!method) {
         method = (...args: unknown[]) => {
-          const family = key === 'resolveScriptFallback' ? args[3] : args[0];
-          if (typeof family === 'string' && suppliedFamilies?.has(family.trim().toLowerCase())) return undefined;
+          const [family, bold, italic] = args;
+          if ((key === 'resolve' || key === 'resolveFamily' || key === 'resolveLastResort') && typeof family === 'string' &&
+            suppliedFaces.has(faceKey(family, bold === true, italic === true))) return undefined;
           const loader: unknown = value.apply(target, args);
           return typeof loader === 'function'
             ? watch(loader as BundledFontLoader, () => resolvedFace(fonts, key, args))
@@ -133,9 +138,9 @@ export function faceLoadFailure(failures: readonly FailedFaceLoad[]): ReturnType
 
 /** `provider` wrapped by {@link recordFaceLoads}, with the font package it loads from. */
 export async function recordProviderFaceLoads(
-  provider: BundledFontProvider, suppliedFamilies: ReadonlySet<string>,
+  provider: BundledFontProvider, supplied?: readonly SuppliedFace[],
 ): Promise<RecordedFontProvider> {
-  return recordFaceLoads(provider, await importFonts(), suppliedFamilies);
+  return recordFaceLoads(provider, await importFonts(), supplied);
 }
 
 /** `work`'s result, or a rejection with the signal's reason as soon as it aborts; `work` itself runs on. */

@@ -40,7 +40,7 @@ const exporters = new WeakMap<object, Exporter>();
 const MAX_FONT_ROUNDS = 4;
 
 const familyKey = (family: string) => family.trim().toLowerCase();
-const faceKey = (family: string, bold: boolean, italic: boolean) => JSON.stringify([familyKey(family), bold, italic]);
+const faceKey = (family: string, bold = false, italic = false) => JSON.stringify([familyKey(family), bold, italic]);
 const isBold = (face: BundledFontFace) => face.weight === 700;
 const isItalic = (face: BundledFontFace) => face.style === 'italic';
 
@@ -61,10 +61,12 @@ function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>, font
     queue: Promise.resolve(), users: 0, released: false,
   };
   try {
+    const addedFamilies = new Set(added.map((face) => familyKey(face.family)));
     for (const face of [...measured, ...added]) {
       const fallback = 'fallback' in face && face.fallback === true;
       register(exporter, face, fallback);
-      if (!fallback) exporter.owned.add(familyKey(face.family));
+      const family = familyKey(face.family);
+      if (!fallback && !addedFamilies.has(family)) exporter.owned.add(family);
     }
   } catch (error) {
     exporter.renderer.free();
@@ -77,22 +79,24 @@ function create(measured: ExportFace[], added: ReadonlyArray<PptxFontFace>, font
  * The installed bundled faces one request resolves to, in the order the native font manager gives them; like it,
  * faces of packages that are not installed are left out before the primary and the last resort are chosen.
  */
-async function resolve(fonts: Fonts, installedFace: InstalledFace, request: RequestedFontFace): Promise<BundledFontFace[]> {
+async function resolve(fonts: Fonts, installedFace: InstalledFace, request: RequestedFontFace, supplied: boolean): Promise<BundledFontFace[]> {
   const faces: BundledFontFace[] = [];
   const push = (face: BundledFontFace | undefined) => {
     if (face && !faces.some((known) => known.family === face.family && isBold(known) === isBold(face) && isItalic(known) === isItalic(face))) {
       faces.push(face);
     }
   };
-  const primary = await installedFace(fonts.resolveBundledFamilyFace(request.family, request.bold, request.italic));
+  const primary = supplied ? undefined : await installedFace(fonts.resolveBundledFamilyFace(request.family, request.bold, request.italic));
   push(primary);
   for (const script of request.scripts ?? []) {
     push(await installedFace(fonts.resolveScriptFallbackFace(script as BundledFontScript, request.bold, request.italic, request.family)));
   }
   push(await installedFace(fonts.resolveGlyphFallbackFace(request.family, request.bold, request.italic, 'powerpoint')));
-  const last = fonts.resolveLastResortChoice(request.family, request.bold, request.italic, 'powerpoint');
-  if (!last.onlyIfPrimaryFails || !primary) push(await installedFace(last.face));
-  if (!faces.length) push(fonts.BASE_LATIN_FONTS.find((face) => isBold(face) === request.bold && isItalic(face) === request.italic));
+  if (!supplied) {
+    const last = fonts.resolveLastResortChoice(request.family, request.bold, request.italic, 'powerpoint');
+    if (!last.onlyIfPrimaryFails || !primary) push(await installedFace(last.face));
+    if (!faces.length) push(fonts.BASE_LATIN_FONTS.find((face) => isBold(face) === request.bold && isItalic(face) === request.italic));
+  }
   return faces;
 }
 
@@ -105,13 +109,13 @@ const hasPrimary = (exporter: Exporter, request: RequestedFontFace) =>
 const hasFallback = (exporter: Exporter, face: BundledFontFace) => exporter.fallback.has(faceKey(face.family, isBold(face), isItalic(face)));
 
 /** The requests of the slide's current version the export renderer has not served yet. */
-function missingRequests(exporter: Exporter, document: PptxDocument, slideId: string, suppliedFamilies: ReadonlySet<string>): RequestedFontFace[] {
+function missingRequests(exporter: Exporter, document: PptxDocument, slideId: string): RequestedFontFace[] {
   const { faces: requests } = JSON.parse(exporter.renderer.requestedFontFacesJson(document, slideId)) as { faces: RequestedFontFace[] };
-  return requests.filter((request) => !suppliedFamilies.has(familyKey(request.family)) && !exporter.requested.has(requestKey(request)));
+  return requests.filter((request) => !exporter.requested.has(requestKey(request)));
 }
 
 async function loadDefaults(
-  exporter: Exporter, wanted: RequestedFontFace[], unavailable: Set<string>, reported: Set<Error>, signal?: AbortSignal,
+  exporter: Exporter, wanted: RequestedFontFace[], supplied: ReadonlySet<string>, unavailable: Set<string>, reported: Set<Error>, signal?: AbortSignal,
 ) {
   const fonts = await loadFonts();
   const installedFace: InstalledFace = async (face) =>
@@ -142,7 +146,9 @@ async function loadDefaults(
     return bytes;
   };
   for (;;) {
-    const plans = await Promise.all(wanted.map(async (request) => ({ request, faces: await resolve(fonts, installedFace, request) })));
+    const plans = await Promise.all(wanted.map(async (request) => ({
+      request, faces: await resolve(fonts, installedFace, request, supplied.has(faceKey(request.family, request.bold, request.italic))),
+    })));
     const excluded = unavailable.size;
     const loaded = await Promise.all(plans.map(async ({ request, faces }) => {
       const primary = hasPrimary(exporter, request);
@@ -197,7 +203,7 @@ function exportFontCdnKey(signal?: AbortSignal): Promise<string> {
 
 /**
  * Lays the slide with `slideId` out again in an export renderer holding the faces the presentation registered, any
- * new family in `added`, and the bundled faces the slide asks for, as the native export does, so both measure alike.
+ * new face in `added`, and the bundled faces the slide asks for, as the native export does, so both measure alike.
  * Faces are collected again until the document stays unchanged while they load, at most `MAX_FONT_ROUNDS` times;
  * the layout then runs without yielding, on that version and at the slide's index in it. Edits that keep asking
  * for new faces past that reject with `font-unavailable`, so the caller can export again.
@@ -206,9 +212,9 @@ export async function defaultFontLayout(
   document: PptxDocument, slideId: string, measured: ExportFace[], added: ReadonlyArray<PptxFontFace> | undefined, signal?: AbortSignal,
 ): Promise<{ list: SlideDisplayList; fonts: ExportFace[] }> {
   slideIndex(document, slideId);
-  const known = new Set(measured.map((face) => familyKey(face.family)));
-  const supplied = added?.filter((face) => !known.has(familyKey(face.family))) ?? [];
-  const suppliedFamilies = new Set(supplied.map((face) => familyKey(face.family)));
+  const known = new Set(measured.map((face) => faceKey(face.family, face.bold, face.italic)));
+  const supplied = added?.filter((face) => !known.has(faceKey(face.family, face.bold, face.italic))) ?? [];
+  const suppliedFaces = new Set(supplied.map((face) => faceKey(face.family, face.bold, face.italic)));
   const fontCdn = await exportFontCdnKey(signal);
   signal?.throwIfAborted();
   let exporter = supplied.length ? undefined : exporters.get(document);
@@ -231,12 +237,12 @@ export async function defaultFontLayout(
       for (let round = 0; ; round += 1) {
         const version = document.documentVersion();
         slideIndex(document, slideId);
-        const wanted = missingRequests(layout, document, slideId, suppliedFamilies);
+        const wanted = missingRequests(layout, document, slideId);
         if (!wanted.length) break;
         if (round === MAX_FONT_ROUNDS) {
           throw new PngExportError('font-unavailable', 'the faces this slide needs kept changing while they loaded; export again');
         }
-        const plans = await loadDefaults(layout, wanted, unavailable, reported, signal);
+        const plans = await loadDefaults(layout, wanted, suppliedFaces, unavailable, reported, signal);
         if (unavailable.size && !supplied.length && layout === held) {
           layout = create([], held.faces, fontCdn);
           layout.owned = new Set(held.owned);

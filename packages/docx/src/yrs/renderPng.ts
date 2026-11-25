@@ -64,9 +64,8 @@ export function createPngExporter(session: YrsSession) {
       const document = copy.materializeDocx();
       if (!document) throw new Error('renderPng needs a session opened from DOCX bytes');
       const complete = fontProvider ? undefined : await resolveCompleteFontSelection(exportFontRuntime);
-      const suppliedFamilies = new Set(fonts?.map((face) => face.family.trim().toLowerCase()));
       const recorded = complete?.provider && !complete.configured
-        ? await recordProviderFaceLoads(complete.provider, suppliedFamilies) : undefined;
+        ? await recordProviderFaceLoads(complete.provider, fonts) : undefined;
       const bundled = fontProvider ?? recorded?.provider ?? complete?.provider;
       const rejectFailedLoads = async () => {
         if (!recorded) return;
