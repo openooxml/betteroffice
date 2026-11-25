@@ -1,5 +1,5 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
-import type { YrsAuthor, YrsLoc, YrsStoryRange } from './index';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import type { YrsAuthor, YrsLoc, YrsStoryRange, YrsStorySegment } from './index';
 import { preflightDocxCommand } from './residentCommandActions';
 import { commandSelectionRange } from './residentCommandAnchors';
 import type { DocxWorkerCommandEngine } from './residentCommandProtocol';
@@ -12,11 +12,7 @@ afterEach(closeCommandEngines);
 
 const SUGGESTING: YrsAuthor = { name: 'Writer', date: '2026-01-01T00:00:00Z' };
 
-/**
- * The delete preflight before it read paragraphs by id: every span of the story is read, the
- * caret paragraph found by its position among them, and the boundary checks and the range check
- * given the spans.
- */
+/** Reference delete preflight using story-wide paragraph spans. */
 function storyScanDelete(
   engine: DocxWorkerCommandEngine, at: YrsLoc, backward: boolean, count: number, skipDeleted: boolean
 ): { range: YrsStoryRange; target?: YrsLoc } | 'unsupported-delete-target' {
@@ -123,9 +119,9 @@ const BOUNDARIES =
   p('0000000A', `<w:del ${stamp(4)}><w:r><w:delText>all deleted</w:delText></w:r></w:del>`) +
   p('0000000B', r('Last \u{1F600}'));
 
-const seen = { carets: 0, unresolved: 0, cellTargets: 0, refused: 0, merges: 0 };
+type DeleteCoverage = { carets: number; unresolved: number; cellTargets: number; refused: number; merges: number };
 
-function expectDeletesMatchStoryScan(arm: CommandArm, label: string): void {
+function expectDeletesMatchStoryScan(arm: CommandArm, label: string, seen: DeleteCoverage): void {
   const engine = arm.engine;
   for (const story of engine.geometryReader.storyIds()) {
     for (const span of engine.geometryReader.paragraphSpans(story)) {
@@ -166,25 +162,55 @@ function expectDeletesMatchStoryScan(arm: CommandArm, label: string): void {
 }
 
 test('backspace and delete read the caret paragraph by id and target what the story scan did', async () => {
+  const seen = { carets: 0, unresolved: 0, cellTargets: 0, refused: 0, merges: 0 };
   const arm = await openCommandEngine([], { bodyXml: BOUNDARIES });
   const body = () => arm.engine.geometryReader.paragraphSpans('body');
   expect(body().map(span => span.paraId)).toContain('00000004');
-  expectDeletesMatchStoryScan(arm, 'opened');
+  expectDeletesMatchStoryScan(arm, 'opened', seen);
   // Typing, a merge and a split each edit the story, so its paragraph index and spans are read anew.
   const plain = body()[0]!;
   expect(execute(arm, command(arm, 'insertText', { selection: selection(plain.paraId, 6), text: 'xy\u{1F600}' })).status).toBe('applied');
-  expectDeletesMatchStoryScan(arm, 'after typing');
+  expectDeletesMatchStoryScan(arm, 'after typing', seen);
   const last = body().at(-1)!;
   expect(execute(arm, command(arm, 'deleteBackward', { selection: selection(last.paraId, 0) })).status).toBe('applied');
-  expectDeletesMatchStoryScan(arm, 'after a merge');
+  expectDeletesMatchStoryScan(arm, 'after a merge', seen);
   const link = body().find(span => span.paraId === '00000008')!;
   expect(execute(arm, command(arm, 'paragraphBreak', { selection: selection(link.paraId, 7) })).status).toBe('applied');
-  expectDeletesMatchStoryScan(arm, 'after a split');
+  expectDeletesMatchStoryScan(arm, 'after a split', seen);
+
+  const duplicates = await openCommandEngine(['a', 'b', 'c', 'd']);
+  const geometry = duplicates.engine.geometryReader;
+  const { end } = geometry.locateParagraph('body', '00000003');
+  duplicates.native.apply_seed_raw_ops('body', JSON.stringify([
+    { op: 'setEmbedAttr', index: end, key: 'paraId', value: '00000002' },
+  ]));
+  expect(geometry.paragraphIdCount('body', '00000002')).toBe(2);
+  const acrossDuplicates = command(duplicates, 'deleteForward', { selection: selection('00000001', 0), count: 7 });
+  expect(preflightDocxCommand(duplicates.engine, duplicates.state, acrossDuplicates, context(duplicates, acrossDuplicates)))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-delete-target' });
+  expectDeletesMatchStoryScan(duplicates, 'with duplicate paragraph ids', seen);
   console.log(`delete preflight parity: ${JSON.stringify(seen)}`);
   expect(seen.carets).toBeGreaterThan(4000);
+  expect(seen.unresolved).toBeGreaterThan(0);
   expect(seen.cellTargets).toBeGreaterThan(0);
+  expect(seen.refused).toBeGreaterThan(0);
   expect(seen.merges).toBeGreaterThan(100);
 }, 120_000);
+
+test('a direct forward table boundary check reads the caret paragraph segments once', () => {
+  const at = { story: 'body', paraId: '00000001', offset: 1 };
+  const paragraph: YrsStorySegment[] = [
+    { kind: 'text', text: 'abc', attributes: {} },
+    { kind: 'pilcrow', paraId: at.paraId, attributes: {}, properties: {} },
+  ];
+  const paragraphSegments = mock((_story: string, _indices: readonly number[]) => [paragraph]);
+  expect(tableBoundaryDeleteTarget({
+    paragraphSpans: () => { throw new Error('Unexpected story-wide paragraph read'); },
+    paragraphSegments,
+    paragraphUnit: () => 0,
+  }, at, 'forward')).toBeNull();
+  expect(paragraphSegments.mock.calls).toEqual([['body', [0]]]);
+});
 
 test('a backspace inside a paragraph reads that paragraph, not the story, at any document length', async () => {
   const work: Record<string, Array<{ spans: number; units: number }>> = {};
@@ -224,3 +250,36 @@ test('a backspace inside a paragraph reads that paragraph, not the story, at any
     'mid-paragraph delete': [{ spans: 0, units: 1 }, { spans: 0, units: 1 }],
   });
 }, TIMEOUT * 3);
+
+test('counted suggesting forward delete visits paragraph segments a bounded number of times', async () => {
+  const paraId = '00000001';
+  const count = 8;
+  const runs = Array.from({ length: 128 }, (_, index) => index % 2 === 0
+    ? r('a') : '<w:r><w:rPr><w:b/></w:rPr><w:t>b</w:t></w:r>').join('');
+  const arm = await openCommandEngine([], { bodyXml: p(paraId, runs) });
+  const readSegments = arm.engine.paragraphSegments.bind(arm.engine);
+  const segmentCount = readSegments('body', [0])[0]!.length;
+  expect(segmentCount).toBeGreaterThan(count);
+  let visits = 0;
+  const segments = spyOn(arm.engine, 'paragraphSegments').mockImplementation((story, indices) =>
+    readSegments(story, indices).map(paragraph => new Proxy(paragraph, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/u.test(key)) visits += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    })));
+  const spans = spyOn(arm.engine.geometryReader, 'paragraphSpans');
+  try {
+    const intent = command(arm, 'deleteForward', { selection: selection(paraId, 0), count, suggesting: SUGGESTING });
+    expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent))).toMatchObject({
+      status: 'ready',
+      prepared: { range: { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: count } } },
+    });
+    expect(spans).not.toHaveBeenCalled();
+    expect(segments).toHaveBeenCalledTimes(1);
+    expect(visits).toBeLessThanOrEqual(2 * segmentCount + 1);
+  } finally {
+    spans.mockRestore();
+    segments.mockRestore();
+  }
+}, TIMEOUT);
