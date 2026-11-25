@@ -29,10 +29,25 @@ pub fn table_header_write_at(
     let same_content = cell.formula.as_deref() == old.and_then(|cell| cell.formula.as_deref())
         && (cell.formula.is_some()
             || &cell.value == old.map_or(&CellValue::Empty, |cell| &cell.value));
-    let clear = cell.formula.is_none()
-        && (matches!(&cell.value, CellValue::Empty)
-            || matches!(&cell.value, CellValue::Text { value } if value.is_empty()));
-    (!same_content || clear && cell.style == old.and_then(|cell| cell.style)).then_some(header)
+    if !same_content {
+        return Some(header);
+    }
+    if cell.formula.is_some() || cell.style != old.and_then(|cell| cell.style) {
+        return None;
+    }
+    let (table, column) = header;
+    let writes_header = match &cell.value {
+        CellValue::Empty => true,
+        CellValue::Text { value } => {
+            value.is_empty()
+                || workbook.tables[table]
+                    .columns
+                    .get(column)
+                    .is_some_and(|caption| caption != value)
+        }
+        _ => false,
+    };
+    writes_header.then_some(header)
 }
 
 pub fn normalize_table_header(

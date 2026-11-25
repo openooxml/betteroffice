@@ -292,6 +292,32 @@ fn renaming_a_header_updates_the_cell_and_table_column() {
 }
 
 #[test]
+fn retyping_a_mismatched_header_renames_the_caption_and_undo_restores_it() {
+    let source = replace_part(
+        &book(),
+        "xl/sharedStrings.xml",
+        "<t>Status</t>",
+        "<t>State</t>",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(reopened.model().table("Table1").unwrap().columns[1], "Status");
+    assert_eq!(
+        reopened.model().value(SHEET1, at("B1")),
+        CellValue::Text {
+            value: "State".into()
+        }
+    );
+
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+}
+
+#[test]
 fn clearing_a_header_generates_a_column_name() {
     let source = book();
     let mut typed_clear = Workbook::open(&source).unwrap();
@@ -1687,6 +1713,36 @@ fn a_reference_in_a_modeled_charts_extension_refuses_the_rename() {
     assert_eq!(charts[0].refs.len(), 1);
     assert_eq!(charts[0].refs[0].formula, "Sheet1!$C$2:$C$4");
     assert_refused_header(&mut workbook, "B1", "State", chart);
+}
+
+#[test]
+fn a_binary_chart_asset_does_not_block_a_header_rename() {
+    let image = "xl/charts/assets/image.png";
+    let overridden = "xl/charts/assets/image.xml";
+    let source = replace_part(
+        &book(),
+        "[Content_Types].xml",
+        "</Types>",
+        &format!(
+            concat!(
+                r#"<Default Extension="png" ContentType="image/png"/>"#,
+                r#"<Override PartName="/{}" ContentType="image/png"/></Types>"#,
+            ),
+            overridden,
+        ),
+    );
+    let bytes = b"\x89PNG\r\n\x1a\n<!--";
+    let mut parts = ooxml_opc::unzip_parts(&source).unwrap();
+    parts.extend([image, overridden].map(|path| (path.into(), bytes.to_vec())));
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let saved = workbook.save().unwrap();
+    assert_saved_headers(&saved, ["Name", "State", "Rev"]);
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    for path in [image, overridden] {
+        assert_eq!(part(&parts, path), bytes);
+    }
 }
 
 #[test]

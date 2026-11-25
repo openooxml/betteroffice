@@ -515,19 +515,23 @@ impl PreservedPackage {
             .flat_map(|sheet| &sheet.charts)
             .map(|chart| normalized_part_name(&chart.part))
             .collect::<HashSet<_>>();
-        let is_chart = |kind: &str| {
-            let kind = kind.to_ascii_lowercase();
-            kind.ends_with(".chart+xml") || kind.ends_with(".chartex+xml")
-        };
         for (path, bytes) in &self.parts {
+            let Some(kind) = effective_content_type(&self.content_types, path)
+                .map(|resolved| resolved.value.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            if !kind.ends_with("+xml") && !matches!(kind.as_str(), "application/xml" | "text/xml") {
+                continue;
+            }
             let normalized = normalized_part_name(path);
             let affected = |formula: &str| matches(formula, false);
             let referenced = if model_charts.contains(&normalized) {
                 crate::chart::extension_formula_reference(bytes, affected)?
             } else {
                 (normalized.starts_with("xl/charts/")
-                    || effective_content_type(&self.content_types, path)
-                        .is_some_and(|resolved| is_chart(resolved.value)))
+                    || kind.ends_with(".chart+xml")
+                    || kind.ends_with(".chartex+xml"))
                     && contains_formula(bytes, &[b"f", b"formula", b"sqref"], affected)?
             };
             if referenced {
