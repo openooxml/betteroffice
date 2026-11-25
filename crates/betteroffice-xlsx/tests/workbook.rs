@@ -8917,6 +8917,37 @@ fn refuses_structural_ops_that_would_strand_pivot_references() {
     Workbook::open(&workbook.save().unwrap()).unwrap();
 }
 
+#[test]
+fn header_edit_on_a_table_with_a_mismatched_header_is_refused_unchanged() {
+    let mut workbook = Workbook::open(&preservation_fixture()).unwrap();
+    let before = package_map(&workbook.save().unwrap());
+    let model_before = workbook.model().clone();
+    let version = workbook.version();
+
+    let error = workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    let Error::Operation(xlsx_ops::OpError::TableHeaderUnsupported(reason)) = error else {
+        panic!("expected a table header refusal, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "unsupported edit: table Table1 column 2 (B1) needs non-empty, unique text matching its caption"
+    );
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.version(), version);
+
+    let after = package_map(&workbook.save().unwrap());
+    for path in ["xl/worksheets/sheet1.xml", "xl/tables/table1.xml"] {
+        assert_eq!(after[path], before[path], "{path}");
+    }
+}
+
 /// `Data` feeds a pivot cache over `A1:B4`, `Report` hosts the pivot table at
 /// `D1:F10`, and `Notes` is named by neither.
 fn pivoted_fixture() -> Vec<u8> {
