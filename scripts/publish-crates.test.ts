@@ -28,10 +28,7 @@ const NEW_CRATE_REFUSAL =
   '  the remote server responded with an error (status 429 Too Many Requests): ' +
   'You have published too many new crates in a short period of time.';
 
-const CARGO_NEW_CRATE_REFUSAL =
-  'error: failed to publish betteroffice-fonts-cjk-kr v0.6.0 to registry at https://crates.io\n' +
-  'Caused by:\n' +
-  '  the remote server responded with an error (status 429 Too Many Requests): You have published too many new crates in a short period of time. Please try again after Wed, 25 Nov 2026 16:06:03 GMT and see https://crates.io/docs/rate-limits for more details.\n';
+const CARGO_NEW_CRATE_REFUSAL = readFileSync(fileURLToPath(new URL('./publish-crates-429.log.txt', import.meta.url)), 'utf8');
 
 function newCrateRefusal(retryAt: number) {
   return `${NEW_CRATE_REFUSAL} Please try again after ${new Date(retryAt).toUTCString()} and see https://crates.io/docs/rate-limits for more details.`;
@@ -641,6 +638,35 @@ describe('new-crate rate limit', () => {
     expect(tokens).toEqual([FAKE_OIDC, FAKE_BOOTSTRAP]);
     expect(checks).toBe(1);
     expect(clock.waits).toEqual([495_000]);
+  });
+  test('cargo\'s real new-crate refusal waits until its retry time, then publishes', async () => {
+    let nowMs = Date.parse('2026-11-25T16:05:24Z');
+    const retryMs = Date.parse('2026-11-25T16:06:03Z');
+    const waits: number[] = [];
+    const attempts: string[] = [];
+    const result = await publishOneCrate({
+      name: 'betteroffice-fonts-cjk-kr',
+      version: '0.6.0',
+      exists: false,
+      oidcToken: FAKE_OIDC,
+      bootstrapToken: FAKE_BOOTSTRAP,
+      recordUse: () => {},
+      waitRegistry: async () => {},
+      rateLimitBudget: { waitedMs: 0, newCratesLeft: 6 },
+      now: () => nowMs,
+      sleep: async (ms: number) => {
+        waits.push(ms);
+        nowMs += ms;
+      },
+      checkVersion: async () => null,
+      runPublish: (token: string) => {
+        attempts.push(token);
+        return nowMs < retryMs ? { status: 101, stderr: CARGO_NEW_CRATE_REFUSAL } : { status: 0, stderr: '' };
+      }
+    });
+    expect(result).toEqual({ source: 'bootstrap' });
+    expect(attempts).toEqual([FAKE_BOOTSTRAP, FAKE_BOOTSTRAP]);
+    expect(waits).toEqual([retryMs - Date.parse('2026-11-25T16:05:24Z') + 15_000]);
   });
 });
 
