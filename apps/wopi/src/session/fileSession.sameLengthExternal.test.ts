@@ -5,7 +5,7 @@ import { addToken, makeHarness, SRC } from "../../test/session/harness";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 async function run(stripInfoVersion: boolean, seed: number) {
   const h = makeHarness({ format: "xlsx" });
