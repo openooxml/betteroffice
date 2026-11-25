@@ -1317,7 +1317,6 @@ fn finalize_cell(
         Some("str") => CellValue::Text {
             value: unescape_name(&c.value_text.unwrap_or_default()),
         },
-        Some("b") if c.value_text.as_deref() == Some("") => CellValue::Empty,
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),
         },
