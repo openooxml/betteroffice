@@ -42,50 +42,57 @@ const dispatchStep = release.jobs['python-pypi'].steps.find(
 const RUN_IDS = PYTHON_PUBLISH_NAMES.map((_, index) => 4200 + index);
 const ALL_NAMES = [...FONT_PACK_NAMES, ...PYTHON_PUBLISH_NAMES];
 const ALL_RUN_IDS = ALL_NAMES.map((_, index) => 4300 + index);
+const post = (name: string) =>
+  `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`;
+const watchRun = (id: number) => `run watch ${id} --exit-status`;
 
-/** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
-function dispatch({ dispatchStatus = 0, failing = 0, timedOut = 0, failCheckAt = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
+function dispatch({ failDispatchAt = 0, failing = 0, timedOut = 0, failCheckAt = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
-  const log = join(directory, 'gh.log');
-  writeFileSync(log, '');
-  const ids = names.map(
-    (name, index) => `    *"inputs[binding]=${name}"*) echo ${runIds[index]} ;;`
-  );
-  writeFileSync(
-    join(directory, 'gh'),
-    [
-      '#!/bin/sh',
-      `echo "$@" >> "${log}"`,
-      'case "$1 $2" in',
-      `  "api --method") [ ${dispatchStatus} -ne 0 ] && exit ${dispatchStatus}; case "$*" in`,
-      ...ids,
-      '    esac ;;',
-      `  "run watch") [ "$3" = "${timedOut}" ] && exit 124; [ "$3" = "${failing}" ] && exit 1 ;;`,
-      'esac',
-      'exit 0'
-    ].join('\n'),
-    { mode: 0o755 }
-  );
-  writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
-  const check = join(directory, 'check-publisher-files.sh');
-  writeFileSync(check, [
-    `echo check-publisher-files >> "${log}"`,
-    `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
-  ].join('\n'));
-  const path = join(directory, 'dispatch.sh');
-  writeFileSync(path, dispatchStep.run);
-  const result = spawnSync('bash', ['-e', path], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${directory}:${process.env.PATH}`,
-      GH_REPO: 'openooxml/betteroffice',
-      PUBLISH: JSON.stringify(names),
-      SHA,
-      CHECK_PUBLISHER_FILES: check
-    }
-  });
-  return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+  try {
+    const log = join(directory, 'gh.log');
+    writeFileSync(log, '');
+    const ids = names.map((name, index) => {
+      const response = index + 1 === failDispatchAt ? 'exit 1' : `echo ${runIds[index]}`;
+      return `    *"inputs[binding]=${name}"*) ${response} ;;`;
+    });
+    writeFileSync(
+      join(directory, 'gh'),
+      [
+        '#!/bin/sh',
+        `echo "$@" >> "${log}"`,
+        'case "$1 $2" in',
+        '  "api --method") case "$*" in',
+        ...ids,
+        '    esac ;;',
+        `  "run watch") [ "$3" = "${timedOut}" ] && exit 124; [ "$3" = "${failing}" ] && exit 1 ;;`,
+        'esac',
+        'exit 0'
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+    const check = join(directory, 'check-publisher-files.sh');
+    writeFileSync(check, [
+      `echo check-publisher-files >> "${log}"`,
+      `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
+    ].join('\n'));
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
+      cwd: repository,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GH_REPO: 'openooxml/betteroffice',
+        PUBLISH: JSON.stringify(names),
+        SHA,
+        GITHUB_SERVER_URL: 'https://github.com',
+        CHECK_PUBLISHER_FILES: check
+      }
+    });
+    return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 describe('registry', () => {
@@ -346,45 +353,16 @@ globalThis.fetch = async (url) => {
 
     const result = dispatch();
 
-    expect(result.status).toBe(0);
-    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
-    expect(posts).toEqual(
-      PYTHON_PUBLISH_NAMES.map(
-        (name) =>
-          `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`
-      )
-    );
-    for (const post of posts) {
-      expect(result.log[result.log.indexOf(post) - 1]).toBe('check-publisher-files');
-    }
-    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(posts.length);
+    expect(result.status, result.stderr).toBe(0);
+    const calls = PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', post(name)]);
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(RUN_IDS.map(watchRun));
   });
 
   test('an empty publish list runs no check and dispatches nothing', () => {
     const result = dispatch({ names: [] });
     expect(result.status, result.stderr).toBe(0);
     expect(result.log).toEqual([]);
-  });
-
-  test('the wait watches exactly the runs the dispatch created', () => {
-    const result = dispatch();
-
-    expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('run watch')).sort()).toEqual(
-      RUN_IDS.map((id) => `run watch ${id} --exit-status`)
-    );
-    expect(publish['run-name']).toBe(
-      'Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}'
-    );
-  });
-
-  test('the release ends only once every dispatched run has', () => {
-    const result = dispatch();
-
-    expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('run watch'))).toHaveLength(
-      PYTHON_PUBLISH_NAMES.length
-    );
   });
 
   test('a dispatched run that fails fails the release', () => {
@@ -400,9 +378,8 @@ globalThis.fetch = async (url) => {
 
   test('watch bounds fit the job deadline and a timeout cancels the stalled child', () => {
     const job = release.jobs['python-pypi'];
-    expect(dispatchStep.run).toContain('timeout "${minutes}m" gh run watch "$run" --exit-status');
-    const packs = Number(dispatchStep.run.match(/^publish (\d+) \$packs$/m)?.[1]);
-    const formats = Number(dispatchStep.run.match(/^publish (\d+) \$formats$/m)?.[1]);
+    const packs = Number(dispatchStep.run.match(/dispatch-publishers\.sh publish-python-binding\.yml (\d+) betteroffice-%s \$packs/)?.[1]);
+    const formats = Number(dispatchStep.run.match(/dispatch-publishers\.sh publish-python-binding\.yml (\d+) betteroffice-%s \$formats/)?.[1]);
     const wheelAndLoad = dist.jobs.wheels['timeout-minutes'] + dist.jobs.load['timeout-minutes'];
     const sdist = dist.jobs.sdist['timeout-minutes'];
     const fontPack = dist.jobs['font-pack']['timeout-minutes'];
@@ -410,26 +387,25 @@ globalThis.fetch = async (url) => {
     expect(packs).toBeGreaterThanOrEqual(fontPack + afterBuild);
     expect(formats).toBeGreaterThanOrEqual(Math.max(wheelAndLoad, sdist) + afterBuild);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(packs + formats + 10);
-    expect(dispatchStep.run).toContain('wait "$watcher" || status=1');
-
     const result = dispatch({ timedOut: RUN_IDS[0]! });
     expect(result.status).toBe(1);
     expect(result.log.filter((line) => line.startsWith('run cancel'))).toEqual([`run cancel ${RUN_IDS[0]}`]);
-    expect(result.stdout).toContain(`::error::betteroffice-${PYTHON_PUBLISH_NAMES[0]} did not publish`);
+    expect(result.stdout).toContain(`::error::betteroffice-${PYTHON_PUBLISH_NAMES[0]} did not publish: https://github.com/openooxml/betteroffice/actions/runs/${RUN_IDS[0]}`);
   });
 
   test('one failed dispatch fails the job without skipping the rest', () => {
-    const result = dispatch({ dispatchStatus: 1 });
+    const result = dispatch({ failDispatchAt: 2 });
 
     expect(result.status).toBe(1);
-    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toHaveLength(
-      PYTHON_PUBLISH_NAMES.length
-    );
-    expect(result.log.some((line) => line.startsWith('run watch'))).toBe(false);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${PYTHON_PUBLISH_NAMES[1]} failed.`);
+    const calls = PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', post(name)]);
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(RUN_IDS.filter((_, index) => index !== 1).map(watchRun));
   });
 
   test('the dispatched workflow is the one PyPI trusts', () => {
     expect(Object.keys(publish.on)).toEqual(['workflow_dispatch']);
+    expect(publish['run-name']).toBe('Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}');
     expect(Object.keys(publish.on.workflow_dispatch.inputs)).toEqual(['binding', 'sha', 'dry_run']);
     expect(publish.on.workflow_dispatch.inputs.sha.required).toBe(true);
     expect(publish.jobs.publish.environment).toBe('pypi-${{ inputs.binding }}');
@@ -498,6 +474,7 @@ globalThis.fetch = async (url) => {
     expect(failed.status).toBe(1);
     expect(failed.stdout).toContain(`::error::betteroffice-${FONT_PACK_NAMES[1]} did not publish`);
     expect(failed.stdout).toContain('no format binding was dispatched');
+    expect(failed.stdout).toContain('A missing PyPI project needs its pending publisher');
     const dispatched = failed.log
       .filter((line) => line.startsWith('api --method POST'))
       .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
@@ -505,9 +482,9 @@ globalThis.fetch = async (url) => {
   });
 
   test.each([
-    ['font pack', FONT_PACK_NAMES, 1],
-    ['format binding', ALL_NAMES, FONT_PACK_NAMES.length + 1]
-  ] as const)('a failed publisher file check for a %s skips its dispatch and fails the job', (_, waveNames, failedIndex) => {
+    ['font pack', 1],
+    ['format binding', FONT_PACK_NAMES.length + 1]
+  ] as const)('a failed publisher file check for a %s stops dispatching and waits for earlier runs', (_, failedIndex) => {
     const result = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failCheckAt: failedIndex + 1 });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${ALL_NAMES[failedIndex]} failed.`);
@@ -515,8 +492,9 @@ globalThis.fetch = async (url) => {
     const dispatched = result.log
       .filter((line) => line.startsWith('api --method POST'))
       .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
-    expect(dispatched).toEqual(waveNames.filter((_, index) => index !== failedIndex));
-    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(waveNames.length);
+    expect(dispatched).toEqual(ALL_NAMES.slice(0, failedIndex));
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(failedIndex + 1);
+    expect(result.log.filter((line) => line.startsWith('run watch')).sort()).toEqual(ALL_RUN_IDS.slice(0, failedIndex).map(watchRun));
   });
 
   test('a font pack builds and checks one pure wheel from the committed assets, and no Rust', () => {

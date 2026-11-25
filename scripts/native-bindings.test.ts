@@ -247,8 +247,15 @@ describe('native package release wiring', () => {
   const packages = Bun.YAML.parse(
     readFileSync(new URL('../.github/workflows/native-packages.yml', import.meta.url), 'utf8')
   ) as any;
+  const sha = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
+  const runIds = NATIVE_FORMATS.map((_, index) => 4200 + index);
+  const post = (name: string) =>
+    `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-native.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${sha} -F inputs[dry_run]=false --jq .workflow_run_id`;
+  const watchRun = (id: number) => `run watch ${id} --exit-status`;
 
-  function dispatch({ publish = JSON.stringify(NATIVE_FORMATS), failCheckAt = 0 } = {}) {
+  function dispatch({
+    publish = JSON.stringify(NATIVE_FORMATS), failCheckAt = 0, dispatchStatus
+  }: { publish?: string; failCheckAt?: number; dispatchStatus?: number } = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
     try {
       const log = join(directory, 'gh.log');
@@ -259,25 +266,30 @@ describe('native package release wiring', () => {
           '#!/bin/sh',
           `echo "$@" >> "${log}"`,
           'case "$*" in',
-          ...NATIVE_FORMATS.map((name, index) => `  *"inputs[binding]=${name}"*) echo ${4200 + index} ;;`),
+          ...NATIVE_FORMATS.map((name, index) => {
+            const response = index === 1 && dispatchStatus !== undefined ? `exit ${dispatchStatus}` : `echo ${runIds[index]}`;
+            return `  *"inputs[binding]=${name}"*) ${response} ;;`;
+          }),
           'esac'
         ].join('\n'),
         { mode: 0o755 }
       );
-      writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+      writeFileSync(join(directory, 'timeout'), '#!/bin/sh\n[ "$1" = 125m ] || exit 2\nshift\nexec "$@"\n', { mode: 0o755 });
       const check = join(directory, 'check-publisher-files.sh');
       writeFileSync(check, [
         `echo check-publisher-files >> "${log}"`,
         `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
       ].join('\n'));
-      const result = spawnSync('bash', ['-c', dispatchStep.run], {
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
         encoding: 'utf8',
         env: {
           ...process.env,
           PATH: `${directory}:${process.env.PATH}`,
           GH_REPO: 'openooxml/betteroffice',
           PUBLISH: publish,
-          SHA: '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182',
+          SHA: sha,
+          GITHUB_SERVER_URL: 'https://github.com',
           CHECK_PUBLISHER_FILES: check
         }
       });
@@ -293,7 +305,7 @@ describe('native package release wiring', () => {
     expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ needs.plan.outputs.skip_native }}' });
     delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(180);
-    expect(job.steps.some((step: any) => step.run?.includes('publish-native.yml/dispatches'))).toBe(false);
+    expect(job.steps.some((step: any) => step.run?.includes('publish-native.yml'))).toBe(false);
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
     const steps = job.steps.map((step: any) => step.name);
@@ -356,15 +368,7 @@ describe('native package release wiring', () => {
     expect(step.env.SHA).toBe('${{ github.sha }}');
     expect(step.env.PUBLISH).toBe('${{ needs.release.outputs.native }}');
     expect(release.jobs.release.outputs.native).toBe('${{ needs.plan.outputs.native }}');
-    expect(step.run).toStartWith('set -euo pipefail\n');
-    expect(step.run).toContain('publish-native.yml/dispatches');
-    expect(step.run).toContain('X-GitHub-Api-Version: 2026-03-10');
-    expect(step.run).toContain('-f ref=main');
-    expect(step.run).toContain('inputs[binding]=$binding');
-    expect(step.run).toContain('inputs[sha]=$SHA');
-    expect(step.run).toContain('inputs[dry_run]=false');
-    expect(step.run).toContain("--jq '.workflow_run_id'");
-    const watch = Number(step.run.match(/timeout (\d+)m gh run watch "\$run" --exit-status/)?.[1]);
+    const watch = Number(step.run.match(/dispatch-publishers\.sh publish-native\.yml (\d+)/)?.[1]);
     const build = Math.max(
       ...dist.jobs.bindings.strategy.matrix.platform.map((platform: any) => platform.timeout ?? 45)
     );
@@ -376,21 +380,14 @@ describe('native package release wiring', () => {
     );
     expect(watch).toBeGreaterThanOrEqual(build + smoke + publish.jobs.publish['timeout-minutes'] + 20);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(watch + 10);
-    expect(step.run).toContain('if [ "$?" -eq 124 ]; then\n        gh run cancel "$run" || true');
-    expect(step.run).toContain('wait "$watcher" || status=1');
-    expect(step.run).toContain('@betteroffice/$binding-native');
-    expect(step.run).toContain('exit $status');
   });
 
-  test('compares publisher files immediately before each native dispatch', () => {
+  test('checks publisher files before each native dispatch and watches every run', () => {
     const result = dispatch();
     expect(result.status, result.stderr).toBe(0);
-    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
-    expect(posts.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1])).toEqual(NATIVE_FORMATS);
-    for (const post of posts) {
-      expect(result.log[result.log.indexOf(post) - 1]).toBe('check-publisher-files');
-    }
-    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(posts.length);
+    const calls = NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)]);
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(runIds.map(watchRun));
   });
 
   test('an empty publish list runs no check and dispatches nothing', () => {
@@ -399,16 +396,25 @@ describe('native package release wiring', () => {
     expect(result.log).toEqual([]);
   });
 
-  test('a failed publisher file check skips that native dispatch and fails the job', () => {
+  test('a failed publisher file check stops native dispatches and still watches the first run', () => {
     const result = dispatch({ failCheckAt: 2 });
     expect(result.status).toBe(1);
-    expect(result.stdout).toContain(`::error::Dispatching @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
-    const posts = result.log.filter((line) => line.startsWith('api --method POST'));
-    expect(posts.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1])).toEqual(
-      NATIVE_FORMATS.filter((_, index) => index !== 1)
-    );
-    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(NATIVE_FORMATS.length);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
+    expect(result.log).toEqual([
+      'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
+    ]);
   });
+
+  test.each([['returns an error', 1], ['returns an empty run ID', 0]] as const)(
+    'other native runs dispatch and are watched when a POST %s', (_, dispatchStatus) => {
+      const result = dispatch({ dispatchStatus });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
+      const calls = NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)]);
+      expect(result.log.slice(0, calls.length)).toEqual(calls);
+      expect(result.log.slice(calls.length).sort()).toEqual(runIds.filter((_, index) => index !== 1).map(watchRun));
+    }
+  );
 
   test('an invalid publish list fails before dispatch', () => {
     const result = dispatch({ publish: 'invalid' });

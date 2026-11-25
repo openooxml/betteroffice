@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkCrates, checkNpm, checkPlan, missingHeldNatives, nativeReleaseVersions, repositoryScan, unaskedMajors, siblingReferences, verifyPublished } from './check-publish-targets.mjs';
 import { releaseNotes, releaseTag } from './held-npm-packages.mjs';
 import { platformPackageVersions } from './native-bindings.mjs';
@@ -964,7 +964,7 @@ describe('release wiring', () => {
   });
 
   test('rehearsals cannot reach a job that publishes or dispatches', () => {
-    const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|gh\s+release\s+create\b|git\s+push\b|publish:crates\b|held-npm-packages\.mjs\b|twine\b|docker\s+push\b|pypi\/)/i;
+    const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|dispatch-publishers\.sh\b|gh\s+release\s+create\b|git\s+push\b|publish:crates\b|held-npm-packages\.mjs\b|twine\b|docker\s+push\b|pypi\/)/i;
     const publishAction = /^(?:changesets\/action@|pypa\/gh-action-pypi-publish@|docker\/build-push-action@|softprops\/action-gh-release@|pypi\/)/i;
     const distFiles = ['native-dist.yml', 'python-dist.yml'];
 
@@ -1067,7 +1067,7 @@ describe('release wiring', () => {
     ['python-pypi', 'publish-python-binding.yml']
   ] as const)('%s checks out the release commit and compares publisher files in the dispatch step', (id, publisher) => {
     const job = release.jobs[id];
-    const dispatch = job.steps.findIndex((step: any) => step.run?.includes(`${publisher}/dispatches`));
+    const dispatch = job.steps.findIndex((step: any) => step.run?.includes(`bash scripts/dispatch-publishers.sh ${publisher} `));
     expect(dispatch).toBe(1);
     expect(job.steps).toHaveLength(2);
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
@@ -1075,18 +1075,9 @@ describe('release wiring', () => {
     expect(job.steps[dispatch].env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
   });
 
-  test('the shared guard compares the same publisher files', () => {
-    const guard = readFileSync(new URL('./check-publisher-files.sh', import.meta.url), 'utf8');
-    expect(guard).toStartWith('#!/usr/bin/env bash\nset -euo pipefail\n');
-    expect(guard).toContain('git rev-parse --is-shallow-repository');
-    expect(guard).toContain('git fetch --no-tags --depth=1 origin main');
-    expect(guard).toContain('git fetch --no-tags origin main');
-    expect(guard).toContain('git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
-    expect(guard).toContain('git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
-    expect(guard).toContain('::error::Publisher file differs from main: $path');
-    expect(guard).toContain('exit 1');
-    const paths = guard.match(/^paths=\(\n([\s\S]*?)\n\)/m)?.[1].trim().split(/\s+/);
-    expect(paths).toEqual([
+  describe('publisher file guard', () => {
+    const guard = fileURLToPath(new URL('./check-publisher-files.sh', import.meta.url));
+    const publisherPaths = [
       '.github/workflows/native-dist.yml',
       '.github/workflows/publish-native.yml',
       '.github/workflows/python-dist.yml',
@@ -1119,7 +1110,63 @@ describe('release wiring', () => {
       'scripts/wasm-cache-key.ts',
       'scripts/wasm.ts',
       'scripts/worker-stub.ts'
-    ]);
+    ];
+
+    test('compares the same publisher files', () => {
+      const paths = readFileSync(guard, 'utf8').match(/^paths=\(\n([\s\S]*?)\n\)/m)?.[1].trim().split(/\s+/);
+      expect(paths).toEqual(publisherPaths);
+    });
+
+    test.each(['full', 'shallow'])('compares the release SHA with current origin/main in a %s checkout', (checkout) => {
+      const directory = mkdtempSync(join(tmpdir(), 'publisher-files-'));
+      fixtureDirectories.push(directory);
+      const origin = join(directory, 'origin');
+      const repo = join(directory, 'release');
+      const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_ALLOW_PROTOCOL: 'file' };
+
+      function git(cwd: string, ...args: string[]) {
+        const result = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
+        expect(result.status, result.stderr).toBe(0);
+        return result.stdout.trim();
+      }
+
+      function write(path: string, content: string) {
+        const file = join(origin, path);
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, content);
+      }
+
+      function commit(message: string) {
+        git(origin, 'add', '.');
+        git(origin, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-m', message);
+      }
+
+      git(directory, 'init', '--initial-branch=main', origin);
+      const unlisted = 'unlisted.txt';
+      const publisher = '.github/workflows/publish-native.yml';
+      write(unlisted, 'original\n');
+      commit('initial commit');
+      for (const path of publisherPaths) write(path.endsWith('/') ? `${path}example/action.yml` : path, 'original\n');
+      commit('release');
+      git(directory, 'clone', ...(checkout === 'shallow' ? ['--depth=1'] : []), pathToFileURL(origin).href, repo);
+      expect(git(repo, 'rev-parse', '--is-shallow-repository')).toBe(String(checkout === 'shallow'));
+      const sha = git(repo, 'rev-parse', 'HEAD');
+      const check = () => spawnSync('bash', [guard], { cwd: repo, env: { ...env, GITHUB_SHA: sha }, encoding: 'utf8' });
+
+      const identical = check();
+      expect(identical.status, identical.stderr).toBe(0);
+
+      write(unlisted, 'changed\n');
+      commit('change an unlisted file');
+      const unlistedChange = check();
+      expect(unlistedChange.status, unlistedChange.stderr).toBe(0);
+
+      write(publisher, 'changed\n');
+      commit('change a publisher file');
+      const publisherChange = check();
+      expect(publisherChange.status).toBe(1);
+      expect(publisherChange.stdout + publisherChange.stderr).toContain(`::error::Publisher file differs from main: ${publisher}`);
+    });
   });
 
   test('each guard runs only on its publish path', () => {

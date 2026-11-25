@@ -444,58 +444,16 @@ jobs:
           SHA: ${{ github.sha }}
           CHECK_PUBLISHER_FILES: scripts/check-publisher-files.sh
         run: |
-          status=0
-          publish() {
-            local minutes=$1
-            shift
-            runs=""
-            for binding in "$@"; do
-              # From API version 2026-03-10 the dispatch returns the created run's id,
-              # so the wait below watches exactly the runs this job started.
-              if bash "$CHECK_PUBLISHER_FILES" &&
-                run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-                  "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
-                  -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-                  -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
-                runs="$runs $binding:$run"
-              else
-                echo "::error::Dispatching the publish of betteroffice-$binding failed."
-                status=1
-              fi
-            done
-
-            watchers=()
-            for entry in $runs; do
-              binding=${entry%%:*}
-              run=${entry#*:}
-              (
-                timeout "${minutes}m" gh run watch "$run" --exit-status || {
-                  if [ "$?" -eq 124 ]; then
-                    gh run cancel "$run" || true
-                  fi
-                  echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-                  exit 1
-                }
-              ) &
-              watchers+=("$!")
-            done
-            for watcher in "${watchers[@]}"; do
-              wait "$watcher" || status=1
-            done
-          }
-
-          packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
-          formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
-          # shellcheck disable=SC2086 # binding names contain no spaces
-          publish 55 $packs
-          if [ $status -ne 0 ] && [ -n "$formats" ]; then
-            echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
-            echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
+          packs=$(jq -r '.[] | select(startswith("fonts-"))' <<< "$PUBLISH")
+          formats=$(jq -r '.[] | select(startswith("fonts-") | not)' <<< "$PUBLISH")
+          if ! bash scripts/dispatch-publishers.sh publish-python-binding.yml 55 betteroffice-%s $packs; then
+            if [ -n "$formats" ]; then
+              echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
+              echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
+            fi
             exit 1
           fi
-          # shellcheck disable=SC2086 # binding names contain no spaces
-          publish 100 $formats
-          exit $status
+          bash scripts/dispatch-publishers.sh publish-python-binding.yml 100 betteroffice-%s $formats
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
   # commit and wait. Repository roots are private so changeset publish leaves
@@ -532,44 +490,7 @@ jobs:
         run: |
           set -euo pipefail
           bindings=$(jq -er '.[]' <<< "$PUBLISH" || [ "$PUBLISH" = '[]' ])
-          status=0
-          runs=""
-          for binding in $bindings; do
-            if bash "$CHECK_PUBLISHER_FILES" &&
-              run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
-                "repos/$GH_REPO/actions/workflows/publish-native.yml/dispatches" \
-                -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
-                -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
-              runs="$runs $binding:$run"
-            else
-              echo "::error::Dispatching @betteroffice/$binding-native failed."
-              status=1
-            fi
-          done
-
-          if [ -z "$runs" ]; then
-            exit "$status"
-          fi
-
-          watchers=()
-          for entry in $runs; do
-            binding=${entry%%:*}
-            run=${entry#*:}
-            (
-              timeout 125m gh run watch "$run" --exit-status || {
-                if [ "$?" -eq 124 ]; then
-                  gh run cancel "$run" || true
-                fi
-                echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-                exit 1
-              }
-            ) &
-            watchers+=("$!")
-          done
-          for watcher in "${watchers[@]}"; do
-            wait "$watcher" || status=1
-          done
-          exit $status
+          bash scripts/dispatch-publishers.sh publish-native.yml 125 '@betteroffice/%s-native' $bindings
 
   held-npm:
     name: Publish packages that need the native packages
