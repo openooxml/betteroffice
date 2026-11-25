@@ -512,7 +512,8 @@ jobs:
       ((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||
       (needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 105
+    # Covers native-dist (75 minutes on the Intel Mac, then 15 for the smoke tests), publishing (15 minutes) and runner queueing.
+    timeout-minutes: 135
     permissions:
       contents: read
       actions: write
@@ -554,7 +555,7 @@ jobs:
             binding=${entry%%:*}
             run=${entry#*:}
             (
-              timeout 95m gh run watch "$run" --exit-status || {
+              timeout 125m gh run watch "$run" --exit-status || {
                 if [ "$?" -eq 124 ]; then
                   gh run cancel "$run" || true
                 fi

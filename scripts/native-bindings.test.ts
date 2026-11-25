@@ -311,6 +311,7 @@ describe('native package release wiring', () => {
       "(needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}"
     ].join(' '));
     expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job['timeout-minutes']).toBe(135);
     expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
     const step = dispatchStep;
     expect(step.env.SHA).toBe('${{ github.sha }}');
@@ -325,7 +326,11 @@ describe('native package release wiring', () => {
     expect(step.run).toContain('inputs[dry_run]=false');
     expect(step.run).toContain("--jq '.workflow_run_id'");
     const watch = Number(step.run.match(/timeout (\d+)m gh run watch "\$run" --exit-status/)?.[1]);
-    const build = dist.jobs.bindings['timeout-minutes'];
+    const build = Math.max(
+      ...dist.jobs.bindings.strategy.matrix.platform.map((platform: any) => platform.timeout ?? 45)
+    );
+    expect(dist.jobs.bindings['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
+    expect(watch).toBe(125);
     const smoke = Math.max(
       dist.jobs['musl-smoke']['timeout-minutes'],
       dist.jobs['windows-arm64-smoke']['timeout-minutes']
@@ -449,6 +454,10 @@ describe('native package release wiring', () => {
       expect([...targets].sort()).toEqual([...manifest.napi.targets].sort());
     }
     expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
+    expect(job['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
+    expect(job.strategy.matrix.platform.filter((platform: any) => platform.timeout)).toEqual([
+      { os: 'macos-15-intel', target: 'x86_64-apple-darwin', timeout: 75 }
+    ]);
     expect(publish.jobs.dist.uses).toBe('./.github/workflows/native-dist.yml');
     expect(publish.jobs.dist.with).toEqual({
       binding: '${{ inputs.binding }}',
