@@ -489,6 +489,12 @@ pub(crate) fn take_table_parses() -> usize {
     TABLE_PARSES.replace(0)
 }
 
+struct TableAlternate {
+    depth: usize,
+    column_count: usize,
+    branch: bool,
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
 fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, ParseError> {
@@ -499,9 +505,7 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
     let mut depth = 0;
     let mut table: Option<Table> = None;
     let mut style = None;
-    let mut alternate = false;
-    let mut alternate_columns = false;
-    let mut branch = false;
+    let mut alternates: Vec<TableAlternate> = Vec::new();
     let mut columns = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
@@ -531,43 +535,52 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
             Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
                 style = TableStyleInfo::parse(&e)?;
             }
-            Event::Start(e) if depth == 2 && local_name(&e) == b"AlternateContent" => {
-                alternate = true;
-                alternate_columns = false;
-            }
-            Event::Start(e) if alternate && depth == 3 => {
-                branch = !alternate_columns
-                    && matches!(local_name(&e).as_slice(), b"Choice" | b"Fallback");
-            }
-            Event::Start(e)
-                if (depth == 2 || branch && depth == 4) && local_name(&e) == b"tableColumns" =>
-            {
-                columns = Some(depth);
-            }
-            Event::Start(e)
-                if columns.is_some_and(|at| depth == at + 1)
-                    && local_name(&e) == b"tableColumn" =>
-            {
-                if let Some(table) = table.as_mut() {
-                    if table.columns.len() >= MAX_TABLE_COLUMNS {
-                        return Err(ParseError::Malformed(
-                            "table column count exceeded cap".into(),
-                        ));
+            Event::Start(e) => {
+                let Some(table) = table.as_mut() else {
+                    continue;
+                };
+                let name = e.local_name();
+                if let Some(alternate) = alternates.last_mut() {
+                    if depth == alternate.depth + 1 {
+                        alternate.branch = table.columns.len() == alternate.column_count
+                            && matches!(name.as_ref(), b"Choice" | b"Fallback");
+                        continue;
                     }
-                    let name = attr(&e, b"name")?.unwrap_or_default();
-                    table.columns.push(unescape_name(&name));
-                    alternate_columns |= branch;
+                    if !alternate.branch {
+                        continue;
+                    }
+                }
+                let table_depth = depth - 2 * alternates.len();
+                match (table_depth, name.as_ref()) {
+                    (2, b"tableColumns") => columns = Some(depth),
+                    (2 | 3, b"AlternateContent") if table_depth == 2 || columns.is_some() => {
+                        alternates.push(TableAlternate {
+                            depth,
+                            column_count: table.columns.len(),
+                            branch: false,
+                        });
+                    }
+                    (3, b"tableColumn") if columns.is_some() => {
+                        if table.columns.len() >= MAX_TABLE_COLUMNS {
+                            return Err(ParseError::Malformed(
+                                "table column count exceeded cap".into(),
+                            ));
+                        }
+                        let name = attr(&e, b"name")?.unwrap_or_default();
+                        table.columns.push(unescape_name(&name));
+                    }
+                    _ => {}
                 }
             }
             Event::End(_) => {
                 if columns == Some(depth + 1) {
                     columns = None;
                 }
-                if depth == 2 {
-                    branch = false;
-                }
-                if depth == 1 {
-                    alternate = false;
+                if alternates
+                    .last()
+                    .is_some_and(|alternate| alternate.depth == depth + 1)
+                {
+                    alternates.pop();
                 }
             }
             Event::Eof => break,

@@ -1120,6 +1120,63 @@ fn alternate_content_columns_resolve_but_cannot_be_renamed() {
 }
 
 #[test]
+fn a_wrapped_table_column_keeps_its_position_before_a_direct_column() {
+    let path = "xl/tables/table1.xml";
+    let original = table(1, "A1:C4", &["Name", "Status", "Rev"]);
+    let direct = table(1, "A1:B2", &["First", "Second"]);
+    let columns = direct.replace(
+        r#"<tableColumn id="1" name="First"/>"#,
+        concat!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x"><tableColumn id="1" name="First">"#,
+            r#"<extLst><ext uri="urn:extension"><tableColumn name="Extension"/></ext></extLst>"#,
+            r#"</tableColumn></mc:Choice><mc:Fallback><tableColumn id="1" name="Fallback"/></mc:Fallback>"#,
+            "</mc:AlternateContent>",
+        ),
+    );
+    let source = replace_part(&book(), path, &original, &columns);
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        concat!(
+            r#"<c r="A1" t="inlineStr"><is><t>Name</t></is></c>"#,
+            r#"<c r="B1" t="s"><v>0</v></c>"#,
+        ),
+        concat!(
+            r#"<c r="A1" t="inlineStr"><is><t>First</t></is></c>"#,
+            r#"<c r="B1" t="inlineStr"><is><t>Second</t></is></c>"#,
+        ),
+    );
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        concat!(
+            r#"<c r="A2" t="inlineStr"><is><t>Ada</t></is></c>"#,
+            r#"<c r="B2" t="inlineStr"><is><t>Open</t></is></c><c r="C2"><v>1</v></c>"#,
+        ),
+        concat!(
+            r#"<c r="A2"><v>10</v></c><c r="B2"><v>20</v></c><c r="C2"><v>1</v></c>"#,
+            r#"<c r="D2"><f>SUM(Table1[Second])</f></c>"#,
+        ),
+    );
+    let mut workbook = Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
+    assert_eq!(
+        workbook.model().value(SHEET1, at("D2")),
+        CellValue::Number { value: 20.0 }
+    );
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns,
+        ["First", "Second"]
+    );
+    assert_refused_header(
+        &mut workbook,
+        "B1",
+        "Updated",
+        "table column count does not match",
+    );
+}
+
+#[test]
 fn a_header_rename_is_refused_when_the_source_column_name_is_missing() {
     let source = replace_part(
         &book(),
@@ -1935,6 +1992,37 @@ fn a_formula_cell_inside_alternate_content_refuses_the_rename() {
     );
     let mut workbook = Workbook::open(&source).unwrap();
     assert_refused_header(&mut workbook, "B1", "State", sheet);
+}
+
+#[test]
+fn alternate_content_on_a_dependent_sheet_refuses_the_rename() {
+    let sheet = "xl/worksheets/sheet2.xml";
+    let source = replace_part(
+        &book(),
+        "xl/tables/table3.xml",
+        r#"headerRowCount="1""#,
+        r#"headerRowCount="0""#,
+    );
+    let source = replace_part(
+        &source,
+        sheet,
+        concat!(
+            r#"<c r="A1" t="inlineStr"><is><t>X</t></is></c>"#,
+            r#"<c r="B1" t="inlineStr"><is><t>Y</t></is></c>"#,
+        ),
+        concat!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x"><c r="A1"><v>1</v></c></mc:Choice>"#,
+            r#"<mc:Fallback><c r="A1"><v>1</v></c></mc:Fallback>"#,
+            r#"</mc:AlternateContent><c r="B1"><f>SUM(Table1[Status])</f><v>0</v></c>"#,
+        ),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_refused_header(&mut workbook, "B1", "State", sheet);
+    assert!(!workbook.can_undo());
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert_eq!(part(&after, sheet), part(&before, sheet));
 }
 
 #[test]

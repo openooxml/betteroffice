@@ -4461,10 +4461,31 @@ impl Workbook {
             .original_workbook()
             .table(&table.name)
             .map_or(table.range, |table| table.range);
+        let table_sheet = &model.sheets[sheet.0 as usize].name;
+        let references = |formula: &str, sheet_name: &str, local| {
+            xlsx_ops::references_table_column(formula, &table.name, sheet_name, local, old)
+        };
         let location = package
-            .table_header_reference(origin, source_range, |formula, local| {
-                xlsx_ops::references_table_column(formula, &table.name, source_sheet, local, old)
-            })
+            .table_header_reference(
+                origin,
+                source_range,
+                |formula, local| references(formula, source_sheet, local),
+                |index| {
+                    let Some(current) = origins.iter().position(|origin| *origin == Some(index))
+                    else {
+                        return false;
+                    };
+                    let is_table_sheet = current == sheet.0 as usize;
+                    model.sheets[current].iter_cells().any(|(cell_ref, cell)| {
+                        let local = is_table_sheet && table.range.contains(cell_ref);
+                        !(is_table_sheet && cell_ref == at)
+                            && cell
+                                .formula
+                                .as_deref()
+                                .is_some_and(|formula| references(formula, table_sheet, local))
+                    })
+                },
+            )
             .map_err(unsupported)?;
         if let Some(location) = location {
             return Err(xlsx_ops::OpError::TableHeaderUnsupported(format!(

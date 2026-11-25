@@ -1091,26 +1091,32 @@ pub(crate) fn table_formula_rename_unsupported(
 }
 
 fn alternate_shared_formula(data: &[u8], groups: &HashSet<u32>) -> Result<bool, ParseError> {
+    alternate_content_matches(data, |element| {
+        Ok(element.local_name().as_ref() == b"f"
+            && attr(element, b"t")?.as_deref() == Some("shared")
+            && attr(element, b"si")?
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .is_some_and(|group| groups.contains(&group)))
+    })
+}
+
+pub(crate) fn alternate_content_matches(
+    data: &[u8],
+    matches: impl Fn(&BytesStart) -> Result<bool, ParseError>,
+) -> Result<bool, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
     let mut depth = 0;
     let mut alternate = None;
     loop {
         match next_event(&mut reader, &mut buffer, &mut depth)? {
-            Event::Start(element)
-                if alternate.is_none() && element.local_name().as_ref() == b"AlternateContent" =>
-            {
-                alternate = Some(depth);
-            }
-            Event::Start(element)
-                if alternate.is_some()
-                    && element.local_name().as_ref() == b"f"
-                    && attr(&element, b"t")?.as_deref() == Some("shared")
-                    && attr(&element, b"si")?
-                        .and_then(|value| value.trim().parse::<u32>().ok())
-                        .is_some_and(|group| groups.contains(&group)) =>
-            {
-                return Ok(true);
+            Event::Start(element) => {
+                if alternate.is_none() && element.local_name().as_ref() == b"AlternateContent" {
+                    alternate = Some(depth);
+                }
+                if alternate.is_some() && matches(&element)? {
+                    return Ok(true);
+                }
             }
             Event::End(_) if alternate.is_some_and(|start| depth < start) => alternate = None,
             Event::Eof => return Ok(false),

@@ -478,6 +478,7 @@ impl PreservedPackage {
         origin: Option<usize>,
         range: CellRange,
         matches: impl Fn(&str, bool) -> bool,
+        rewrites_sheet: impl Fn(usize) -> bool,
     ) -> Result<Option<&str>, ParseError> {
         for (index, sheet) in self.sheets.iter().enumerate() {
             for child in &sheet.template.children {
@@ -489,6 +490,9 @@ impl PreservedPackage {
                         .windows(alternate.len())
                         .any(|bytes| bytes == alternate);
                     if (has_alternate
+                        && rewrites_sheet(index)
+                        && crate::patch::alternate_content_matches(&child.bytes, |_| Ok(true))?)
+                        || (has_alternate
                         && contains_formula_in(
                             &child.bytes,
                             &[b"f", b"formula"],
