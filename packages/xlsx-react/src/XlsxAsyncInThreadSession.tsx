@@ -12,7 +12,7 @@ export function XlsxAsyncInThreadSession(props: Omit<XlsxAsyncEditorProps, 'file
     current.current = api;
     const cleanup = props.onReady?.(createInThreadAsyncEditorApi(api, props.collaboration !== undefined, () => {
       if (current.current !== api) throw new XlsxCommandAdmissionError('document-replaced');
-    }, () => latest.current.onSave));
+    }, () => latest.current.onSave, () => latest.current.defaultFonts));
     return () => {
       if (current.current === api) current.current = null;
       cleanup?.();

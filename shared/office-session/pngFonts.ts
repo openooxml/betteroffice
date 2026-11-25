@@ -6,6 +6,7 @@ export interface PngFontFace {
   bold?: boolean;
   italic?: boolean;
   bytes: Uint8Array;
+  unicodeRange?: string;
   /** The face's own weight and style, where it serves a style it is not, such as a regular face for bold text. */
   face?: { bold: boolean; italic: boolean };
 }
@@ -20,6 +21,7 @@ export interface PngRunFont {
 }
 
 export interface InstalledPngFaces {
+  alias(face: PngFontFace): string | undefined;
   /** The private family the export paints `font` with, when a supplied face covers it. */
   family(font: PngRunFont): string | undefined;
   /** The supplied face chosen for `font`. */
@@ -40,6 +42,7 @@ export interface InstallPngFacesOptions {
   fonts: Iterable<PngRunFont>;
   /** Faces supplied for this export. */
   faces: ReadonlyArray<PngFontFace>;
+  additionalFaces?: ReadonlyArray<PngFontFace>;
   /** The supplied face that paints `font`, chosen as the format's layout chooses. */
   choose(faces: ReadonlyArray<PngFontFace>, font: PngRunFont): PngFontFace | undefined;
   /** Faces that paint the characters of `font` its chosen face lacks, in the order the native engine tries them. */
@@ -86,6 +89,7 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
       family = `${options.prefix}-${id}-${installed.size}`;
       const loaded = await new FontFace(family, face.bytes.slice().buffer as ArrayBuffer, {
         weight: (face.face?.bold ?? face.bold) ? '700' : '400', style: (face.face?.italic ?? face.italic) ? 'italic' : 'normal',
+        ...(face.unicodeRange ? { unicodeRange: face.unicodeRange } : {}),
       }).load().catch(() => { throw fontUnavailable(face.family, options.subject); });
       set.add(loaded);
       added.push(loaded);
@@ -106,6 +110,7 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
       }
       lists.set(key, list);
     }
+    for (const face of options.additionalFaces ?? []) await install(face);
     if (set && typeof set.load === 'function') {
       for (const [key, font] of fonts) {
         const supplied = chosen.get(key);
@@ -115,6 +120,7 @@ export async function installPngFaces(options: InstallPngFacesOptions): Promise<
       }
     }
     return {
+      alias: (face) => installed.get(face),
       family: (font) => chosen.get(pngFontKey(font))?.family,
       face: (font) => chosen.get(pngFontKey(font))?.face,
       families: (font) => [...(lists.get(pngFontKey(font)) ?? [])],

@@ -8,7 +8,8 @@ import { commandReason } from './commands/evaluate';
 
 export function createInThreadAsyncEditorApi(
   api: XlsxEditorApi, collaborative: boolean, assertCurrent: () => void,
-  onSave: () => ((bytes: Uint8Array) => void) | undefined = () => undefined
+  onSave: () => ((bytes: Uint8Array) => void) | undefined = () => undefined,
+  defaultFonts: () => boolean | undefined = () => undefined,
 ): XlsxAsyncEditorApi {
   async function read<T>(operation: () => T): Promise<T> {
     await api.flushPendingInput();
@@ -90,8 +91,9 @@ export function createInThreadAsyncEditorApi(
       const { signal, ...rest } = options;
       const captured = structuredClone(target);
       const wire = structuredClone(rest);
+      const useDefaultFonts = defaultFonts();
       return await read(async () => {
-        const fonts = wire.fonts ?? await editorExportFaces(handle.renderPngFonts(captured, wire), null, undefined, captured);
+        const fonts = wire.fonts ?? await editorExportFaces(handle.renderPngFonts(captured, wire), null, useDefaultFonts, captured);
         return handle.renderPng(captured, { ...wire, fonts, signal });
       });
     },

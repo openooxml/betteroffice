@@ -74,12 +74,14 @@ export function runPieces(cmd: TextCmd & { cssFontFamily?: string }): TextPiece[
   const pieces: TextPiece[] = [];
   const push = (from: number, to: number, style: TextPiece) => {
     if (to <= from) return;
+    const text = cmd.text.slice(from, to);
     const last = pieces[pieces.length - 1];
     if (last && sameStyle(last, style)) {
-      last.text += cmd.text.slice(from, to);
+      last.text += text;
+      last.cmd.text = last.text;
       last.end = to;
     } else {
-      pieces.push({ ...style, text: cmd.text.slice(from, to), start: from, end: to });
+      pieces.push({ ...style, cmd: { ...style.cmd, text }, text, start: from, end: to });
     }
   };
   let cursor = 0;

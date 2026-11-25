@@ -1,5 +1,6 @@
-import type { BundledFontFace, BundledFontScript, resolveScriptFallbackFace } from '@betteroffice/fonts';
+import type { BundledFontScript } from '@betteroffice/fonts';
 import type { DisplayList, TextCmd } from '../../packages/xlsx/src/display-list/types';
+import type { PngFontFace, PngRunFont } from './pngFonts';
 import { nonCjkScriptUnicodeRange, textScripts } from './textScripts';
 import { runPieces } from './xlsxTextRuns';
 
@@ -10,76 +11,71 @@ export interface CellScriptFontRequest {
   script: BundledFontScript;
 }
 
-const SCRIPT_FONTS = Symbol.for('betteroffice.xlsx.scriptFonts');
-type Resolver = typeof resolveScriptFallbackFace;
-const scope = globalThis as typeof globalThis & {
-  [SCRIPT_FONTS]?: {
-    resolve?: Resolver;
-    faces: Map<string, BundledFontFace | undefined>;
-    scripts: WeakMap<TextCmd, { text: string; scripts: readonly BundledFontScript[] }>;
-  };
-};
+export type CellScriptFamilies = (cmd: TextCmd) => string[] | undefined;
+export type ScriptFontDisplayList = DisplayList & { cellScriptFamilies?: CellScriptFamilies };
+export type EditorPngFont = PngRunFont & { scripts?: BundledFontScript[] };
+export type PngScriptFallbackFace = PngFontFace & { scriptFallbacks: CellScriptFontRequest[] };
 
-function cache() {
-  return scope[SCRIPT_FONTS] ??= { faces: new Map(), scripts: new WeakMap() };
+const NO_SCRIPTS: readonly BundledFontScript[] = [];
+const SCRIPT_CACHE_CAPACITY = 1024;
+const SCRIPT_CACHE_MAX_TEXT_LENGTH = 512;
+const scriptsByText = new Map<string, readonly BundledFontScript[]>();
+
+function cellScripts(cmd: TextCmd, ownText = cmd.text ?? ''): readonly BundledFontScript[] {
+  const text = ownText + (cmd.numberFormat?.parts.map(({ character }) => character).join('') ?? '');
+  if (/^[\u0000-\u02ff]*$/u.test(text)) return NO_SCRIPTS;
+  const known = scriptsByText.get(text);
+  if (known) return known;
+  const scripts = textScripts(text).filter((script) => nonCjkScriptUnicodeRange(script)) as BundledFontScript[];
+  if (text.length <= SCRIPT_CACHE_MAX_TEXT_LENGTH) {
+    if (scriptsByText.size >= SCRIPT_CACHE_CAPACITY) scriptsByText.delete(scriptsByText.keys().next().value!);
+    scriptsByText.set(text, scripts);
+  }
+  return scripts;
 }
 
-function cellScripts(cmd: TextCmd & { cssFontFamily?: string }): readonly BundledFontScript[] {
-  if (cmd.chart || cmd.cssFontFamily !== undefined) return [];
-  const { scripts } = cache();
-  const text = (cmd.text ?? '') + (cmd.numberFormat?.parts.map(({ character }) => character).join('') ?? '');
-  const known = scripts.get(cmd);
-  if (known?.text === text) return known.scripts;
-  const detected = /^[\u0000-\u02ff]*$/u.test(text) ? []
-    : textScripts(text).filter((script) => nonCjkScriptUnicodeRange(script)) as BundledFontScript[];
-  scripts.set(cmd, { text, scripts: detected });
-  return detected;
-}
-
-function requestFor(script: BundledFontScript, { fontFamily, bold = false, italic = false }: TextCmd): CellScriptFontRequest {
-  return { script, fontFamily: fontFamily ?? '', bold, italic };
+export function cellFontKey(fontFamily: string, bold: boolean, italic: boolean): string {
+  return `${Number(bold)}${Number(italic)}\0${fontFamily.trim().toLowerCase()}`;
 }
 
 export function cellScriptFontKey({ script, fontFamily, bold, italic }: CellScriptFontRequest): string {
-  return JSON.stringify([script, fontFamily.trim().toLowerCase(), bold, italic]);
+  return `${script}\0${cellFontKey(fontFamily, bold, italic)}`;
 }
 
-export function cellScriptFace(request: CellScriptFontRequest, resolver?: Resolver): BundledFontFace | undefined {
-  const state = cache();
-  if (resolver && resolver !== state.resolve) {
-    state.resolve = resolver;
-    state.faces.clear();
+export function cellScriptFamilies(cmd: TextCmd, families: ReadonlyMap<string, string>): string[] | undefined {
+  if (cmd.chart) return undefined;
+  const scripts = cellScripts(cmd);
+  if (!scripts.length) return undefined;
+  const style = cellFontKey(cmd.fontFamily ?? '', cmd.bold === true, cmd.italic === true);
+  const names: string[] = [];
+  for (const script of scripts) {
+    const name = families.get(`${script}\0${style}`);
+    if (name !== undefined) names.push(name);
   }
-  if (!state.resolve) return undefined;
-  const key = cellScriptFontKey(request);
-  if (!state.faces.has(key)) {
-    const { script, fontFamily, bold, italic } = request;
-    state.faces.set(key, state.resolve(script, bold, italic, fontFamily));
-  }
-  return state.faces.get(key);
-}
-
-export function cellScriptFaces(cmd: TextCmd): BundledFontFace[] {
-  return cellScripts(cmd).flatMap((script) => {
-    const face = cellScriptFace(requestFor(script, cmd));
-    return face ? [face] : [];
-  });
+  return names;
 }
 
 export function cellScriptFontRequests(displayList: DisplayList): CellScriptFontRequest[] {
   const requests = new Map<string, CellScriptFontRequest>();
+  const add = (cmd: TextCmd, scripts: readonly BundledFontScript[]) => {
+    if (!scripts.length) return;
+    const fontFamily = cmd.fontFamily ?? '';
+    const bold = cmd.bold === true;
+    const italic = cmd.italic === true;
+    const style = cellFontKey(fontFamily, bold, italic);
+    for (const script of scripts) {
+      const key = `${script}\0${style}`;
+      if (!requests.has(key)) requests.set(key, { script, fontFamily, bold, italic });
+    }
+  };
   for (const cmd of displayList.commands) {
-    if (cmd.op !== 'text') continue;
+    if (cmd.op !== 'text' || cmd.chart) continue;
     const scripts = cellScripts(cmd);
     if (!scripts.length) continue;
     const pieces = runPieces(cmd);
-    const styles = pieces ? pieces.map((piece) => piece.cmd) : [cmd];
-    for (const style of styles) {
-      for (const script of scripts) {
-        const request = requestFor(script, style);
-        requests.set(cellScriptFontKey(request), request);
-      }
-    }
+    if (pieces) {
+      for (const piece of pieces) add(piece.cmd, cellScripts(piece.cmd, piece.text));
+    } else add(cmd, scripts);
   }
   return [...requests.values()];
 }
