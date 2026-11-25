@@ -15,8 +15,8 @@ use serde_json::Value;
 use yrs::{ReadTxn, Transact, Update};
 
 use crate::deck::{
-    normalized_background, shape_fill, stroked_outline, validate_adjustments, validate_background,
-    validate_rect,
+    normalized_adjustments, normalized_background, shape_fill, stroked_outline,
+    validate_adjustments, validate_background, validate_rect,
 };
 use crate::model::validate_xml_text;
 use crate::proposals::inherited_style;
@@ -1403,17 +1403,9 @@ fn plan_step(deck: &Deck<'_>, index: u32, step: &EditStep) -> Result<Planned, Ed
                 ));
             }
             validate_adjustments(adjustments).map_err(|error| invalid(error, &requested))?;
-            let adjusted: BTreeMap<_, _> = adjustments
-                .iter()
-                .map(|(name, value)| {
-                    let maximum = if shape.geometry == "roundRect" && name == "adj" {
-                        0.5
-                    } else {
-                        1.0
-                    };
-                    (name.clone(), value.clamp(0.0, maximum))
-                })
-                .collect();
+            let adjusted =
+                normalized_adjustments(&shape.geometry, &shape.adjust_values, adjustments)
+                    .map_err(|error| invalid(error, &requested))?;
             let effect = (shape.adjust_values != adjusted).then_some(Effect::Adjust(adjusted));
             Ok(Planned::property(
                 index,

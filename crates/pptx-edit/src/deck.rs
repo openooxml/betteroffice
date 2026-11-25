@@ -985,16 +985,8 @@ impl DeckSession {
                 "shape without preset geometry does not support shape adjustments".to_owned(),
             ));
         }
-        let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_else(BTreeMap::new);
-        let mut after = BTreeMap::new();
-        for (name, value) in adjustments {
-            let maximum = if geometry == "roundRect" && name == "adj" {
-                0.5
-            } else {
-                1.0
-            };
-            after.insert(name.clone(), value.clamp(0.0, maximum));
-        }
+        let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_default();
+        let after = normalized_adjustments(&geometry, &before, adjustments)?;
         insert_json(&shape, &mut txn, "adjustValuesJson", Some(&after))?;
         Ok(ShapeAdjustReceipt {
             slide_id: slide_id.to_owned(),
@@ -3289,6 +3281,48 @@ fn validate_coordinate(value: i64) -> EditResult<()> {
         )));
     }
     Ok(())
+}
+
+fn is_bent_connector_guide(geometry: &str, name: &str) -> bool {
+    matches!(
+        (geometry, name),
+        ("bentConnector3" | "bentConnector4" | "bentConnector5", "adj1")
+            | ("bentConnector4" | "bentConnector5", "adj2")
+            | ("bentConnector5", "adj3")
+    )
+}
+
+pub(crate) fn normalized_adjustments(
+    geometry: &str,
+    before: &BTreeMap<String, f64>,
+    adjustments: &BTreeMap<String, f64>,
+) -> EditResult<BTreeMap<String, f64>> {
+    let mut after: BTreeMap<_, _> = before
+        .iter()
+        .filter(|(name, _)| is_bent_connector_guide(geometry, name))
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+    for (name, value) in adjustments {
+        let value = if is_bent_connector_guide(geometry, name) {
+            *value
+        } else if geometry == "roundRect" && name == "adj" {
+            value.clamp(0.0, 0.5)
+        } else {
+            value.clamp(0.0, 1.0)
+        };
+        after.insert(name.clone(), value);
+    }
+    validate_adjustments(&after)?;
+    for (name, value) in &after {
+        if is_bent_connector_guide(geometry, name)
+            && !(i64::MIN as f64..i64::MAX as f64).contains(&(value * 100_000.0).round())
+        {
+            return Err(EditError::InvalidAdjustment(format!(
+                "guide {name:?} exceeds the writable range"
+            )));
+        }
+    }
+    Ok(after)
 }
 
 pub(crate) fn validate_adjustments(adjustments: &BTreeMap<String, f64>) -> EditResult<()> {

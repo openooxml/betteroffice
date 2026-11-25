@@ -1149,12 +1149,15 @@ function drawShapeLineEnds(
   color: string,
   width: number
 ): void {
+  const hasHead = head?.type && head.type !== 'none';
+  const hasTail = tail?.type && tail.type !== 'none';
+  if (!hasHead && !hasTail) return;
   const endpoints = shapePathEndpoints(shape.geometryPath);
   if (!endpoints) return;
-  if (head?.type && head.type !== 'none') {
+  if (hasHead) {
     drawLineEnd(ctx, endpoints.start, endpoints.next, head, color, width);
   }
-  if (tail?.type && tail.type !== 'none') {
+  if (hasTail) {
     drawLineEnd(ctx, endpoints.end, endpoints.prev, tail, color, width);
   }
 }
@@ -1168,11 +1171,19 @@ function shapePathEndpoints(
   commands: ShapePrimitive['geometryPath']
 ): { start: Point; next: Point; prev: Point; end: Point } | null {
   const points: Point[] = [];
+  const push = (x: number, y: number): void => {
+    const previous = points[points.length - 1];
+    if (!previous || previous.x !== x || previous.y !== y) points.push({ x, y });
+  };
   for (const command of commands) {
-    if (command.type === 'move' || command.type === 'line')
-      points.push({ x: command.x, y: command.y });
-    else if (command.type === 'quad') points.push({ x: command.x, y: command.y });
-    else if (command.type === 'cubic') points.push({ x: command.x, y: command.y });
+    if (command.type === 'close') continue;
+    if (command.type === 'quad') {
+      push(command.cpx, command.cpy);
+    } else if (command.type === 'cubic') {
+      push(command.cp1x, command.cp1y);
+      push(command.cp2x, command.cp2y);
+    }
+    push(command.x, command.y);
   }
   if (points.length < 2) return null;
   return {

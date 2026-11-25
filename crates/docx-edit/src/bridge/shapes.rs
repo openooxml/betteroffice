@@ -1301,69 +1301,6 @@ fn arrow(direction: &str) -> Vec<Value> {
     right
 }
 
-fn bent_connector(segments: usize) -> Vec<Value> {
-    if segments <= 2 {
-        return vec![
-            command("move", &[("x", 0.0), ("y", 0.0)]),
-            command("line", &[("x", 0.5), ("y", 0.0)]),
-            command("line", &[("x", 0.5), ("y", 1.0)]),
-            command("line", &[("x", 1.0), ("y", 1.0)]),
-        ];
-    }
-    let mut output = vec![command("move", &[("x", 0.0), ("y", 0.0)])];
-    for index in 1..segments {
-        let fraction = index as f64 / segments as f64;
-        let point = if index % 2 == 1 {
-            (
-                if index == 1 { 0.5 } else { fraction },
-                (index - 1) as f64 / segments as f64,
-            )
-        } else {
-            ((index - 1) as f64 / segments as f64, fraction)
-        };
-        output.push(command("line", &[("x", point.0), ("y", point.1)]));
-    }
-    output.push(command("line", &[("x", 1.0), ("y", 1.0)]));
-    output
-}
-
-fn curved_connector(segments: usize) -> Vec<Value> {
-    if segments <= 2 {
-        return vec![
-            command("move", &[("x", 0.0), ("y", 0.0)]),
-            command(
-                "cubic",
-                &[
-                    ("cp1x", 0.5),
-                    ("cp1y", 0.0),
-                    ("cp2x", 0.5),
-                    ("cp2y", 1.0),
-                    ("x", 1.0),
-                    ("y", 1.0),
-                ],
-            ),
-        ];
-    }
-    let mut output = vec![command("move", &[("x", 0.0), ("y", 0.0)])];
-    for index in 0..segments - 1 {
-        let start = index as f64 / (segments - 1) as f64;
-        let end = (index + 1) as f64 / (segments - 1) as f64;
-        let middle = start + (end - start) * 0.5;
-        output.push(command(
-            "cubic",
-            &[
-                ("cp1x", middle),
-                ("cp1y", start),
-                ("cp2x", middle),
-                ("cp2y", end),
-                ("x", end),
-                ("y", end),
-            ],
-        ));
-    }
-    output
-}
-
 fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     Some(match shape_type {
         "rect"
@@ -1484,14 +1421,6 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
         "star16" => star(16),
         "star24" => star(24),
         "star32" => star(32),
-        "bentConnector2" => bent_connector(2),
-        "bentConnector3" => bent_connector(3),
-        "bentConnector4" => bent_connector(4),
-        "bentConnector5" => bent_connector(5),
-        "curvedConnector2" => curved_connector(2),
-        "curvedConnector3" => curved_connector(3),
-        "curvedConnector4" => curved_connector(4),
-        "curvedConnector5" => curved_connector(5),
         "rightArrow" => arrow("right"),
         "leftArrow" => arrow("left"),
         "upArrow" => arrow("up"),

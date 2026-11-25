@@ -1189,13 +1189,13 @@ impl RenderedSlide {
         }
         for region in self.hit_regions.iter().rev() {
             let (shape_x, shape_y) = region.local_point(x, y);
-            let inside_shape = region.rect.contains(shape_x, shape_y);
-            if let Some(text) = &region.text {
+            let inside_frame = region.rect.contains(shape_x, shape_y);
+            let inside_text = if let Some(text) = &region.text {
                 let (text_x, text_y) = text.local_point(x, y);
-                if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
-                    continue;
-                }
-                if let Some(line) = nearest_line(&text.lines, text_x, text_y)
+                let inside_text =
+                    inside_frame || (text.overflow && region.hit_rect.contains(text_x, text_y));
+                if inside_text
+                    && let Some(line) = nearest_line(&text.lines, text_x, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
                     })
@@ -1206,7 +1206,15 @@ impl RenderedSlide {
                         position: caret.position,
                     });
                 }
-            } else if !inside_shape {
+                inside_text
+            } else {
+                false
+            };
+            let inside_shape = region
+                .bent_connector
+                .as_ref()
+                .map_or(inside_frame, |connector| connector.contains(shape_x, shape_y));
+            if !inside_text && !inside_shape {
                 continue;
             }
             return Some(HitTestResult::Shape {
@@ -2119,6 +2127,7 @@ impl<'a> LayoutBuilder<'a> {
             flip_h: resolved.flip_h,
             flip_v: resolved.flip_v,
         };
+        let mut bent_connector = None;
         if self.shape_filter.is_none() {
             let inherited = [original, layout_node, master_node];
             let inherited_fill = self.resolved_fill(&inherited);
@@ -2210,6 +2219,7 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     };
+                    bent_connector = BentConnectorHit::from_primitive(&primitive);
                     if use_bg_fill {
                         self.push_background_shape(primitive, paths, picture)?;
                     } else {
@@ -2297,6 +2307,7 @@ impl<'a> LayoutBuilder<'a> {
                 rect,
                 hit_rect: rect_covering_text(rect, text_hit.as_ref()),
                 transform,
+                bent_connector,
                 text: text_hit,
             });
         }
@@ -2360,6 +2371,7 @@ impl<'a> LayoutBuilder<'a> {
             flip_h: base.transform.flip_h,
             flip_v: base.transform.flip_v,
         };
+        let mut bent_connector = None;
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
@@ -2431,6 +2443,7 @@ impl<'a> LayoutBuilder<'a> {
                     shadow,
                     transform,
                 };
+                bent_connector = BentConnectorHit::from_primitive(&primitive);
                 if use_bg_fill {
                     self.push_background_shape(primitive, &value.paths, picture)?;
                 } else {
@@ -2518,6 +2531,7 @@ impl<'a> LayoutBuilder<'a> {
             rect,
             hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
+            bent_connector,
             text: text_hit,
         });
         Ok(())
@@ -7021,6 +7035,7 @@ struct HitRegion {
     rect: PxRect,
     hit_rect: PxRect,
     transform: Transform,
+    bent_connector: Option<BentConnectorHit>,
     text: Option<TextHit>,
 }
 
@@ -7028,6 +7043,63 @@ impl HitRegion {
     /// Maps slide coordinates into the shape frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
         local_point(self.rect, self.transform, x, y)
+    }
+}
+
+struct BentConnectorHit {
+    points: Vec<(f64, f64)>,
+    tolerance: f64,
+}
+
+impl BentConnectorHit {
+    fn from_primitive(primitive: &Primitive) -> Option<Self> {
+        let Primitive::Shape {
+            geometry,
+            path,
+            x,
+            y,
+            w,
+            h,
+            stroke: Some(stroke),
+            ..
+        } = primitive
+        else {
+            return None;
+        };
+        if !matches!(
+            geometry.as_str(),
+            "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
+        ) {
+            return None;
+        }
+        let points = path
+            .iter()
+            .map(|command| match *command {
+                GeometryPathCommand::Move { x: px, y: py }
+                | GeometryPathCommand::Line { x: px, y: py } => {
+                    (
+                        f64::from(*x) + px * f64::from(*w),
+                        f64::from(*y) + py * f64::from(*h),
+                    )
+                }
+                _ => unreachable!("bent connector paths contain only straight segments"),
+            })
+            .collect();
+        Some(Self {
+            points,
+            tolerance: (f64::from(stroke.width) / 2.0).max(3.0),
+        })
+    }
+
+    fn contains(&self, x: f32, y: f32) -> bool {
+        let (x, y) = (f64::from(x), f64::from(y));
+        self.points.windows(2).any(|pair| {
+            let (ax, ay) = pair[0];
+            let (bx, by) = pair[1];
+            let dx = (ax.min(bx) - x).max(x - ax.max(bx)).max(0.0);
+            let dy = (ay.min(by) - y).max(y - ay.max(by)).max(0.0);
+            dx * dx + dy * dy <= self.tolerance * self.tolerance
+        })
     }
 }
 
@@ -11846,6 +11918,7 @@ mod tests {
                     h: 100.0,
                 },
                 transform,
+                bent_connector: None,
                 text: None,
             }],
         };
@@ -11871,79 +11944,6 @@ mod tests {
         assert!(slide(flipped).hit_test(105.0, 105.0).is_none());
     }
 
-    #[test]
-    fn hit_testing_flipped_text_keeps_the_upright_caret() {
-        let slide = |flip_h| RenderedSlide {
-            display_list: SurfaceDisplayList {
-                contract_version: CONTRACT_VERSION,
-                width: 400.0,
-                height: 400.0,
-                background: None,
-                primitives: Vec::new(),
-                alt_text: BTreeMap::new(),
-                title_shape: None,
-            },
-            font_substitutions: Vec::new(),
-            autofit: HashMap::new(),
-            hit_regions: vec![HitRegion {
-                shape_id: "mirrored".to_owned(),
-                rect: PxRect {
-                    x: 100.0,
-                    y: 100.0,
-                    w: 120.0,
-                    h: 40.0,
-                },
-                hit_rect: PxRect {
-                    x: 100.0,
-                    y: 100.0,
-                    w: 120.0,
-                    h: 40.0,
-                },
-                transform: Transform {
-                    rotation_deg: 0.0,
-                    flip_h,
-                    flip_v: false,
-                },
-                text: Some(TextHit {
-                    overflow: false,
-                    story_id: "story".to_owned(),
-                    rect: PxRect {
-                        x: 100.0,
-                        y: 100.0,
-                        w: 120.0,
-                        h: 40.0,
-                    },
-                    transform: text_transform(
-                        Transform {
-                            rotation_deg: 0.0,
-                            flip_h,
-                            flip_v: false,
-                bent_connector: None,
-                        },
-                        TextFlow::Horizontal,
-                    ),
-                    lines: vec![PositionedTextLine {
-                        column_offset: 0.0,
-                        x: 110.0,
-                        y: 110.0,
-                        width: 100.0,
-                        height: 20.0,
-                        baseline: 125.0,
-                        start: 0,
-                        end: 5,
-                        runs: Vec::new(),
-                        caret_stops: vec![
-                            CaretStop {
-                                position: 0,
-                                x: 110.0,
-                            },
-                            CaretStop {
-                                position: 5,
-                                x: 210.0,
-                            },
-                        ],
-                    }],
-                }),
     #[test]
     fn hit_testing_a_rotated_bent_connector_follows_its_painted_detour() {
         let session = DeckSession::open(FIXTURE, 8_015).unwrap();
@@ -11987,6 +11987,79 @@ mod tests {
         assert_eq!(rendered.hit_test(150.0, 150.0), None);
     }
 
+    #[test]
+    fn hit_testing_flipped_text_keeps_the_upright_caret() {
+        let slide = |flip_h| RenderedSlide {
+            display_list: SurfaceDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 400.0,
+                height: 400.0,
+                background: None,
+                primitives: Vec::new(),
+                alt_text: BTreeMap::new(),
+                title_shape: None,
+            },
+            font_substitutions: Vec::new(),
+            autofit: HashMap::new(),
+            hit_regions: vec![HitRegion {
+                shape_id: "mirrored".to_owned(),
+                rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
+                transform: Transform {
+                    rotation_deg: 0.0,
+                    flip_h,
+                    flip_v: false,
+                },
+                bent_connector: None,
+                text: Some(TextHit {
+                    overflow: false,
+                    story_id: "story".to_owned(),
+                    rect: PxRect {
+                        x: 100.0,
+                        y: 100.0,
+                        w: 120.0,
+                        h: 40.0,
+                    },
+                    transform: text_transform(
+                        Transform {
+                            rotation_deg: 0.0,
+                            flip_h,
+                            flip_v: false,
+                        },
+                        TextFlow::Horizontal,
+                    ),
+                    lines: vec![PositionedTextLine {
+                        column_offset: 0.0,
+                        x: 110.0,
+                        y: 110.0,
+                        width: 100.0,
+                        height: 20.0,
+                        baseline: 125.0,
+                        start: 0,
+                        end: 5,
+                        runs: Vec::new(),
+                        caret_stops: vec![
+                            CaretStop {
+                                position: 0,
+                                x: 110.0,
+                            },
+                            CaretStop {
+                                position: 5,
+                                x: 210.0,
+                            },
+                        ],
+                    }],
+                }),
             }],
         };
         let position = |flip_h| match slide(flip_h).hit_test(120.0, 120.0) {
@@ -12020,7 +12093,6 @@ mod tests {
                 primitives: Vec::new(),
                 alt_text: BTreeMap::new(),
                 title_shape: None,
-                bent_connector: None,
             },
             font_substitutions: Vec::new(),
             autofit: HashMap::new(),
@@ -12029,6 +12101,7 @@ mod tests {
                 hit_rect: rect,
                 rect,
                 transform: shape,
+                bent_connector: None,
                 text: Some(TextHit {
                     overflow: false,
                     story_id: "story".to_owned(),
@@ -12101,7 +12174,6 @@ mod tests {
         assert_eq!(TextFlow::from_body_vert(Some("eaVert")), TextFlow::Vert);
         assert_eq!(
             TextFlow::from_body_vert(Some("mongolianVert")),
-                bent_connector: None,
             TextFlow::VertLeftToRight
         );
         for mode in ["wordArtVert", "wordArtVertRtl"] {

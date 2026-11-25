@@ -1588,20 +1588,32 @@ fn line_end(value: Option<&Value>) -> Result<Option<LineEnd>, String> {
     }))
 }
 
-/// The first two and last two points the outline passes through, as the web
-/// backend reads them for line ends.
 fn path_endpoints(commands: &[ShapePathCommand]) -> Result<Option<[(f32, f32); 4]>, String> {
     let mut points = Vec::new();
     for command in commands {
         let (x, y) = match command {
-            ShapePathCommand::Move { x, y }
-            | ShapePathCommand::Line { x, y }
-            | ShapePathCommand::Quad { x, y, .. }
-            | ShapePathCommand::Cubic { x, y, .. } => (x, y),
+            ShapePathCommand::Move { x, y } | ShapePathCommand::Line { x, y } => (x, y),
+            ShapePathCommand::Quad { cpx, cpy, x, y } => {
+                points.push((number_f32(cpx)?, number_f32(cpy)?));
+                (x, y)
+            }
+            ShapePathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                points.push((number_f32(cp1x)?, number_f32(cp1y)?));
+                points.push((number_f32(cp2x)?, number_f32(cp2y)?));
+                (x, y)
+            }
             ShapePathCommand::Close => continue,
         };
         points.push((number_f32(x)?, number_f32(y)?));
     }
+    points.dedup();
     let count = points.len();
     if count < 2 {
         return Ok(None);
@@ -4082,18 +4094,6 @@ mod tests {
         assert!(line_end_path(&arrow, tip, previous, 2.0).unwrap().1);
     }
 
-    fn picture_scene(references: &[&str]) -> DisplayList {
-        let primitives: Vec<Value> = references
-            .iter()
-            .enumerate()
-            .map(|(index, reference)| {
-                json!({
-                    "kind": "image",
-                    "relId": reference,
-                    "x": 2 + index * 16,
-                    "y": 2,
-                    "w": 12,
-                    "h": 12
     #[test]
     fn connector_line_ends_follow_the_first_and_last_nonzero_tangents() {
         for (preset, commands, expected) in [
@@ -4121,6 +4121,18 @@ mod tests {
         }
     }
 
+    fn picture_scene(references: &[&str]) -> DisplayList {
+        let primitives: Vec<Value> = references
+            .iter()
+            .enumerate()
+            .map(|(index, reference)| {
+                json!({
+                    "kind": "image",
+                    "relId": reference,
+                    "x": 2 + index * 16,
+                    "y": 2,
+                    "w": 12,
+                    "h": 12
                 })
             })
             .collect();

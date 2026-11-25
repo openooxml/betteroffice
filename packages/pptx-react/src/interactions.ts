@@ -35,6 +35,9 @@ export const RESIZE_HANDLES: readonly ResizeHandle[] = [
 ];
 
 const BORDER_BAND_SCREEN_PX = 6;
+const BENT_CONNECTOR_PRESETS = new Set([
+  'bentConnector2', 'bentConnector3', 'bentConnector4', 'bentConnector5',
+]);
 export const MIN_SHAPE_SIZE_EMU = 76_200;
 
 type PrimitiveGeometry = Pick<SlidePrimitive, 'x' | 'y' | 'w' | 'h' | 'transform'>;
@@ -288,6 +291,26 @@ export function farEdge(origin: number, extent: number): number {
 /** The local point when it lands inside the primitive, else null. */
 function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
   const local = localPoint(primitive, point);
+  if (primitive.kind === 'shape' && primitive.stroke && BENT_CONNECTOR_PRESETS.has(primitive.geometry)) {
+    const tolerance = Math.max(3, primitive.stroke.width / 2);
+    let previousX = 0;
+    let previousY = 0;
+    for (const command of primitive.path) {
+      if (command.type !== 'move' && command.type !== 'line') {
+        throw new Error('Bent connector paths contain only straight segments');
+      }
+      const x = primitive.x + command.x * primitive.w;
+      const y = primitive.y + command.y * primitive.h;
+      if (command.type === 'line') {
+        const dx = Math.max(Math.min(previousX, x) - local.x, local.x - Math.max(previousX, x), 0);
+        const dy = Math.max(Math.min(previousY, y) - local.y, local.y - Math.max(previousY, y), 0);
+        if (dx * dx + dy * dy <= tolerance * tolerance) return local;
+      }
+      previousX = x;
+      previousY = y;
+    }
+    return null;
+  }
   return local.x >= Math.fround(primitive.x) &&
     local.x <= farEdge(primitive.x, primitive.w) &&
     local.y >= Math.fround(primitive.y) &&

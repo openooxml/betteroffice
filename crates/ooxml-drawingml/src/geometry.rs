@@ -44,6 +44,7 @@ const SEGMENT_SLACK: f64 = 1e-9;
 const MAX_FRAME_EXTENT: f64 = 1e12;
 /// ECMA-376 leaves a callout's tail unpinned; this keeps it finite without cramping it.
 const MAX_CALLOUT_OFFSET: f64 = 100.0;
+const MAX_CONNECTOR_OFFSET: f64 = 1e6;
 /// The frame `cloudCallout`'s body path declares, in its own `w`/`h` units.
 const CLOUD_FRAME: f64 = 43200.0;
 /// `cloudCallout`'s body, as ECMA-376 states it: `wR`, `hR`, `stAng`, `swAng` per `arcTo`.
@@ -1120,15 +1121,9 @@ fn orient(direction: &str, x: f64, y: f64) -> (f64, f64) {
 }
 
 fn bent_connector(segments: usize, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
-    // ECMA-376 leaves bentConnector adjusts unpinned (`fmla="val 50000"` with no
-    // `pin`), allowing `adj < 0` or `adj > 1` so U-turn and C-wrap connectors can
-    // route outside the endpoint bounding frame.
     let adj = |name: &str| {
-        adjustments
-            .get(name)
-            .copied()
-            .filter(|v| v.is_finite())
-            .unwrap_or(0.5)
+        unpinned(adjustments.get(name).copied(), 0.5)
+            .clamp(-MAX_CONNECTOR_OFFSET, MAX_CONNECTOR_OFFSET)
     };
     let points: Vec<(f64, f64)> = match segments {
         0..=2 => vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
@@ -1173,10 +1168,10 @@ fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
         return vec![
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Cubic {
-                cp1x: 0.5,
+                cp1x: ELLIPSE_KAPPA,
                 cp1y: 0.0,
                 cp2x: 1.0,
-                cp2y: 0.5,
+                cp2y: 1.0 - ELLIPSE_KAPPA,
                 x: 1.0,
                 y: 1.0,
             },
@@ -1470,6 +1465,11 @@ mod tests {
             b3,
             vec![
                 GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.5, y: 1.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
         let b4 = preset_geometry_to_path(
             "bentConnector4",
             &HashMap::from([("adj1".to_owned(), 0.75), ("adj2".to_owned(), -0.25)]),
@@ -1483,11 +1483,6 @@ mod tests {
                 GeometryPathCommand::Line { x: 0.75, y: 0.0 },
                 GeometryPathCommand::Line { x: 0.75, y: -0.25 },
                 GeometryPathCommand::Line { x: 1.0, y: -0.25 },
-                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
-            ]
-        );
-                GeometryPathCommand::Line { x: 0.5, y: 0.0 },
-                GeometryPathCommand::Line { x: 0.5, y: 1.0 },
                 GeometryPathCommand::Line { x: 1.0, y: 1.0 },
             ]
         );
