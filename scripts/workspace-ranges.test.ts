@@ -97,6 +97,18 @@ test('rejects an out-of-range version for an unchanged workspace range', () => {
   expect(statSync(b).mtimeMs).toBe(mtime);
 });
 
+test('rejects an invalid workspace range without rewriting the manifest', () => {
+  const { root, b } = workspace();
+  const recorded = explicitWorkspaceRanges(root);
+  const invalid = Buffer.from(readFileSync(b, 'utf8').replace('"workspace:^0"', '"workspace:invalid"'));
+  writeFileSync(b, invalid);
+
+  expect(() => restoreWorkspaceRanges(recorded, root)).toThrow(
+    'packages/b/package.json dependencies a changed to workspace:invalid, not a workspace range'
+  );
+  expect(readFileSync(b)).toEqual(invalid);
+});
+
 test('restores ranges while preserving four-space and tab indentation', () => {
   const { root, b, c } = workspace();
   const recorded = explicitWorkspaceRanges(root);

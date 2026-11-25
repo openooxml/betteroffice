@@ -22,6 +22,13 @@ function getSemver() {
   return (semver ??= createRequire(changesetsEntry())('semver'));
 }
 
+function explicitWorkspaceRange(value, semver) {
+  if (typeof value !== 'string' || !value.startsWith(WORKSPACE_PREFIX)) return;
+  const range = value.slice(WORKSPACE_PREFIX.length);
+  if (!range.trim() || BARE_RANGES.has(range) || !semver.validRange(range)) return;
+  return range;
+}
+
 function workspacePackages(root) {
   const { workspaces } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
   if (!Array.isArray(workspaces)) throw new Error('Expected a workspaces array in package.json.');
@@ -53,9 +60,8 @@ export function explicitWorkspaceRanges(root = process.cwd()) {
   for (const { manifest, json } of workspacePackages(root)) {
     for (const section of DEPENDENCY_FIELDS) {
       for (const [name, value] of Object.entries(json[section] ?? {})) {
-        if (typeof value !== 'string' || !value.startsWith(WORKSPACE_PREFIX)) continue;
-        const range = value.slice(WORKSPACE_PREFIX.length);
-        if (!range.trim() || BARE_RANGES.has(range) || !semver.validRange(range)) continue;
+        const range = explicitWorkspaceRange(value, semver);
+        if (range === undefined) continue;
         recorded.push({ manifest, section, name, range });
       }
     }
@@ -89,7 +95,7 @@ export function restoreWorkspaceRanges(recorded, root = process.cwd()) {
     if (current === undefined) {
       throw new Error(`Could not find ${manifest} ${section} ${name} to restore.`);
     }
-    if (typeof current !== 'string' || !current.startsWith(WORKSPACE_PREFIX)) {
+    if (explicitWorkspaceRange(current, semver) === undefined) {
       const value = typeof current === 'string' ? current : JSON.stringify(current);
       throw new Error(`${manifest} ${section} ${name} changed to ${value}, not a workspace range`);
     }
