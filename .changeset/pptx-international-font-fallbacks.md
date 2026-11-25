@@ -2,4 +2,4 @@
 '@betteroffice/pptx': patch
 ---
 
-The presentation editor now loads matching fallback fonts for scripts like Arabic, Hebrew, Thai and Devanagari by default, so text displays even when those fonts are missing from the device.
+The presentation editor now loads fallback fonts for scripts like Arabic, Hebrew, Thai and Devanagari by default. Simplified Arabic and Traditional Arabic request the same fallback face as PNG export.

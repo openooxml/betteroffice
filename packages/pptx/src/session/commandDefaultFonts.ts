@@ -10,7 +10,7 @@ import type { createSlicedFontFaces } from './commandSlicedFonts';
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean }
-  | { kind: 'coverage'; script: string; bold: boolean; italic: boolean };
+  | { kind: 'coverage'; script: string; requestedFamily?: string; bold: boolean; italic: boolean };
 
 /** @internal */
 const DEFAULT_FONT_MAX_ATTEMPTS = 3;
@@ -77,7 +77,8 @@ export function createCommandDefaultFonts(
   let prepared = false;
   const cancellations = new Set<() => void>();
   const key = (face: FontRequest) => JSON.stringify([face.kind,
-    face.kind === 'coverage' ? face.script : face.family.trim().toLowerCase(), face.bold, face.italic]);
+    face.kind === 'coverage' ? [face.script, face.requestedFamily?.trim().toLowerCase()] : face.family.trim().toLowerCase(),
+    face.bold, face.italic]);
   const suppliedFamily = (face: FontRequest) => face.kind === 'primary' && families.has(face.family.trim().toLowerCase());
 
   const retryable = (id: string) => !attempted.has(id) ||
@@ -141,11 +142,13 @@ export function createCommandDefaultFonts(
         let load: BundledFontLoader | undefined;
         let light: (() => Promise<ArrayBuffer>) | undefined;
         if (face.kind === 'coverage') {
-          load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
+          const script = face.script as BundledFontScript;
+          const family: [string?] = face.requestedFamily === undefined ? [] : [face.requestedFamily];
+          load = source.resolveScriptFallback(script, bold, italic, ...family);
           if (!load && (bold || italic)) {
             bold = false;
             italic = false;
-            load = source.resolveScriptFallback(face.script as BundledFontScript, bold, italic);
+            load = source.resolveScriptFallback(script, bold, italic, ...family);
           }
         } else {
           const named = source.resolve(face.family, bold, italic) ?? source.resolveFamily(face.family, bold, italic);
@@ -159,7 +162,7 @@ export function createCommandDefaultFonts(
             const { openSlicedFace } = await importProgressiveFonts();
             const opened = await openSlicedFace(load.slices);
             if (disposed || suppliedFamily(face)) return undefined;
-            const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())
+            const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes(), face.requestedFamily)
               : { family: face.family, bold: face.bold, italic: face.italic, bytes: opened.bytes() };
             if (skeleton && !families.has(skeleton.family.trim().toLowerCase())) {
               sliced.add(skeleton.family, { get revision() { return opened.revision; }, bytes: () => opened.bytes(),
@@ -177,7 +180,7 @@ export function createCommandDefaultFonts(
         });
         if (disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
-          ? await scriptFontFace(face.script, bold, italic, bytes)
+          ? await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily)
           : { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
         if (!loaded || disposed || suppliedFamily(face)) return undefined;
         sliced?.plain(loaded.family, loaded.bold, loaded.italic);
@@ -222,7 +225,8 @@ export function createCommandDefaultFonts(
         const primary: FontRequest = { kind: 'primary', family: face.family, bold: face.bold, italic: face.italic };
         wanted.set(key(primary), primary);
         for (const script of face.scripts ?? []) {
-          const coverage: FontRequest = { kind: 'coverage', script, bold: face.bold, italic: face.italic };
+          const coverage: FontRequest = { kind: 'coverage', script, bold: face.bold, italic: face.italic,
+            requestedFamily: script === 'arabic' ? face.family : undefined };
           wanted.set(key(coverage), coverage);
         }
       }
