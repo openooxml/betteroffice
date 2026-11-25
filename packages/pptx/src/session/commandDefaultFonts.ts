@@ -41,15 +41,17 @@ export const commandFontProvider = {
  */
 export function prefetchCoverageFaces(
   scripts: readonly string[], wasmReady: Promise<unknown>, provider: () => ReturnType<typeof commandFontProvider.load>,
-  sliced = false,
+  sliced = false, current = () => true,
 ): void {
   decoderReady = wasmReady;
   if (!scripts.length) return;
   void provider().then(async (source) => {
     for (const script of scripts) {
+      if (!current()) return;
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
       if (load?.slices && sliced && slicedFacesSupported()) {
         const { openSlicedFace } = await importProgressiveFonts();
+        if (!current()) return;
         void openSlicedFace(load.slices).catch(() => {});
       } else void load?.().catch(() => {});
     }

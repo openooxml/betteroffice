@@ -1,10 +1,8 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
-import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import { slicedFacesSupported as browserSupportsSlicedFaces } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { readFontTraits } from '../../../../shared/fontTraits';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
-
-export { slicedFacesSupported };
 
 /** What the session needs from a progressive face. */
 export interface SlicedFontFace {
@@ -32,6 +30,14 @@ const FILL_BATCH = 48;
 const FILL_QUIET_MS = 300;
 const FILL_DELAY_MS = 1000;
 
+/**
+ * Sliced faces are verified in Chromium and Firefox. Safari, iOS browsers (all WebKit) and unknown engines
+ * use whole faces.
+ */
+export function slicedFacesSupported(userAgent?: string): boolean {
+  return browserSupportsSlicedFaces(userAgent);
+}
+
 type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
 
 interface Entry {
@@ -51,7 +57,7 @@ const styleOf = (bold: boolean, italic: boolean) => `${bold ? 1 : 0}|${italic ? 
 /**
  * The sliced faces of one session. A paint prepares its text first: the chunks it needs load, and when that
  * changed the face a new revision is installed under its own family name, because a canvas in a worker never sees
- * a replaced face under the same family. If a chunk cannot load the whole face takes over, so no glyph draws blank.
+ * a replaced face under the same family.
  */
 export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   const entries = new Map<string, Entry>();
@@ -73,7 +79,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   /** Revisions only grow, so a parse that finishes behind a newer revision gives way to it instead of waiting in line. */
   async function install(entry: Entry, revision: number, bytes: ArrayBuffer, chunks: ReadonlySet<number> | null): Promise<string> {
     const fonts = (globalThis as typeof globalThis & { fonts?: FontFaceSet }).fonts;
-    if (!fonts) return entry.family;
+    if (!fonts || typeof FontFace !== 'function') return entry.family;
     const family = revision === WHOLE ? `${entry.family} whole` : `${entry.family} r${revision}`;
     const face = await new FontFace(family, bytes, descriptors(bytes)).load();
     if (disposed || !entries.has(keyOf(entry.family))) return entry.family;
@@ -117,14 +123,14 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     try {
       await entry.face.ensureText(text);
     } catch (error) {
-      if (isImplicitFontCdnError(error)) return latestOf(entry)?.family ?? entry.family;
+      if (isImplicitFontCdnError(error)) return entry.family;
       let bytes: ArrayBuffer;
       try { bytes = await replacementBytes(entry); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
     }
-    return publish(entry);
+    try { return await publish(entry); } catch { return entry.family; }
   }
 
   const coverage: PaintFontCoverage = {

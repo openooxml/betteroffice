@@ -21,6 +21,7 @@ interface Batch {
 }
 
 const keyOf = (family: string) => family.trim().toLowerCase();
+const pageFonts = () => typeof document === 'undefined' ? undefined : document.fonts;
 
 /**
  * The page's side of sliced faces: the worker owns them and fetches their chunks; the page keeps a copy of each
@@ -43,17 +44,21 @@ export function createPeerlessFontCoverage(
     if (!read) return name;
     if (!read.bytes) return latest?.family ?? name;
     const family = `${name} s${session} r${read.revision}`;
-    const traits = readFontTraits(new Uint8Array(read.bytes));
-    const face = await new FontFace(family, read.bytes, traits ? {
-      weight: String(traits.weight), style: traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal',
-    } : {}).load();
-    if (!current() || families.get(keyOf(name)) !== entry) return name;
-    const newest = entry.faces[entry.faces.length - 1];
-    if (newest && newest.revision >= read.revision) return newest.family;
-    document.fonts.add(face);
-    entry.faces.push({ revision: read.revision, family, face });
-    while (entry.faces.length > KEPT_REVISIONS) document.fonts.delete(entry.faces.shift()!.face);
-    return family;
+    const fonts = pageFonts();
+    if (!fonts || typeof FontFace !== 'function') return name;
+    try {
+      const traits = readFontTraits(new Uint8Array(read.bytes));
+      const face = await new FontFace(family, read.bytes, traits ? {
+        weight: String(traits.weight), style: traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal',
+      } : {}).load();
+      if (!current() || families.get(keyOf(name)) !== entry) return name;
+      const newest = entry.faces[entry.faces.length - 1];
+      if (newest && newest.revision >= read.revision) return newest.family;
+      fonts.add(face);
+      entry.faces.push({ revision: read.revision, family, face });
+      while (entry.faces.length > KEPT_REVISIONS) fonts.delete(entry.faces.shift()!.face);
+      return family;
+    } catch { return name; }
   }
 
   const latest = (name: string) => {
@@ -66,10 +71,11 @@ export function createPeerlessFontCoverage(
     return {
       prepare(name, text) {
         const key = keyOf(name);
+        const fonts = pageFonts();
         if (!client.state.slicedFamilies?.some((family) => keyOf(family) === key) || !client.readCoverageFont ||
-          typeof document === 'undefined') {
+          !fonts || typeof FontFace !== 'function') {
           const replaced = families.get(key);
-          if (replaced) for (const { face } of replaced.faces) document.fonts.delete(face);
+          if (replaced) for (const { face } of replaced.faces) fonts?.delete(face);
           families.delete(key);
           return Promise.resolve(name);
         }
@@ -89,7 +95,8 @@ export function createPeerlessFontCoverage(
     ...lane(),
     thumbnails: lane(),
     dispose() {
-      for (const entry of families.values()) for (const { face } of entry.faces) document.fonts?.delete(face);
+      const fonts = pageFonts();
+      for (const entry of families.values()) for (const { face } of entry.faces) fonts?.delete(face);
       families.clear();
     },
   };

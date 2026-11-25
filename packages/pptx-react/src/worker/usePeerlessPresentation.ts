@@ -122,8 +122,8 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
-    collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.experimentalSlicedFonts,
+    props.clientId, Boolean(collaboration), collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
@@ -645,8 +645,8 @@ export function usePeerlessPresentation(
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
-              slicedFonts: callbacks.current.experimentalSlicedFonts,
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: props.defaultFonts,
+              slicedFonts: props.experimentalSlicedFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {

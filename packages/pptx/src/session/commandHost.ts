@@ -12,7 +12,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
-import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import { shouldSlicePresentationFonts, slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
@@ -1728,14 +1728,15 @@ export function registerPresentationCommandHandlers(
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
     prefetchCoverageFonts(_, scripts, sliced, configuration) {
-      if (disposed || handle || opening || !Array.isArray(scripts)) return;
+      const current = () => !disposed && !handle && !opening;
+      if (!current() || !Array.isArray(scripts)) return;
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
       useFontCdn(configuration);
-      const useSlices = shouldSlicePresentationFonts(sliced === undefined ? undefined : sliced === true);
+      const useSlices = sliced === undefined ? shouldSlicePresentationFonts() : sliced === true && slicedFacesSupported();
       void commandDefaultFontModule.load().then((fonts) => {
-        if (!disposed && !handle && !opening) {
-          fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices);
+        if (current()) {
+          fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices, current);
         }
       }).catch(() => {});
     },
@@ -1760,7 +1761,7 @@ export function registerPresentationCommandHandlers(
       }
       useFontCdn(input.fontCdn);
       opening = true;
-      const useSlices = shouldSlicePresentationFonts(input.slicedFonts === true);
+      const useSlices = input.slicedFonts === true && slicedFacesSupported();
       const slicing = useSlices
         ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
@@ -1775,7 +1776,7 @@ export function registerPresentationCommandHandlers(
           else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
           if (input.defaultFonts !== false && result.scripts.length) {
             void commandDefaultFontModule.load().then((fonts) => {
-              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), useSlices);
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), useSlices, () => !disposed);
             }).catch(() => {});
           }
         }).catch(() => {});

@@ -8,5 +8,5 @@ export function slicedFacesSupported(
 }
 
 export function shouldSlicePresentationFonts(sliced?: boolean): boolean {
-  return slicedFacesSupported() && (sliced ?? missingWorkerRenderCapabilities().length === 0);
+  return sliced !== false && slicedFacesSupported() && missingWorkerRenderCapabilities().length === 0;
 }

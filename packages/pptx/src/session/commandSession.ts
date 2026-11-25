@@ -67,7 +67,7 @@ export function createPptxWorkerSession(
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
   const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? sessionWasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
-  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
+  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes, options);
   const transport = createWorkerTransport(options.worker ? options.worker() :
     preparedWorker ?? createSessionWorker());
   let stopEngineFetch = () => {};
