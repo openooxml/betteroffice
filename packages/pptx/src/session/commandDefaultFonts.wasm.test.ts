@@ -59,7 +59,7 @@ async function deck(families = ['Calibri', 'Cambria'], text: string | readonly s
 
 function source(
   loaders: Record<string, () => Promise<ArrayBuffer>>,
-  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+  script: (script: string, bold: boolean, italic: boolean, family?: string) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
 ) {
   const resolve = mock((family: string, _bold?: boolean, _italic?: boolean) => loaders[family]);
   const resolveScriptFallback = mock(script);
@@ -730,7 +730,7 @@ test('Arabic and Thai runs in Arial load and use their script defaults', async (
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), connection().transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, 'Arial');
   expect(manager.resolveScriptFallback).toHaveBeenCalledWith('thai', false, false);
   expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
     .toEqual(['Noto Sans Arabic', 'Noto Sans Thai']);
@@ -744,13 +744,35 @@ test('Arabic and Thai runs in Arial load and use their script defaults', async (
   }
 });
 
+test('Simplified Arabic uses the same script fallback as PNG export', async () => {
+  const family = 'Simplified Arabic';
+  const sans = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const manager = source({ [family]: async () => font }, (script, bold, italic, requested) => {
+    if (script !== 'arabic') return undefined;
+    const resolved = fonts.resolveScriptFallbackFace(script, bold, italic, requested);
+    return async () => resolved?.family === 'Noto Naskh Arabic' ? naskh : sans;
+  });
+  const client = await createPresentationCommandClient(await deck([family], 'وتين'), options, connection().transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, family);
+  const expected = fonts.resolveScriptFallbackFace('arabic', false, false, family)!.family;
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs))
+    .filter((run) => /[\u0600-\u06ff]/.test(run.text));
+  expect(runs.length).toBeGreaterThan(0);
+  expect(runs.every((run) => run.fontFamily === expected && run.fontId !== 0xffffffff)).toBe(true);
+});
+
 test('wrong script face bytes keep the browser font', async () => {
   const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
   const manager = source({ Calibri: async () => carlito }, () => async () => font);
   const wire = connection();
   const client = await createPresentationCommandClient(await deck(['Calibri'], 'alpha مرحبا שלום नमस्ते ไทย'), options, wire.transport);
   clients.push(client);
-  for (const script of ['arabic', 'hebrew', 'devanagari', 'thai']) {
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, 'Calibri');
+  for (const script of ['hebrew', 'devanagari', 'thai']) {
     expect(manager.resolveScriptFallback).toHaveBeenCalledWith(script, false, false);
   }
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;

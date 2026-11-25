@@ -24,7 +24,7 @@ const bytes = new Uint8Array([1, 2, 3]).buffer;
 
 function provider(
   load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined,
-  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+  script: (script: string, bold: boolean, italic: boolean, family?: string) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
 ) {
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
@@ -416,7 +416,7 @@ test('default font plumbing stays out of all package entries', async () => {
   }
 });
 
-test('script requests keep traits, fall back to regular and deduplicate across families and concurrent loads', async () => {
+test('Arabic requests keep family and traits and install the shared regular face only once', async () => {
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, (script, bold, italic) =>
     script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
@@ -430,7 +430,10 @@ test('script requests keep traits, fall back to regular and deduplicate across f
     expect(fonts.hasPending()).toBe(true);
     const results = await Promise.all([fonts.load(), fonts.load()]);
     expect(source.resolve.mock.calls).toEqual([['Unknown Family', true, true]]);
-    expect(source.resolveScriptFallback.mock.calls).toEqual([['arabic', true, true], ['arabic', false, false]]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([
+      ['arabic', true, true, 'Calibri'], ['arabic', false, false, 'Calibri'],
+      ['arabic', true, true, 'Unknown Family'], ['arabic', false, false, 'Unknown Family'],
+    ]);
     expect(results.flat()).toMatchObject([{ family: 'Noto Sans Arabic', bold: false, italic: false, kind: 'coverage' }]);
     expect(install).toHaveBeenCalledTimes(1);
     expect(install.mock.calls[0][0][0].kind).toBe('coverage');
