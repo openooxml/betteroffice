@@ -4,7 +4,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::sheet_json::{decode_charts, decode_hyperlinks};
+use crate::sheet_json::{
+    check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
+    encode_charts, encode_hyperlinks,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
@@ -241,6 +244,7 @@ struct WorkbookBase {
     bootstrap_client_id: u64,
     date_system: DateSystem,
     full_precision: Option<bool>,
+    iterate: bool,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
     fingerprints: Fingerprints,
@@ -324,6 +328,7 @@ impl WorkbookBase {
             bootstrap_client_id,
             date_system: model.date_system,
             full_precision: Some(model.full_precision),
+            iterate: model.iterate,
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints,
@@ -553,6 +558,7 @@ impl WorkbookBase {
             bootstrap_client_id,
             date_system: model.date_system,
             full_precision: Some(model.full_precision),
+            iterate: model.iterate,
             defined_names: model.defined_names.clone(),
             fingerprint,
             fingerprints: fingerprints.into(),
@@ -616,6 +622,7 @@ impl WorkbookBase {
             sheets: Vec::new(),
             date_system: self.date_system,
             full_precision: self.full_precision.unwrap_or(true),
+            iterate: self.iterate,
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
@@ -1064,7 +1071,8 @@ impl WorkbookAuthority {
         }
         let mut writer = Writer::new();
         base.bootstrap_client_id.write(&mut writer);
-        snapshot::CalculationSettings(base.date_system, base.full_precision).write(&mut writer);
+        snapshot::CalculationSettings(base.date_system, base.full_precision, base.iterate)
+            .write(&mut writer);
         base.defined_names.write(&mut writer);
         base.fingerprint.write(&mut writer);
         base.fingerprints.write(&mut writer);
@@ -1160,6 +1168,16 @@ impl WorkbookAuthority {
         self.base.full_precision
     }
 
+    pub(crate) fn iterate_setting(&self) -> Option<bool> {
+        self.base.iterate.then_some(true)
+    }
+
+    pub(crate) fn restore_iterate(&mut self, iterate: bool) {
+        if self.base.iterate != iterate {
+            Arc::make_mut(&mut self.base).iterate = iterate;
+        }
+    }
+
     /// `row_styles` reads the row defaults that follow the Yrs state; a state
     /// releases before them encoded ends there.
     pub(crate) fn restore_recovery_state(
@@ -1177,11 +1195,13 @@ impl WorkbookAuthority {
         }
         let mut reader = Reader::new(bytes);
         let bootstrap_client_id = Codec::read(&mut reader)?;
-        let snapshot::CalculationSettings(date_system, full_precision) = Codec::read(&mut reader)?;
+        let snapshot::CalculationSettings(date_system, full_precision, iterate) =
+            Codec::read(&mut reader)?;
         let mut base = WorkbookBase {
             bootstrap_client_id,
             date_system,
             full_precision,
+            iterate,
             defined_names: Codec::read(&mut reader)?,
             fingerprint: Codec::read(&mut reader)?,
             fingerprints: Codec::read(&mut reader)?,
@@ -1313,6 +1333,20 @@ impl WorkbookAuthority {
     ) -> Result<Self, AuthorityError> {
         Self::from_source_with_projection(model, client_id, legacy_dimensions, legacy_styles, &[])
             .map(|(authority, _, _)| authority)
+    }
+
+    pub(crate) fn check_source_admission(model: &WorkbookModel) -> Result<(), String> {
+        let (key, payload) = cell_format_entry(&CellFormat::default())?;
+        decode_cell_format_entry(&key, &payload)?;
+        for entry in source_style_entries(&model.styles, style_entry) {
+            let (key, payload) = entry?;
+            decode_cell_format_entry(&key, &payload)?;
+        }
+        for sheet in &model.sheets {
+            check_hyperlink_state_size(&encode_hyperlinks(&sheet.hyperlinks)?)?;
+            check_chart_state_size(&encode_charts(&sheet.charts)?)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn from_source_with_projection(
@@ -3989,6 +4023,17 @@ fn seed(
 
 type FormatEntryWriter = fn(&Stylesheet, u32) -> Result<(String, String), String>;
 
+fn source_style_entries(
+    styles: &Stylesheet,
+    entry: FormatEntryWriter,
+) -> impl Iterator<Item = Result<(String, String), String>> + '_ {
+    (0..styles.cell_xfs.len()).map(move |index| {
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        entry(styles, index)
+    })
+}
+
 #[cfg(test)]
 fn seed_with_format_entries(
     doc: &Doc,
@@ -4021,10 +4066,8 @@ fn seed_in_chunks(
     let (key, payload) = cell_format_entry(&CellFormat::default())?;
     cell_formats.try_update(&mut txn, key, payload);
     let mut style_keys = Vec::with_capacity(model.styles.cell_xfs.len());
-    for index in 0..model.styles.cell_xfs.len() {
-        let index =
-            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
-        let (key, payload) = entry(&model.styles, index)?;
+    for entry in source_style_entries(&model.styles, entry) {
+        let (key, payload) = entry?;
         style_keys.push(key.clone());
         cell_formats.try_update(&mut txn, key, payload);
     }
@@ -5292,8 +5335,7 @@ fn sync_sheet_frame(
         sheet_map.try_update(txn, COL_STYLES, Any::Array(columns.into()));
     }
     sheet_map.try_update(txn, FREEZE_PANE, freeze_pane_to_any(sheet.freeze_pane));
-    let hyperlinks = serde_json::to_string(&sheet.hyperlinks)
-        .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
+    let hyperlinks = encode_hyperlinks(&sheet.hyperlinks)?;
     sheet_map.try_update(txn, HYPERLINKS, hyperlinks);
     clear_hyperlink_edits(sheet_map, txn);
     if !collaborative && (sheet.auto_filter.is_some() || sheet_map.get(txn, AUTO_FILTER).is_some())
@@ -5310,8 +5352,7 @@ fn sync_sheet_frame(
             .map_err(|error| format!("cannot encode sheet conditional formats: {error}"))?;
         sheet_map.try_update(txn, CONDITIONAL_FORMATS, conditional_formats);
     }
-    let charts = serde_json::to_string(&sheet.charts)
-        .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
+    let charts = encode_charts(&sheet.charts)?;
     sheet_map.try_update(txn, CHARTS, charts);
     sheet_map.try_update(txn, MERGES, merges_to_any(&sheet.merges));
     clear_merge_edits(sheet_map, txn);
@@ -5662,12 +5703,7 @@ fn style_needs_plain(
 }
 
 fn style_entry(stylesheet: &Stylesheet, index: u32) -> Result<(String, String), String> {
-    let (source_xf, derived_from) = stylesheet.format_source(index);
-    stored_format_entry(&StoredCellFormat {
-        format: stylesheet.cell_format(Some(index)),
-        source_xf,
-        derived_from,
-    })
+    stored_format_entry(&StoredCellFormat::from_style(stylesheet, Some(index)))
 }
 
 fn cell_format_entry(format: &CellFormat) -> Result<(String, String), String> {

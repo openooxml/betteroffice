@@ -14,6 +14,8 @@ export interface RevisionNumbers {
     insertion?: number;
     deletion?: number;
 }
+/** `_kind` of the embed a kept inline element holding content seeds as. @internal */
+export declare const RAW_INLINE_KIND = "rawInline";
 export declare function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void;
 export declare function restoreBlockBookmarks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[];
 /** The session key of the pilcrow a projected paragraph was built from. @internal */

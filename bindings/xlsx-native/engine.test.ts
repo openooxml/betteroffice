@@ -48,6 +48,8 @@ type EngineDocument = {
   undoJson(): string;
   readCellsJson(request: string): string;
   calculationStatusJson(): string;
+  documentVersion(): string;
+  clearUpdateObservation(): void;
   exportStructuredJson(options: string): string;
   saveBytes(): Uint8Array;
   free(): void;
@@ -59,6 +61,33 @@ function expectPlainBytes(bytes: Uint8Array) {
   expect(Object.getPrototypeOf(bytes)).toBe(Uint8Array.prototype);
   expect(bytes.byteOffset).toBe(0);
   expect(bytes.buffer.byteLength).toBe(bytes.byteLength);
+}
+
+async function calculationBook(calcPr: string, cells: string): Promise<Uint8Array> {
+  const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const packageRels = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml',
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + '<Override PartName="/xl/workbook.xml"'
+    + ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    + '<Override PartName="/xl/worksheets/sheet1.xml"'
+    + ' ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    + '</Types>');
+  zip.file('_rels/.rels', `<Relationships xmlns="${packageRels}">
+<Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`);
+  zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}">
+<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>${calcPr}</workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="${packageRels}">
+<Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml',
+    `<worksheet xmlns="${main}"><sheetData>${cells}</sheetData></worksheet>`);
+  return zip.generateAsync({ type: 'uint8array' });
 }
 
 function pngPixels(bytes: Uint8Array): Uint8Array {
@@ -419,22 +448,37 @@ describe('xlsx native engine parity', () => {
     }
   });
 
-  test('native opens report progress through the shared JS hook', async () => {
-    const zip = await JSZip.loadAsync(fixture);
-    const rows = ['<row r="1"><c r="A1"><v>1</v></c></row>'];
-    for (let row = 2; row <= 20_000; row++) {
-      rows.push(`<row r="${row}"><c r="A${row}"><f>A${row - 1}+1</f></c></row>`);
-    }
-    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`);
-    const bytes = await zip.generateAsync({ type: 'uint8array' });
+  describe('engine callbacks', () => {
     const host = globalThis as typeof globalThis & { __betterofficeEngineProgress?: () => void };
-    const previous = host.__betterofficeEngineProgress;
-    try {
+    const recursiveUse = 'recursive use of an object detected which would lead to unsafe aliasing in rust';
+    let bytes: Uint8Array;
+
+    beforeAll(async () => {
+      const zip = await JSZip.loadAsync(fixture);
+      const rows = ['<row r="1"><c r="A1"><v>1</v></c></row>'];
+      for (let row = 2; row <= 20_000; row++) {
+        rows.push(`<row r="${row}"><c r="A${row}"><f>A${row - 1}+1</f></c></row>`);
+      }
+      zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`);
+      bytes = await zip.generateAsync({ type: 'uint8array' });
+    });
+
+    function withProgressHook<T>(hook: () => void, call: () => T): T {
+      const previous = host.__betterofficeEngineProgress;
+      host.__betterofficeEngineProgress = hook;
+      try {
+        return call();
+      } finally {
+        if (previous === undefined) delete host.__betterofficeEngineProgress;
+        else host.__betterofficeEngineProgress = previous;
+      }
+    }
+
+    test('native opens report progress through the shared JS hook', () => {
       for (const Document of [WasmDocument, native.XlsxDocument]) {
         let ticks = 0;
         const input = bytes.slice();
-        host.__betterofficeEngineProgress = () => { ticks++; input.fill(0); };
-        const doc = Document.open(input);
+        const doc = withProgressHook(() => { ticks++; input.fill(0); }, () => Document.open(input));
         try {
           expect(ticks).toBeGreaterThanOrEqual(4);
           expect(input.every((byte) => byte === 0)).toBe(true);
@@ -442,10 +486,116 @@ describe('xlsx native engine parity', () => {
           doc.free();
         }
       }
-    } finally {
-      if (previous === undefined) delete host.__betterofficeEngineProgress;
-      else host.__betterofficeEngineProgress = previous;
-    }
+    });
+
+    test.each(['free', 'documentVersion', 'clearUpdateObservation'] as const)(
+      'progress callbacks cannot call %s on a busy workbook', (method) => {
+        const engines = method === 'free' ? [native.XlsxDocument] : [WasmDocument, native.XlsxDocument];
+        for (const Document of engines) {
+          const doc = Document.open(bytes.slice()) as EngineDocument;
+          try {
+            const expected = doc.recalculateJson();
+            const version = doc.documentVersion();
+            let attempted = false;
+            let error: unknown;
+            const actual = withProgressHook(() => {
+              if (attempted) return;
+              attempted = true;
+              try {
+                doc[method]();
+              } catch (caught) {
+                error = caught;
+              }
+            }, () => doc.recalculateJson());
+            expect(attempted).toBe(true);
+            expect(error).toBeInstanceOf(Error);
+            expect((error as Error).message).toBe(recursiveUse);
+            expect(actual).toBe(expected);
+            expect(doc.documentVersion()).toBe(version);
+          } finally {
+            if (Document !== WasmDocument) doc.free();
+          }
+        }
+      },
+    );
+
+    test('a throwing progress hook leaves recalculation and subsequent reads unaffected', () => {
+      for (const Document of [WasmDocument, native.XlsxDocument]) {
+        const doc = Document.open(bytes.slice()) as EngineDocument;
+        try {
+          const expected = doc.recalculateJson();
+          const version = doc.documentVersion();
+          let ticks = 0;
+          const actual = withProgressHook(() => {
+            ticks++;
+            throw new Error('progress callback failed');
+          }, () => doc.recalculateJson());
+          expect(ticks).toBeGreaterThan(0);
+          expect(actual).toBe(expected);
+          expect(doc.documentVersion()).toBe(version);
+        } finally {
+          doc.free();
+        }
+      }
+    });
+
+    test('a progress hook that throws is still called on every tick', () => {
+      const doc = native.XlsxDocument.open(bytes.slice()) as EngineDocument;
+      try {
+        doc.recalculateJson();
+        let quiet = 0;
+        withProgressHook(() => { quiet++; }, () => doc.recalculateJson());
+        let throwing = 0;
+        withProgressHook(() => {
+          throwing++;
+          throw new Error('progress callback failed');
+        }, () => doc.recalculateJson());
+        expect(quiet).toBeGreaterThan(4);
+        expect(throwing).toBeGreaterThanOrEqual(quiet - 2);
+      } finally {
+        doc.free();
+      }
+    });
+
+    test('the clock can recalculate another workbook while the first remains busy', () => {
+      const doc = native.XlsxDocument.open(new Uint8Array(fixture)) as EngineDocument;
+      const other = native.XlsxDocument.open(new Uint8Array(fixture)) as EngineDocument;
+      try {
+        const expected = doc.recalculateJson();
+        const expectedOther = other.recalculateJson();
+        const now = Date.now;
+        let calls = 0;
+        let otherResult: string | undefined;
+        let error: unknown;
+        let actual: string;
+        Date.now = () => {
+          if (++calls === 1) {
+            otherResult = other.recalculateJson();
+          } else if (calls === 2) {
+            try {
+              doc.documentVersion();
+            } catch (caught) {
+              error = caught;
+            }
+          }
+          return now();
+        };
+        try {
+          actual = doc.recalculateJson();
+        } finally {
+          Date.now = now;
+        }
+        expect(calls).toBe(2);
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe(recursiveUse);
+        expect(otherResult).toBe(expectedOther);
+        expect(actual).toBe(expected);
+        expect(doc.calculationStatusJson()).toBe(expected);
+      } finally {
+        other.free();
+        doc.free();
+      }
+    });
   });
 
   test('wasm and native engines return identical results', () => {
@@ -480,16 +630,12 @@ describe('xlsx native engine parity', () => {
     }
   });
 
-  test('a flagged workbook with a stale array-formula cache saves the same calculated values on both engines', async () => {
-    const main = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
-    const rels = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-    const zip = new JSZip();
-    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
-    zip.file('_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-    zip.file('xl/workbook.xml', `<workbook xmlns="${main}" xmlns:r="${rels}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets><calcPr fullCalcOnLoad="1"/></workbook>`);
-    zip.file('xl/_rels/workbook.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rels}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`);
-    zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="${main}"><sheetData><row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row></sheetData></worksheet>`);
-    const source = await zip.generateAsync({ type: 'uint8array' });
+  test('a flagged workbook saves unchanged without an edit on both engines', async () => {
+    const source = await calculationBook(
+      '<calcPr fullCalcOnLoad="1"/>',
+      '<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c><c r="D2"><f>2+3</f><v/></c></row>'
+      + '<row r="3"><c r="C3"><v>100</v></c></row>',
+    );
     const opens: Array<[string, (engine: typeof WasmDocument) => EngineDocument]> = [
       ['open', engine => engine.open(source) as EngineDocument],
       ['openWithCalculationJson', engine => engine.openWithCalculationJson(source, context) as EngineDocument],
@@ -501,14 +647,39 @@ describe('xlsx native engine parity', () => {
         const wasmSaved = new Uint8Array(wasmDoc.saveBytes());
         const nativeSaved = new Uint8Array(nativeDoc.saveBytes());
         expect(nativeSaved, name).toEqual(wasmSaved);
-        for (const saved of [wasmSaved, nativeSaved]) {
-          const sheet = await (await JSZip.loadAsync(saved)).file('xl/worksheets/sheet1.xml')!.async('string');
-          expect(sheet.match(/<c r="C3"[^>]*>.*?<\/c>/)?.[0], name).toContain('<v>1</v>');
-        }
+        expect(nativeSaved, name).toEqual(new Uint8Array(source));
+        expect(new Uint8Array(nativeDoc.saveBytes()), name).toEqual(new Uint8Array(source));
       } finally {
         wasmDoc.free();
         nativeDoc.free();
       }
+    }
+  });
+
+  test('the default native open keeps cached array booleans on save', async () => {
+    const cells = '<row r="1"><c r="A1" t="b"><f t="array" ref="A1:A3">FALSE()</f><v>1</v></c></row>'
+      + '<row r="2"><c r="A2" t="b"><v>1</v></c></row>'
+      + '<row r="3"><c r="A3" t="b"><v>1</v></c></row>';
+    const source = await calculationBook('<calcPr fullCalcOnLoad="1"/>', cells);
+    const document = native.XlsxDocument.open(source) as EngineDocument;
+    try {
+      expect(new Uint8Array(document.saveBytes())).toEqual(new Uint8Array(source));
+    } finally {
+      document.free();
+    }
+  });
+
+  test('the default native open keeps iterative caches on save', async () => {
+    const cells = '<row r="1">'
+      + '<c r="A1"><f>(A1+10)/2</f><v>10</v></c><c r="B1"><f>A1*2</f><v>20</v></c>'
+      + '<c r="C1"><v>5</v></c><c r="D1"><f>C1+1</f><v>999</v></c>'
+      + '<c r="E1"><f>F1/2+10</f><v>20</v></c><c r="F1"><f>E1</f><v>20</v></c></row>';
+    const source = await calculationBook('<calcPr iterate="1" fullCalcOnLoad="1"/>', cells);
+    const document = native.XlsxDocument.open(source) as EngineDocument;
+    try {
+      expect(new Uint8Array(document.saveBytes())).toEqual(new Uint8Array(source));
+    } finally {
+      document.free();
     }
   });
 

@@ -1,7 +1,10 @@
 import { expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { FORMS, errorCode, importOnlyExports } from './check-node-require.mjs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { FORMS, errorCode, importOnlyExports, requireFloorProblems, rootIsModule } from './check-node-require.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const manifest = (directory: string) => JSON.parse(readFileSync(`${root}${directory}/package.json`, 'utf8'));
@@ -50,4 +53,44 @@ test('CI loads the wasm packages and the native bindings in all three forms', ()
   const workflow = readFileSync(`${root}.github/workflows/ci.yml`, 'utf8');
   expect(workflow).toContain('run: node scripts/check-node-require.mjs packages/docx packages/xlsx packages/pptx\n');
   expect(workflow).toContain('node scripts/check-node-require.mjs $(node scripts/native-bindings.mjs --paths)\n');
+});
+
+test('an engines range that admits a Node without require() of ES modules is a problem', () => {
+  const problems = (node?: string, rootModule = true) =>
+    requireFloorProblems({ name: 'p', ...(node === undefined ? {} : { engines: { node } }) }, rootModule);
+  expect(problems('^20.16.0 || >=22.3.0')).toEqual([
+    'p: engines.node "^20.16.0 || >=22.3.0" admits Node 20.18.3 outside ^20.19.0 || >=22.12.0, where require() of an ES module fails with ERR_REQUIRE_ESM',
+  ]);
+  expect(problems('>=18')[0]).toContain('Node 18.20.8');
+  expect(problems('^19.0.0 || >=22.12.0')[0]).toContain('Node 19.9.0');
+  expect(problems('>=20.17.0 <20.18.0 || >=22.12.0')[0]).toContain('admits versions outside');
+  expect(problems('not a range')).toEqual(['p: engines.node "not a range" is not a valid range']);
+  expect(problems('^20.19.0 || >=22.12.0')).toEqual([]);
+  expect(problems('>=22.12')).toEqual([]);
+  expect(problems()).toEqual([]);
+  expect(problems('^20.16.0 || >=22.3.0', false)).toEqual([]);
+});
+
+test('the root a require() loads is an ES module by extension or by the nearest package.json', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'require-floor-'));
+  try {
+    mkdirSync(join(directory, 'dist'));
+    expect(rootIsModule(directory, { exports: { '.': { import: './dist/core.mjs', default: './dist/core.mjs' } } })).toBe(true);
+    expect(rootIsModule(directory, { exports: { require: './dist/core.cjs', import: './dist/core.mjs' } })).toBe(false);
+    expect(rootIsModule(directory, { type: 'commonjs', exports: { default: './dist/index.js' } })).toBe(false);
+    writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'commonjs' }));
+    writeFileSync(join(directory, 'dist', 'package.json'), JSON.stringify({ type: 'module' }));
+    expect(rootIsModule(directory, { type: 'commonjs', exports: { default: './dist/index.js' } })).toBe(true);
+    expect(rootIsModule(directory, { main: 'index.js' })).toBe(false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the native roots declare the Node versions their require() needs', () => {
+  for (const format of ['docx', 'xlsx', 'pptx']) {
+    const native = manifest(`bindings/${format}-native`);
+    expect(native.engines.node).toBe('^20.19.0 || >=22.12.0');
+    expect(requireFloorProblems(native)).toEqual([]);
+  }
 });

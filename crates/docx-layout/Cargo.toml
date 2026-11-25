@@ -44,7 +44,7 @@ js-sys = "0.3"
 wasm-bindgen = "0.2"
 
 [dev-dependencies]
-betteroffice-fonts.workspace = true
+betteroffice-fonts = { workspace = true, features = ["manager"] }
 # the glyph-run emission tests build an explicit FontStore (register the
 # Liberation fixture) and drive build_display_list_json_with_fonts directly
 ooxml-text.workspace = true

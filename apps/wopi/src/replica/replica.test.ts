@@ -31,7 +31,7 @@ function clientId(): number {
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 function expectDocxSavesEqual(a: Uint8Array, b: Uint8Array): void {
   const differing = differingParts(a, b);

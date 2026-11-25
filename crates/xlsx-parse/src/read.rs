@@ -43,7 +43,7 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) workbook: Workbook,
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
-    pub(crate) cell_facts: Vec<SourceCellFacts>,
+    pub(crate) cell_facts: Vec<WorksheetCellFacts>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
     /// The style table releases that needed an explicit `applyX` flag read,
     /// present only when it differs. A legacy collaboration fingerprint is the
@@ -105,7 +105,7 @@ pub(crate) fn parse_workbook_indexed(
             }
             sheets.push(sheet);
             shared_string_cells.push(SharedStringCells::new());
-            cell_facts.push(SourceCellFacts::default());
+            cell_facts.push(WorksheetCellFacts::default());
             legacy_dimensions.push(LegacySheetDimensions::default());
             continue;
         }
@@ -117,7 +117,7 @@ pub(crate) fn parse_workbook_indexed(
             .unwrap_or_default();
         let mut indices = SharedStringCells::new();
         let mut legacy = LegacySheetDimensions::default();
-        let mut facts = SourceCellFacts::default();
+        let mut facts = WorksheetCellFacts::default();
         let mut sheet = parse_worksheet(
             &entry.name,
             bytes,
@@ -145,6 +145,7 @@ pub(crate) fn parse_workbook_indexed(
             sheets,
             date_system: meta.date_system,
             full_precision: meta.full_precision,
+            iterate: meta.iterate,
             defined_names: meta.defined_names,
             shared_strings,
             styles,
@@ -275,6 +276,7 @@ fn check_workbook_root(e: &quick_xml::events::BytesStart) -> Result<(), ParseErr
 
 struct WorkbookMeta {
     full_precision: bool,
+    iterate: bool,
     date_system: DateSystem,
     active_sheet: SheetId,
     sheets: Vec<SheetEntry>,
@@ -288,12 +290,23 @@ pub fn workbook_full_precision(data: &[u8]) -> Result<bool, ParseError> {
     parse_workbook_xml(data).map(|meta| meta.full_precision)
 }
 
+/// whether the workbook requests iterative calculation.
+pub fn workbook_iterate(data: &[u8]) -> Result<bool, ParseError> {
+    parse_workbook_xml(data).map(|meta| meta.iterate)
+}
+
+/// the workbook's full precision and iterate settings.
+pub fn workbook_calculation_settings(data: &[u8]) -> Result<(bool, bool), ParseError> {
+    parse_workbook_xml(data).map(|meta| (meta.full_precision, meta.iterate))
+}
+
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
     let mut date_system = DateSystem::V1900;
     let mut full_precision = true;
+    let mut iterate = false;
     let mut active_sheet = None;
     let mut sheets_depth = None;
     let mut sheets = Vec::new();
@@ -309,6 +322,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
                 b"calcPr" if depth == 2 => {
                     full_precision = attr(&e, b"fullPrecision")?
                         .is_none_or(|value| !matches!(value.as_str(), "0" | "false"));
+                    iterate = attr(&e, b"iterate")?.as_deref().is_some_and(is_truthy);
                 }
                 b"workbookPr" => {
                     if let Some(v) = attr(&e, b"date1904")?
@@ -364,6 +378,7 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     }
     Ok(WorkbookMeta {
         full_precision,
+        iterate,
         date_system,
         active_sheet: active_sheet.unwrap_or(SheetId(0)),
         sheets,
@@ -682,9 +697,24 @@ pub struct SourceCellFacts {
     pub alternate_formulas: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorksheetCellFacts {
+    pub(crate) source: SourceCellFacts,
+    // The XML and model disagree about whether these cells hold a cache.
+    cache_presence_overrides: BTreeSet<(u32, u32)>,
+}
+
+impl WorksheetCellFacts {
+    pub(crate) fn has_cached_value(&self, at: CellRef, cell: Option<&Cell>) -> bool {
+        cell.is_some_and(|cell| cell.value != CellValue::Empty)
+            ^ self.cache_presence_overrides.contains(&(at.row, at.col))
+    }
+}
+
 /// in-progress cell state accumulated between a `<c>` start and its end.
 #[derive(Default)]
 struct CellBuild {
+    depth: usize,
     addr: Option<CellRef>,
     ty: Option<String>,
     style: Option<u32>,
@@ -692,6 +722,10 @@ struct CellBuild {
     inline_text: Option<String>,
     inline_runs: bool,
     formula: Option<String>,
+    /// Depth of an `mc:AlternateContent` directly under the cell.
+    alternate: Option<usize>,
+    /// Depth of that block's `mc:Fallback`, whose children are read as the cell's own.
+    fallback: Option<usize>,
 }
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
@@ -704,7 +738,7 @@ fn parse_worksheet(
     relationships: &BTreeMap<String, Relationship>,
     shared_string_cells: &mut SharedStringCells,
     legacy: &mut LegacySheetDimensions,
-    facts: &mut SourceCellFacts,
+    facts: &mut WorksheetCellFacts,
     dxfs: &[DifferentialFormat],
 ) -> Result<Sheet, ParseError> {
     let mut reader = reader(data);
@@ -724,6 +758,49 @@ fn parse_worksheet(
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if cur.is_some() => {
+                let Some(c) = cur.as_mut() else {
+                    continue;
+                };
+                let name = local_name(&e);
+                if depth == c.depth + 1 {
+                    let alternate = name.as_slice() == b"AlternateContent";
+                    c.alternate = alternate.then_some(depth);
+                    c.fallback = None;
+                    if alternate {
+                        continue;
+                    }
+                }
+                if c.alternate.is_some_and(|at| depth == at + 1) {
+                    c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
+                    continue;
+                }
+                let direct = depth == c.depth + 1;
+                if !direct && !c.fallback.is_some_and(|at| depth == at + 1) {
+                    continue;
+                }
+                match name.as_slice() {
+                    b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
+                    b"f" => {
+                        let text = collect_text(&mut reader, &mut buf, &mut depth)?;
+                        if c.formula.is_some() && !direct {
+                            continue;
+                        }
+                        if let Some(origin) = c.addr {
+                            shared_formulas.record(&e, origin, &text)?;
+                            record_array_formula(&e, origin, &mut sheet, facts)?;
+                        }
+                        c.formula = Some(text);
+                        facts.source.alternate_formulas |= alternate_depth > 0;
+                    }
+                    b"is" => {
+                        let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
+                        c.inline_text = Some(text);
+                        c.inline_runs = runs;
+                    }
+                    _ => {}
+                }
+            }
             Event::Start(e) => match local_name(&e).as_slice() {
                 b"row" => {
                     let row = match attr(&e, b"r")? {
@@ -771,42 +848,14 @@ fn parse_worksheet(
                     col_cursor = addr.col;
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
+                        depth,
                         addr: Some(addr),
                         ty: attr(&e, b"t")?,
                         style,
                         ..CellBuild::default()
                     });
                 }
-                b"v" => {
-                    let text = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    if let Some(c) = cur.as_mut() {
-                        c.value_text = Some(text);
-                    }
-                }
-                b"f" => {
-                    let text = collect_text(&mut reader, &mut buf, &mut depth)?;
-                    let array_ref = array_formula_range(&e)?;
-                    if let Some(c) = cur.as_mut() {
-                        if let Some(origin) = c.addr {
-                            shared_formulas.record(&e, origin, &text)?;
-                            if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
-                                sheet.set_array_formula(origin, range);
-                            } else if attr(&e, b"t")?.as_deref() == Some("array") {
-                                facts.dropped_array_ranges = true;
-                            }
-                        }
-                        c.formula = Some(text);
-                        facts.alternate_formulas |= alternate_depth > 0;
-                    }
-                }
                 b"AlternateContent" => alternate_depth += 1,
-                b"is" => {
-                    let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
-                    if let Some(c) = cur.as_mut() {
-                        c.inline_text = Some(text);
-                        c.inline_runs = runs;
-                    }
-                }
                 b"mergeCell" => {
                     if let Some(r) = attr(&e, b"ref")? {
                         let range = CellRange::parse_a1(&r)
@@ -854,6 +903,7 @@ fn parse_worksheet(
                 }
                 _ => {}
             },
+            Event::End(_) if cur.as_ref().is_some_and(|cell| depth >= cell.depth) => {}
             Event::End(e) => {
                 let name = e.name();
                 match name.local_name().as_ref() {
@@ -1055,23 +1105,26 @@ pub fn cf_rule_attribute(raw_xml: &str, name: &str) -> Option<String> {
     }
 }
 
-/// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
-/// larger than the spill limit is read as an ordinary formula.
-fn array_formula_range(
+fn record_array_formula(
     element: &quick_xml::events::BytesStart,
-) -> Result<Option<CellRange>, ParseError> {
+    origin: CellRef,
+    sheet: &mut Sheet,
+    facts: &mut WorksheetCellFacts,
+) -> Result<(), ParseError> {
     if attr(element, b"t")?.as_deref() != Some("array") {
-        return Ok(None);
+        return Ok(());
     }
-    let Some(reference) = attr(element, b"ref")? else {
-        return Ok(None);
-    };
-    let Ok(range) = CellRange::parse_a1(&reference) else {
-        return Ok(None);
-    };
-    let rows = u64::from(range.end.row - range.start.row) + 1;
-    let cols = u64::from(range.end.col - range.start.col) + 1;
-    Ok((rows * cols <= xlsx_model::MAX_SPILL_CELLS as u64).then_some(range))
+    let range = attr(element, b"ref")?.and_then(|reference| CellRange::parse_a1(&reference).ok());
+    if let Some(range) = range.filter(|range| {
+        let rows = u64::from(range.end.row - range.start.row) + 1;
+        let cols = u64::from(range.end.col - range.start.col) + 1;
+        rows * cols <= xlsx_model::MAX_SPILL_CELLS as u64 && range.contains(origin)
+    }) {
+        sheet.set_array_formula(origin, range);
+    } else {
+        facts.source.dropped_array_ranges = true;
+    }
+    Ok(())
 }
 
 fn parse_hyperlink(
@@ -1237,15 +1290,18 @@ fn finalize_cell(
     sheet: &mut Sheet,
     columns: &ColumnRuns,
     shared_string_cells: &mut SharedStringCells,
-    facts: &mut SourceCellFacts,
+    facts: &mut WorksheetCellFacts,
 ) -> Result<(), ParseError> {
     let addr = match c.addr {
         Some(a) => a,
         None => return Ok(()),
     };
+    let key = (addr.row, addr.col);
     if c.formula.is_some() && c.value_text.is_none() && c.inline_text.is_none() {
-        facts.uncached_formulas.insert((addr.row, addr.col));
+        facts.source.uncached_formulas.insert(key);
     }
+    let has_cache =
+        c.value_text.as_ref().is_some_and(|value| !value.is_empty()) || c.inline_text.is_some();
     let cached = c
         .value_text
         .as_deref()
@@ -1255,13 +1311,13 @@ fn finalize_cell(
                 .as_deref()
                 .is_some_and(|text| !text.is_empty()));
     if (c.formula.is_some() || c.ty.is_some()) && !cached {
-        facts.blank_results.insert((addr.row, addr.col));
+        facts.source.blank_results.insert(key);
     }
     if c.inline_runs
         && c.ty.as_deref() == Some("inlineStr")
         && let Some(text) = &c.inline_text
     {
-        facts.rich_inline.insert((addr.row, addr.col), text.clone());
+        facts.source.rich_inline.insert(key, text.clone());
     }
     let value = match c.ty.as_deref() {
         Some("s") => {
@@ -1321,7 +1377,18 @@ fn finalize_cell(
         }
         cell.style = Some(0);
     }
-    if cell != Cell::default() {
+    let retained = cell != Cell::default();
+    let cache_presence_differs = has_cache != (cell.value != CellValue::Empty);
+    if (cache_presence_differs || !facts.cache_presence_overrides.is_empty())
+        && (retained || sheet.cell(addr).is_none())
+    {
+        if cache_presence_differs {
+            facts.cache_presence_overrides.insert(key);
+        } else {
+            facts.cache_presence_overrides.remove(&key);
+        }
+    }
+    if retained {
         sheet.set_cell(addr, cell);
     }
     Ok(())

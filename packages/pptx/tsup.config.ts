@@ -30,7 +30,7 @@ export default defineConfig((options) => ({
   },
   onSuccess: async () => {
     const out = options.outDir ?? 'dist';
-    await buildWorkerStubs('pptx', out);
+    await buildWorkerStubs('pptx', out, { browserFonts: true });
     await rename(join(out, 'pptxSessionWorker.node.js'), join(out, 'pptxSessionWorker.node.mjs'));
     await mkdir('dist/generated', { recursive: true });
     await mkdir(join(out, 'generated/preflight'), { recursive: true });

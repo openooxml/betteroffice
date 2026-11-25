@@ -1,12 +1,14 @@
 //! Paragraph properties and inline-content serialization.
 
+use std::borrow::Borrow;
+
 use crate::borders::Borders;
 use crate::formatting::{
     NumberingProperties, ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame,
 };
 use crate::inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
-    RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
+    BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
+    MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -16,7 +18,7 @@ use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
-use super::context::{DeferredFormData, SerializerContext};
+use super::context::{DeferredFormData, SerializerContext, shared_direction_prefix};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -44,7 +46,9 @@ pub fn serialize_paragraph(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
+    let enclosing = std::mem::take(&mut context.direction);
     let result = serialize_paragraph_inner(paragraph, context);
+    context.direction = enclosing;
     context.leave_paragraph();
     result.map(
         |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
@@ -128,22 +132,20 @@ fn serialize_paragraph_inner(
     )?;
     append_generated(&mut writer, &properties);
     let mut generated_comment_references = Vec::new();
-    for content in &paragraph.content {
+    let mut upcoming = None;
+    for (index, content) in paragraph.content.iter().enumerate() {
+        if paragraph_content_zero_width(content) && context.direction.any_open() {
+            if upcoming.is_none() {
+                upcoming = Some(upcoming_paragraph_scopes(paragraph, Within::of(context)));
+            }
+            if let Some(scopes) = &upcoming {
+                context.direction.look_ahead(scopes[index]);
+            }
+        }
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
         if let ParagraphContent::CommentRange(marker) = content
-            && marker.node_type == "commentRangeEnd"
             && !generated_comment_references.contains(&marker.id)
-            && !paragraph.content.iter().any(|content| match content {
-                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
-                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
-                    (matches!(
-                        node,
-                        InlineNode::Run(_) | InlineNode::Hyperlink(_) | InlineNode::InlineSdt(_)
-                    ) || node.has_tracked_control(false, true))
-                        && has_comment_reference(node, marker.id)
-                }),
-                _ => false,
-            })
+            && needs_comment_reference(paragraph, content)
         {
             writer
                 .start_element("w:r")
@@ -159,8 +161,235 @@ fn serialize_paragraph_inner(
             generated_comment_references.push(marker.id);
         }
     }
+    let closing = context.direction.close_all();
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
+    }
     writer.end_element();
     Ok(writer.finish())
+}
+
+/// Whether `content` is a `commentRangeEnd` whose comment no reference in the paragraph marks,
+/// so a reference run is written after it.
+fn needs_comment_reference(paragraph: &Paragraph, content: &ParagraphContent) -> bool {
+    let ParagraphContent::CommentRange(marker) = content else {
+        return false;
+    };
+    marker.node_type == "commentRangeEnd"
+        && !paragraph.content.iter().any(|content| match content {
+            ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
+            ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
+                (matches!(
+                    node,
+                    InlineNode::Run(_) | InlineNode::Hyperlink(_) | InlineNode::InlineSdt(_)
+                ) || node.has_tracked_control(false, true))
+                    && has_comment_reference(node, marker.id)
+            }),
+            _ => false,
+        })
+}
+
+/// The range and annotation marks a direction scope may hold, each one empty `w:` element.
+const MARKS_WITHOUT_WIDTH: [&str; 19] = [
+    "bookmarkStart",
+    "bookmarkEnd",
+    "commentRangeStart",
+    "commentRangeEnd",
+    "moveFromRangeStart",
+    "moveFromRangeEnd",
+    "moveToRangeStart",
+    "moveToRangeEnd",
+    "customXmlInsRangeStart",
+    "customXmlInsRangeEnd",
+    "customXmlDelRangeStart",
+    "customXmlDelRangeEnd",
+    "customXmlMoveFromRangeStart",
+    "customXmlMoveFromRangeEnd",
+    "customXmlMoveToRangeStart",
+    "customXmlMoveToRangeEnd",
+    "permStart",
+    "permEnd",
+    "proofErr",
+];
+
+/// Whether `xml` is one of [`MARKS_WITHOUT_WIDTH`], written where it sits and taking no width.
+fn empty_word_mark(xml: &str) -> bool {
+    let Some(tag) = xml.trim().strip_prefix("<w:") else {
+        return false;
+    };
+    let name = tag
+        .split([' ', '\t', '\n', '\r', '/', '>'])
+        .next()
+        .unwrap_or_default();
+    if !MARKS_WITHOUT_WIDTH.contains(&name) {
+        return false;
+    }
+    let mut quote = None;
+    for (index, character) in tag.char_indices() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => {}
+            None if matches!(character, '"' | '\'') => quote = Some(character),
+            None if character == '>' => {
+                return index + 1 == tag.len() && tag[..index].ends_with('/');
+            }
+            None => {}
+        }
+    }
+    false
+}
+
+fn zero_width(node: &InlineNode) -> bool {
+    match node {
+        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => true,
+        InlineNode::RawXml(raw) => empty_word_mark(&raw.xml),
+        _ => false,
+    }
+}
+
+fn paragraph_content_zero_width(content: &ParagraphContent) -> bool {
+    match content {
+        ParagraphContent::Inline(node) => zero_width(node),
+        ParagraphContent::Tracked(_) => false,
+        ParagraphContent::RangeStart(_)
+        | ParagraphContent::RangeEnd(_)
+        | ParagraphContent::CommentRange(_) => true,
+    }
+}
+
+/// Whether a node is written inside a content control and inside a tracked change, which decides
+/// the children a hyperlink there writes.
+#[derive(Clone, Copy)]
+struct Within {
+    control: bool,
+    revision: bool,
+}
+
+impl Within {
+    fn of(context: &SerializerContext) -> Self {
+        Self {
+            control: context.in_control,
+            revision: context.in_revision,
+        }
+    }
+}
+
+/// Whether a hyperlink written `within` writes its child `child`.
+fn link_writes(child: &InlineNode, within: Within) -> bool {
+    match child {
+        _ if within.control && within.revision => true,
+        InlineNode::Run(_)
+        | InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::RawXml(_) => true,
+        InlineNode::InlineSdt(_) => child.has_tracked_control(false, within.revision),
+        _ => false,
+    }
+}
+
+/// The children a hyperlink written `within` writes, in order.
+fn written_link_children(hyperlink: &Hyperlink, within: Within) -> Vec<&InlineNode> {
+    let expanded = within.control && within.revision;
+    let nested = hyperlink.structured_children.as_ref().filter(|children| {
+        expanded
+            || children
+                .iter()
+                .any(|child| child.has_tracked_control(false, within.revision))
+    });
+    nested
+        .unwrap_or(&hyperlink.children)
+        .iter()
+        .filter(|child| link_writes(child, within))
+        .collect()
+}
+
+/// The scopes `node`, written `within`, keeps open where it starts.
+fn leading_scopes(node: &InlineNode, within: Within) -> &[DirectionScope] {
+    let mut shared = None;
+    merge_direction_scopes(node, &mut shared, within);
+    shared.unwrap_or_default()
+}
+
+/// The scopes the next node with width keeps open where it starts, from each of a wrapper
+/// element's nodes on: those of what is written after the nodes where none of them follows.
+/// They are found in one pass from the end, when a node without width first needs them.
+struct Upcoming<'a, N> {
+    nodes: &'a [N],
+    after: Option<&'a [DirectionScope]>,
+    within: Within,
+    scopes: Option<Vec<Option<&'a [DirectionScope]>>>,
+}
+
+impl<'a, N: Borrow<InlineNode>> Upcoming<'a, N> {
+    fn new(nodes: &'a [N], after: Option<&'a [DirectionScope]>, within: Within) -> Self {
+        Self {
+            nodes,
+            after,
+            within,
+            scopes: None,
+        }
+    }
+
+    /// Notes, before `nodes[index]` when it takes no width inside an open scope, the scopes the
+    /// next node with width keeps open where it starts.
+    fn look_ahead(&mut self, index: usize, context: &mut SerializerContext) {
+        if !zero_width(self.nodes[index].borrow()) || !context.direction.any_open() {
+            return;
+        }
+        if self.scopes.is_none() {
+            self.scopes = Some(upcoming_scopes(self.nodes, self.after, self.within));
+        }
+        if let Some(scopes) = &self.scopes {
+            context.direction.look_ahead(scopes[index]);
+        }
+    }
+}
+
+fn upcoming_scopes<'a, N: Borrow<InlineNode>>(
+    nodes: &'a [N],
+    after: Option<&'a [DirectionScope]>,
+    within: Within,
+) -> Vec<Option<&'a [DirectionScope]>> {
+    let mut next = after;
+    let mut upcoming = vec![None; nodes.len()];
+    for (index, node) in nodes.iter().enumerate().rev() {
+        let node: &InlineNode = node.borrow();
+        if !zero_width(node) {
+            next = Some(leading_scopes(node, within));
+        }
+        upcoming[index] = next;
+    }
+    upcoming
+}
+
+/// The scopes the first paragraph content with width from each index on keeps open where it
+/// starts, written `within`, found in one pass from the end; `None` where a reference run is
+/// written before it or none follows.
+fn upcoming_paragraph_scopes(
+    paragraph: &Paragraph,
+    within: Within,
+) -> Vec<Option<&[DirectionScope]>> {
+    let revision = Within {
+        revision: true,
+        ..within
+    };
+    let mut next = None;
+    let mut upcoming = vec![None; paragraph.content.len()];
+    for (index, content) in paragraph.content.iter().enumerate().rev() {
+        match content {
+            ParagraphContent::Inline(node) if !zero_width(node) => {
+                next = Some(leading_scopes(node, within));
+            }
+            ParagraphContent::Tracked(change) => {
+                let scopes = shared_direction_scopes(&change.content, revision);
+                next = Some(scopes.unwrap_or_default());
+            }
+            _ if needs_comment_reference(paragraph, content) => next = None,
+            _ => {}
+        }
+        upcoming[index] = next;
+    }
+    upcoming
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -284,34 +513,42 @@ pub fn serialize_paragraph_content(
     content: &ParagraphContent,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    match content {
-        ParagraphContent::Inline(node) => serialize_inline_node(node, context),
-        ParagraphContent::Tracked(change) => serialize_tracked_change(change, context),
-        ParagraphContent::RangeStart(marker) => serialize_range_start(marker),
-        ParagraphContent::RangeEnd(marker) => serialize_range_end(marker),
-        ParagraphContent::CommentRange(marker) => serialize_comment_range(marker),
-    }
+    let marker = match content {
+        ParagraphContent::Inline(node) => return serialize_inline_node(node, context),
+        ParagraphContent::Tracked(change) => return serialize_tracked_change(change, context),
+        ParagraphContent::RangeStart(marker) => serialize_range_start(marker)?,
+        ParagraphContent::RangeEnd(marker) => serialize_range_end(marker)?,
+        ParagraphContent::CommentRange(marker) => serialize_comment_range(marker)?,
+    };
+    Ok(prefixed(context.direction.unscoped(true), marker))
 }
 
 pub(crate) fn serialize_inline_node(
     node: &InlineNode,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    match node {
-        InlineNode::Run(run) => serialize_context_run(run, context),
-        InlineNode::Hyperlink(hyperlink) => serialize_hyperlink(hyperlink, context),
-        InlineNode::BookmarkStart(bookmark) => Ok(serialize_bookmark_start(bookmark)),
-        InlineNode::BookmarkEnd(bookmark) => Ok(serialize_bookmark_end(bookmark)),
-        InlineNode::SimpleField(field) => serialize_simple_field(field, context),
-        InlineNode::ComplexField(field) => serialize_complex_field(field, context),
-        InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
-        InlineNode::Math(math) => serialize_math(math),
-        InlineNode::Tracked(change) => serialize_tracked_change(change, context),
+    let unscoped = match node {
+        InlineNode::Run(run) => return serialize_context_run(run, context),
+        InlineNode::Hyperlink(hyperlink) => return serialize_hyperlink(hyperlink, context),
+        InlineNode::SimpleField(field) => return serialize_simple_field(field, context),
+        InlineNode::ComplexField(field) => return serialize_complex_field(field, context),
+        InlineNode::InlineSdt(sdt) => return serialize_inline_sdt(sdt, context),
+        InlineNode::Tracked(change) => return serialize_tracked_change(change, context),
+        InlineNode::BookmarkStart(bookmark) => serialize_bookmark_start(bookmark),
+        InlineNode::BookmarkEnd(bookmark) => serialize_bookmark_end(bookmark),
+        InlineNode::Math(math) => serialize_math(math)?,
         InlineNode::RawXml(raw) => {
             validate_replayed_fragment(&raw.xml)?;
-            Ok(raw.xml.clone())
+            raw.xml.clone()
         }
+    };
+    if unscoped.is_empty() {
+        return Ok(unscoped);
     }
+    Ok(prefixed(
+        context.direction.unscoped(zero_width(node)),
+        unscoped,
+    ))
 }
 
 pub(super) fn serialize_bookmark_start(bookmark: &BookmarkStart) -> String {
@@ -340,11 +577,105 @@ pub(super) fn serialize_bookmark_end(bookmark: &BookmarkEnd) -> String {
 }
 
 fn serialize_context_run(run: &Run, context: &mut SerializerContext) -> Result<String, ParseError> {
-    if context.deletion {
-        serialize_deleted_run(run, context)
+    serialize_scoped_run(run, context.deletion, context)
+}
+
+fn serialize_scoped_run(
+    run: &Run,
+    deletion: bool,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
+    let opened = context.direction.transition(&run.direction_scopes);
+    let xml = if deletion {
+        serialize_deleted_run(run, context)?
     } else {
-        serialize_run(run, context)
+        serialize_run(run, context)?
+    };
+    Ok(prefixed(opened, xml))
+}
+
+fn prefixed(mut before: String, xml: String) -> String {
+    if before.is_empty() {
+        return xml;
     }
+    before.push_str(&xml);
+    before
+}
+
+fn merge_run_direction_scopes<'a>(run: &'a Run, shared: &mut Option<&'a [DirectionScope]>) {
+    merge_scopes(&run.direction_scopes, shared);
+}
+
+fn merge_scopes<'a>(scopes: &'a [DirectionScope], shared: &mut Option<&'a [DirectionScope]>) {
+    *shared = Some(match *shared {
+        Some(current) => &current[..shared_direction_prefix(current, scopes)],
+        None => scopes,
+    });
+}
+
+/// The scopes every code and result run of `field` sits in, or the scopes read around the field
+/// when it holds no such run.
+fn complex_field_direction_scopes(field: &ComplexField) -> &[DirectionScope] {
+    let mut shared = None;
+    for run in field.field_code.iter().chain(&field.field_result) {
+        merge_run_direction_scopes(run, &mut shared);
+    }
+    shared.unwrap_or(&field.direction_scopes)
+}
+
+fn merge_direction_scopes<'a>(
+    node: &'a InlineNode,
+    shared: &mut Option<&'a [DirectionScope]>,
+    within: Within,
+) {
+    match node {
+        InlineNode::Run(run) => merge_run_direction_scopes(run, shared),
+        InlineNode::Hyperlink(link) => {
+            for child in written_link_children(link, within) {
+                merge_direction_scopes(child, shared, within);
+            }
+        }
+        InlineNode::SimpleField(field) => {
+            for run in &field.content {
+                merge_run_direction_scopes(run, shared);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            merge_scopes(complex_field_direction_scopes(field), shared)
+        }
+        InlineNode::InlineSdt(sdt) => {
+            let within = Within {
+                control: true,
+                ..within
+            };
+            for child in &sdt.content {
+                merge_direction_scopes(child, shared, within);
+            }
+        }
+        InlineNode::Tracked(change) => {
+            let within = Within {
+                revision: true,
+                ..within
+            };
+            for child in &change.content {
+                merge_direction_scopes(child, shared, within);
+            }
+        }
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_) => {}
+    }
+}
+
+/// The `w:dir`/`w:bdo` scopes every run in `nodes`, written `within`, sits in, outermost first;
+/// `None` without runs.
+fn shared_direction_scopes(nodes: &[InlineNode], within: Within) -> Option<&[DirectionScope]> {
+    let mut shared = None;
+    for node in nodes {
+        merge_direction_scopes(node, &mut shared, within);
+    }
+    shared
 }
 
 fn serialize_hyperlink(
@@ -352,29 +683,24 @@ fn serialize_hyperlink(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut children = String::new();
-    let expanded = context.in_control && context.in_revision;
-    let nested = hyperlink.structured_children.as_ref().filter(|children| {
-        expanded
-            || children
-                .iter()
-                .any(|child| child.has_tracked_control(false, context.in_revision))
-    });
-    for child in nested.unwrap_or(&hyperlink.children) {
-        match child {
-            _ if expanded => children.push_str(&serialize_inline_node(child, context)?),
-            InlineNode::Run(run) => children.push_str(&serialize_context_run(run, context)?),
-            InlineNode::BookmarkStart(bookmark) => {
-                children.push_str(&serialize_bookmark_start(bookmark))
-            }
-            InlineNode::BookmarkEnd(bookmark) => {
-                children.push_str(&serialize_bookmark_end(bookmark))
-            }
-            InlineNode::InlineSdt(_) if child.has_tracked_control(false, context.in_revision) => {
-                children.push_str(&serialize_inline_node(child, context)?);
-            }
-            _ => {}
-        }
+    let within = Within::of(context);
+    let written = written_link_children(hyperlink, within);
+    let mut shared = None;
+    for &child in &written {
+        merge_direction_scopes(child, &mut shared, within);
     }
+    let (before, base) = context.direction.enter_wrapper(shared);
+    let mut upcoming = Upcoming::new(&written, None, within);
+    for (index, child) in written.iter().enumerate() {
+        upcoming.look_ahead(index, context);
+        children.push_str(&serialize_inline_node(child, context)?);
+    }
+    children.push_str(&context.direction.leave_wrapper(base));
+    let xml = serialize_hyperlink_element(hyperlink, children);
+    Ok(prefixed(before, xml))
+}
+
+fn serialize_hyperlink_element(hyperlink: &Hyperlink, children: String) -> String {
     let has_attributes = nonempty(hyperlink.relationship_id.as_deref()).is_some()
         || nonempty(hyperlink.anchor.as_deref()).is_some()
         || nonempty(hyperlink.tooltip.as_deref()).is_some()
@@ -382,7 +708,7 @@ fn serialize_hyperlink(
         || hyperlink.history.is_some()
         || nonempty(hyperlink.doc_location.as_deref()).is_some();
     if !has_attributes && nonempty(hyperlink.href.as_deref()).is_none() {
-        return Ok(children);
+        return children;
     }
     let mut writer = XmlWriter::with_capacity(children.len() + 128);
     writer.start_element("w:hyperlink");
@@ -400,14 +726,18 @@ fn serialize_hyperlink(
     );
     append_generated(&mut writer, &children);
     writer.end_element();
-    Ok(writer.finish())
+    writer.finish()
 }
 
 fn serialize_simple_field(
     field: &SimpleField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let mut output = String::new();
+    let mut shared = None;
+    for run in &field.content {
+        merge_run_direction_scopes(run, &mut shared);
+    }
+    let (mut output, base) = context.direction.enter_wrapper(shared);
     output.push_str("<w:fldSimple w:instr=\"");
     output.push_str(&super::xml_writer::escape_xml(&field.instruction));
     output.push('"');
@@ -421,6 +751,7 @@ fn serialize_simple_field(
     for run in &field.content {
         output.push_str(&serialize_context_run(run, context)?);
     }
+    output.push_str(&context.direction.leave_wrapper(base));
     output.push_str("</w:fldSimple>");
     Ok(output)
 }
@@ -592,13 +923,16 @@ fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    let shared = complex_field_direction_scopes(field);
     if let Some(source) = field.source_run_xml.as_deref()
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
     {
         validate_replayed_fragment(source)?;
-        return Ok(source.to_owned());
+        let mut output = context.direction.transition(shared);
+        output.push_str(source);
+        return Ok(output);
     }
     let formatting = field
         .field_result
@@ -606,7 +940,7 @@ fn serialize_complex_field(
         .and_then(|run| run.formatting.as_ref())
         .or(field.formatting.as_ref());
     let properties = serialize_text_formatting(formatting);
-    let mut output = String::new();
+    let mut output = context.direction.transition(shared);
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"begin\"");
@@ -649,17 +983,29 @@ fn serialize_complex_field(
                 .flat_map(field_runs)
                 .eq(field.field_code.iter())
     });
+    let mut result_scopes = None;
+    for run in &field.field_result {
+        merge_run_direction_scopes(run, &mut result_scopes);
+    }
+    let result_scopes = result_scopes.unwrap_or(&field.direction_scopes);
     if let Some(nodes) = in_place {
-        for node in nodes {
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
+        for (index, node) in nodes.iter().enumerate() {
+            upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else if let Some(nodes) = code_nodes {
+        let code_scopes = match field.field_code.first() {
+            Some(run) => run.direction_scopes.as_slice(),
+            None => shared,
+        };
         for node in nodes.iter().filter(|node| {
             matches!(
                 node,
                 InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
             )
         }) {
+            context.direction.look_ahead(Some(code_scopes));
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
@@ -678,6 +1024,7 @@ fn serialize_complex_field(
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
+    output.push_str(&context.direction.transition(result_scopes));
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
@@ -688,7 +1035,9 @@ fn serialize_complex_field(
         .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_ref());
     if let Some(nodes) = structured {
-        for node in nodes {
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
+        for (index, node) in nodes.iter().enumerate() {
+            upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
         }
     } else {
@@ -699,14 +1048,19 @@ fn serialize_complex_field(
                 .is_some_and(|(boundary, _)| *boundary == index)
             {
                 let (_, node) = bookmarks.next().unwrap();
+                context
+                    .direction
+                    .look_ahead(Some(run.direction_scopes.as_slice()));
                 output.push_str(&serialize_inline_node(node, context)?);
             }
             output.push_str(&serialize_context_run(run, context)?);
         }
         for (_, node) in bookmarks {
+            context.direction.look_ahead(Some(result_scopes));
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
+    output.push_str(&context.direction.transition(result_scopes));
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
@@ -724,14 +1078,28 @@ pub fn serialize_inline_sdt(
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
     let previous = std::mem::replace(&mut context.in_control, true);
-    let result = sdt.content.iter().try_for_each(|item| {
-        append_generated(&mut writer, &serialize_inline_node(item, context)?);
-        Ok::<_, ParseError>(())
-    });
+    let within = Within::of(context);
+    let (before, base) = context
+        .direction
+        .enter_wrapper(shared_direction_scopes(&sdt.content, within));
+    let mut upcoming = Upcoming::new(&sdt.content, None, within);
+    let result = sdt
+        .content
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, item)| {
+            upcoming.look_ahead(index, context);
+            append_generated(&mut writer, &serialize_inline_node(item, context)?);
+            Ok::<_, ParseError>(())
+        });
     context.in_control = previous;
     result?;
+    let closing = context.direction.leave_wrapper(base);
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
+    }
     writer.end_element().end_element();
-    Ok(writer.finish())
+    Ok(prefixed(before, writer.finish()))
 }
 
 fn form_field_name(field: &ComplexField, raw: &str) -> String {
@@ -903,6 +1271,13 @@ fn serialize_tracked_change(
         "moveTo" => ("w:moveTo", false),
         _ => return Ok(String::new()),
     };
+    let within = Within {
+        revision: true,
+        ..Within::of(context)
+    };
+    let (before, base) = context
+        .direction
+        .enter_wrapper(shared_direction_scopes(&change.content, within));
     let mut writer = XmlWriter::with_capacity(256);
     writer
         .start_element(element)
@@ -919,36 +1294,42 @@ fn serialize_tracked_change(
     let previous_revision = std::mem::replace(&mut context.in_revision, true);
     let previous_deletion =
         std::mem::replace(&mut context.deletion, deletion && context.in_control);
-    let result = change.content.iter().try_for_each(|item| {
-        let xml = match item {
-            _ if context.in_control => serialize_inline_node(item, context)?,
-            InlineNode::Run(run) => {
-                if deletion {
-                    serialize_deleted_run(run, context)?
-                } else {
-                    serialize_run(run, context)?
+    let mut upcoming = Upcoming::new(&change.content, None, within);
+    let result = change
+        .content
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, item)| {
+            let xml = match item {
+                _ if context.in_control => {
+                    upcoming.look_ahead(index, context);
+                    serialize_inline_node(item, context)?
                 }
-            }
-            InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
-            InlineNode::InlineSdt(_) => {
-                context.deletion = deletion;
-                let result = serialize_inline_node(item, context);
-                context.deletion = false;
-                result?
-            }
-            InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
-                serialize_inline_node(item, context)?
-            }
-            _ => return Ok(()),
-        };
-        append_generated(&mut writer, &xml);
-        Ok::<_, ParseError>(())
-    });
+                InlineNode::Run(run) => serialize_scoped_run(run, deletion, context)?,
+                InlineNode::Hyperlink(link) => serialize_hyperlink(link, context)?,
+                InlineNode::InlineSdt(_) => {
+                    context.deletion = deletion;
+                    let result = serialize_inline_node(item, context);
+                    context.deletion = false;
+                    result?
+                }
+                InlineNode::Tracked(_) if item.has_tracked_control(false, true) => {
+                    serialize_inline_node(item, context)?
+                }
+                _ => return Ok(()),
+            };
+            append_generated(&mut writer, &xml);
+            Ok::<_, ParseError>(())
+        });
     context.in_revision = previous_revision;
     context.deletion = previous_deletion;
     result?;
+    let closing = context.direction.leave_wrapper(base);
+    if !closing.is_empty() {
+        append_generated(&mut writer, &closing);
+    }
     writer.end_element();
-    Ok(writer.finish())
+    Ok(prefixed(before, writer.finish()))
 }
 
 fn serialize_range_start(marker: &RangeStart) -> Result<String, ParseError> {
@@ -1361,6 +1742,7 @@ mod tests {
                     text: "3".to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }],
             fld_lock: Some(true),
             dirty: Some(true),
@@ -1401,6 +1783,7 @@ mod tests {
                     text: "hello & goodbye".to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             }))],
             list_rendering: None,
             rendered_page_break_before: Some(true),
@@ -1437,6 +1820,7 @@ mod tests {
                         text: "A".to_owned(),
                         preserve_space: None,
                     }],
+                    direction_scopes: Vec::new(),
                 }))],
                 list_rendering: None,
                 rendered_page_break_before: None,
@@ -1563,6 +1947,703 @@ mod tests {
         assert_eq!(
             serialize_tracked_change(&change, &mut context()).unwrap(),
             "<w:del w:id=\"7\" w:author=\"Ada\"></w:del>"
+        );
+    }
+
+    const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    const DIR: (&str, &str) = (r#"<w:dir w:val="rtl">"#, "</w:dir>");
+
+    const BDO: (&str, &str) = (r#"<w:bdo w:val="rtl">"#, "</w:bdo>");
+
+    const SCOPE_TAGS: [&str; 4] = [
+        r#"<w:dir w:val="rtl">"#,
+        r#"<w:dir w:val="ltr">"#,
+        r#"<w:bdo w:val="rtl">"#,
+        r#"<w:bdo w:val="ltr">"#,
+    ];
+
+    const FIELD_OPEN: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> SUBJECT </w:instrText></w:r>"#,
+        r#"<w:dir w:val="rtl"><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    );
+
+    const FIELD_CLOSE: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:dir>"#;
+
+    const SDT_OPEN: &str = concat!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr>"#,
+        r#"<w:sdtContent><w:dir w:val="rtl">"#,
+    );
+
+    const DIRECTION_SCOPES: [(&str, &str, &str, &str); 10] = [
+        ("paragraph", r#"<w:dir w:val="rtl">"#, "", "</w:dir>"),
+        ("bdo", r#"<w:bdo w:val="rtl">"#, "", "</w:bdo>"),
+        (
+            "hyperlink",
+            r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:hyperlink>",
+        ),
+        (
+            "insertion",
+            r#"<w:ins w:id="1" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:ins>",
+        ),
+        (
+            "deletion",
+            r#"<w:del w:id="2" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:del>",
+        ),
+        (
+            "content control",
+            SDT_OPEN,
+            "",
+            "</w:dir></w:sdtContent></w:sdt>",
+        ),
+        (
+            "simple field",
+            r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:fldSimple>",
+        ),
+        (
+            "nested",
+            r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:bdo>",
+        ),
+        (
+            "adjacent",
+            r#"<w:dir w:val="rtl">"#,
+            r#"</w:dir><w:dir w:val="ltr">"#,
+            "</w:dir>",
+        ),
+        ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
+    ];
+
+    fn round_trip(xml: &str) -> String {
+        serialize_paragraph(&parsed(xml), &mut context()).unwrap()
+    }
+
+    fn parsed(xml: &str) -> Paragraph {
+        let limits = crate::xml::ParseLimits::default();
+        let mut budget = crate::xml::ParseBudget::new(&limits);
+        let document =
+            crate::xml::parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
+        let mut ids = crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
+        crate::paragraph::parse_paragraph(
+            document.root().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &mut budget,
+            &mut ids,
+            None,
+            false,
+            0,
+        )
+        .unwrap()
+    }
+
+    fn shown(xml: &str) -> String {
+        let mut text = String::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find('<') {
+            let Some(end) = rest[start..].find('>') else {
+                break;
+            };
+            let tag = &rest[start + 1..start + end];
+            rest = &rest[start + end + 1..];
+            let name = tag.split([' ', '/']).next().unwrap_or_default();
+            if matches!(name, "w:t" | "w:delText") && !tag.ends_with('/') {
+                text.push_str(&rest[..rest.find('<').unwrap_or(rest.len())]);
+            }
+        }
+        text
+    }
+
+    fn region<'a>(xml: &'a str, open: &str, close: &str) -> &'a str {
+        let start = xml.find(open).map_or(xml.len(), |at| at + open.len());
+        let rest = &xml[start..];
+        rest.find(close).map_or("", |end| &rest[..end])
+    }
+
+    fn container(name: &str) -> Option<(&'static str, &'static str)> {
+        match name {
+            "hyperlink" => Some(("<w:hyperlink", "</w:hyperlink>")),
+            "insertion" => Some(("<w:ins ", "</w:ins>")),
+            "deletion" => Some(("<w:del ", "</w:del>")),
+            "content control" => Some(("<w:sdtContent>", "</w:sdtContent>")),
+            "simple field" => Some(("<w:fldSimple", "</w:fldSimple>")),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn direction_scopes_save_back_around_their_text_in_every_container() {
+        for (name, open, middle, close) in DIRECTION_SCOPES {
+            let text = if name == "deletion" { "delText" } else { "t" };
+            let source = format!(
+                r#"<w:p xmlns:w="{WORD}"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{open}<w:r><w:{text}>two</w:{text}></w:r>{middle}<w:r><w:{text} xml:space="preserve"> runs</w:{text}></w:r>{close}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+            );
+            let output = round_trip(&source);
+            assert_eq!(shown(&output), "Before two runs after", "{name}");
+            for tag in SCOPE_TAGS {
+                assert_eq!(
+                    output.matches(tag).count(),
+                    source.matches(tag).count(),
+                    "{name} {tag}: {output}"
+                );
+            }
+            let (inner_open, inner_close) = if name == "bdo" { BDO } else { DIR };
+            let inner = if name == "adjacent" {
+                "two"
+            } else {
+                "two runs"
+            };
+            assert_eq!(
+                shown(region(&output, inner_open, inner_close)),
+                inner,
+                "{name}: {output}"
+            );
+            if name == "adjacent" {
+                let ltr = region(&output, r#"<w:dir w:val="ltr">"#, "</w:dir>");
+                assert_eq!(shown(ltr), " runs", "{output}");
+            }
+            if name == "nested" {
+                let ltr = region(&output, r#"<w:bdo w:val="ltr">"#, "</w:bdo>");
+                assert!(ltr.contains(DIR.0), "{output}");
+                assert_eq!(shown(ltr), "two runs", "{output}");
+            }
+            if let Some((outer_open, outer_close)) = container(name) {
+                assert!(
+                    region(&output, outer_open, outer_close).contains(DIR.0),
+                    "{name}: {output}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complex_field_result_scope_holds_its_separate_character() {
+        let source = format!(
+            r#"<w:p xmlns:w="{WORD}"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{FIELD_OPEN}<w:r><w:t>two</w:t></w:r>{FIELD_CLOSE}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+        );
+        let output = round_trip(&source);
+        assert_eq!(shown(&output), "Before two after", "{output}");
+        let scoped = region(&output, DIR.0, DIR.1);
+        assert!(
+            scoped.starts_with(r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#),
+            "{output}"
+        );
+        assert!(
+            scoped.ends_with(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            "{output}"
+        );
+        assert_eq!(shown(scoped), "two", "{output}");
+    }
+
+    #[test]
+    fn unmodeled_word_inline_elements_save_back_verbatim() {
+        let output = round_trip(&format!(
+            r#"<w:p xmlns:w="{WORD}"><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:r><w:t>b</w:t></w:r></w:p>"#
+        ));
+        assert!(output.contains("<w:zzz"), "{output}");
+        assert!(
+            output.contains("<w:r><w:t>x</w:t></w:r></w:zzz>"),
+            "{output}"
+        );
+        assert_eq!(shown(&output), "axb", "{output}");
+    }
+
+    const RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    const MATH: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+
+    const BEGIN: &str = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#;
+
+    const INSTRUCTION: &str = "<w:r><w:instrText>PAGE</w:instrText></w:r>";
+
+    const SEPARATE: &str = r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#;
+
+    const END: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+
+    const EQUATION: &str = "<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>";
+
+    fn text_run(text: &str) -> String {
+        format!("<w:r><w:t>{text}</w:t></w:r>")
+    }
+
+    fn rtl(inner: &str) -> String {
+        format!(r#"<w:dir w:val="rtl">{inner}</w:dir>"#)
+    }
+
+    fn paragraph_xml(content: &str) -> String {
+        format!(
+            r#"<w:p xmlns:w="{WORD}" xmlns:r="{RELATIONSHIPS}" xmlns:m="{MATH}">{content}</w:p>"#
+        )
+    }
+
+    fn written(content: &str) -> String {
+        round_trip(&paragraph_xml(content))
+    }
+
+    fn rtl_code_run(text: &str) -> Value {
+        json!({
+            "type": "run",
+            "content": [{"type": "instrText", "text": text}],
+            "directionScopes": [{"kind": "dir", "val": "rtl", "id": 0}]
+        })
+    }
+
+    fn run_holding<'a>(xml: &'a str, needle: &str) -> &'a str {
+        let at = xml.find(needle).expect("the unscoped save holds the run");
+        let start = xml[..at].rfind("<w:r>").expect("the needle sits in a run");
+        let end = at + xml[at..].find("</w:r>").expect("the run closes") + "</w:r>".len();
+        &xml[start..end]
+    }
+
+    fn wrapped(xml: &str, node: &str, open: &str, close: &str) -> String {
+        assert_eq!(xml.matches(node).count(), 1, "{node}: {xml}");
+        xml.replacen(node, &format!("{open}{node}{close}"), 1)
+    }
+
+    #[test]
+    fn a_direction_scope_closes_before_every_node_that_does_not_carry_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let cases = [
+            (
+                "equation",
+                format!("{a}{}{EQUATION}{c}", rtl(&b)),
+                format!("{a}{b}{EQUATION}{c}"),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "comment range end",
+                format!(
+                    r#"{a}<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/>{c}"#,
+                    rtl(&b)
+                ),
+                format!(r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>{c}"#),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "comment range end closing the paragraph",
+                format!(
+                    r#"{a}<w:commentRangeStart w:id="1"/>{}<w:commentRangeEnd w:id="1"/>"#,
+                    rtl(&b)
+                ),
+                format!(r#"{a}<w:commentRangeStart w:id="1"/>{b}<w:commentRangeEnd w:id="1"/>"#),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "kept element",
+                format!(r#"{a}{}<w:subDoc r:id="rId9"/>{c}"#, rtl(&b)),
+                format!(r#"{a}{b}<w:subDoc r:id="rId9"/>{c}"#),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "bookmark end",
+                format!(
+                    r#"{a}<w:bookmarkStart w:id="3" w:name="mark"/>{}<w:bookmarkEnd w:id="3"/>{c}"#,
+                    rtl(&b)
+                ),
+                format!(
+                    r#"{a}<w:bookmarkStart w:id="3" w:name="mark"/>{b}<w:bookmarkEnd w:id="3"/>{c}"#
+                ),
+                "<w:t>B</w:t>",
+            ),
+            (
+                "scoped field code with an unscoped result",
+                format!("{a}{BEGIN}{}{SEPARATE}{b}{END}{c}", rtl(INSTRUCTION)),
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{END}{c}"),
+                "<w:instrText",
+            ),
+            (
+                "field result whose last run alone is scoped",
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{}{END}{d}", rtl(&c)),
+                format!("{a}{BEGIN}{INSTRUCTION}{SEPARATE}{b}{c}{END}{d}"),
+                "<w:t>C</w:t>",
+            ),
+        ];
+        for (name, scoped, plain, needle) in cases {
+            let unscoped = written(&plain);
+            let node = run_holding(&unscoped, needle).to_owned();
+            let expected = wrapped(&unscoped, &node, DIR.0, DIR.1);
+            assert_eq!(written(&scoped), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_direction_element_without_a_value_saves_without_one() {
+        let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));
+        let unscoped = written(&format!("{a}{b}{c}"));
+        let expected = wrapped(&unscoped, &b, "<w:dir>", "</w:dir>");
+        assert_eq!(written(&format!("{a}<w:dir>{b}</w:dir>{c}")), expected);
+    }
+
+    fn runs_spanning<'a>(xml: &'a str, first: &str, last: &str) -> &'a str {
+        let at = |run: &str| run.as_ptr() as usize - xml.as_ptr() as usize;
+        let first = run_holding(xml, first);
+        let last = run_holding(xml, last);
+        &xml[at(first)..at(last) + last.len()]
+    }
+
+    #[test]
+    fn a_bookmark_between_two_runs_of_one_scope_is_written_inside_it() {
+        let first = "<w:r><w:t>مرحبا</w:t></w:r>";
+        let second = r#"<w:r><w:t xml:space="preserve"> 123</w:t></w:r>"#;
+        let start = r#"<w:bookmarkStart w:id="0" w:name="b"/>"#;
+        let end = r#"<w:bookmarkEnd w:id="0"/>"#;
+        let unscoped = written(&format!("{first}{start}{second}{end}"));
+        let held = runs_spanning(&unscoped, "مرحبا", " 123");
+        assert!(held.contains(start), "{unscoped}");
+        let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+        let output = written(&rtl(&format!("{first}{start}{second}{end}")));
+        assert_eq!(output, expected);
+        assert_eq!(output.matches("<w:dir").count(), 1, "{output}");
+        assert!(output.contains(&format!("</w:dir>{end}")), "{output}");
+    }
+
+    #[test]
+    fn a_node_without_width_between_two_runs_of_one_scope_is_written_inside_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let close = r#"<w:commentRangeEnd w:id="1"/>"#;
+        for middle in [
+            r#"<w:commentRangeStart w:id="1"/>"#,
+            r#"<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>"#,
+            r#"<w:moveFromRangeStart w:id="5" w:name="move"/>"#,
+            r#"<w:bookmarkStart w:id="3" w:name="mark"/><w:commentRangeStart w:id="1"/>"#,
+        ] {
+            let unscoped = written(&format!("{a}{b}{middle}{c}{close}{d}"));
+            let held = runs_spanning(&unscoped, "<w:t>B</w:t>", "<w:t>C</w:t>");
+            let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+            let output = written(&format!("{a}{}{close}{d}", rtl(&format!("{b}{middle}{c}"))));
+            assert_eq!(output, expected, "{middle}");
+            assert_eq!(output.matches("<w:dir").count(), 1, "{middle}: {output}");
+        }
+    }
+
+    #[test]
+    fn a_bookmark_inside_one_scope_stays_inside_it_in_a_hyperlink_and_a_hyperlink_inside_a_content_control()
+     {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        for (open, close) in [
+            (r#"<w:hyperlink w:anchor="target">"#, "</w:hyperlink>"),
+            (
+                r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent><w:hyperlink w:anchor="target">"#,
+                "</w:hyperlink></w:sdtContent></w:sdt>",
+            ),
+        ] {
+            let unscoped = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
+            let held = runs_spanning(&unscoped, "<w:t>B</w:t>", "<w:t>C</w:t>");
+            assert!(held.contains(bookmark), "{unscoped}");
+            let expected = wrapped(&unscoped, held, DIR.0, DIR.1);
+            let output = written(&format!(
+                "{a}{open}{}{close}{d}",
+                rtl(&format!("{b}{bookmark}{c}"))
+            ));
+            assert_eq!(output, expected, "{open}");
+        }
+    }
+
+    #[test]
+    fn a_complex_field_held_in_one_run_is_rebuilt_inside_its_direction_scope() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let field = concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+            r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>"#
+        );
+        let output = written(&format!("{a}{}{b}", rtl(field)));
+        assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
+        let open = output.find("<w:dir ").unwrap();
+        let close = output.find("</w:dir>").unwrap();
+        let begin = output.find(r#"w:fldCharType="begin""#).unwrap();
+        let end = output.find(r#"w:fldCharType="end""#).unwrap();
+        assert!(open < begin && end < close, "{output}");
+        assert!(output.find("<w:t>A</w:t>").unwrap() < open, "{output}");
+        assert!(close < output.find("<w:t>B</w:t>").unwrap(), "{output}");
+    }
+
+    const TWO_FIELDS: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText>"#,
+        r#"<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/>"#,
+        r#"<w:t xml:space="preserve"> of </w:t><w:fldChar w:fldCharType="begin"/>"#,
+        r#"<w:instrText xml:space="preserve"> NUMPAGES </w:instrText><w:fldChar w:fldCharType="separate"/>"#,
+        r#"<w:t>2</w:t><w:fldChar w:fldCharType="end"/></w:r>"#
+    );
+
+    #[test]
+    fn a_run_of_two_complex_fields_kept_as_its_source_is_written_once_inside_its_direction_scope() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let output = written(&format!("{a}{}{b}", rtl(TWO_FIELDS)));
+        assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
+        assert_eq!(
+            output.matches(r#"w:fldCharType="begin""#).count(),
+            2,
+            "{output}"
+        );
+        let open = output.find("<w:dir ").unwrap();
+        let close = output.find("</w:dir>").unwrap();
+        assert!(
+            open < output.find(r#"w:fldCharType="begin""#).unwrap(),
+            "{output}"
+        );
+        assert!(
+            output.rfind(r#"w:fldCharType="end""#).unwrap() < close,
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_two_complex_fields_without_a_scope_is_written_as_its_source() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let output = written(&format!("{a}{TWO_FIELDS}{b}"));
+        assert!(!output.contains("w:dir"), "{output}");
+        assert_eq!(output.matches(TWO_FIELDS).count(), 1, "{output}");
+    }
+
+    #[test]
+    fn a_complex_field_rebuilt_from_a_changed_instruction_stays_inside_its_direction_scope() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let mut paragraph = parsed(&paragraph_xml(&format!("{a}{}{b}", rtl(TWO_FIELDS))));
+        let field = paragraph
+            .content
+            .iter_mut()
+            .find_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::ComplexField(field)) => Some(field),
+                _ => None,
+            })
+            .expect("the run parses as a complex field");
+        assert!(field.source_run_xml.is_some());
+        field.instruction = "SECTIONPAGES".to_owned();
+        let output = serialize_paragraph(&paragraph, &mut context()).unwrap();
+        assert!(!output.contains(" NUMPAGES "), "{output}");
+        assert_eq!(output.matches("<w:dir ").count(), 1, "{output}");
+        let open = output.find("<w:dir ").unwrap();
+        let close = output.find("</w:dir>").unwrap();
+        let begin = output.find(r#"w:fldCharType="begin""#).unwrap();
+        let instruction = output.find("SECTIONPAGES").unwrap();
+        let end = output.rfind(r#"w:fldCharType="end""#).unwrap();
+        assert!(
+            open < begin && begin < instruction && end < close,
+            "{output}"
+        );
+        assert!(output.find("<w:t>A</w:t>").unwrap() < open, "{output}");
+        assert!(close < output.find("<w:t>B</w:t>").unwrap(), "{output}");
+    }
+
+    #[test]
+    fn a_bookmark_directly_inside_an_inline_content_control_is_dropped_on_a_rewrite() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let open = r#"<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>"#;
+        let close = "</w:sdtContent></w:sdt>";
+        let output = written(&format!("{a}{open}{b}{bookmark}{c}{close}{d}"));
+        assert!(!output.contains("w:bookmarkStart"), "{output}");
+        assert!(
+            output.contains("<w:t>B</w:t>") && output.contains("<w:t>C</w:t>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_node_without_width_between_two_different_scopes_is_written_outside_both() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let ltr = |inner: &str| format!(r#"<w:dir w:val="ltr">{inner}</w:dir>"#);
+        let bdo = |inner: &str| format!(r#"<w:bdo w:val="rtl">{inner}</w:bdo>"#);
+        let unscoped = written(&format!("{a}{b}{bookmark}{c}{d}"));
+        let first = run_holding(&unscoped, "<w:t>B</w:t>").to_owned();
+        let second = run_holding(&unscoped, "<w:t>C</w:t>").to_owned();
+        let around_first = wrapped(&unscoped, &first, DIR.0, DIR.1);
+        for (source, expected) in [
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), ltr(&c)),
+                wrapped(&around_first, &second, r#"<w:dir w:val="ltr">"#, "</w:dir>"),
+            ),
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), bdo(&c)),
+                wrapped(&around_first, &second, BDO.0, BDO.1),
+            ),
+            (
+                format!("{a}{}{bookmark}{}{d}", rtl(&b), rtl(&c)),
+                wrapped(&around_first, &second, DIR.0, DIR.1),
+            ),
+        ] {
+            let output = written(&source);
+            assert_eq!(output, expected, "{source}");
+            assert!(output.contains(&format!("</w:dir>{bookmark}")), "{output}");
+        }
+    }
+
+    #[test]
+    fn a_mark_between_an_inner_scope_run_and_an_outer_scope_run_keeps_the_outer_open() {
+        let content = format!(
+            r#"<w:bdo w:val="rtl"><w:dir w:val="ltr">{}</w:dir><w:bookmarkStart w:id="0" w:name="b"/>{}</w:bdo>"#,
+            text_run("AB"),
+            text_run("CD")
+        );
+        assert_eq!(written(&content), paragraph_xml(&content));
+    }
+
+    #[test]
+    fn a_kept_element_that_is_no_range_or_annotation_mark_is_written_outside_the_scope_around_it() {
+        let (a, b, c, d) = (text_run("A"), text_run("B"), text_run("C"), text_run("D"));
+        let sub_doc = r#"<w:subDoc r:id="rId9"/>"#;
+        let unscoped = written(&format!("{a}{b}{sub_doc}{c}{d}"));
+        let expected = wrapped(&wrapped(&unscoped, &b, DIR.0, DIR.1), &c, DIR.0, DIR.1);
+        let output = written(&format!("{a}{}{d}", rtl(&format!("{b}{sub_doc}{c}"))));
+        assert_eq!(output, expected);
+        assert_eq!(output.matches("<w:dir").count(), 2, "{output}");
+    }
+
+    #[test]
+    fn a_mark_before_a_hyperlink_that_writes_no_run_of_the_scope_is_written_outside_it() {
+        let (a, b) = (text_run("A"), text_run("B"));
+        let bookmark = r#"<w:bookmarkStart w:id="3" w:name="mark"/>"#;
+        let link = format!(
+            r#"<w:hyperlink w:anchor="target"><w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>{b}</w:sdtContent></w:sdt></w:hyperlink>"#
+        );
+        let unscoped = written(&format!("{a}{bookmark}{link}"));
+        let expected = wrapped(&unscoped, &a, DIR.0, DIR.1);
+        assert_eq!(written(&rtl(&format!("{a}{bookmark}{link}"))), expected);
+    }
+
+    #[test]
+    fn a_code_bookmark_of_a_rebuilt_field_stays_inside_the_scope_of_its_code_runs() {
+        let field: ComplexField = serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE x",
+            "fieldType": "QUOTE",
+            "fieldCode": [rtl_code_run("QUOTE x")],
+            "fieldResult": [],
+            "structuredCode": {"inline": [
+                {"type": "bookmarkStart", "id": 5, "name": "CodeMark"},
+                rtl_code_run("QUOTE y")
+            ]}
+        }))
+        .unwrap();
+        let output = serialize_complex_field(&field, &mut context()).unwrap();
+        assert_eq!(output.matches("<w:dir").count(), 1, "{output}");
+        let order = [
+            r#"w:fldCharType="begin""#,
+            "CodeMark",
+            "QUOTE x",
+            r#"w:fldCharType="separate""#,
+        ];
+        let at: Vec<_> = order.iter().map(|needle| output.find(needle)).collect();
+        assert!(
+            at.iter().all(Option::is_some) && at.windows(2).all(|pair| pair[0] < pair[1]),
+            "{at:?}: {output}"
+        );
+    }
+
+    fn two_thousand_marks(scoped: bool) -> String {
+        let mut content = String::new();
+        for id in 0..2000 {
+            content.push_str(&text_run("A"));
+            content.push_str(&format!(
+                r#"<w:bookmarkStart w:id="{id}" w:name="m{id}"/><w:bookmarkEnd w:id="{id}"/>"#
+            ));
+        }
+        content.push_str(&text_run("A"));
+        if scoped { rtl(&content) } else { content }
+    }
+
+    #[test]
+    fn a_paragraph_of_two_thousand_bookmark_pairs_saves_as_it_reads() {
+        for scoped in [false, true] {
+            let content = two_thousand_marks(scoped);
+            assert!(
+                written(&content) == paragraph_xml(&content),
+                "scoped: {scoped}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_two_thousand_marks_paragraph_rewrite() {
+        for (name, scoped) in [("no scope", false), ("one scope over all", true)] {
+            let paragraph = parsed(&paragraph_xml(&two_thousand_marks(scoped)));
+            let mut times: Vec<_> = (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    serialize_paragraph(&paragraph, &mut context()).unwrap();
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            eprintln!("two thousand bookmark pairs, {name}: median {:?}", times[2]);
+        }
+    }
+
+    fn two_thousand_comment_ranges(scoped: bool) -> String {
+        let mut content = String::new();
+        for id in 0..2000 {
+            content.push_str(&text_run("A"));
+            content.push_str(&format!(r#"<w:commentRangeStart w:id="{id}"/>"#));
+            content.push_str(&text_run("B"));
+            content.push_str(&format!(
+                r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="{id}"/></w:r>"#
+            ));
+        }
+        content.push_str(&text_run("A"));
+        if scoped { rtl(&content) } else { content }
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_two_thousand_comment_ranges_paragraph_rewrite() {
+        for (name, scoped) in [("no scope", false), ("one scope over all", true)] {
+            let paragraph = parsed(&paragraph_xml(&two_thousand_comment_ranges(scoped)));
+            let mut times: Vec<_> = (0..5)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    serialize_paragraph(&paragraph, &mut context()).unwrap();
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            eprintln!(
+                "two thousand comment ranges with references, {name}: median {:?}",
+                times[2]
+            );
+        }
+    }
+
+    #[test]
+    fn kept_word_elements_inside_a_complex_field_stay_between_its_begin_and_end() {
+        let (a, b, c) = (text_run("A"), text_run("B"), text_run("C"));
+        let output = written(&format!(
+            r#"{a}{BEGIN}{INSTRUCTION}{SEPARATE}<w:customXmlInsRangeStart w:id="7" w:author="Grace"/>{b}<w:customXmlInsRangeEnd w:id="7"/><w:subDoc r:id="rId9"/>{END}{c}"#
+        ));
+        let order = [
+            r#"w:fldCharType="begin""#,
+            "<w:customXmlInsRangeStart",
+            "<w:t>B</w:t>",
+            "<w:customXmlInsRangeEnd",
+            "<w:subDoc",
+            r#"w:fldCharType="end""#,
+        ];
+        let counts: Vec<_> = order
+            .iter()
+            .map(|needle| output.matches(needle).count())
+            .collect();
+        assert_eq!(counts, [1; 6], "{output}");
+        let at: Vec<_> = order.iter().map(|needle| output.find(needle)).collect();
+        assert!(
+            at.windows(2).all(|pair| pair[0] < pair[1]),
+            "{at:?}: {output}"
         );
     }
 

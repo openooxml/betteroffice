@@ -67,4 +67,5 @@ export declare function createRustMeasureSource(options: {
     progressive?: boolean;
     /** With the default provider, give families it doesn't carry the last-resort face. On unless `false`. */
     standIns?: boolean;
+    baseLatinStandIn?: boolean;
 }): RustMeasureSource;

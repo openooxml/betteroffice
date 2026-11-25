@@ -1,9 +1,11 @@
 import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
+import * as fonts from '@betteroffice/fonts';
 import JSZip from 'jszip';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isHostMessage } from '../../../../shared/office-session/protocol';
 import type { XlsxExportResult } from '../exports';
+import { engineKind } from '../wasm/engine';
 import * as wasm from '../wasm/loader';
 import { createWorkbookSession } from './client';
 import { createWorkbookSessionHost } from './host';
@@ -203,6 +205,55 @@ test('PNG and print exports use the requested sheet after edits without navigati
     expect((await session.call.frame(viewport)).sheet).toBe(before.activeSheet);
     expect(session.failure).toBeUndefined();
   } finally { main.dispose(); await session.dispose(); }
+});
+
+test.skipIf(engineKind === 'native')('workbook range PNG rejects an unavailable default face and paints with a supplied face', async () => {
+  const handle = wasm.openWorkbook(bytes);
+  const unavailable = spyOn(fonts, 'loadBundledFontBytes').mockRejectedValue(new Error('offline'));
+  const painted: Array<{ text: string; bytes?: Uint8Array }> = [];
+  class Face {
+    constructor(public family: string, public source: ArrayBuffer) {}
+    load() { return Promise.resolve(this); }
+  }
+  const held = new Set<Face>();
+  const matchingFaces = (font: string) => [...held].filter(({ family }) => font.includes(`"${family}"`));
+  class Canvas {
+    getContext() {
+      return new Proxy({} as Record<string, unknown>, {
+        get(target, property) {
+          if (property === 'measureText') return (text: string) => ({ width: text.length });
+          if (property === 'fillText') return (text: string) => {
+            const [face] = matchingFaces(String(target.font));
+            painted.push({ text, bytes: face && new Uint8Array(face.source) });
+          };
+          return target[property as string] ?? (() => {});
+        },
+      });
+    }
+    convertToBlob() { return Promise.resolve(new Blob(['png'], { type: 'image/png' })); }
+  }
+  const scope = globalThis as Record<string, unknown>;
+  const saved = { document: scope.document, OffscreenCanvas: scope.OffscreenCanvas, FontFace: scope.FontFace, fonts: scope.fonts };
+  Object.assign(scope, { document: undefined, OffscreenCanvas: Canvas, FontFace: Face,
+    fonts: { add: held.add.bind(held), delete: held.delete.bind(held), load: async (font: string) => matchingFaces(font) } });
+  try {
+    handle.editCell(0, 0, 0, 'Total');
+    handle.patchRangeStyle(0, 'A1', { fontFamily: 'Calibri' });
+    const target = { sheet: 0, range: 'A1' };
+    await expect(handle.renderPng(target)).rejects.toMatchObject({
+      name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('for Calibri could not load: offline'),
+    });
+    expect(painted).toEqual([]);
+    unavailable.mockClear();
+    const face = { family: 'Calibri', bytes: new Uint8Array([1, 2, 3]) };
+    await expect(handle.renderPng(target, { fonts: [face] })).resolves.toEqual(new TextEncoder().encode('png'));
+    expect(painted).toContainEqual({ text: 'Total', bytes: face.bytes });
+    expect(unavailable).not.toHaveBeenCalled();
+  } finally {
+    Object.assign(scope, saved);
+    unavailable.mockRestore();
+    handle.dispose();
+  }
 });
 
 test('PNG unavailability is typed and leaves the session usable', async () => {

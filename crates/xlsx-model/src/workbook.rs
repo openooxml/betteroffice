@@ -985,6 +985,7 @@ impl<'a> Iterator for SparseCells<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Workbook {
     pub full_precision: bool,
+    pub iterate: bool,
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
     pub defined_names: Vec<DefinedName>,
@@ -1000,6 +1001,7 @@ impl Default for Workbook {
     fn default() -> Self {
         Self {
             full_precision: true,
+            iterate: false,
             sheets: Vec::new(),
             date_system: DateSystem::default(),
             defined_names: Vec::new(),

@@ -546,6 +546,12 @@ struct AuthoritySlot {
     deferred: Option<Box<DeferredAuthority>>,
 }
 
+enum AuthorityBuild {
+    Eager,
+    Deferred,
+    RecoverySource,
+}
+
 struct DeferredAuthority {
     legacy_dimensions: Vec<xlsx_parse::LegacySheetDimensions>,
     legacy_styles: Option<Stylesheet>,
@@ -865,6 +871,15 @@ impl Workbook {
     }
 
     fn open_internal(bytes: &[u8], build_graph: bool, client_id: Option<u64>) -> Result<Self> {
+        Self::open_source(bytes, build_graph, client_id, AuthorityBuild::Deferred)
+    }
+
+    fn open_source(
+        bytes: &[u8],
+        build_graph: bool,
+        client_id: Option<u64>,
+        authority_build: AuthorityBuild,
+    ) -> Result<Self> {
         xlsx_model::open_timing! {
             let timing_parse = xlsx_model::open_timing::span("package_parse");
         }
@@ -885,7 +900,11 @@ impl Workbook {
             client_id,
             &parsed.legacy_dimensions,
             (parsed.legacy_styles.as_ref(), &[]),
-            client_id.is_none() && !eager_authority(),
+            if client_id.is_some() || eager_authority() {
+                AuthorityBuild::Eager
+            } else {
+                authority_build
+            },
         )?;
         workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
         Ok(workbook)
@@ -1003,12 +1022,10 @@ impl Workbook {
             client_id,
             legacy_dimensions,
             legacy_styles,
-            false,
+            AuthorityBuild::Eager,
         )
     }
 
-    /// `defer` leaves the authority to be built from `source_package`'s parsed model, which
-    /// must be `model`.
     #[allow(clippy::too_many_arguments)]
     fn from_source_deferring(
         mut model: WorkbookModel,
@@ -1018,7 +1035,7 @@ impl Workbook {
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: (Option<&Stylesheet>, &[Stylesheet]),
-        defer: bool,
+        authority_build: AuthorityBuild,
     ) -> Result<Self> {
         model.styles.read_declared_number_formats();
         validate_model(&model)?;
@@ -1031,9 +1048,16 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let deferred =
-            defer && client_id.is_none() && source_package.is_some() && legacy_styles.1.is_empty();
-        let (authority, model, structure) = if deferred {
+        let deferred_source = source_package.as_ref().filter(|_| {
+            !matches!(authority_build, AuthorityBuild::Eager)
+                && client_id.is_none()
+                && legacy_styles.1.is_empty()
+        });
+        let (authority, model, structure) = if let Some(package) = deferred_source {
+            if matches!(authority_build, AuthorityBuild::Deferred) {
+                WorkbookAuthority::check_source_admission(package.original_workbook())
+                    .map_err(Error::CollaborativeState)?;
+            }
             let slot = AuthoritySlot {
                 built: OnceLock::new(),
                 deferred: Some(Box::new(DeferredAuthority {
@@ -1773,12 +1797,6 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let recalculated =
-                    self.recalculated_since_open
-                        && package.requests_full_calculation()
-                        && self.model.sheets.iter().any(|sheet| {
-                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
-                        });
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -1786,7 +1804,7 @@ impl Workbook {
                     &self.preserved.shared_string_cells,
                     &self.preserved.axes,
                     xlsx_parse::SaveEdits {
-                        changed: self.edited_since_open || recalculated,
+                        changed: self.edited_since_open,
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
@@ -2985,10 +3003,9 @@ impl Workbook {
     /// or, on the first calculation, formulas the file stored no result for. One that moves
     /// none of these leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
-    /// the recalculated values. The recalculation at open does not, except that a file
-    /// asking for a full calculation on load (`calcPr` `fullCalcOnLoad` or `forceFullCalc`)
-    /// saves the values it produced when it holds any formula; formulas the engine
-    /// cannot evaluate keep their cached results either way.
+    /// the recalculated values. The recalculation at open does not: a save with no edit
+    /// since open, while the active sheet is the one the file stores, returns the source
+    /// file unchanged when its archive can be reused as read.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
         let result = self.recalculate(options);
         self.edited_since_open = true;

@@ -68,6 +68,23 @@ class FakeWorker implements ResidentEngineWorkerPort {
   }
 }
 
+test('a custom port without addEventListener gets its font pack requests answered once', async () => {
+  const port = new FakeWorker();
+  let resolveReply!: () => void;
+  const replied = new Promise<void>((resolve) => { resolveReply = resolve; });
+  const post = spyOn(port, 'postMessage').mockImplementation(() => { resolveReply(); });
+  const client = new ResidentEngineWorkerClient(port);
+  try {
+    const message = { protocol: 1, kind: 'font-pack-request', id: 'pack', pack: 'intl' };
+    port.onmessage!({ data: message } as unknown as MessageEvent<DocxEngineWorkerResponse>);
+    await replied;
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ kind: 'font-pack-reply', id: 'pack' }));
+  } finally {
+    client.destroy();
+  }
+});
+
 test('font decoder RPC transfers exact copies and returns font and payload before open', async () => {
   const port = new FakeWorker();
   const client = new ResidentEngineWorkerClient(port);

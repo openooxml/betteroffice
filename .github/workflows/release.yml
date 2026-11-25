@@ -20,10 +20,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
       published: ${{ steps.changesets.outputs.published }}
+      held: ${{ steps.npm-targets.outputs.held }}
     permissions:
       contents: write
       pull-requests: write
@@ -72,12 +73,16 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
+      - name: Note skipped tests
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'
+        run: echo "::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests."
+
       - name: Type check
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run typecheck:packages
 
       - name: Test
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run test
 
       - name: Build packages
@@ -116,6 +121,7 @@ jobs:
       # runs no `version` command: these manifests carry the versions it publishes.
       # It reads name and version, which the pin below leaves alone.
       - name: Check npm publish targets
+        id: npm-targets
         if: steps.pending.outputs.publishing == 'true'
         env:
           RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
@@ -136,9 +142,23 @@ jobs:
 
       # changesets does not rewrite the workspace: protocol here, so pin it to
       # concrete versions before publish (ephemeral checkout; source is unchanged).
+      - name: Note the npm fallback token
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
         run: bun scripts/rewrite-workspace-deps.ts
+
+      # Pack the pinned manifests before marking them private for Changesets.
+      - name: Pack and hold packages published after the release
+        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
+        env:
+          HELD_NPM_PACKAGES: ${{ steps.npm-targets.outputs.held }}
+        run: node scripts/held-npm-packages.mjs --pack "$RUNNER_TEMP/held-npm"
 
       - name: Release PR or publish
         id: changesets
@@ -150,16 +170,29 @@ jobs:
           commit: "chore: release"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No npm token: auth is OIDC Trusted Publishing (configured per
-          # package after the first manual publish creates it). id-token: write
-          # above authorizes the exchange and signs provenance.
+          # Auth is OIDC Trusted Publishing (configured per package after the
+          # first manual publish creates it). id-token: write above authorizes
+          # the exchange and signs provenance. npm uses NPM_FALLBACK_TOKEN only
+          # for a package whose exchange fails; it is unset unless publishing.
+          NODE_AUTH_TOKEN: ${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}
           NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Upload held npm tarballs
+        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: held-npm
+          path: ${{ runner.temp }}/held-npm
+          if-no-files-found: error
+          overwrite: true
 
       # Also after a failed publish: it names what the set is missing. Reports
       # only: deploy and the native and Python jobs still run after a miss.
       - name: Verify npm and CDN publish targets
         if: "always() && steps.pending.outputs.publishing == 'true'"
         continue-on-error: true
+        env:
+          HELD_NPM_PACKAGES: ${{ steps.npm-targets.outputs.held }}
         run: node scripts/check-publish-targets.mjs --verify-published
 
       # GITHUB_TOKEN releases don't fire `on: release`, so dispatch directly.
@@ -272,7 +305,7 @@ jobs:
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
     # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
-    timeout-minutes: 75
+    timeout-minutes: 90
     permissions:
       contents: read
       actions: write
@@ -311,6 +344,55 @@ jobs:
             fi
           done
           exit $status
+
+  held-npm:
+    name: Publish packages that need the native packages
+    needs: [release, native-npm]
+    # The registry check also covers a native job skipped with RELEASE_SKIP_NATIVE.
+    if: >-
+      !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&
+      needs.release.outputs.held != '' && needs.release.outputs.held != '[]' &&
+      (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: held-npm
+          path: ${{ runner.temp }}/held-npm
+
+      - name: Note the npm fallback token
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
+      - name: Publish held packages and create releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HELD_NPM_PACKAGES: ${{ needs.release.outputs.held }}
+          NATIVE_NPM_RESULT: ${{ needs.native-npm.result }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FALLBACK_TOKEN }}
+        run: node scripts/held-npm-packages.mjs --publish "$RUNNER_TEMP/held-npm"
 
   # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without
   # that variable the WOPI image is never pushed. It dispatches and does not wait:

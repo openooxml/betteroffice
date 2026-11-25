@@ -188,6 +188,7 @@ export declare class EditSession {
   resolve_comment(commentId: string): string
   resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string
   resolve_paragraph_anchor(anchorJson: string): string
+  resolve_raw_marks(): string
   resolve_sticky_position(story: string, position: Uint8Array): string
   revision_ids_at(story: string, paraId: string, offset: number): string
   revision_stamps_json(idsJson: string): string
@@ -215,6 +216,8 @@ export declare class EditSession {
   set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
   patch_style_languages_xml(source: string): string
   ensure_list_definition(story: string, paraId: string, kind: string): string
+  ensure_list_definition_after(story: string, paraId: string, kind: string, lead?: string | undefined | null): string
+  paragraph_style_numbers(story: string, paraId: string): boolean | undefined
   created_list_definitions_json(): string
   list_definition_keys_in_use_json(): string
   set_document_property(key: string, json: string): boolean

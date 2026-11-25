@@ -1,5 +1,7 @@
 import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
-import type { FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
+import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
@@ -24,10 +26,10 @@ const sessionDecoder = sessionFontDecoder(async (bytes, options) => {
 
 export const commandFontProvider = {
   /** @internal */
-  async load(fontCdn?: FontCdnConfiguration) {
-    const fonts = await import('@betteroffice/fonts');
-    if (fontCdn) fonts.configureFontCdn(fontCdn);
-    return fonts.createFontProvider(undefined, { decoder: sessionDecoder });
+  async load(...configuration: [fontCdn?: FontCdnConfiguration]) {
+    if (configuration.length) setFontCdnConfiguration(configuration[0]);
+    const fonts = await importFonts();
+    return fonts.createFontProvider(undefined, { decoder: sessionDecoder, strict: 'except-optional-cdn-failure' });
   },
 };
 
@@ -46,7 +48,7 @@ export function prefetchCoverageFaces(
     for (const script of scripts) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
       if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
-        const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+        const { openSlicedFace } = await importProgressiveFonts();
         void openSlicedFace(load.slices).catch(() => {});
       } else void load?.().catch(() => {});
     }
@@ -110,8 +112,10 @@ export function createCommandDefaultFonts(
     const existing = pending.get(id);
     if (existing) return existing;
     if (!retryable(id) || suppliedFamily(face)) return Promise.resolve(undefined);
+    const previousAttempts = attempts.get(id);
+    const previousRetry = retryAt.get(id);
     attempted.add(id);
-    attempts.set(id, (attempts.get(id) ?? 0) + 1);
+    attempts.set(id, (previousAttempts ?? 0) + 1);
     retryAt.delete(id);
     const task = new Promise<DefaultFontFace | undefined>((resolve) => {
       let finished = false;
@@ -152,7 +156,7 @@ export function createCommandDefaultFonts(
         available = true;
         if (load.slices && sliced?.supported()) {
           try {
-            const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+            const { openSlicedFace } = await importProgressiveFonts();
             const opened = await openSlicedFace(load.slices);
             if (disposed || suppliedFamily(face)) return undefined;
             const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes())
@@ -163,9 +167,14 @@ export function createCommandDefaultFonts(
                 chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, load);
               return disposed ? undefined : skeleton;
             }
-          } catch {}
+          } catch (error) {
+            if (isImplicitFontCdnError(error) && error.diagnostic.pack === 'latin') throw error;
+          }
         }
-        const bytes = await load();
+        const bytes = await load().catch((error: unknown) => {
+          if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+          throw error;
+        });
         if (disposed || suppliedFamily(face)) return undefined;
         const loaded = face.kind === 'coverage'
           ? await scriptFontFace(face.script, bold, italic, bytes)
@@ -187,9 +196,17 @@ export function createCommandDefaultFonts(
         if (!loaded && available && !disposed && !suppliedFamily(face)) failed(id);
         if (finished && loaded) publish([face], [loaded]);
         else finish(loaded);
-      }, () => {
+      }, (error: unknown) => {
         pending.delete(id);
-        if (!disposed && !suppliedFamily(face)) failed(id);
+        if (isImplicitFontCdnError(error)) {
+          if (previousAttempts === undefined) {
+            attempted.delete(id);
+            attempts.delete(id);
+          } else {
+            attempts.set(id, previousAttempts);
+            if (previousRetry !== undefined) retryAt.set(id, previousRetry);
+          }
+        } else if (!disposed && !suppliedFamily(face)) failed(id);
         finish();
       });
     });

@@ -487,6 +487,7 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
             "calculation precision",
             left.full_precision != right.full_precision,
         ),
+        ("iterative calculation", left.iterate != right.iterate),
         ("defined names", left.defined_names != right.defined_names),
         (
             "shared strings",
@@ -781,12 +782,18 @@ impl Workbook {
             authority.inherit_xf_xml_markers(styles);
         }
         pulse();
-        if authority.full_precision_setting().is_none() {
-            let source = source.map(|bytes| ooxml_opc::SourceContainer::new(bytes.to_vec()));
-            let precision =
-                crate::snapshot::source_full_precision(source.as_ref()).map_err(invalid)?;
-            authority.restore_full_precision(precision);
-        }
+        let source_workbook = source
+            .map(|source| Self::open_source(source, false, None, AuthorityBuild::RecoverySource))
+            .transpose()?;
+        let source_model = source_workbook.as_ref().map(Self::model);
+        let full_precision = authority
+            .full_precision_setting()
+            .unwrap_or_else(|| source_model.is_none_or(|model| model.full_precision));
+        let iterate = authority
+            .iterate_setting()
+            .unwrap_or_else(|| source_model.is_some_and(|model| model.iterate));
+        authority.restore_full_precision(full_precision);
+        authority.restore_iterate(iterate);
         let projection = authority.materialize().map_err(authority_error)?;
         pulse();
         let mut model = checkpoint.calculation.apply(projection)?;
@@ -829,8 +836,8 @@ impl Workbook {
         {
             return Err(invalid("Recovery preservation sheet count mismatch"));
         }
-        let mut workbook = match source {
-            Some(source) => Self::open_internal(source, false, None)?,
+        let mut workbook = match source_workbook {
+            Some(workbook) => workbook,
             None => Self::from_parts(model.clone(), None, SheetId(0), false, None)?,
         };
         pulse();

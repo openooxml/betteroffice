@@ -228,6 +228,32 @@ fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
     part.paragraph_patches[0].clone()
 }
 
+#[test]
+fn the_list_display_attribute_leaves_an_item_holding_an_equation_planned_unchanged() {
+    let math = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#;
+    let doc = open(&format!(
+        r#"<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="3"/></w:numPr></w:pPr>{}{math}"#,
+        text("abc")
+    ));
+    let loaded = doc.paragraphs("body").unwrap()[0].clone();
+    doc.set_paragraph_attr(&loaded.para_id, "listLevelIndents", Any::Bool(true))
+        .unwrap();
+    let mut live = doc.paragraphs("body").unwrap()[0].properties.clone();
+    assert_eq!(live.remove("listLevelIndents"), Some(Any::Bool(true)));
+    assert_eq!(live, loaded.properties);
+    let plan = doc.paragraph_save_plan();
+    let body = || {
+        plan.spliced_parts
+            .iter()
+            .filter(|part| part.part == "word/document.xml")
+    };
+    let changed: Vec<u32> = body().flat_map(|part| part.changed.clone()).collect();
+    assert_eq!(changed, Vec::<u32>::new());
+    assert!(body().all(|part| part.legacy_paragraphs.is_empty()));
+    assert!(body().all(|part| part.paragraph_patches.is_empty()));
+    assert!(loaded.properties.contains_key("numPr"));
+}
+
 fn save_document(
     source: &docx_parse::S9DocumentBodyWire,
     edit_model: impl FnOnce(&mut serde_json::Value),

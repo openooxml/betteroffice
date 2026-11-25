@@ -18,6 +18,24 @@ import type { Document } from '@betteroffice/docx/types/document';
 import { createInputAdmission, type PeerlessInputAdmission } from '../peerless/inputAdmission';
 import { createPeerlessViewStore, type PeerlessFrameGeometry, type PeerlessProvisionalCaret, type PeerlessViewStore } from '../peerless/viewStore';
 
+type ResidentEdit = DocxCommandConnection['client']['call']['edit'];
+
+const MAX_DEFERRED_COMMANDS = 32;
+
+function replayEdits(resident: DocxCommandConnection, appliedSeqs: readonly number[]): ResidentEdit {
+  return async command => {
+    const ack = await resident.client.call.edit(command);
+    if (!command.replay) return ack;
+    const failed = ack.outcomes.find(outcome => outcome.status === 'refused' || outcome.status === 'cancelled' ||
+      (outcome.status === 'noop' && appliedSeqs.includes(outcome.seq)));
+    if (failed) {
+      discardCommandPresentation(ack.frame);
+      throw new SessionFailure('message', `DOCX recovery failed at command ${failed.seq} (${command.kind}): ${failed.reason ?? failed.status}`);
+    }
+    return ack;
+  };
+}
+
 /** @internal Opens worker authority without creating a main-thread document. */
 export type PeerlessDocumentSource = Uint8Array | Document;
 
@@ -30,7 +48,7 @@ export interface UsePeerlessEditSessionOptions {
   prepareGeometry(frame: DocxCommandFrame, rasterScale?: number): PeerlessFrameGeometry | undefined;
   /** The same frame geometry with page boxes snapped to another raster scale. */
   rescaleGeometry?(geometry: PeerlessFrameGeometry, rasterScale: number): PeerlessFrameGeometry | undefined;
-  onError?(error: Error): void;
+  onError?(error: Error, recoveryFailed?: boolean): void;
   /** Failures the editor survives, such as pages that cannot be painted until the viewport or zoom changes. */
   onRecoverableError?(error: Error): void;
 }
@@ -43,6 +61,7 @@ export interface PeerlessEditSessionBinding {
   commands: PeerlessCommandBinding;
   echoPainter: PeerlessEchoPainter;
   presentation: PeerlessFramePresentation;
+  setPasteOptionsLive?(dismiss: (() => void) | null): void;
   setDisplayWindow?(start: number, end: number): void;
   setRasterScale?(scale: number): void;
 }
@@ -51,7 +70,7 @@ export interface PeerlessEditSessionBinding {
 export type UsePeerlessEditSessionResult =
   | { status: 'opening'; binding: null; error: null }
   | { status: 'ready'; binding: PeerlessEditSessionBinding; error: null }
-  | { status: 'failed'; binding: null; error: Error };
+  | { status: 'failed'; binding: null; error: Error; recoveryFailed: boolean };
 
 /** @internal */
 export function usePeerlessEditSession(
@@ -73,25 +92,14 @@ export function usePeerlessEditSession(
     let recovering = false;
     let crash: Error | undefined;
     let receiveRequestedFrame: ((frame: DocxCommandFrame) => void) | undefined;
-    const connect = (resident: DocxCommandConnection, replayAppliedSeqs: readonly number[] = []): DocxCommandConnection => ({
+    const connect = (resident: DocxCommandConnection, replayAppliedSeqs?: readonly number[]): DocxCommandConnection => ({
       ...resident,
       client: {
         ...resident.client,
         get failure() { return resident.client.failure; },
-        call: {
-          ...resident.client.call,
-          async edit(command) {
-            const ack = await resident.client.call.edit(command);
-            const refused = command.replay && ack.outcomes.find(outcome =>
-              outcome.status === 'refused' || outcome.status === 'cancelled' ||
-              (replayAppliedSeqs.includes(outcome.seq) && outcome.status === 'noop'));
-            if (refused) {
-              discardCommandPresentation(ack.frame);
-              throw new SessionFailure('message', `Cannot restore DOCX command ${command.seq} (${command.kind}): ${refused.reason ?? refused.status}`);
-            }
-            return ack;
-          },
-        },
+        call: replayAppliedSeqs ? { ...resident.client.call,
+          edit: replayEdits(resident, replayAppliedSeqs),
+        } : resident.client.call,
         onFrame(listener) {
           receiveRequestedFrame = listener;
           const stop = resident.client.onFrame?.(listener);
@@ -114,10 +122,11 @@ export function usePeerlessEditSession(
     const fail = (cause: unknown) => {
       if (controller.signal.aborted) return;
       const error = cause instanceof Error ? cause : new Error(String(cause));
+      const recoveryFailed = binding !== undefined;
       controller.abort();
       close();
-      setResult({ status: 'failed', binding: null, error });
-      callbacks.current.onError?.(error);
+      setResult({ status: 'failed', binding: null, error, recoveryFailed });
+      callbacks.current.onError?.(error, recoveryFailed);
     };
     setResult({ status: 'opening', binding: null, error: null });
     void (async () => {
@@ -151,7 +160,7 @@ export function usePeerlessEditSession(
             else discardCommandPresentation(ack.frame);
           }).catch((error: unknown) => {
             settled();
-            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
+            if (resident === connection && !recovering) fail(error);
           });
         };
         let echoCaret: PeerlessProvisionalCaret | undefined;
@@ -183,36 +192,59 @@ export function usePeerlessEditSession(
         const requestViewport = async () => {
           if (viewportPending || !connection?.requestViewport || controller.signal.aborted) return;
           viewportPending = true;
+          const resident = connection;
           try {
             while (viewport && !controller.signal.aborted) {
               const request = viewport;
               viewport = undefined;
-              await connection.requestViewport?.({ ...request, frameEpoch: viewStore.getSnapshot().geometry?.frameEpoch ?? 0 });
+              await resident.requestViewport?.({ ...request, frameEpoch: viewStore.getSnapshot().geometry?.frameEpoch ?? 0 });
+              if (resident !== connection) break;
             }
           } catch (error) {
-            if (!controller.signal.aborted && !recovering) callbacks.current.onError?.(error instanceof Error ? error : new Error(String(error)));
-          } finally { viewportPending = false; }
+            if (resident === connection && !recovering) fail(error);
+          } finally {
+            viewportPending = false;
+            if (viewport && !recovering) void requestViewport();
+          }
         };
+        let dismissPasteOptions: (() => void) | null = null;
+        let pendingChoices = 0;
+        let submitted = 0;
+        let firstDue: number | undefined;
         const session = createDocxWorkerEditSession<PeerlessDocumentSource, PeerlessEchoIntent>({
           source, connection: connect(connection), echo: presentation.hooks, coalesce: coalesceInputDrafts,
           holdForCoalescing: holdInputForCoalescing,
           transactionalPresentation: true, echoOverflow: 'decline', maxEchoEntries: 256,
           maxRecoveryAttempts: callbacks.current.recovery ? 1 : 0,
+          /** A Paste Options choice never lands after a checkpoint that follows its paste, so its replay can never be refused. */
+          checkpointPolicy: (stats) => {
+            if (stats.applied < 128 && stats.bytes < 1024 * 1024) return false;
+            firstDue ??= submitted;
+            if (submitted - firstDue >= MAX_DEFERRED_COMMANDS) {
+              dismissPasteOptions?.();
+            }
+            return !dismissPasteOptions && pendingChoices === 0;
+          },
           recovery: {
             checkpoint: callbacks.current.recovery?.checkpoint
-              ? (resident) => callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint() : undefined,
+              ? async (resident) => {
+                const checkpoint = await (callbacks.current.recovery?.checkpoint?.(resident) ?? resident.client.call.checkpoint());
+                firstDue = undefined;
+                return checkpoint;
+              } : undefined,
             onRecovery(event) {
               if (controller.signal.aborted) return;
+              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'));
               if (event.phase !== 'diverged') recovering = event.phase === 'recovering';
               if (event.phase === 'recovering') {
                 crash = event.failure;
+                dismissPasteOptions?.();
                 viewStore.setRecovering?.(true);
               }
               if (event.phase === 'recovered') {
                 viewport = { ...displayWindow, ...viewport };
                 void requestViewport();
               }
-              if (event.phase === 'failed') fail(event.failure ?? new Error('The worker editor session failed'));
               callbacks.current.recovery?.onRecovery?.(event);
             },
             async reopen(input) {
@@ -247,9 +279,28 @@ export function usePeerlessEditSession(
           close();
           return;
         }
-        const admission = createInputAdmission({ session, viewStore, echoPainter });
+        const trackPasteChoice = (ack: Promise<unknown>) => {
+          pendingChoices++;
+          const settled = () => {
+            pendingChoices--;
+            if (!pendingChoices && firstDue !== undefined) void session.flush().catch(() => {});
+          };
+          void ack.then(settled, settled);
+        };
+        const submit = session.submit;
+        session.submit = (kind, payload, options) => {
+          const ticket = submit(kind, payload, options);
+          submitted++;
+          if (kind === 'replacePasteFragment') trackPasteChoice(ticket.ack);
+          return ticket;
+        };
+        const admission = createInputAdmission({ session, viewStore, echoPainter, onDeferredPasteChoice: trackPasteChoice });
         cleanups.push(() => admission.dispose());
         binding = { session, viewStore, admission, commands: createPeerlessCommandBinding(admission), echoPainter, presentation,
+          setPasteOptionsLive(dismiss) {
+            dismissPasteOptions = dismiss;
+            if (!dismiss && firstDue !== undefined) void session.flush().catch(() => {});
+          },
           setDisplayWindow(start, end) {
             displayWindow = { start, end };
             viewport = { ...viewport, ...displayWindow };

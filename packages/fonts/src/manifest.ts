@@ -1,4 +1,4 @@
-import intlSizes from './intl-sizes.json';
+import intlManifest from '../../fonts-intl/assets/manifest.json';
 import latinManifest from '../../fonts-latin/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';
 
@@ -107,6 +107,8 @@ function familyFaces(
   ];
 }
 
+const intlSizes = new Map(intlManifest.faces.map(({ file, byteLength }) => [file, byteLength]));
+
 function intlFamilyFaces(
   family: string,
   script: BundledFontScript,
@@ -114,7 +116,7 @@ function intlFamilyFaces(
 ): BundledFontFace[] {
   return (['Regular', 'Bold'] as const).flatMap<BundledFontFace>((style) => {
     const file = `${fileBase}-${style}.ttf.zst`;
-    const byteLength = (intlSizes as Record<string, number>)[file];
+    const byteLength = intlSizes.get(file);
     return byteLength === undefined ? [] : [{
       family,
       weight: style === 'Bold' ? 700 : 400,
@@ -701,12 +703,6 @@ function resolveWidthMatchedSubstitute(family: string) {
   return WIDTH_MATCHED_SUBSTITUTES.get(family.trim().toLowerCase());
 }
 
-/**
- * `Calibri Light` and `Inter Light` are families of their own on the machine
- * that drew the reference: a Regular and an Italic, no bold member, so a run
- * marked bold is still drawn at the family's own weight, and a name we cannot
- * place at all is Calibri, whatever weight it claims (#797).
- */
 const LIGHTER_THAN_REGULAR = new Set([
   'thin',
   'hairline',
@@ -719,6 +715,7 @@ const LIGHTER_THAN_REGULAR = new Set([
 
 function lightVariantOf(
   family: string,
+  bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
   const words = family.trim().split(/[\s-]+/);
@@ -726,20 +723,22 @@ function lightVariantOf(
   if (!LIGHTER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
     return undefined;
   }
-  return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+  const base = words.slice(0, -1).join(' ');
+  const ownBold = bold && resolveMetricCompatFamily(base) !== 'Selawik';
+  const face = resolveMetricCompatFace(base, ownBold, italic);
+  return face && (!ownBold || face.weight === 700) ? face : resolveMetricCompatFace(base, false, italic);
 }
 
 /**
- * The bundled face for a lighter member of a family we carry, such as
- * `Calibri Light`, at its own weight whatever weight the run claims; undefined
- * for any other name.
+ * The bundled face for a lighter member such as `Calibri Light`, honoring bold
+ * when the substitute has a bold face. Returns undefined for other names.
  */
 export function resolveLightVariantFace(
   family: string,
-  _bold: boolean,
+  bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
-  return lightVariantOf(family, italic);
+  return lightVariantOf(family, bold, italic);
 }
 
 /**
@@ -844,7 +843,7 @@ function resolveBaseFace(
   office: LastResortOffice,
   excludeSelawik = false,
 ): BundledFontFace {
-  const light = lightVariantOf(family, italic);
+  const light = lightVariantOf(family, bold, italic);
   if (light && (!excludeSelawik || light.family !== 'Selawik')) return light;
   if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);

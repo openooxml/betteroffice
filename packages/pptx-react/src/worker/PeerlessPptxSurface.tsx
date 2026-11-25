@@ -46,9 +46,10 @@ import {
 import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerlessPresentation';
 import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
-import { PeerlessShapeOverlay } from './PeerlessShapeOverlay';
+import { PeerlessResizeHandles, PeerlessShapeOverlay } from './PeerlessShapeOverlay';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
+import { PeerlessShapeResizePreview } from './PeerlessShapeResizePreview';
 import { usePptxPinchZoom } from '../usePptxPinchZoom';
 
 function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPresentation | null,
@@ -105,16 +106,24 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
 function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
   const { t } = useTranslation();
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
+  const isComposing = () => Boolean(run.store.getSnapshot().composition);
+  const composing = useSyncExternalStore(run.store.subscribePresentation, isComposing, isComposing);
   const geometry = useMemo(() => snapshot?.view.confirmed ? indexGeometry(snapshot.view.confirmed.displayList) : null,
     [snapshot?.view.confirmed]);
   if (!snapshot?.view.confirmed) return null;
   const { view, fit } = snapshot;
   const confirmed = view.confirmed!;
   const selected = view.selection;
-  const rectangles = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
-    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId)
-      .map(({ primitive, transforms }) => transformedRect(transforms,
-        { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h })) : [];
+  const editedEntries = selected && selected.kind !== 'object' && selected.slideId === confirmed.frame.slideId
+    ? geometry!.hits.filter(({ primitive }) => primitive.shapeId === selected.shapeId) : [];
+  const rectangles = editedEntries.map(({ primitive, transforms }) => transformedRect(transforms,
+    { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h }));
+  const canResizeEdited = selected?.kind !== 'object' && selected?.canResize === true && editedEntries.some(({ transforms }) =>
+    transforms.length === 1 && transforms[0]?.shapeId === selected?.shapeId) &&
+    editedEntries.every(({ transforms }) => transforms.length === 1 && transforms.every(({ transform }) => {
+      const rotation = ((transform?.rotationDeg ?? 0) % 360 + 360) % 360;
+      return rotation === 0 && !transform?.flipH && !transform?.flipV;
+    }));
   const x = Math.min(...rectangles.map((rect) => rect.x));
   const y = Math.min(...rectangles.map((rect) => rect.y));
   const edited = insertion ?? (rectangles.length ? { x, y,
@@ -140,8 +149,12 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
       <PeerlessCaret store={run.visual} />
     </div>
+    <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
-      scale={fit.scale} readOnly={view.editState.readOnly} />}
+      scale={fit.scale} readOnly={view.editState.readOnly || composing} />}
+    {!composing && !insertion && edited && selected && selected.kind !== 'object' &&
+      <PeerlessResizeHandles bounds={edited} scale={fit.scale}
+        readOnly={view.editState.readOnly} canResize={canResizeEdited} />}
     {edited && <span data-testid="pptx-text-edit-outline" aria-hidden="true" style={{
       position: 'absolute', zIndex: 3, pointerEvents: 'none', border: '1px solid #6b7280',
       boxSizing: 'border-box', boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',

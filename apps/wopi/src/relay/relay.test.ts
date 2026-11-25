@@ -40,7 +40,7 @@ import { SessionApi } from "../../web/src/api";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 let cleanups: Array<() => void | Promise<void>> = [];

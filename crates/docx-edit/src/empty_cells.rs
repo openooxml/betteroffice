@@ -13,6 +13,11 @@ use crate::{
     map_string, out_len,
 };
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LIVE_TABLE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn names_cell<T: ReadTxn>(table: &MapRef, txn: &T, story_id: &str) -> bool {
     let Some(Out::Any(Any::Array(rows))) = table.get(txn, "rows") else {
         return false;
@@ -39,6 +44,8 @@ pub(crate) fn naming_table<T: ReadTxn>(
     story_id: &str,
     mut accept: impl FnMut(&TextRef, u32) -> bool,
 ) -> Option<(TextRef, u32)> {
+    #[cfg(test)]
+    LIVE_TABLE_SCANS.with(|scans| scans.set(scans.get() + 1));
     let stories = txn.get_map(STORIES)?;
     for (_, value) in crate::live_stories(&stories, txn) {
         let Out::YText(story) = value else {
@@ -62,6 +69,8 @@ pub(crate) fn naming_table<T: ReadTxn>(
 /// Every cell story id a table of a live story names, present or not: ids a new cell must not
 /// take.
 pub(crate) fn named_cell_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
+    #[cfg(test)]
+    LIVE_TABLE_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut named = HashSet::new();
     let Some(stories) = txn.get_map(STORIES) else {
         return named;
