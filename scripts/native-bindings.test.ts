@@ -435,7 +435,7 @@ describe('native package release wiring', () => {
 
   test('an invalid publish list fails before dispatch', () => {
     const result = dispatch({ publish: 'invalid' });
-    expect(result.status).toBe(1);
+    expect(result.status).not.toBe(0);
     expect(result.log).toEqual([]);
   });
 

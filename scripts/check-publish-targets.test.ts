@@ -1019,6 +1019,7 @@ describe('release wiring', () => {
     const gates = Object.keys(release.jobs).filter((id) => !publishing.includes(id) && !requiresRelease(id)).sort();
     expect(gates).toEqual(['native-build', 'native-build-retry', 'plan', 'python-build', 'python-build-retry', 'test']);
     for (const id of gates) {
+      expect(release.jobs[id].secrets, id).toBeUndefined();
       const job = release.jobs[id];
       const permissions = job.permissions;
       expect(permissions !== null && typeof permissions === 'object' && !Array.isArray(permissions), id).toBe(true);

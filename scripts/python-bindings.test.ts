@@ -575,7 +575,9 @@ globalThis.fetch = async (url) => {
     expect(pytest['working-directory']).toBe('${{ runner.temp }}');
     expect(pytest.env).toEqual({ BINDING: '${{ inputs.binding }}', PYTHONUTF8: '1' });
     expect(pytest.run).toBe('python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"');
-    expect(dist.jobs.built.if).toContain("needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.load.result == 'success'");
+    expect(dist.jobs.built.if).toBe(
+      "${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.load.result == 'success') }}"
+    );
   });
 });
 
