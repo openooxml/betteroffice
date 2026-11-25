@@ -620,6 +620,7 @@ describe('native package release wiring', () => {
       'packages/docx/package.json',
       'shared/**',
       'scripts/version-packages.mjs',
+      'scripts/workspace-ranges.mjs',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',
       '.github/workflows/publish-native.yml'

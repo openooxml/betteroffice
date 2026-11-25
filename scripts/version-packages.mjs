@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { updateDownloadSnapshots } from './download-snapshot.mjs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import { NATIVE_PACKAGES, validateNativeVersions } from './native-bindings.mjs';
+import { explicitWorkspaceRanges, restoreWorkspaceRanges } from './workspace-ranges.mjs';
 import {
   RUST_CRATES,
   STANDALONE_WORKSPACES,
@@ -142,7 +143,11 @@ if (checkOnly) {
   process.exit(0);
 }
 
+const workspaceRanges = explicitWorkspaceRanges();
 run('bun', ['run', 'changeset', 'version']);
+for (const { manifest, section, name, range } of restoreWorkspaceRanges(workspaceRanges)) {
+  console.log(`Kept ${manifest} ${section} ${name} at workspace:${range}.`);
+}
 try {
   const counts = await updateDownloadSnapshots();
   console.log(`Download snapshots: ${JSON.stringify(counts)}`);
