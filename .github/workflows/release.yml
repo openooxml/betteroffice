@@ -142,7 +142,8 @@ jobs:
         if: steps.pending.outputs.publishing == 'true'
         env:
           FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN }}
-        run: if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
+        run: |
+          if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
 
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
@@ -378,7 +379,8 @@ jobs:
       - name: Note the npm fallback token
         env:
           FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN }}
-        run: if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
+        run: |
+          if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
 
       - name: Publish held packages and create releases
         env:

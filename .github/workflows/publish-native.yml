@@ -121,7 +121,8 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN }}
-        run: if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
+        run: |
+          if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi
 
       - name: Publish packages
         if: ${{ !inputs.dry_run }}

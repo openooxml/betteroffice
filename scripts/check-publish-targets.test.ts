@@ -1153,7 +1153,7 @@ describe('npm fallback token', () => {
     readFileSync(fileURLToPath(new URL('../.github/workflows/publish-native.yml', import.meta.url)), 'utf8')
   ) as any;
   const fallback = '${{ secrets.NPM_FALLBACK_TOKEN }}';
-  const note = 'if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi';
+  const note = 'if [ -n "$FALLBACK" ]; then echo "npm fallback token present: publishing may use it"; fi\n';
   const steps = release.jobs.release.steps;
   const names = steps.map((step: any) => step.name);
 
