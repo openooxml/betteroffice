@@ -1,6 +1,7 @@
 import { readFontAsset } from './asset';
 import type { FontDecoder } from './decode';
 import { openProgressiveFace, type ProgressiveFontFace, type SliceLocation } from './progressive';
+import type { FontCdnReporter } from '../../../shared/fontCdnDiagnostics';
 
 export { readFontAsset } from './asset';
 export {
@@ -13,8 +14,10 @@ export {
   type SliceTransport,
 } from './progressive';
 
-const faces = new Map<string, Promise<ProgressiveFontFace>>();
-const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFontFace>>>();
+type Faces = Map<string, Promise<ProgressiveFontFace>>;
+const faceCaches = () => ({ faces: new Map<string, Promise<ProgressiveFontFace>>(), engines: new WeakMap<FontDecoder, Faces>() });
+const shared = faceCaches();
+const scoped = new WeakMap<FontCdnReporter, ReturnType<typeof faceCaches>>();
 
 /**
  * Opens the sliced face a loader's `slices` locates. One face is shared per
@@ -29,11 +32,17 @@ export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFont
 }
 
 function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
-  const { ref, base, url, timeoutMs, requestTimeoutMs, decode, decoder, retain } = location;
-  let cache = faces;
+  const { ref, base, url, timeoutMs, requestTimeoutMs, decode, decoder, retain, reportCdnFailure } = location;
+  let caches = shared;
+  if (reportCdnFailure) {
+    const existing = scoped.get(reportCdnFailure);
+    caches = existing ?? faceCaches();
+    if (!existing) scoped.set(reportCdnFailure, caches);
+  }
+  let cache = caches.faces;
   if (decoder !== undefined) {
-    cache = engineFaces.get(decoder) ?? new Map();
-    engineFaces.set(decoder, cache);
+    cache = caches.engines.get(decoder) ?? new Map();
+    caches.engines.set(decoder, cache);
   }
   const key = `${ref.indexSha256}|${base}|${timeoutMs ?? ''}`;
   let pending = cache.get(key);
@@ -49,6 +58,7 @@ function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
         url,
         timeoutMs: transportTimeout,
         decode,
+        reportCdnFailure,
       });
     })();
     cache.set(key, pending);

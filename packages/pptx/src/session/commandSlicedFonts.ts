@@ -1,6 +1,6 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { readFontTraits } from '../../../../shared/fontTraits';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 
 /** What the session needs from a progressive face. */
@@ -45,6 +45,7 @@ interface Entry {
   family: string;
   face: SlicedFontFace;
   whole: WholeFaceLoader;
+  reportCdnFailure: FontCdnReporter;
   wholeBytes?: ArrayBuffer;
   wholeLoad?: Promise<ArrayBuffer>;
   /** `chunks` is what the revision's bytes hold; a whole face holds everything. */
@@ -101,7 +102,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       throw error;
     });
   const replacementBytes = (entry: Entry) => wholeBytes(entry).catch((error: unknown) => {
-    if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+    if (isImplicitFontCdnError(error)) entry.reportCdnFailure(error);
     throw error;
   });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
@@ -254,9 +255,9 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
     },
-    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void {
+    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>, reportCdnFailure = reportImplicitCdnFailure): void {
       if (!disposed && !entries.has(keyOf(family))) {
-        entries.set(keyOf(family), { family, face, whole, installed: [] });
+        entries.set(keyOf(family), { family, face, whole, reportCdnFailure, installed: [] });
       }
     },
     has: (family: string) => entries.has(keyOf(family)),

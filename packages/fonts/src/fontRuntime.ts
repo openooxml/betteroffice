@@ -5,7 +5,7 @@ import { loadFontBytes } from './bytes';
 import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, packFor, sliceDecoder, sliceRefOf } from './packed';
 import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnReporter } from '../../../shared/fontCdnDiagnostics';
 import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown, implicitFontRequest,
@@ -37,7 +37,12 @@ type FontPack = Exclude<FontAssetKind, 'decoder'>;
 type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
 export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
 type AssetBase = URL | Promise<URL> | undefined;
-type FontLoadOptions = { decoder?: FontDecoder; retain?: boolean; strict?: boolean | 'except-optional-cdn-failure' };
+type FontLoadOptions = {
+  decoder?: FontDecoder;
+  retain?: boolean;
+  strict?: boolean | 'except-optional-cdn-failure';
+  reportCdnFailure?: FontCdnReporter;
+};
 type RuntimeFontSource = BundledFontSource & {
   /** @internal */
   faceUnavailableUntil?(face: BundledFontFace): Promise<number | undefined>;
@@ -276,7 +281,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
       if (isImplicitFontCdnError(error)) {
         const optional = error.diagnostic.pack !== 'latin';
         if (runtime?.strict && !(substituteOptionalCdnFailure && optional)) throw error;
-        reportImplicitCdnFailure(error);
+        (runtime?.reportCdnFailure ?? reportImplicitCdnFailure)(error);
         onCdnFailure?.();
         const bytes = await substituteFontBytes(face, packed, runtime, optional);
         if (implicitCdnFace && optional) substitutedCdnFaces.add(implicitCdnFace);

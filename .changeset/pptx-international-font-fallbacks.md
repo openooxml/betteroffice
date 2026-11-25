@@ -3,4 +3,4 @@
 '@betteroffice/fonts': patch
 ---
 
-The presentation editor now loads fallback fonts for scripts like Arabic, Hebrew, Thai and Devanagari by default and skips repeated downloads for unavailable packs. Simplified Arabic and Traditional Arabic request the same fallback face as PNG export.
+The presentation editor loads fallback fonts for scripts like Arabic, Hebrew, Thai and Devanagari, using the same faces as PNG export. When a font pack is unavailable, it warns once and skips repeated downloads.
