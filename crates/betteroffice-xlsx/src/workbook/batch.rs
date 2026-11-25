@@ -1337,6 +1337,21 @@ impl Workbook {
         let mut per_op = Vec::with_capacity(ops.len());
         for (step, op) in &ops {
             validate_op(&preview, op)?;
+            match self.ensure_alternate_cell_op(&self.preserved.origins, &self.preserved.axes, op) {
+                Ok(()) => {}
+                Err(error @ Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
+                    let planned = &steps[*step as usize];
+                    return refuse(
+                        failure(
+                            EditFailureCode::Unsupported,
+                            error.to_string(),
+                            Some(planned.target.clone()),
+                        )
+                        .at(*step),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
             let formats = preview.styles.cell_xfs.len();
             let inverse = match xlsx_ops::apply_in_place(&mut preview, op) {
                 Ok(inverse) => inverse.0,

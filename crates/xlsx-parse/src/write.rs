@@ -12,7 +12,7 @@ use std::ops::Range;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
-use xlsx_model::addr::{ColId, RowId};
+use xlsx_model::addr::{ColId, MAX_COLS, RowId};
 use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
@@ -698,6 +698,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         let axes = sheet_axes.get(index).and_then(|axes| axes.as_ref());
         let output = match source {
             Some(source) if source.is_worksheet() => {
+                if let Some(original) = original {
+                    validate_alternate_cells(sheet, original, source, axes)?;
+                }
                 if shared_strings_stable
                     && original.is_some_and(|original| {
                         package.part_bytes(&source.path).is_some_and(|bytes| {
@@ -3143,6 +3146,47 @@ struct WorksheetOutput {
     relationships: Option<Vec<Relationship>>,
 }
 
+fn validate_alternate_cells(
+    sheet: &Sheet,
+    original: &Sheet,
+    source: &PreservedSheet,
+    axes: Option<&SheetAxes>,
+) -> Result<(), ParseError> {
+    let facts = &source.cell_facts.source;
+    for &(row, col) in &facts.alternate_cells {
+        let at = CellRef::new(row, col);
+        if axes.is_some_and(|axes| {
+            axes.rows.current(row) != Some(row) || axes.cols.current(col) != Some(col)
+        }) || original.cell(at) != sheet.cell(at)
+            || original.array_formula(at) != sheet.array_formula(at)
+        {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "sheet {} cell {} is inside mc:AlternateContent",
+                sheet.name,
+                at.to_a1()
+            )));
+        }
+    }
+    for &row in &facts.alternate_rows {
+        let range = CellRange::new(CellRef::new(row, 0), CellRef::new(row, MAX_COLS - 1));
+        if axes.is_some_and(|axes| axes.rows.current(row) != Some(row))
+            || original.row_heights.get(&row) != sheet.row_heights.get(&row)
+            || original.hidden_row_heights.get(&row) != sheet.hidden_row_heights.get(&row)
+            || original.row_styles.get(&row) != sheet.row_styles.get(&row)
+            || sheet
+                .cells_in_range(range)
+                .any(|(at, cell)| original.cell(at) != Some(cell))
+        {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "sheet {} row {} is inside mc:AlternateContent",
+                sheet.name,
+                row + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The `<cols>` and `<sheetData>` elements with only the changed columns, rows
 /// and cells rewritten and every other byte kept verbatim.
 #[allow(clippy::too_many_arguments)]
@@ -3278,6 +3322,14 @@ fn worksheet_xml_with_template(
             styles,
             names,
         )?),
+        _ if !source.cell_facts.source.alternate_cells.is_empty()
+            || !source.cell_facts.source.alternate_rows.is_empty() =>
+        {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "sheet {} requires source coordinates to preserve mc:AlternateContent",
+                sheet.name
+            )));
+        }
         _ => None,
     };
     let (columns, sheet_data) = match patched {

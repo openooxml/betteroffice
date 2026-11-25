@@ -2503,6 +2503,12 @@ impl Workbook {
         {
             return Ok(MutationResult::default());
         }
+        self.ensure_alternate_cells_writable(
+            &self.preserved.origins,
+            &self.preserved.axes,
+            sheet,
+            CellRange::new(cell, cell),
+        )?;
         mark(EditStage::Validated);
         self.ensure_graph();
         let formula = state.formula.clone();
@@ -2623,6 +2629,12 @@ impl Workbook {
             if format.is_none() && cell_states_semantically_equal(&old, &state) {
                 continue;
             }
+            self.ensure_alternate_cells_writable(
+                &self.preserved.origins,
+                &self.preserved.axes,
+                sheet,
+                CellRange::new(edit.cell, edit.cell),
+            )?;
             touched.push((sheet, edit.cell, state.formula.clone()));
             let op = Op::SetCell {
                 sheet,
@@ -2782,6 +2794,9 @@ impl Workbook {
             }
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
+        for op in &ops {
+            self.ensure_alternate_cell_op(&self.preserved.origins, &self.preserved.axes, op)?;
+        }
         self.carry_moved_answers(sheet, source, target, &ops);
         self.apply_carried_ops(ops, options)
     }
@@ -2902,6 +2917,7 @@ impl Workbook {
 
             self.ensure_move_keeps_inline_text(&origins, op)?;
             validate_op(staged, op)?;
+            self.ensure_alternate_cell_op(&origins, &axes, op)?;
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
             match *op {
@@ -3437,6 +3453,9 @@ impl Workbook {
                 proposal_id: id.to_string(),
                 mutation: MutationResult::default(),
             });
+        }
+        for op in &ops {
+            self.ensure_alternate_cell_op(&self.preserved.origins, &self.preserved.axes, op)?;
         }
         if !force {
             let mut review = preview.clone();
@@ -4348,6 +4367,73 @@ impl Workbook {
                 "sheet {} is not an editable worksheet",
                 sheet.0
             )));
+        }
+        Ok(())
+    }
+
+    fn ensure_alternate_cell_op(
+        &self,
+        origins: &[Option<usize>],
+        axes: &[Option<xlsx_parse::SheetAxes>],
+        op: &Op,
+    ) -> Result<()> {
+        let (sheet, range) = match *op {
+            Op::SetCell { sheet, at, .. } => (sheet, CellRange::new(at, at)),
+            Op::PatchRangeStyle { sheet, range, .. }
+            | Op::SetRangeNumberFormat { sheet, range, .. }
+            | Op::ApplyRangeFormat { sheet, range, .. } => (sheet, range),
+            _ => return Ok(()),
+        };
+        self.ensure_alternate_cells_writable(origins, axes, sheet, range)
+    }
+
+    fn ensure_alternate_cells_writable(
+        &self,
+        origins: &[Option<usize>],
+        axes: &[Option<xlsx_parse::SheetAxes>],
+        sheet: SheetId,
+        range: CellRange,
+    ) -> Result<()> {
+        let index = sheet.0 as usize;
+        let Some(origin) = origins.get(index).copied().flatten() else {
+            return Ok(());
+        };
+        let Some(package) = &self.source_package else {
+            return Ok(());
+        };
+        let Some(facts) = package.alternate_cell_facts(origin)? else {
+            return Ok(());
+        };
+        let axes = axes.get(index).and_then(Option::as_ref);
+        let blocked = if range.start.row == range.end.row && range.start.col == range.end.col {
+            let at = range.start;
+            let row = axes.map_or(Some(at.row), |axes| axes.rows.source(at.row));
+            let col = axes.map_or(Some(at.col), |axes| axes.cols.source(at.col));
+            row.is_some_and(|row| {
+                facts.alternate_rows.contains(&row)
+                    || col.is_some_and(|col| facts.alternate_cells.contains(&(row, col)))
+            })
+            .then_some(at)
+        } else {
+            let row_at = |row| axes.map_or(Some(row), |axes| axes.rows.current(row));
+            let col_at = |col| axes.map_or(Some(col), |axes| axes.cols.current(col));
+            facts
+                .alternate_rows
+                .iter()
+                .filter_map(|&row| row_at(row))
+                .map(|row| CellRef::new(row, range.start.col))
+                .chain(facts.alternate_cells.iter().filter_map(|&(row, col)| {
+                    Some(CellRef::new(row_at(row)?, col_at(col)?))
+                }))
+                .find(|&at| range.contains(at))
+        };
+        if let Some(at) = blocked {
+            return Err(xlsx_parse::ParseError::UnsupportedEdit(format!(
+                "sheet {} cell {} is inside mc:AlternateContent",
+                sheet.0,
+                at.to_a1()
+            ))
+            .into());
         }
         Ok(())
     }

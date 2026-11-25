@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 
 use ooxml_opc::SourceContainer;
 use xlsx_model::SheetPicture;
-use xlsx_parse::{PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage};
+use xlsx_parse::{
+    PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage, SourceCellFacts,
+};
 
 use super::{SnapshotError, SnapshotResult};
 use crate::{Error, Result};
@@ -15,15 +17,20 @@ pub(crate) enum PackageSlot {
         source: SourceContainer,
         facts: PackageFacts,
         rebuilt: OnceLock<std::result::Result<PreservedPackage, String>>,
+        may_hold_alternate_cells: Vec<OnceLock<bool>>,
     },
 }
 
 impl PackageSlot {
     pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts) -> Self {
+        let may_hold_alternate_cells = (0..PackageFactsView::from_facts(&facts).source_sheet_count())
+            .map(|_| OnceLock::new())
+            .collect();
         Self::Deferred {
             source,
             facts,
             rebuilt: OnceLock::new(),
+            may_hold_alternate_cells,
         }
     }
 
@@ -75,6 +82,7 @@ impl PackageSlot {
             source,
             facts,
             rebuilt,
+            ..
         } = self
         else {
             return true;
@@ -123,6 +131,7 @@ impl PackageSlot {
                 source,
                 facts,
                 rebuilt,
+                ..
             } => match rebuilt.get() {
                 Some(Ok(package)) => return package.source_sheet_pictures(sheet),
                 _ => (source, facts),
@@ -192,6 +201,29 @@ impl PackageSlot {
                 .as_ref()
                 .map_err(|message| Error::Package(message.clone())),
         }
+    }
+
+    pub(crate) fn alternate_cell_facts(&self, sheet: usize) -> Result<Option<&SourceCellFacts>> {
+        if self.materialized().is_none()
+            && let Self::Deferred {
+                may_hold_alternate_cells,
+                ..
+            } = self
+            && let Some(cached) = may_hold_alternate_cells.get(sheet)
+            && !cached.get_or_init(|| {
+                let marker = b"AlternateContent";
+                self.facts().source_sheet_part(sheet).is_none_or(|path| {
+                    self.part_bytes(path).is_none_or(|bytes| {
+                        bytes.windows(marker.len()).any(|window| window == marker)
+                    })
+                })
+            })
+        {
+            return Ok(None);
+        }
+        Ok(self.materialize()?.source_cell_facts(sheet).filter(|facts| {
+            !facts.alternate_cells.is_empty() || !facts.alternate_rows.is_empty()
+        }))
     }
 
     /// The parsed package, without parsing a deferred one.

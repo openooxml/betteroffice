@@ -695,6 +695,8 @@ pub struct SourceCellFacts {
     /// Whether a formula cell sits inside `mc:AlternateContent`, where another
     /// branch's cell can stand in for it in the model.
     pub alternate_formulas: bool,
+    pub alternate_cells: BTreeSet<(u32, u32)>,
+    pub alternate_rows: BTreeSet<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -754,6 +756,8 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
+    let mut sheet_data_depth = None;
+    let mut grid_alternate = None;
     let mut seen_view = false;
 
     loop {
@@ -802,6 +806,7 @@ fn parse_worksheet(
                 }
             }
             Event::Start(e) => match local_name(&e).as_slice() {
+                b"sheetData" => sheet_data_depth = Some(depth),
                 b"row" => {
                     let row = match attr(&e, b"r")? {
                         Some(v) => parse_index(&v, MAX_ROWS)?,
@@ -809,6 +814,9 @@ fn parse_worksheet(
                     };
                     cur_row = Some(row);
                     col_cursor = 0;
+                    if grid_alternate.is_some() {
+                        facts.source.alternate_rows.insert(row);
+                    }
                     if attr(&e, b"customFormat")?.is_some_and(|value| is_truthy(&value)) {
                         let style = attr(&e, b"s")?
                             .and_then(|value| value.parse::<u32>().ok())
@@ -846,6 +854,9 @@ fn parse_worksheet(
                         None => CellRef::new(cur_row.unwrap_or(0), col_cursor),
                     };
                     col_cursor = addr.col;
+                    if grid_alternate.is_some() {
+                        facts.source.alternate_cells.insert((addr.row, addr.col));
+                    }
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
                         depth,
@@ -855,7 +866,16 @@ fn parse_worksheet(
                         ..CellBuild::default()
                     });
                 }
-                b"AlternateContent" => alternate_depth += 1,
+                b"AlternateContent" => {
+                    alternate_depth += 1;
+                    if grid_alternate.is_none()
+                        && sheet_data_depth.is_some_and(|open| {
+                            depth == open + 1 || (depth == open + 2 && cur_row.is_some())
+                        })
+                    {
+                        grid_alternate = Some(depth);
+                    }
+                }
                 b"mergeCell" => {
                     if let Some(r) = attr(&e, b"ref")? {
                         let range = CellRange::parse_a1(&r)
@@ -921,7 +941,13 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
-                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
+                    b"sheetData" if sheet_data_depth == Some(depth + 1) => sheet_data_depth = None,
+                    b"AlternateContent" => {
+                        alternate_depth = alternate_depth.saturating_sub(1);
+                        if grid_alternate == Some(depth + 1) {
+                            grid_alternate = None;
+                        }
+                    }
                     _ => {}
                 }
             }

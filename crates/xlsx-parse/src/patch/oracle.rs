@@ -39,7 +39,7 @@ impl SheetPatch<'_> {
     }
 
     pub(super) fn sheet_data_oracle(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
-        let Some((element, rows)) = scan_sheet_data(source)? else {
+        let Some(SourceSheetData { element, rows, .. }) = scan_sheet_data(source)? else {
             return Ok(None);
         };
         let dirty = self.dirty_formulas_oracle(source, &rows)?;

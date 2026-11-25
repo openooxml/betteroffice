@@ -72,11 +72,15 @@ struct SourceRow {
     empty: bool,
     index: u32,
     cells: Vec<SourceCell>,
+    alternates: Vec<SourceAlternate>,
 }
 
 impl SourceRow {
     fn content_start(&self) -> usize {
-        self.cells.last().map_or(self.tag.end, |cell| cell.span.end)
+        let cell_end = self.cells.last().map_or(self.tag.end, |cell| cell.span.end);
+        self.alternates
+            .last()
+            .map_or(cell_end, |block| cell_end.max(block.span.end))
     }
 }
 
@@ -118,6 +122,31 @@ struct WidthPiece {
     range: Range<u32>,
     changed: Option<(Option<f64>, Option<f64>)>,
     style: Option<Option<u32>>,
+}
+
+struct SourceSheetData {
+    element: SourceElement,
+    rows: Vec<SourceRow>,
+    alternates: Vec<SourceAlternate>,
+}
+
+struct SourceAlternate {
+    before: usize,
+    span: Range<usize>,
+    first: Option<u32>,
+}
+
+impl SourceAlternate {
+    fn at_before(&self, next: Option<(usize, u32)>, end: u32) -> Option<u32> {
+        if next.is_some_and(|(start, _)| start < self.span.start) {
+            return None;
+        }
+        Some(self.first.or(next.map(|(_, index)| index)).unwrap_or(end))
+    }
+
+    fn emit(&self, out: &mut Vec<u8>, data: &[u8]) {
+        out.extend_from_slice(&data[self.before..self.span.end]);
+    }
 }
 
 struct SourceCellCursor<'a, I: Iterator> {
@@ -173,13 +202,21 @@ where
 impl SheetPatch<'_> {
     /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
-        #[cfg(any(test, feature = "test-oracle"))]
-        if crate::save_oracle::use_legacy_save_path() {
-            return self.sheet_data_oracle(source);
-        }
-        let Some((element, rows)) = scan_sheet_data(source)? else {
+        let Some(SourceSheetData {
+            element,
+            rows,
+            alternates,
+        }) = scan_sheet_data(source)? else {
             return Ok(None);
         };
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path()
+            && alternates.is_empty()
+            && rows.iter().all(|row| row.alternates.is_empty())
+        {
+            return self.sheet_data_oracle(source);
+        }
+        let wrapped = &self.cell_facts.source;
         let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
@@ -196,22 +233,54 @@ impl SheetPatch<'_> {
         // order, so the rows it reuses are visited in that order too
         source_rows.sort_unstable_by_key(|(current, _)| *current);
         let mut source_rows = source_rows.into_iter().peekable();
-        let mut cells = self.sheet.iter_cells().peekable();
+        let mut alternate_blocks = alternates.iter().peekable();
+        let mut cells = self
+            .sheet
+            .iter_cells()
+            .filter(|(at, _)| !wrapped.alternate_cells.contains(&(at.row, at.col)))
+            .peekable();
         let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
-        let mut heights = self.sheet.row_heights.keys().copied().peekable();
-        let mut row_styles = self.sheet.row_styles.keys().copied().peekable();
+        let mut heights = self
+            .sheet
+            .row_heights
+            .keys()
+            .copied()
+            .filter(|row| !wrapped.alternate_rows.contains(row))
+            .peekable();
+        let mut row_styles = self
+            .sheet
+            .row_styles
+            .keys()
+            .copied()
+            .filter(|row| !wrapped.alternate_rows.contains(row))
+            .peekable();
         loop {
-            let next_source = source_rows.peek().map(|(current, _)| *current);
+            let next_source = source_rows
+                .peek()
+                .map(|(current, row)| (row.span.start, *current));
+            let next_alternate = alternate_blocks
+                .peek()
+                .and_then(|block| block.at_before(next_source, MAX_ROWS));
+            let next_source = next_source
+                .filter(|_| next_alternate.is_none())
+                .map(|(_, at)| at);
             let next_cell = cells.peek().map(|(at, _)| at.row);
             let next_height = heights.peek().copied();
             let next_style = row_styles.peek().copied();
-            let Some(row) = [next_source, next_cell, next_height, next_style]
+            let Some(row) = [next_source, next_cell, next_height, next_style, next_alternate]
                 .into_iter()
                 .flatten()
                 .min()
             else {
                 break;
             };
+            if next_alternate == Some(row) {
+                alternate_blocks
+                    .next()
+                    .expect("peeked")
+                    .emit(&mut out, source);
+                continue;
+            }
             if next_height == Some(row) {
                 heights.next();
             }
@@ -238,6 +307,9 @@ impl SheetPatch<'_> {
         let tail = rows
             .last()
             .map_or(element.content.start, |row| row.span.end);
+        let tail = alternates
+            .last()
+            .map_or(tail, |block| tail.max(block.span.end));
         out.extend_from_slice(&source[tail..element.content.end]);
         out.extend_from_slice(&element.suffix);
         Ok(Some(out))
@@ -410,6 +482,7 @@ impl SheetPatch<'_> {
         O: Iterator<Item = (CellRef, &'o Cell)>,
     {
         let mut body = Vec::new();
+        let mut alternates = source.alternates.iter().peekable();
         let mut columns: Option<(u32, u32)> = None;
         let mut source_cells = source
             .cells
@@ -422,14 +495,30 @@ impl SheetPatch<'_> {
             })
             .peekable();
         loop {
-            let next_source = source_cells.peek().map(|(current, _)| *current);
+            let next_source = source_cells
+                .peek()
+                .map(|(current, cell)| (cell.span.start, *current));
+            let next_alternate = alternates
+                .peek()
+                .and_then(|block| block.at_before(next_source, MAX_COLS));
+            let next_source = next_source
+                .filter(|_| next_alternate.is_none())
+                .map(|(_, at)| at);
             let next_model = cells
                 .peek()
                 .filter(|(at, _)| at.row == row)
                 .map(|(at, _)| at.col);
-            let Some(col) = [next_source, next_model].into_iter().flatten().min() else {
+            let Some(col) = [next_source, next_model, next_alternate]
+                .into_iter()
+                .flatten()
+                .min()
+            else {
                 break;
             };
+            if next_alternate == Some(col) {
+                alternates.next().expect("peeked").emit(&mut body, data);
+                continue;
+            }
             let source_cell =
                 (next_source == Some(col)).then(|| source_cells.next().expect("peeked").1);
             let model_cell = (next_model == Some(col)).then(|| cells.next().expect("peeked").1);
@@ -507,6 +596,16 @@ impl SheetPatch<'_> {
                 set_attribute(&mut attributes, "s", "s", style.to_string());
                 set_attribute(&mut attributes, "customFormat", "customFormat", "1".into());
             }
+        }
+        let mut wrapped_cols = self
+            .cell_facts
+            .source
+            .alternate_cells
+            .range((row, 0)..=(row, u32::MAX));
+        if let Some(&(_, first)) = wrapped_cols.next() {
+            let last = wrapped_cols.next_back().map_or(first, |&(_, last)| last);
+            let (min, max) = columns.unwrap_or((first + 1, last + 1));
+            columns = Some((min.min(first + 1), max.max(last + 1)));
         }
         if let Some((min, max)) = columns
             && spans_exclude(&attributes, min, max)
@@ -1437,7 +1536,7 @@ pub(crate) fn sheet_data_regeneration_loss(data: &[u8]) -> Result<Option<String>
 }
 
 /// Rows and cells of a `<sheetData>`; `None` when unpatchable cell by cell.
-fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)>, ParseError> {
+fn scan_sheet_data(data: &[u8]) -> Result<Option<SourceSheetData>, ParseError> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().expand_empty_elements = false;
     reader.config_mut().check_end_names = true;
@@ -1448,12 +1547,41 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
     let mut rows: Vec<SourceRow> = Vec::new();
     let mut row: Option<SourceRow> = None;
     let mut cell: Option<SourceCell> = None;
+    let mut alternates = Vec::new();
+    let mut alternate: Option<(usize, usize, Option<u32>)> = None;
+    let mut col_cursor = 0;
     loop {
         let before = reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = reader.buffer_position() as usize;
+        if let Some((_, _, first)) = &mut alternate
+            && let Event::Start(element) | Event::Empty(element) = &event
+        {
+            let at = match (row.is_some(), element.local_name().as_ref()) {
+                (true, b"c") => {
+                    let col = attr(element, b"r")?
+                        .and_then(|address| CellRef::parse_a1(&address).ok())
+                        .map_or(col_cursor, |at| at.col);
+                    col_cursor = col + 1;
+                    Some(col)
+                }
+                (false, b"row") => attr(element, b"r")?
+                    .and_then(|index| index.trim().parse::<u32>().ok())
+                    .and_then(|index| index.checked_sub(1)),
+                _ => None,
+            };
+            if let Some(at) = at {
+                *first = Some(first.map_or(at, |index| index.min(at)));
+            }
+        }
         match event {
             Event::Start(element) => {
+                if (depth == 1 || (depth == 2 && row.is_some()))
+                    && alternate.is_none()
+                    && element.local_name().as_ref() == b"AlternateContent"
+                {
+                    alternate = Some((depth, before, None));
+                }
                 match depth {
                     0 => {
                         prefix = data[before..after].to_vec();
@@ -1464,6 +1592,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                         let Some(index) = row_index(&element, rows.last())? else {
                             return Ok(None);
                         };
+                        col_cursor = 0;
                         row = Some(SourceRow {
                             before: cursor..before,
                             span: before..after,
@@ -1471,6 +1600,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                             empty: false,
                             index,
                             cells: Vec::new(),
+                            alternates: Vec::new(),
                         });
                     }
                     2 if element.local_name().as_ref() == b"c" => {
@@ -1478,6 +1608,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                             let Some(at) = cell_address(&element, row)? else {
                                 return Ok(None);
                             };
+                            col_cursor = at.col + 1;
                             cell = Some(SourceCell {
                                 before: row.content_start()..before,
                                 span: before..after,
@@ -1503,10 +1634,11 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
             }
             Event::Empty(element) => match depth {
                 0 => {
-                    return Ok(Some((
-                        expanded_empty(data, &element, before..after)?,
-                        Vec::new(),
-                    )));
+                    return Ok(Some(SourceSheetData {
+                        element: expanded_empty(data, &element, before..after)?,
+                        rows,
+                        alternates,
+                    }));
                 }
                 1 if element.local_name().as_ref() == b"row" => {
                     let Some(index) = row_index(&element, rows.last())? else {
@@ -1519,6 +1651,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                         empty: true,
                         index,
                         cells: Vec::new(),
+                        alternates: Vec::new(),
                     });
                     cursor = after;
                 }
@@ -1527,6 +1660,7 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
                         let Some(at) = cell_address(&element, row)? else {
                             return Ok(None);
                         };
+                        col_cursor = at.col + 1;
                         let shared_string = attr(&element, b"t")?.as_deref() == Some("s");
                         row.cells.push(SourceCell {
                             before: row.content_start()..before,
@@ -1548,16 +1682,34 @@ fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)
             },
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
+                if let Some((_, start, first)) = alternate.take_if(|(opened, _, _)| *opened == depth) {
+                    match &mut row {
+                        Some(row) => row.alternates.push(SourceAlternate {
+                            before: row.content_start(),
+                            span: start..after,
+                            first,
+                        }),
+                        None => {
+                            alternates.push(SourceAlternate {
+                                before: cursor,
+                                span: start..after,
+                                first,
+                            });
+                            cursor = after;
+                        }
+                    }
+                }
                 match depth {
                     0 => {
-                        return Ok(Some((
-                            SourceElement {
+                        return Ok(Some(SourceSheetData {
+                            element: SourceElement {
                                 prefix,
                                 suffix: data[before..after].to_vec(),
                                 content: content_start..before,
                             },
                             rows,
-                        )));
+                            alternates,
+                        }));
                     }
                     1 => {
                         if let Some(mut row) = row.take() {
@@ -1603,6 +1755,32 @@ fn cell_address(element: &BytesStart<'_>, row: &SourceRow) -> Result<Option<Cell
                 .last()
                 .is_none_or(|previous| previous.at.col < at.col)
     }))
+}
+
+#[cfg(test)]
+#[test]
+fn alternate_branches_stay_in_place_when_the_following_cell_is_removed() {
+    let alternate = concat!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test:ext">"#,
+        r#"<mc:Choice Requires="x"><c r="B1"><v>2</v></c></mc:Choice>"#,
+        r#"<mc:Fallback><c r="C1"><v>3</v></c></mc:Fallback>"#,
+        "</mc:AlternateContent>",
+    );
+    let source = format!(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c>{alternate}<c r="D1"><v>4</v></c><c r="E1"><v>5</v></c></row></sheetData>"#,
+    );
+    let parts = crate::tests::package(&source, &[], false);
+    let parsed = crate::tests::parse_workbook_with_package(&parts).unwrap();
+    assert_eq!(
+        parsed.package.source_cell_facts(0).unwrap().alternate_cells,
+        BTreeSet::from([(0, 1), (0, 2)]),
+    );
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].set_cell(CellRef::new(0, 3), Cell::default());
+
+    let saved = style_match_tests::save(&parsed, &workbook, Some(SheetAxes::default()));
+    let expected = source.replace(r#"<c r="D1"><v>4</v></c>"#, "");
+    assert!(saved.contains(&expected), "{saved}");
 }
 
 fn formula_markup(

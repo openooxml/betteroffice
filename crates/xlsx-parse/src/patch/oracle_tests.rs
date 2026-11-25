@@ -626,6 +626,7 @@ fn source_row(cells: &[(&str, Option<u32>)]) -> (Vec<u8>, SourceRow) {
         empty: false,
         index: 0,
         cells: source_cells,
+        alternates: Vec::new(),
     };
     (data, row)
 }
