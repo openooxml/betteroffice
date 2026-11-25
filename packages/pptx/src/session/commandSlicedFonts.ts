@@ -1,7 +1,10 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { readFontTraits } from '../../../../shared/fontTraits';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
+
+export { slicedFacesSupported };
 
 /** What the session needs from a progressive face. */
 export interface SlicedFontFace {
@@ -28,16 +31,6 @@ const KEPT_REVISIONS = 2;
 const FILL_BATCH = 48;
 const FILL_QUIET_MS = 300;
 const FILL_DELAY_MS = 1000;
-
-/**
- * Sliced faces are verified in Chromium and Firefox. Safari, iOS browsers (all WebKit) and unknown engines
- * use whole faces.
- */
-export function slicedFacesSupported(
-  userAgent = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent ?? '',
-): boolean {
-  return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
-}
 
 type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
 

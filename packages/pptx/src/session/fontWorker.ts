@@ -1,5 +1,5 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
-import { missingWorkerRenderCapabilities } from '../../../../shared/office-session/render/workerCapabilities';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -29,7 +29,7 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
  * Starts the session worker for `source` early and returns a handle to its font decoder; the editor that opens the
  * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
  * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
- * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
+ * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts`,
  * `activeSlideIndex` and `slicedFonts` the editor will use.
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
@@ -39,8 +39,7 @@ export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
     owner = createPreparedFontWorker();
     preparedWorkers.set(source, owner);
     if (options.defaultFonts !== false) {
-      const sliced = options.slicedFonts ?? (typeof document === 'undefined' ? undefined : missingWorkerRenderCapabilities().length === 0);
-      owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, sliced);
+      owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, shouldSlicePresentationFonts(options.slicedFonts));
     }
   }
   return owner.handle();
@@ -97,10 +96,10 @@ function createPreparedFontWorker() {
     retired: () => retired,
     shared: () => holders > 1,
     take,
-    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean | undefined): void {
+    prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean): void {
       const fontCdn = getFontCdnConfiguration();
       void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
-        const args = fontCdn ? [scripts, sliced, fontCdn] : sliced === undefined ? [scripts] : [scripts, sliced];
+        const args = fontCdn ? [scripts, sliced, fontCdn] : [scripts, sliced];
         if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args }, []);
       }).catch(() => {});
     },

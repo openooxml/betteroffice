@@ -1,5 +1,6 @@
 import type { BundledFontLoader, BundledFontScript } from '@betteroffice/fonts';
 import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
+import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import { scriptFontFace } from './commandScriptFonts';
@@ -47,7 +48,7 @@ export function prefetchCoverageFaces(
   void provider().then(async (source) => {
     for (const script of scripts) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
-      if (load?.slices && sliced) {
+      if (load?.slices && sliced && slicedFacesSupported()) {
         const { openSlicedFace } = await importProgressiveFonts();
         void openSlicedFace(load.slices).catch(() => {});
       } else void load?.().catch(() => {});
@@ -154,7 +155,7 @@ export function createCommandDefaultFonts(
         }
         if (!load) return undefined;
         available = true;
-        if (load.slices && sliced) {
+        if (load.slices && sliced?.supported()) {
           try {
             const { openSlicedFace } = await importProgressiveFonts();
             const opened = await openSlicedFace(load.slices);

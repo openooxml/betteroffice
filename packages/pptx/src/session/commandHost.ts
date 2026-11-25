@@ -12,6 +12,7 @@ import { isCommandEnvelope } from '../../../../shared/office-session/commands/ty
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
@@ -1731,8 +1732,8 @@ export function registerPresentationCommandHandlers(
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
       useFontCdn(configuration);
-      void commandDefaultFontModule.load().then(async (fonts) => {
-        const useSlices = sliced === undefined ? (await import('./commandSlicedFonts')).slicedFacesSupported() : sliced === true;
+      const useSlices = shouldSlicePresentationFonts(sliced === undefined ? undefined : sliced === true);
+      void commandDefaultFontModule.load().then((fonts) => {
         if (!disposed && !handle && !opening) {
           fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices);
         }
@@ -1759,7 +1760,8 @@ export function registerPresentationCommandHandlers(
       }
       useFontCdn(input.fontCdn);
       opening = true;
-      const slicing = input.slicedFonts === true
+      const useSlices = shouldSlicePresentationFonts(input.slicedFonts === true);
+      const slicing = useSlices
         ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
@@ -1773,7 +1775,7 @@ export function registerPresentationCommandHandlers(
           else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
           if (input.defaultFonts !== false && result.scripts.length) {
             void commandDefaultFontModule.load().then((fonts) => {
-              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), input.slicedFonts === true);
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), useSlices);
             }).catch(() => {});
           }
         }).catch(() => {});
