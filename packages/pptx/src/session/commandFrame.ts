@@ -11,6 +11,7 @@ import type { MetafileSvg } from './metafileSvg';
 import { frameAssetIds } from './frame';
 
 type FrameTags = Omit<PresentationCommandFrame, 'displayList' | 'media'>;
+type FrameMetafiles = Pick<MetafileSvg, 'ready' | 'convert'>;
 
 /** Lays out one slide as the command frame paints it, with caret stops on grapheme boundaries. */
 export function parseCommandDisplayList(handle: PresentationHandle, slideIndex: number): SlideDisplayList {
@@ -55,7 +56,7 @@ function normalizeCaretStops(primitives: SlidePrimitive[]): void {
 
 export function buildCommandFrame(
   handle: PresentationHandle, tags: FrameTags, sentMedia: ReadonlySet<string>, parsed?: (list: SlideDisplayList) => void, cached?: SlideDisplayList,
-  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
+  metafiles?: FrameMetafiles, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
 ): TransferResult<PresentationCommandFrame> {
   const list = cached ?? parseCommandDisplayList(handle, tags.slideIndex);
   parsed?.(list);
@@ -67,7 +68,7 @@ export function buildCommandFrame(
 
 export function commandFrameMedia(
   handle: PresentationHandle, list: SlideDisplayList, sentMedia: ReadonlySet<string>,
-  metafiles?: MetafileSvg, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
+  metafiles?: FrameMetafiles, pendingMetafiles?: Set<string>, extracted?: Map<string, Uint8Array>,
 ): PresentationCommandFrame['media'] {
   const media: PresentationCommandFrame['media'] = [];
   for (const assetId of frameAssetIds(list)) {
@@ -81,7 +82,7 @@ export function commandFrameMedia(
 }
 
 export function commandFrameMediaBytes(
-  handle: PresentationHandle, assetId: string, metafiles?: MetafileSvg, pendingMetafiles?: Set<string>,
+  handle: PresentationHandle, assetId: string, metafiles?: FrameMetafiles, pendingMetafiles?: Set<string>,
 ): Uint8Array {
   let bytes = handle.mediaBytes(assetId);
   if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {

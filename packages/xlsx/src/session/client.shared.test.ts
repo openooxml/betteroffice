@@ -1,5 +1,6 @@
 import { configureFontCdn } from '@betteroffice/fonts';
 import { expect, spyOn, test } from 'bun:test';
+import { withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { isClientMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
@@ -390,6 +391,33 @@ test('workbook opens omit font CDN configuration when none was configured', asyn
       try {
         expect(recoveryPort.openedInputs[0]).not.toHaveProperty('fontCdn');
       } finally { await recovery.dispose(); }
+    }
+  } finally { setFontCdnConfiguration(previous); }
+});
+
+test('XLSX source and recovery opens send the page default and omit it for a Node host', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  try {
+    for (const page of [false, true]) {
+      const restore = page ? withBrowserFontGlobals() : () => {};
+      try {
+        for (const open of [
+          (transport: SessionTransport) => createWorkbookSession(new Uint8Array(), {}, transport),
+          (transport: SessionTransport) => createWorkbookRecoverySession(new Uint8Array(), {}, transport),
+          (transport: SessionTransport) => createWorkbookRecoverySession(new Uint8Array(), {}, transport,
+            { state: new Uint8Array([1]), epoch: 1, version: 0, throughSeq: 0 }),
+        ]) {
+          const port = controlled();
+          const session = await open(port.transport);
+          try {
+            if (page) expect(port.openedInputs[0]).toMatchObject({
+              fontCdn: { baseUrl: 'https://cdn.jsdelivr.net/npm/', implicit: true },
+            });
+            else expect(port.openedInputs[0]).not.toHaveProperty('fontCdn');
+          } finally { await session.dispose(); }
+        }
+      } finally { restore(); }
     }
   } finally { setFontCdnConfiguration(previous); }
 });

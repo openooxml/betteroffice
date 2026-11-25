@@ -1,7 +1,12 @@
-import { expect, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { createFontProvider, resolveLastResortFace } from '@betteroffice/fonts';
+import * as fonts from '@betteroffice/fonts';
 import type { SliceLocation } from '@betteroffice/fonts/progressive';
+import { configureDefaultFonts, resolveDefaultFontProvider } from './defaultFontProvider';
 import { TextMeasureFontRegistry } from './fontRegistry';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../../fonts/src/fontFetch.test-support';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../../shared/office-session/fontCdn';
 
 test("an unknown family asks the provider for Word's last-resort face", async () => {
   const offices: unknown[] = [];
@@ -19,6 +24,201 @@ test("an unknown family asks the provider for Word's last-resort face", async ()
   );
   expect(await registry.getFontIdChain('Lato', false, false)).toEqual([3]);
   expect(offices).toEqual(['word']);
+});
+
+test('DOCX layout uses Base Latin when neither the primary nor the last resort pack is installed', async () => {
+  const previous = getFontCdnConfiguration();
+  setFontCdnConfiguration(undefined);
+  const fetch = spyOnFontFetch(fontAssetResponse);
+  const registerFont = mock((_bytes: Uint8Array) => 1);
+  const provider = fontRuntimeWithoutPacks().createFontProvider();
+  try {
+    const registry = new TextMeasureFontRegistry({ registerFont }, { bundled: provider });
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(registerFont).toHaveBeenCalledWith(new Uint8Array(await provider.resolveBaseLatin!(false, false)!()));
+  } finally {
+    fetch.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('DOCX warns once about the missing Latin pack with the CDN disabled', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-cdn-disabled-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch(fontAssetResponse);
+  try {
+    fonts.configureFontCdn({ baseUrl: false });
+    const provider = await resolveDefaultFontProvider({});
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, { bundled: provider });
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(await registry.getFontIdChain('Calibri', false, false)).toEqual([1]);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('cdn.jsdelivr.net'))).toBe(false);
+    expect(warn.mock.calls).toEqual([[
+      '[fontRegistry] bundled face for "Calibri" failed to load or register; falling back: ' +
+      'Bundled font Carlito-Regular.ttf.zst needs @betteroffice/fonts-latin - install @betteroffice/fonts-latin',
+    ]]);
+  } finally {
+    fetch.mockRestore();
+    create.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('DOCX substitutes after a slice index 404 and fetches slices again only after cooldown', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const requests: string[] = [];
+  let failed = true;
+  const fetch = spyOnFontFetch((input) => {
+    const url = String(input);
+    if (url.includes('cdn.jsdelivr.net')) {
+      requests.push(url);
+      if (failed) return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return fontAssetResponse(input);
+  });
+  const installed: number[] = [];
+  try {
+    setFontCdnConfiguration(undefined);
+    const provider = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false });
+    const load = provider.resolveScriptFallback('cjk-jp', false, false)!;
+    const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+    const registry = new TextMeasureFontRegistry({ registerFont: (bytes) => installed.push(bytes.byteLength) }, {
+      bundled: provider,
+      progressive: (slices) => openSlicedFace(slices as SliceLocation),
+    });
+    const index = (await load.slices!.url(load.slices!.ref.index)).href;
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([]);
+    expect(requests).toEqual([index]);
+    failed = false;
+    clock.mockReturnValue(now + 59_999);
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([]);
+    expect(installed).toEqual([]);
+    expect(requests).toEqual([index]);
+    clock.mockReturnValue(now + 60_000);
+    expect(await registry.getScriptFallbackIds(['cjk-jp'])).toEqual([1]);
+    expect(registry.isProgressive(1)).toBe(true);
+    expect(requests.map((url) => url.slice(url.lastIndexOf('/') + 1)).sort()).toEqual([
+      'core.zst', 'skeleton.zst', 'slices.json', 'slices.json',
+    ]);
+  } finally {
+    fetch.mockRestore();
+    warn.mockRestore();
+    clock.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
+
+test('DOCX with configured fonts substitutes locally after its first implicit CDN failure', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const runtime = fontRuntimeWithoutPacks();
+  const requests: string[] = [];
+  const fetch = spyOnFontFetch(async (input) => {
+    const url = String(input);
+    if (url.includes('cdn.jsdelivr.net')) {
+      requests.push(url);
+      throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  });
+  try {
+    setFontCdnConfiguration(undefined);
+    configureDefaultFonts({ fonts: runtime });
+    const provider = await resolveDefaultFontProvider({});
+    const { openSlicedFace } = await import('@betteroffice/fonts/progressive');
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, {
+      bundled: provider,
+      progressive: (slices) => openSlicedFace(slices as SliceLocation),
+    });
+    expect(await registry.getFontIdChain('MS Gothic', false, false)).toEqual([1]);
+    expect(requests).toEqual([expect.stringMatching(/\/fonts-cjk@.+\/slices\.json$/)]);
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test.each(['script fallback', 'last resort'] as const)('DOCX warns once per CDN cooldown for a failed %s', async (kind) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch((input) => String(input).includes('cdn.jsdelivr.net')
+    ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input));
+  try {
+    configureDefaultFonts({});
+    setFontCdnConfiguration(undefined);
+    const provider = await resolveDefaultFontProvider({});
+    const strict = runtime.createFontProvider(undefined, { strict: true });
+    const registry = new TextMeasureFontRegistry({ registerFont: () => 1 }, { bundled: kind === 'script fallback' ? provider : {
+      resolve: () => undefined,
+      resolveLastResort: () => strict.resolveScriptFallback('arabic', false, false),
+      resolveBaseLatin: () => async () => new ArrayBuffer(16),
+    } });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (kind === 'script fallback') expect(await registry.getScriptFallbackIds(['arabic'])).toEqual([]);
+      else expect(await registry.getFontIdChain('Unknown', false, false)).toEqual([1]);
+    }
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([expect.stringContaining('cdn.jsdelivr.net')]);
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    create.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test.each(['disabled', 'unavailable'] as const)('DOCX leaves an absent script family to browser fallback when the CDN is %s', async (cdn) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const dispatch = globalThis.dispatchEvent;
+  const diagnostic = mock((_event: Event) => true);
+  globalThis.dispatchEvent = diagnostic;
+  const runtime = fontRuntimeWithoutPacks(new URL('https://docx-base.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const requests: string[] = [];
+  const fetch = spyOnFontFetch((input) => {
+    const url = String(input);
+    if (!url.endsWith('.wasm')) requests.push(url);
+    return url.includes('cdn.jsdelivr.net') ? Promise.resolve(new Response(null, { status: 404 })) : fontAssetResponse(input);
+  });
+  const registerFont = mock(() => 1);
+  const family = 'MS Gothic';
+  try {
+    configureDefaultFonts({});
+    setFontCdnConfiguration(cdn === 'disabled' ? { baseUrl: false, timeoutMs: 30_000 } : undefined);
+    const provider = await resolveDefaultFontProvider({});
+    const registry = new TextMeasureFontRegistry({ registerFont }, { bundled: provider });
+    const ids = await registry.getFontIdChain(family, false, false);
+    expect(requests).toEqual(cdn === 'disabled' ? [] : [expect.stringContaining('/fonts-cjk@')]);
+    expect(diagnostic).toHaveBeenCalledTimes(cdn === 'disabled' ? 0 : 1);
+    expect(ids).toEqual([]);
+    expect(registerFont).not.toHaveBeenCalled();
+  } finally {
+    configureDefaultFonts({});
+    fetch.mockRestore();
+    create.mockRestore();
+    warn.mockRestore();
+    globalThis.dispatchEvent = dispatch;
+    restore();
+    setFontCdnConfiguration(previous);
+  }
 });
 
 test('shared loaders register fresh buffers once across families and script fallbacks', async () => {
