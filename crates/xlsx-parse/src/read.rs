@@ -763,12 +763,8 @@ fn parse_worksheet(
                     continue;
                 };
                 let name = local_name(&e);
-                let compatibility = e
-                    .name()
-                    .prefix()
-                    .is_some_and(|prefix| prefix.as_ref() == b"mc");
                 if depth == c.depth + 1 {
-                    let alternate = compatibility && name.as_slice() == b"AlternateContent";
+                    let alternate = name.as_slice() == b"AlternateContent";
                     c.alternate = alternate.then_some(depth);
                     c.fallback = None;
                     if alternate {
@@ -776,7 +772,7 @@ fn parse_worksheet(
                     }
                 }
                 if c.alternate.is_some_and(|at| depth == at + 1) {
-                    c.fallback = (compatibility && name.as_slice() == b"Fallback").then_some(depth);
+                    c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
                     continue;
                 }
                 let direct = depth == c.depth + 1;
