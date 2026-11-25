@@ -1138,6 +1138,15 @@ export class FileSession {
     return this.#saveInternal({ tokenUser, isAutosave: false, isExitSave: false, by: tokenUser?.id ?? null });
   }
 
+  async #readBackMatches(user: UserSession, bytes: Uint8Array): Promise<boolean> {
+    try {
+      const stored = await this.#host.readFile({ wopiSrc: this.wopiSrc, accessToken: user.accessToken });
+      return Buffer.from(stored).equals(Buffer.from(bytes));
+    } catch {
+      return false;
+    }
+  }
+
   #recordWritten(itemVersion: string | null): void {
     const journal = this.#deps.journal;
     if (!journal || !this.#journalActive) return;
@@ -1200,7 +1209,7 @@ export class FileSession {
         } catch (err) {
           unauthorized = err instanceof WopiHostError && err.kind === "unauthorized";
         }
-        const ours = result.itemVersion === null && info?.Size === bytes.byteLength;
+        const ours = result.itemVersion === null && info?.Size === bytes.byteLength && (await this.#readBackMatches(current, bytes));
         const written = result.itemVersion ?? (ours ? info?.Version : undefined) ?? null;
         if (info?.Version && info.Version !== written) {
           return this.#saveCurrentConflict(current, tried);
