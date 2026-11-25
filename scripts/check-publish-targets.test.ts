@@ -870,6 +870,173 @@ describe('release wiring', () => {
     step.run?.includes('check-publish-targets.mjs')
   );
 
+  test('dispatch rehearsals use a separate concurrency group per ref', () => {
+    expect(release.concurrency).toEqual({
+      group: "${{ inputs.rehearse == true && format('release-rehearsal-{0}', github.ref) || 'release' }}",
+      'cancel-in-progress': false
+    });
+    expect(release.on.workflow_dispatch.inputs.rehearse).toEqual({
+      description: 'Build and load-check every native package and Python binding without publishing.',
+      type: 'boolean',
+      default: false
+    });
+  });
+
+  test('plans before the gate without installing workspace dependencies', () => {
+    const plan = release.jobs.plan;
+    expect(plan.if).toBe("github.ref == 'refs/heads/main' || inputs.rehearse == true");
+    expect(plan['runs-on']).toBe('ubuntu-latest');
+    expect(plan['timeout-minutes']).toBe(10);
+    expect(plan.permissions).toEqual({ contents: 'read' });
+    expect(plan.steps[0].uses).toBe('actions/checkout@v7.0.1');
+    expect(plan.steps[1]).toEqual({ uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24' } });
+    expect(plan.steps.slice(2).map((step: any) => step.id ?? step.name)).toEqual([
+      'pending', 'Note skipped tests', 'bindings'
+    ]);
+    expect(plan.steps[2].run).toContain("find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md'");
+    expect(plan.steps[4].env).toEqual({
+      REHEARSE: '${{ inputs.rehearse == true }}',
+      PUBLISHING: '${{ steps.pending.outputs.publishing }}'
+    });
+    expect(plan.outputs).toEqual({
+      publishing: "${{ inputs.rehearse == true && 'true' || steps.pending.outputs.publishing }}",
+      native: '${{ steps.bindings.outputs.native }}',
+      python: '${{ steps.bindings.outputs.python }}'
+    });
+    expect(release.jobs.release.outputs.publishing).toBe('${{ needs.plan.outputs.publishing }}');
+    expect(steps).not.toContain('Detect pending changesets');
+  });
+
+  test('release requires a successful plan and accepts a failed build only after a successful retry', () => {
+    const job = release.jobs.release;
+    expect(job.needs).toEqual([
+      'plan', 'test', 'native-build', 'native-build-retry', 'python-build', 'python-build-retry'
+    ]);
+    expect(job.if).toBe([
+      "${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.rehearse != true &&",
+      "needs.plan.result == 'success' &&",
+      "(needs.test.result == 'success' || needs.test.result == 'skipped') &&",
+      "(needs.native-build.result == 'success' ||",
+      "(needs.native-build.result == 'failure' && needs.native-build-retry.result == 'success') ||",
+      "needs.native-build.result == 'skipped') &&",
+      "(needs.python-build.result == 'success' ||",
+      "(needs.python-build.result == 'failure' && needs.python-build-retry.result == 'success') ||",
+      "needs.python-build.result == 'skipped') }}"
+    ].join(' '));
+    for (const id of ['python-bindings', 'python-pypi', 'native-npm', 'held-npm', 'wopi-image']) {
+      expect([release.jobs[id].needs].flat()).toContain('release');
+    }
+  });
+
+  test('rehearsals cannot reach a job that publishes or dispatches', () => {
+    const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|twine\b|docker\s+push\b|pypi\/)/i;
+    const publishAction = /^(?:changesets\/action@|pypa\/gh-action-pypi-publish@|pypi\/)/i;
+    const publishPermissions = ['id-token', 'actions', 'contents', 'packages'];
+
+    function hasPublishingStep(job: any) {
+      return (job.steps ?? []).some((step: any) =>
+        publishCommand.test((step.run ?? '').replace(/\\\r?\n/g, ' ')) ||
+        publishAction.test(step.uses ?? '')
+      );
+    }
+
+    function canPublish(job: any) {
+      const permissions = job.permissions ?? release.permissions;
+      return permissions === 'write-all' ||
+        publishPermissions.some((scope) => permissions?.[scope] === 'write') ||
+        hasPublishingStep(job);
+    }
+
+    function requiresRelease(id: string, visited = new Set<string>()): boolean {
+      if (id === 'release') return true;
+      if (visited.has(id)) return false;
+      visited.add(id);
+      const job = release.jobs[id];
+      const condition = job.if ?? '';
+      const needs: string[] = [job.needs ?? []].flat();
+      if (/\b(?:always|failure)\s*\(\s*\)/i.test(condition)) return false;
+      if (/\b(?:cancelled|success)\s*\(\s*\)/i.test(condition)) {
+        const withoutGroups = condition.replace(/^\$\{\{\s*|\s*\}\}$/g, '').replace(/\([^()]*\)/g, '');
+        return needs.includes('release') && !withoutGroups.includes('||') && withoutGroups.split('&&')
+          .some((clause) => /^needs\.release\.result\s*==\s*'success'$/i.test(clause.trim()));
+      }
+      return needs.some((dependency) => requiresRelease(dependency, visited));
+    }
+
+    const publishing = Object.keys(release.jobs).filter((id) => canPublish(release.jobs[id])).sort();
+    expect(publishing).toEqual(['held-npm', 'native-npm', 'python-pypi', 'release', 'wopi-image']);
+    for (const id of publishing) {
+      if (id === 'release') {
+        expect(release.jobs[id].if).toContain("github.ref == 'refs/heads/main'");
+        expect(release.jobs[id].if).toContain('inputs.rehearse != true');
+      } else {
+        expect(requiresRelease(id), id).toBe(true);
+      }
+    }
+
+    for (const id of ['plan', 'test', 'native-build', 'native-build-retry', 'python-build', 'python-build-retry']) {
+      expect(canPublish(release.jobs[id]), id).toBe(false);
+    }
+    for (const file of ['native-dist.yml', 'python-dist.yml']) {
+      const dist = Bun.YAML.parse(
+        readFileSync(new URL(file, new URL('../.github/workflows/', import.meta.url)), 'utf8')
+      ) as any;
+      for (const { permissions } of [dist, ...Object.values(dist.jobs)]) {
+        expect(permissions, file).not.toBe('write-all');
+        expect(Object.values(permissions ?? {}), file).not.toContain('write');
+      }
+      for (const [id, job] of Object.entries(dist.jobs)) {
+        expect(hasPublishingStep(job), `${file}: ${id}`).toBe(false);
+      }
+    }
+  });
+
+  test('compares publisher files with main before authenticating or uploading', () => {
+    const guard = release.jobs.release.steps.find((step: any) => step.name === 'Check the publisher files match main');
+    expect(guard.if).toBe("needs.plan.outputs.publishing == 'true'");
+    expect(steps.indexOf(guard.name)).toBeLessThan(steps.indexOf('Detect crates.io bootstrap token'));
+    expect(guard.run).toContain('git fetch --no-tags origin main');
+    expect(guard.run).toContain('git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
+    expect(guard.run).toContain('git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"');
+    expect(guard.run).toContain('::error::Publisher file differs from main: $path');
+    expect(guard.run).toContain('exit 1');
+    const paths = guard.run.match(/^paths=\(\n([\s\S]*?)\n\)/m)?.[1].trim().split(/\s+/);
+    expect(paths).toEqual([
+      '.github/workflows/native-dist.yml',
+      '.github/workflows/publish-native.yml',
+      '.github/workflows/python-dist.yml',
+      '.github/workflows/publish-python-binding.yml',
+      '.github/workflows/deploy.yml',
+      '.github/workflows/wopi-image.yml',
+      '.github/actions/',
+      'package.json',
+      'bun.lock',
+      'apps/demo/scripts/build-collaboration-seeds.ts',
+      'packages/docx/scripts/copy-assets.ts',
+      'scripts/build-docx-wasm.ts',
+      'scripts/build-fonts-decoder.ts',
+      'scripts/build-pptx-wasm.ts',
+      'scripts/build-stale-packages.ts',
+      'scripts/build-vsdx-wasm.ts',
+      'scripts/build-xlsx-wasm.ts',
+      'scripts/check-packed-license.mjs',
+      'scripts/create-demo-deck.ts',
+      'scripts/create-demo-diagram.ts',
+      'scripts/create-demo-workbook.ts',
+      'scripts/glibc-floor.mjs',
+      'scripts/native-allocator-smoke.mjs',
+      'scripts/native-engine.ts',
+      'scripts/native-raw-smoke.mjs',
+      'scripts/package-boundary.ts',
+      'scripts/python-binding-names.mjs',
+      'scripts/python_font_packs.py',
+      'scripts/rewrite-workspace-deps.ts',
+      'scripts/wasm-cache-key.ts',
+      'scripts/wasm.ts',
+      'scripts/worker-stub.ts'
+    ]);
+  });
+
   test('each guard runs only on its publish path', () => {
     expect(guards.map((step: any) => step.run.trim())).toEqual([
       'node scripts/check-publish-targets.mjs --crates',
@@ -878,10 +1045,10 @@ describe('release wiring', () => {
       'node scripts/check-publish-targets.mjs --verify-published'
     ]);
     expect(guards.map((step: any) => step.if)).toEqual([
-      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
-      "steps.pending.outputs.publishing == 'true'",
-      "steps.pending.outputs.publishing != 'true'",
-      "always() && steps.pending.outputs.publishing == 'true'"
+      "needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
+      "needs.plan.outputs.publishing == 'true'",
+      "needs.plan.outputs.publishing != 'true'",
+      "always() && needs.plan.outputs.publishing == 'true'"
     ]);
   });
 
@@ -898,9 +1065,11 @@ describe('release wiring', () => {
     expect(release.jobs.release.outputs.held).toBe('${{ steps.npm-targets.outputs.held }}');
     const held = release.jobs['held-npm'];
     expect(held.needs).toEqual(['release', 'native-npm']);
-    expect(held.if).toContain("needs.release.result == 'success' && needs.release.outputs.publishing == 'true'");
-    expect(held.if).toContain("needs.release.outputs.held != '' && needs.release.outputs.held != '[]'");
-    expect(held.if).toContain("needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped'");
+    expect(held.if).toBe([
+      "!cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&",
+      "needs.release.outputs.held != '' && needs.release.outputs.held != '[]' &&",
+      "(needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')"
+    ].join(' '));
     expect(held.permissions).toEqual({ contents: 'write', 'id-token': 'write' });
   });
 
@@ -951,7 +1120,7 @@ describe('crates OIDC-first wiring', () => {
     const auth = named.get('Authenticate to crates.io');
     expect(auth.uses).toMatch(/^rust-lang\/crates-io-auth-action@[0-9a-f]{40}$/);
     expect(auth.if).toBe(
-      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+      "needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
     );
   });
 
@@ -1181,7 +1350,7 @@ describe('npm fallback token', () => {
   test('is passed as NODE_AUTH_TOKEN, only on the publish path, with provenance on', () => {
     const changesets = steps.find((step: any) => step.name === 'Release PR or publish');
     expect(changesets.env.NODE_AUTH_TOKEN).toBe(
-      "${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}"
+      "${{ needs.plan.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}"
     );
     expect(changesets.env.NPM_CONFIG_PROVENANCE).toBe('true');
     expect(changesets.env.NPM_TOKEN).toBeUndefined();
@@ -1194,7 +1363,7 @@ describe('npm fallback token', () => {
 
   test('each note sees only whether the secret is set, prints a fixed line, and runs right before publishing', () => {
     const jobs: Array<[any, string, string | undefined]> = [
-      [release.jobs.release, 'Release PR or publish', "steps.pending.outputs.publishing == 'true'"],
+      [release.jobs.release, 'Release PR or publish', "needs.plan.outputs.publishing == 'true'"],
       [release.jobs['held-npm'], 'Publish held packages and create releases', undefined],
       [nativePublish.jobs.publish, 'Publish packages', '${{ !inputs.dry_run }}']
     ];

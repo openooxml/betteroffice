@@ -227,7 +227,7 @@ describe('native package release wiring', () => {
     expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
     delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(180);
-    expect(JSON.stringify(job)).not.toContain('native');
+    expect(job.steps.some((step: any) => step.run?.includes('publish-native.yml/dispatches'))).toBe(false);
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
     const steps = job.steps.map((step: any) => step.name);
@@ -237,6 +237,33 @@ describe('native package release wiring', () => {
     expect(steps.indexOf('Authenticate to crates.io')).toBeLessThan(
       steps.indexOf('Check crates.io publish targets')
     );
+  });
+
+  test('release gates publishing on the native build matrix for this commit', () => {
+    const job = release.jobs['native-build'];
+    expect(job.needs).toBe('plan');
+    expect(job.if).toBe(
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && vars.RELEASE_SKIP_NATIVE != 'true'"
+    );
+    expect(job.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { binding: '${{ fromJSON(needs.plan.outputs.native) }}' }
+    });
+    expect(job.uses).toBe('./.github/workflows/native-dist.yml');
+    expect(job.with).toEqual({ binding: '${{ matrix.binding }}', sha: '${{ github.sha }}' });
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job['continue-on-error']).toBeUndefined();
+  });
+
+  test('release retries the whole native build matrix once after failure', () => {
+    const job = release.jobs['native-build'];
+    const retry = release.jobs['native-build-retry'];
+    expect(retry.needs).toEqual(['plan', 'native-build']);
+    expect(retry.if).toBe("${{ !cancelled() && needs.native-build.result == 'failure' }}");
+    for (const key of ['strategy', 'uses', 'with', 'permissions', 'secrets']) {
+      expect(retry[key]).toEqual(job[key]);
+    }
+    expect(retry['continue-on-error']).toBeUndefined();
   });
 
   test('publishes held packages after the release and native publishing', () => {
@@ -254,12 +281,12 @@ describe('native package release wiring', () => {
     );
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job['timeout-minutes']).toBe(90);
-    expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
-    expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
-    const step = job.steps[1];
+    expect(job.permissions).toEqual({ actions: 'write' });
+    const step = job.steps[0];
     expect(step.env.SHA).toBe('${{ github.sha }}');
+    expect(step.env.PUBLISH).toBe('${{ needs.release.outputs.native }}');
+    expect(release.jobs.release.outputs.native).toBe('${{ needs.plan.outputs.native }}');
     expect(step.run).toStartWith('set -euo pipefail\n');
-    expect(step.run).toContain('pending=$(node scripts/native-bindings.mjs --pending)');
     expect(step.run).toContain('publish-native.yml/dispatches');
     expect(step.run).toContain('X-GitHub-Api-Version: 2026-03-10');
     expect(step.run).toContain('-f ref=main');
@@ -267,24 +294,26 @@ describe('native package release wiring', () => {
     expect(step.run).toContain('inputs[sha]=$SHA');
     expect(step.run).toContain('inputs[dry_run]=false');
     expect(step.run).toContain("--jq '.workflow_run_id'");
-    expect(step.run).toContain('gh run watch "$run" --exit-status');
+    const bound = step.run.match(/timeout (\d+)m gh run watch "\$run" --exit-status/);
+    expect(Number(bound?.[1])).toBeLessThan(job['timeout-minutes']);
+    expect(step.run).toContain('if [ "$?" -eq 124 ]; then\n        gh run cancel "$run" || true');
+    expect(step.run).toContain('wait "$watcher" || status=1');
     expect(step.run).toContain('@betteroffice/$binding-native');
     expect(step.run).toContain('exit $status');
   });
 
-  test('a failed registry lookup fails before dispatch', () => {
+  test('an invalid publish list fails before dispatch', () => {
     const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
     try {
-      writeFileSync(join(directory, 'node'), '#!/bin/sh\nexit 42\n', { mode: 0o755 });
       writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho unexpected-dispatch\nexit 99\n', {
         mode: 0o755
       });
-      const step = release.jobs['native-npm'].steps[1];
+      const step = release.jobs['native-npm'].steps[0];
       const result = spawnSync('bash', ['-c', step.run], {
         encoding: 'utf8',
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}` }
+        env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, PUBLISH: 'invalid' }
       });
-      expect(result.status).toBe(42);
+      expect(result.status).toBe(1);
       expect(result.stdout).not.toContain('unexpected-dispatch');
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -477,7 +506,8 @@ describe('native package release wiring', () => {
     expect(loader.with).toEqual({
       name: '${{ inputs.binding }}-native-loader',
       path: 'bindings/${{ inputs.binding }}-native/index.js\nbindings/${{ inputs.binding }}-native/dist\n',
-      'if-no-files-found': 'error'
+      'if-no-files-found': 'error',
+      overwrite: true
     });
     const binary = steps.find(
       (step: any) =>
@@ -499,6 +529,17 @@ describe('native package release wiring', () => {
     expect(steps.indexOf(fonts)).toBeLessThan(steps.indexOf(testing));
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
+  });
+
+  test('every native dist upload can replace the first attempt artifact', () => {
+    const uploads = Object.values(dist.jobs).flatMap((job: any) =>
+      (job.steps ?? []).filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'))
+    );
+    expect(uploads).toHaveLength(2);
+    for (const upload of uploads) {
+      expect(upload.uses).toBe('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9');
+      expect(upload.with.overwrite).toBe(true);
+    }
   });
 
   test('CI builds every path and checks declarations and all three runtimes', () => {

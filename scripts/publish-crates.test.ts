@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -975,7 +976,7 @@ describe('release workflow crates auth', () => {
   test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
     const auth = named.get('Authenticate to crates.io');
     expect(auth.if).toBe(
-      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+      "needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
     );
     expect(auth.if).not.toContain('crates-bootstrap');
   });
@@ -992,20 +993,72 @@ describe('release workflow crates auth', () => {
     expect(publish.env.CARGO_REGISTRY_TOKEN).toBe('${{ steps.crates-auth.outputs.token }}');
     expect(publish.env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
     expect(publish.if).toBe(
-      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+      "needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
     );
   });
 
-  test('the type check and tests run unless RELEASE_SKIP_TESTS is true, which logs the skip', () => {
-    for (const name of ['Type check', 'Test']) {
-      expect(named.get(name).if).toBe(
-        "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'"
-      );
-    }
-    const note = named.get('Note skipped tests');
-    expect(note.if).toBe(
-      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'"
+  test('the type check and tests run unless RELEASE_SKIP_TESTS is true', () => {
+    const job = release.jobs.test;
+    expect(job.needs).toBe('plan');
+    expect(job.if).toBe(
+      "needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true' && github.ref == 'refs/heads/main' && inputs.rehearse != true"
     );
-    expect(note.run).toContain('::warning::');
+    expect(job['runs-on']).toBe('ubuntu-latest');
+    expect(job['timeout-minutes']).toBe(100);
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job.steps.map((step: any) => step.uses ?? step.run)).toEqual([
+      'actions/checkout@v7.0.1',
+      'oven-sh/setup-bun@v2',
+      'actions/setup-node@v7.1.0',
+      'bun install --frozen-lockfile',
+      'dtolnay/rust-toolchain@stable',
+      'Swatinem/rust-cache@v2',
+      './.github/actions/wasm-toolchain',
+      'taiki-e/install-action@v2',
+      'bun run typecheck:packages',
+      'bun run test'
+    ]);
+    expect(job.steps[1].with['bun-version']).toBe('1.4.3');
+    expect(job.steps[2].with['node-version']).toBe('24');
+    expect(job.steps[4].with.targets).toBe('wasm32-unknown-unknown');
+    expect(job.steps[7].with.tool).toBe('wasm-pack@0.15.0');
+    for (const name of ['Type check', 'Test']) {
+      expect(named.has(name)).toBe(false);
+    }
+  });
+
+  test('RELEASE_SKIP_TESTS appears only in the test condition and the plan warning env', () => {
+    const note = release.jobs.plan.steps.find((step: any) => step.name === 'Note skipped tests');
+    expect(note.if).toBeUndefined();
+    expect(note.env).toEqual({
+      SKIP_TESTS: '${{ vars.RELEASE_SKIP_TESTS }}',
+      PUBLISHING: '${{ steps.pending.outputs.publishing }}',
+      REHEARSE: '${{ inputs.rehearse == true }}'
+    });
+    expect(release.jobs.test.if).toContain('RELEASE_SKIP_TESTS');
+    for (const [id, job] of Object.entries<any>(release.jobs)) {
+      if (id !== 'test') expect(job.if ?? '', id).not.toContain('RELEASE_SKIP_TESTS');
+      for (const step of job.steps ?? []) {
+        expect(step.if ?? '', id).not.toContain('RELEASE_SKIP_TESTS');
+      }
+    }
+    expect(releaseSource.match(/RELEASE_SKIP_TESTS/g)).toHaveLength(2);
+  });
+
+  test.each([
+    ['true', 'true', 'false', true],
+    ['false', 'true', 'false', false],
+    ['true', 'false', 'false', false],
+    ['true', 'true', 'true', false]
+  ] as const)('plan warning with skip=%s, publishing=%s and rehearse=%s', (skip, publishing, rehearse, warns) => {
+    const note = release.jobs.plan.steps.find((step: any) => step.name === 'Note skipped tests');
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', note.run], {
+      encoding: 'utf8',
+      env: { ...process.env, SKIP_TESTS: skip, PUBLISHING: publishing, REHEARSE: rehearse }
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(warns
+      ? '::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests.\n'
+      : '');
   });
 });

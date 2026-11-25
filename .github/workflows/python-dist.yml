@@ -60,6 +60,54 @@ jobs:
           name: python-${{ inputs.binding }}.${{ matrix.platform.os }}.${{ matrix.platform.target }}
           path: bindings/python-${{ inputs.binding }}/dist
           if-no-files-found: error
+          overwrite: true
+
+  load:
+    name: Load wheel (${{ matrix.platform.os }})
+    needs: wheels
+    if: ${{ !startsWith(inputs.binding, 'fonts-') }}
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - os: ubuntu-24.04
+            artifact: ubuntu-latest.x86_64
+          - os: ubuntu-24.04-arm
+            artifact: ubuntu-latest.aarch64
+          - os: macos-latest
+            artifact: macos-latest.aarch64
+          - os: windows-latest
+            artifact: windows-latest.x64
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: actions/setup-python@v7.1.0
+        with:
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-${{ inputs.binding }}.${{ matrix.platform.artifact }}
+          path: wheel
+
+      - name: Install the wheel
+        run: |
+          python -I scripts/python_font_packs.py --out font-packs
+          python -m pip install --only-binary :all: --find-links font-packs wheel/*.whl
+          python -m pip install pytest
+
+      - name: Test the installed binding
+        working-directory: ${{ runner.temp }}
+        env:
+          BINDING: ${{ inputs.binding }}
+        run: python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"
 
   sdist:
     name: Source distribution
@@ -85,6 +133,7 @@ jobs:
           name: python-${{ inputs.binding }}.sdist
           path: bindings/python-${{ inputs.binding }}/dist
           if-no-files-found: error
+          overwrite: true
 
   font-pack:
     name: Font pack wheel
@@ -113,14 +162,15 @@ jobs:
           name: python-${{ inputs.binding }}.wheel
           path: dist
           if-no-files-found: error
+          overwrite: true
 
   # `needs` inside a called workflow scopes to this binding alone, so this
   # receipt exists only when every one of its own artifacts does. The publish
   # matrix demands it per binding instead of depending on the whole build.
   built:
     name: Complete
-    needs: [wheels, sdist, font-pack]
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success') }}
+    needs: [wheels, sdist, font-pack, load]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.load.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:
@@ -133,3 +183,4 @@ jobs:
         with:
           name: built-${{ inputs.binding }}
           path: built.txt
+          overwrite: true

@@ -6,9 +6,14 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rehearse:
+        description: Build and load-check every native package and Python binding without publishing.
+        type: boolean
+        default: false
 
 concurrency:
-  group: release
+  group: ${{ inputs.rehearse == true && format('release-rehearsal-{0}', github.ref) || 'release' }}
   cancel-in-progress: false
 
 defaults:
@@ -16,13 +21,177 @@ defaults:
     shell: bash
 
 jobs:
+  plan:
+    name: Plan release
+    if: github.ref == 'refs/heads/main' || inputs.rehearse == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      publishing: ${{ inputs.rehearse == true && 'true' || steps.pending.outputs.publishing }}
+      native: ${{ steps.bindings.outputs.native }}
+      python: ${{ steps.bindings.outputs.python }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Detect pending changesets
+        id: pending
+        run: |
+          changesets=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
+          echo "publishing=$([ -z "$changesets" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Note skipped tests
+        env:
+          SKIP_TESTS: ${{ vars.RELEASE_SKIP_TESTS }}
+          PUBLISHING: ${{ steps.pending.outputs.publishing }}
+          REHEARSE: ${{ inputs.rehearse == true }}
+        run: |
+          if [ "$SKIP_TESTS" = true ] && [ "$PUBLISHING" = true ] && [ "$REHEARSE" != true ]; then
+            printf '::warning::RELEASE_SKIP_%s is true, so this release skips its type check and tests.\n' TESTS
+          fi
+
+      - name: Select bindings
+        id: bindings
+        env:
+          REHEARSE: ${{ inputs.rehearse == true }}
+          PUBLISHING: ${{ steps.pending.outputs.publishing }}
+        run: |
+          native='[]'
+          python='[]'
+          if [ "$REHEARSE" = true ]; then
+            native=$(node --input-type=module -e 'import { NATIVE_FORMATS } from "./scripts/native-bindings.mjs"; console.log(JSON.stringify(NATIVE_FORMATS))')
+            python=$(node --input-type=module -e 'import { FONT_PACK_NAMES, PYTHON_BINDING_NAMES } from "./scripts/python-bindings.mjs"; console.log(JSON.stringify([...FONT_PACK_NAMES, ...PYTHON_BINDING_NAMES]))')
+          elif [ "$PUBLISHING" = true ]; then
+            native=$(node scripts/native-bindings.mjs --pending)
+            python=$(node scripts/python-bindings.mjs --pending)
+          fi
+          echo "native=$native" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test release
+    needs: plan
+    if: needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true' && github.ref == 'refs/heads/main' && inputs.rehearse != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Type check
+        run: bun run typecheck:packages
+
+      - name: Test
+        run: bun run test
+
+  native-build:
+    name: Build native ${{ matrix.binding }}
+    needs: plan
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && vars.RELEASE_SKIP_NATIVE != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.plan.outputs.native) }}
+    uses: ./.github/workflows/native-dist.yml
+    with:
+      binding: ${{ matrix.binding }}
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+
+  native-build-retry:
+    name: Retry native ${{ matrix.binding }}
+    needs: [plan, native-build]
+    if: ${{ !cancelled() && needs.native-build.result == 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.plan.outputs.native) }}
+    uses: ./.github/workflows/native-dist.yml
+    with:
+      binding: ${{ matrix.binding }}
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+
+  python-build:
+    name: Build Python ${{ matrix.binding }}
+    needs: plan
+    if: needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && vars.RELEASE_SKIP_PYTHON != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.plan.outputs.python) }}
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      binding: ${{ matrix.binding }}
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+
+  python-build-retry:
+    name: Retry Python ${{ matrix.binding }}
+    needs: [plan, python-build]
+    if: ${{ !cancelled() && needs.python-build.result == 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: ${{ fromJSON(needs.plan.outputs.python) }}
+    uses: ./.github/workflows/python-dist.yml
+    with:
+      binding: ${{ matrix.binding }}
+      sha: ${{ github.sha }}
+    permissions:
+      contents: read
+
   release:
-    if: github.ref == 'refs/heads/main'
+    needs: [plan, test, native-build, native-build-retry, python-build, python-build-retry]
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.rehearse != true &&
+      needs.plan.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.native-build.result == 'success' ||
+      (needs.native-build.result == 'failure' && needs.native-build-retry.result == 'success') ||
+      needs.native-build.result == 'skipped') &&
+      (needs.python-build.result == 'success' ||
+      (needs.python-build.result == 'failure' && needs.python-build-retry.result == 'success') ||
+      needs.python-build.result == 'skipped') }}
     name: Release
     runs-on: ubuntu-latest
     timeout-minutes: 180
     outputs:
-      publishing: ${{ steps.pending.outputs.publishing }}
+      publishing: ${{ needs.plan.outputs.publishing }}
+      native: ${{ needs.plan.outputs.native }}
+      python: ${{ needs.plan.outputs.python }}
       published: ${{ steps.changesets.outputs.published }}
       held: ${{ steps.npm-targets.outputs.held }}
     permissions:
@@ -53,12 +222,6 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Detect pending changesets
-        id: pending
-        run: |
-          changesets=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
-          echo "publishing=$([ -z "$changesets" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -66,32 +229,65 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - uses: ./.github/actions/wasm-toolchain
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
 
       - uses: taiki-e/install-action@v2
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
         with:
           tool: wasm-pack@0.15.0
 
-      - name: Note skipped tests
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'
-        run: echo "::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests."
-
-      - name: Type check
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
-        run: bun run typecheck:packages
-
-      - name: Test
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
-        run: bun run test
+      - name: Check the publisher files match main
+        if: needs.plan.outputs.publishing == 'true'
+        run: |
+          git fetch --no-tags origin main
+          paths=(
+            .github/workflows/native-dist.yml
+            .github/workflows/publish-native.yml
+            .github/workflows/python-dist.yml
+            .github/workflows/publish-python-binding.yml
+            .github/workflows/deploy.yml
+            .github/workflows/wopi-image.yml
+            .github/actions/
+            package.json
+            bun.lock
+            apps/demo/scripts/build-collaboration-seeds.ts
+            packages/docx/scripts/copy-assets.ts
+            scripts/build-docx-wasm.ts
+            scripts/build-fonts-decoder.ts
+            scripts/build-pptx-wasm.ts
+            scripts/build-stale-packages.ts
+            scripts/build-vsdx-wasm.ts
+            scripts/build-xlsx-wasm.ts
+            scripts/check-packed-license.mjs
+            scripts/create-demo-deck.ts
+            scripts/create-demo-diagram.ts
+            scripts/create-demo-workbook.ts
+            scripts/glibc-floor.mjs
+            scripts/native-allocator-smoke.mjs
+            scripts/native-engine.ts
+            scripts/native-raw-smoke.mjs
+            scripts/package-boundary.ts
+            scripts/python-binding-names.mjs
+            scripts/python_font_packs.py
+            scripts/rewrite-workspace-deps.ts
+            scripts/wasm-cache-key.ts
+            scripts/wasm.ts
+            scripts/worker-stub.ts
+          )
+          if ! git diff --quiet "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}"; then
+            git diff --name-only "$GITHUB_SHA" FETCH_HEAD -- "${paths[@]}" | while IFS= read -r path; do
+              echo "::error::Publisher file differs from main: $path"
+            done
+            exit 1
+          fi
 
       - name: Build packages
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
         run: bun run build:packages
 
       - name: Detect crates.io bootstrap token
         id: crates-bootstrap
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
+        if: needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: |
@@ -105,14 +301,14 @@ jobs:
 
       - name: Authenticate to crates.io
         id: crates-auth
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
+        if: needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1
         continue-on-error: ${{ steps.crates-bootstrap.outputs.enabled == 'true' }}
 
       # Both registries are checked before the first upload: a guard that fails
       # after the crates publish leaves the release half-published.
       - name: Check crates.io publish targets
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
+        if: needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: node scripts/check-publish-targets.mjs --crates
@@ -122,7 +318,7 @@ jobs:
       # It reads name and version, which the pin below leaves alone.
       - name: Check npm publish targets
         id: npm-targets
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
         env:
           RELEASE_SKIP_NATIVE: ${{ vars.RELEASE_SKIP_NATIVE }}
         run: node scripts/check-publish-targets.mjs --npm
@@ -130,11 +326,11 @@ jobs:
       # A peer range a bump leaves turns its dependents major, and a fixed group
       # carries that to every member: refuse a release PR nobody asked to be major.
       - name: Check the release plan for unrequested major bumps
-        if: steps.pending.outputs.publishing != 'true'
+        if: needs.plan.outputs.publishing != 'true'
         run: node scripts/check-publish-targets.mjs --plan
 
       - name: Publish Rust crates
-        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
+        if: needs.plan.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
           CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
@@ -143,19 +339,19 @@ jobs:
       # changesets does not rewrite the workspace: protocol here, so pin it to
       # concrete versions before publish (ephemeral checkout; source is unchanged).
       - name: Note the npm fallback token
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
         env:
           FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
         run: |
           if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
 
       - name: Pin workspace deps for npm publish
-        if: steps.pending.outputs.publishing == 'true'
+        if: needs.plan.outputs.publishing == 'true'
         run: bun scripts/rewrite-workspace-deps.ts
 
       # Pack the pinned manifests before marking them private for Changesets.
       - name: Pack and hold packages published after the release
-        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
+        if: needs.plan.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
         env:
           HELD_NPM_PACKAGES: ${{ steps.npm-targets.outputs.held }}
         run: node scripts/held-npm-packages.mjs --pack "$RUNNER_TEMP/held-npm"
@@ -174,11 +370,11 @@ jobs:
           # first manual publish creates it). id-token: write above authorizes
           # the exchange and signs provenance. npm uses NPM_FALLBACK_TOKEN only
           # for a package whose exchange fails; it is unset unless publishing.
-          NODE_AUTH_TOKEN: ${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}
+          NODE_AUTH_TOKEN: ${{ needs.plan.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}
           NPM_CONFIG_PROVENANCE: "true"
 
       - name: Upload held npm tarballs
-        if: steps.pending.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
+        if: needs.plan.outputs.publishing == 'true' && steps.npm-targets.outputs.held != '' && steps.npm-targets.outputs.held != '[]'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: held-npm
@@ -189,7 +385,7 @@ jobs:
       # Also after a failed publish: it names what the set is missing. Reports
       # only: deploy and the native and Python jobs still run after a miss.
       - name: Verify npm and CDN publish targets
-        if: "always() && steps.pending.outputs.publishing == 'true'"
+        if: "always() && needs.plan.outputs.publishing == 'true'"
         continue-on-error: true
         env:
           HELD_NPM_PACKAGES: ${{ steps.npm-targets.outputs.held }}
@@ -209,7 +405,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      publish: ${{ steps.registry.outputs.publish }}
+      publish: ${{ needs.release.outputs.python }}
     permissions:
       contents: read
     steps:
@@ -227,25 +423,18 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7.0.1
-
-      - id: registry
-        run: |
-          publish=$(node scripts/python-bindings.mjs --pending)
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-
   # A PyPI Trusted Publisher is scoped to the file that runs the upload, and every
   # publisher here names publish-python-binding.yml, so the release dispatches that
   # workflow instead of uploading. The dispatch carries this run's commit, because
   # main moves; the wait is what makes a failed upload fail the release.
   python-pypi:
     name: Publish Python bindings
-    needs: python-bindings
+    needs: [release, python-bindings]
     if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
     # Covers the font packs' worst case, 15 (wheel) + 5 + 15 (publish), then the
-    # bindings': 45 (wheels) + 5 + 15 (publish).
-    timeout-minutes: 110
+    # bindings': 45 (wheels) + 15 (load) + 5 + 15 (publish).
+    timeout-minutes: 140
     permissions:
       actions: write # dispatch publish-python-binding.yml
     steps:
@@ -258,6 +447,8 @@ jobs:
         run: |
           status=0
           publish() {
+            local minutes=$1
+            shift
             runs=""
             for binding in "$@"; do
               # From API version 2026-03-10 the dispatch returns the created run's id,
@@ -273,27 +464,37 @@ jobs:
               fi
             done
 
+            watchers=()
             for entry in $runs; do
               binding=${entry%%:*}
               run=${entry#*:}
-              if ! gh run watch "$run" --exit-status; then
-                echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-                status=1
-              fi
+              (
+                timeout "${minutes}m" gh run watch "$run" --exit-status || {
+                  if [ "$?" -eq 124 ]; then
+                    gh run cancel "$run" || true
+                  fi
+                  echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+                  exit 1
+                }
+              ) &
+              watchers+=("$!")
+            done
+            for watcher in "${watchers[@]}"; do
+              wait "$watcher" || status=1
             done
           }
 
           packs=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-"))')
           formats=$(echo "$PUBLISH" | jq -r '.[] | select(startswith("fonts-") | not)')
           # shellcheck disable=SC2086 # binding names contain no spaces
-          publish $packs
+          publish 40 $packs
           if [ $status -ne 0 ] && [ -n "$formats" ]; then
             echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
             echo "::error::A missing PyPI project needs its pending publisher (environment pypi-fonts-<pack>): RELEASING.md, \"Font pack wheels\". Rerun the release once it exists."
             exit 1
           fi
           # shellcheck disable=SC2086 # binding names contain no spaces
-          publish $formats
+          publish 90 $formats
           exit $status
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
@@ -304,23 +505,20 @@ jobs:
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
+    # Covers native-dist (45 minutes + 15 for Alpine) and publishing (15 minutes).
     timeout-minutes: 90
     permissions:
-      contents: read
       actions: write
     steps:
-      - uses: actions/checkout@v7.0.1
-
       - name: Dispatch a publish per format, then wait for each
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          PUBLISH: ${{ needs.release.outputs.native }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          pending=$(node scripts/native-bindings.mjs --pending)
-          bindings=$(printf '%s' "$pending" | jq -er '.[]' || [ "$pending" = '[]' ])
+          bindings=$(jq -er '.[]' <<< "$PUBLISH" || [ "$PUBLISH" = '[]' ])
           status=0
           runs=""
           for binding in $bindings; do
@@ -335,13 +533,23 @@ jobs:
             fi
           done
 
+          watchers=()
           for entry in $runs; do
             binding=${entry%%:*}
             run=${entry#*:}
-            if ! gh run watch "$run" --exit-status; then
-              echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
-              status=1
-            fi
+            (
+              timeout 80m gh run watch "$run" --exit-status || {
+                if [ "$?" -eq 124 ]; then
+                  gh run cancel "$run" || true
+                fi
+                echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+                exit 1
+              }
+            ) &
+            watchers+=("$!")
+          done
+          for watcher in "${watchers[@]}"; do
+            wait "$watcher" || status=1
           done
           exit $status
 
