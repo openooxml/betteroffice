@@ -16,7 +16,11 @@ function changesetsEntry() {
   }
 }
 
-const semver = createRequire(changesetsEntry())('semver');
+let semver;
+
+function getSemver() {
+  return (semver ??= createRequire(changesetsEntry())('semver'));
+}
 
 function workspacePackages(root) {
   const { workspaces } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -32,17 +36,19 @@ function workspacePackages(root) {
     return readdirSync(join(root, directory), { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
       .map((entry) => `${directory}/${entry.name}/package.json`)
-      .filter((manifest) => existsSync(join(root, manifest)))
       .sort();
   });
 
-  return manifests.map((manifest) => {
-    const source = readFileSync(join(root, manifest), 'utf8');
-    return { manifest, source, json: JSON.parse(source) };
-  });
+  return manifests
+    .filter((manifest) => existsSync(join(root, manifest)))
+    .map((manifest) => {
+      const source = readFileSync(join(root, manifest), 'utf8');
+      return { manifest, source, json: JSON.parse(source) };
+    });
 }
 
 export function explicitWorkspaceRanges(root = process.cwd()) {
+  const semver = getSemver();
   const recorded = [];
   for (const { manifest, json } of workspacePackages(root)) {
     for (const section of DEPENDENCY_FIELDS) {
@@ -57,59 +63,44 @@ export function explicitWorkspaceRanges(root = process.cwd()) {
   return recorded;
 }
 
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function restoreRange(source, { manifest, section, name, range }, current) {
-  const sectionPattern = new RegExp(
-    `^  "${section}"[ \\t]*:[ \\t]*\\{[ \\t]*\\r?\\n[\\s\\S]*?^  \\}`,
-    'm'
-  );
-  const key = escapeRegExp(JSON.stringify(name));
-  const value = escapeRegExp(JSON.stringify(current));
-  const dependencyPattern = new RegExp(
-    `(^    ${key}[ \\t]*:[ \\t]*)${value}(?=[ \\t]*(?:,[ \\t]*)?\\r?$)`,
-    'm'
-  );
-  const original = JSON.stringify(WORKSPACE_PREFIX + range);
-  const updated = source.replace(sectionPattern, (block) =>
-    block.replace(dependencyPattern, (_match, prefix) => prefix + original)
-  );
-  if (updated === source) throw new Error(`Could not restore ${manifest} ${section} ${name}.`);
-  return updated;
-}
-
 export function restoreWorkspaceRanges(recorded, root = process.cwd()) {
   if (recorded.length === 0) return [];
 
+  const semver = getSemver();
   const packages = workspacePackages(root);
   const manifests = new Map(packages.map((pkg) => [pkg.manifest, pkg]));
   const versions = new Map(packages.map(({ json }) => [json.name, json.version]));
-  const updates = new Map();
+  const updates = new Set();
   const restored = [];
 
   for (const entry of recorded) {
     const { manifest, section, name, range } = entry;
-    const pkg = manifests.get(manifest);
-    const current = pkg?.json[section]?.[name];
-    if (current === WORKSPACE_PREFIX + range) continue;
-
     const version = versions.get(name);
-    if (!semver.satisfies(version, range)) {
+    if (!versions.has(name) || !semver.satisfies(version, range)) {
       throw new Error(
         `${manifest} ${section} ${name} declares workspace:${range}, which does not include the new version ${version ?? '(missing)'}.`
       );
     }
-    if (typeof current !== 'string') {
+
+    const pkg = manifests.get(manifest);
+    const current = pkg?.json[section]?.[name];
+    const original = WORKSPACE_PREFIX + range;
+    if (current === original) continue;
+    if (current === undefined) {
       throw new Error(`Could not find ${manifest} ${section} ${name} to restore.`);
     }
-    updates.set(manifest, restoreRange(updates.get(manifest) ?? pkg.source, entry, current));
+    if (typeof current !== 'string' || !current.startsWith(WORKSPACE_PREFIX)) {
+      const value = typeof current === 'string' ? current : JSON.stringify(current);
+      throw new Error(`${manifest} ${section} ${name} changed to ${value}, not a workspace range`);
+    }
+    pkg.json[section][name] = original;
+    updates.add(pkg);
     restored.push(entry);
   }
 
-  for (const [manifest, source] of updates) {
-    writeFileSync(join(root, manifest), source);
+  for (const { manifest, source, json } of updates) {
+    const indent = source.match(/^[ \t]+/m)?.[0] ?? '  ';
+    writeFileSync(join(root, manifest), JSON.stringify(json, null, indent) + (source.endsWith('\n') ? '\n' : ''));
   }
   return restored;
 }

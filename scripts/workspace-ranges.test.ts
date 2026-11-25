@@ -48,8 +48,7 @@ test('records only explicit semver workspace ranges', () => {
 
 test('restores the in-range dependency value and leaves unchanged manifests untouched', () => {
   const { root, a, b, c } = workspace();
-  const before = readFileSync(b, 'utf8').replace('"version":', '"version" :');
-  writeFileSync(b, before);
+  const before = readFileSync(b, 'utf8');
   const peerSource = readFileSync(c, 'utf8');
   const past = new Date('2000-01-01T00:00:00Z');
   utimesSync(c, past, past);
@@ -80,6 +79,35 @@ test('rejects an out-of-range version before writing any restorations', () => {
   );
   expect(readFileSync(b, 'utf8')).toBe(nextB);
   expect(readFileSync(c, 'utf8')).toBe(nextC);
+});
+
+test('rejects an out-of-range version for an unchanged workspace range', () => {
+  const { root, a, b } = workspace();
+  const recorded = explicitWorkspaceRanges(root);
+  const before = readFileSync(b, 'utf8');
+  const past = new Date('2000-01-01T00:00:00Z');
+  utimesSync(b, past, past);
+  const mtime = statSync(b).mtimeMs;
+  writeFileSync(a, readFileSync(a, 'utf8').replace('0.4.2', '1.0.0'));
+
+  expect(() => restoreWorkspaceRanges(recorded, root)).toThrow(
+    'packages/b/package.json dependencies a declares workspace:^0, which does not include the new version 1.0.0.'
+  );
+  expect(readFileSync(b, 'utf8')).toBe(before);
+  expect(statSync(b).mtimeMs).toBe(mtime);
+});
+
+test('restores ranges while preserving four-space and tab indentation', () => {
+  const { root, b, c } = workspace();
+  const recorded = explicitWorkspaceRanges(root);
+  const fourSpaces = JSON.stringify(JSON.parse(readFileSync(b, 'utf8')), null, 4) + '\n';
+  const tabs = JSON.stringify(JSON.parse(readFileSync(c, 'utf8')), null, '\t');
+  writeFileSync(b, fourSpaces.replace('"workspace:^0"', '"workspace:^0.4.2"'));
+  writeFileSync(c, tabs.replace('"workspace:^0"', '"workspace:^0.4.2"'));
+
+  expect(restoreWorkspaceRanges(recorded, root)).toEqual([dependency, peer]);
+  expect(readFileSync(b, 'utf8')).toBe(fourSpaces);
+  expect(readFileSync(c, 'utf8')).toBe(tabs);
 });
 
 test('records the explicit font pack ranges in docx-native', () => {
