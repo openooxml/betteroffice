@@ -1073,6 +1073,7 @@ describe('release wiring', () => {
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     expect(job.steps[0].with).toEqual({ ref: '${{ github.sha }}', 'fetch-depth': 1 });
     expect(job.steps[dispatch].env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
+    if (id === 'native-npm') expect(job.steps[dispatch].env.NATIVE_BINDINGS).toBe('scripts/native-bindings.mjs');
   });
 
   describe('publisher file guard', () => {

@@ -446,6 +446,7 @@ jobs:
         run: |
           packs=$(jq -r '.[] | select(startswith("fonts-"))' <<< "$PUBLISH")
           formats=$(jq -r '.[] | select(startswith("fonts-") | not)' <<< "$PUBLISH")
+          # shellcheck disable=SC2086 # binding names contain no spaces
           if ! bash scripts/dispatch-publishers.sh publish-python-binding.yml 55 betteroffice-%s $packs; then
             if [ -n "$formats" ]; then
               echo "::error::A font pack did not publish, so no format binding was dispatched: every betteroffice-<format> wheel requires betteroffice-fonts-latin, -intl and -cjk at the versions this commit pins."
@@ -453,6 +454,7 @@ jobs:
             fi
             exit 1
           fi
+          # shellcheck disable=SC2086 # binding names contain no spaces
           bash scripts/dispatch-publishers.sh publish-python-binding.yml 100 betteroffice-%s $formats
 
   # npm Trusted Publishers name publish-native.yml, so dispatch it with this run's
@@ -487,9 +489,16 @@ jobs:
           PUBLISH: ${{ needs.release.outputs.native }}
           SHA: ${{ github.sha }}
           CHECK_PUBLISHER_FILES: scripts/check-publisher-files.sh
+          NATIVE_BINDINGS: scripts/native-bindings.mjs
         run: |
           set -euo pipefail
-          bindings=$(jq -er '.[]' <<< "$PUBLISH" || [ "$PUBLISH" = '[]' ])
+          built=$(jq -ec 'if type == "array" then . else error end' <<< "$PUBLISH")
+          bindings=""
+          if [ "$built" != '[]' ]; then
+            pending=$(node "$NATIVE_BINDINGS" --pending)
+            bindings=$(jq -nr --argjson built "$built" --argjson pending "$pending" '$built[] | select(. as $b | $pending | index($b))')
+          fi
+          # shellcheck disable=SC2086 # binding names contain no spaces
           bash scripts/dispatch-publishers.sh publish-native.yml 125 '@betteroffice/%s-native' $bindings
 
   held-npm:

@@ -254,8 +254,8 @@ describe('native package release wiring', () => {
   const watchRun = (id: number) => `run watch ${id} --exit-status`;
 
   function dispatch({
-    publish = JSON.stringify(NATIVE_FORMATS), failCheckAt = 0, dispatchStatus
-  }: { publish?: string; failCheckAt?: number; dispatchStatus?: number } = {}) {
+    publish = JSON.stringify(NATIVE_FORMATS), pending = publish, failCheckAt = 0, dispatchStatus
+  }: { publish?: string; pending?: string; failCheckAt?: number; dispatchStatus?: number } = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
     try {
       const log = join(directory, 'gh.log');
@@ -280,6 +280,8 @@ describe('native package release wiring', () => {
         `echo check-publisher-files >> "${log}"`,
         `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
       ].join('\n'));
+      const bindings = join(directory, 'native-bindings.mjs');
+      writeFileSync(bindings, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, 'pending\\n');\nconsole.log(${JSON.stringify(pending)});\n`);
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
         cwd: fileURLToPath(new URL('..', import.meta.url)),
         encoding: 'utf8',
@@ -290,7 +292,8 @@ describe('native package release wiring', () => {
           PUBLISH: publish,
           SHA: sha,
           GITHUB_SERVER_URL: 'https://github.com',
-          CHECK_PUBLISHER_FILES: check
+          CHECK_PUBLISHER_FILES: check,
+          NATIVE_BINDINGS: bindings
         }
       });
       return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
@@ -385,9 +388,23 @@ describe('native package release wiring', () => {
   test('checks publisher files before each native dispatch and watches every run', () => {
     const result = dispatch();
     expect(result.status, result.stderr).toBe(0);
-    const calls = NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)]);
+    const calls = ['pending', ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
     expect(result.log.slice(0, calls.length)).toEqual(calls);
     expect(result.log.slice(calls.length).sort()).toEqual(runIds.map(watchRun));
+  });
+
+  test('a native version published since the plan is not dispatched again', () => {
+    const result = dispatch({ pending: JSON.stringify(NATIVE_FORMATS.slice(1)) });
+    expect(result.status, result.stderr).toBe(0);
+    const calls = ['pending', ...NATIVE_FORMATS.slice(1).flatMap((name) => ['check-publisher-files', post(name)])];
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log).not.toContain(post(NATIVE_FORMATS[0]!));
+  });
+
+  test('a binding the gate did not build is never dispatched', () => {
+    const result = dispatch({ publish: JSON.stringify(NATIVE_FORMATS.slice(0, 1)), pending: JSON.stringify(NATIVE_FORMATS) });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toEqual([post(NATIVE_FORMATS[0]!)]);
   });
 
   test('an empty publish list runs no check and dispatches nothing', () => {
@@ -401,7 +418,7 @@ describe('native package release wiring', () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
     expect(result.log).toEqual([
-      'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
+      'pending', 'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
     ]);
   });
 
@@ -410,7 +427,7 @@ describe('native package release wiring', () => {
       const result = dispatch({ dispatchStatus });
       expect(result.status).toBe(1);
       expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
-      const calls = NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)]);
+      const calls = ['pending', ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
       expect(result.log.slice(0, calls.length)).toEqual(calls);
       expect(result.log.slice(calls.length).sort()).toEqual(runIds.filter((_, index) => index !== 1).map(watchRun));
     }
