@@ -13,6 +13,7 @@ pub(crate) struct SessionIds {
     floored: AtomicBool,
     unused: AtomicU64,
     drawn: Mutex<Vec<Range<u64>>>,
+    seen: Mutex<HashSet<u64>>,
 }
 
 impl SessionIds {
@@ -23,6 +24,7 @@ impl SessionIds {
             floored: AtomicBool::new(false),
             unused: AtomicU64::new(0),
             drawn: Mutex::new(Vec::new()),
+            seen: Mutex::new(HashSet::new()),
         }
     }
 
@@ -30,7 +32,18 @@ impl SessionIds {
     /// counter past every `{client_id}:N` the document read through `txn` holds.
     pub(crate) fn draw<T: ReadTxn>(&self, txn: &T) -> String {
         if !self.floored.swap(true, Ordering::Relaxed) {
-            self.counter.fetch_max(self.floor(txn), Ordering::Relaxed);
+            let floor = self.floor(txn);
+            if floor >= MAX_FLOOR {
+                let before = self.counter.load(Ordering::Relaxed);
+                if before < MAX_FLOOR {
+                    self.unused.fetch_max(before, Ordering::Relaxed);
+                }
+                let mut seen = self.seen.lock().unwrap();
+                self.scan(txn, &mut |n| {
+                    seen.insert(n);
+                });
+            }
+            self.counter.fetch_max(floor, Ordering::Relaxed);
         }
         let mut counter = self.counter.load(Ordering::Relaxed);
         loop {
@@ -64,16 +77,18 @@ impl SessionIds {
             used.insert(n);
         });
         let drawn = self.drawn.lock().unwrap();
+        let seen = self.seen.lock().unwrap();
         let mut next = self.unused.load(Ordering::Relaxed);
         loop {
             if let Some(run) = drawn.iter().find(|run| run.contains(&next)) {
                 next = run.end;
-            } else if used.contains(&next) {
+            } else if used.contains(&next) || seen.contains(&next) {
                 next += 1;
             } else {
                 break;
             }
         }
+        drop(seen);
         drop(drawn);
         assert!(next < MAX_FLOOR, "session id counter exhausted");
         self.unused.store(next + 1, Ordering::Relaxed);
@@ -95,6 +110,8 @@ impl SessionIds {
             .store(other.unused.load(Ordering::Relaxed), Ordering::Relaxed);
         let drawn = other.drawn.lock().unwrap().clone();
         *self.drawn.lock().unwrap() = drawn;
+        let seen = other.seen.lock().unwrap().clone();
+        *self.seen.lock().unwrap() = seen;
     }
 
     #[cfg(test)]
