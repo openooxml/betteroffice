@@ -2735,13 +2735,13 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
     let lost = |text: &str| {
-        let sheets = xlsx_model::sheet_qualifier::remove_sheet_references(
-            text,
+        let tables = crate::remap::remove_table_references(text, &dropped_tables, &order_before);
+        xlsx_model::sheet_qualifier::remove_sheet_references(
+            tables.as_deref().unwrap_or(text),
             &removed_name,
             &order_before,
-        );
-        crate::remap::remove_table_references(sheets.as_deref().unwrap_or(text), &dropped_tables)
-            .or(sheets)
+        )
+        .or(tables)
     };
     crate::remap::ensure_table_references_rewritable(wb, index, &dropped_tables)?;
     let cell_edits = crate::remap::removed_sheet_cell_edits(wb, index, &lost)?;

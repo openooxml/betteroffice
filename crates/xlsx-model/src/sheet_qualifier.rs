@@ -255,7 +255,9 @@ pub fn is_simple_sheet_name(name: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|character| character.is_ascii_digit())
-        && CellRef::parse_a1(name).is_err()
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE")
+        && CellRef::parse_a1(&name.to_ascii_uppercase()).is_err()
         && !is_r1c1_reference(name)
 }
 

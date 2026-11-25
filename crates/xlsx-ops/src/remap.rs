@@ -1948,7 +1948,13 @@ pub(crate) fn rename_sheet_references(
 /// `text` with every structured reference to a table in `dropped` (`Table[...]`,
 /// or the bare table name) replaced by `#REF!`, as Excel saves a reference to a
 /// deleted table; `None` when nothing names one, or the text does not lex.
-pub(crate) fn remove_table_references(text: &str, dropped: &[String]) -> Option<String> {
+pub(crate) fn remove_table_references(
+    text: &str,
+    dropped: &[String],
+    sheets: &[String],
+) -> Option<String> {
+    use xlsx_calc::TokKind;
+
     if dropped.is_empty() {
         return None;
     }
@@ -1960,56 +1966,36 @@ pub(crate) fn remove_table_references(text: &str, dropped: &[String]) -> Option<
         return None;
     }
     let tokens = xlsx_calc::lex_for_rewrite(text).ok()?;
-    let drops = |table: &str| {
-        dropped
-            .iter()
-            .any(|name| name.to_lowercase() == table.to_lowercase())
-    };
+    let drops = |table: &str| dropped.iter().any(|name| sheet_names_equal(name, table));
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     for (at, token) in tokens.iter().enumerate() {
-        let external = at > 0
-            && matches!(&tokens[at - 1].kind, xlsx_calc::TokKind::Ident(word) if word.starts_with('['));
-        let names_dropped = !external
-            && match &token.kind {
-                xlsx_calc::TokKind::TableRef { table, .. } => drops(table),
-                xlsx_calc::TokKind::Ident(word) => {
-                    drops(word)
-                        && !matches!(
-                            tokens.get(at + 1).map(|next| &next.kind),
-                            Some(xlsx_calc::TokKind::LParen)
-                        )
-                        && !first_sheet_of_range(&tokens[at + 1..])
-                }
-                _ => false,
-            };
-        if names_dropped {
-            out.push_str(&text[copied..token.start]);
-            out.push_str("#REF!");
-            copied = token.end;
-        }
+        let end = match &token.kind {
+            TokKind::TableRef { table, .. } if drops(table) => token.end,
+            TokKind::Ident(word)
+                if drops(word)
+                    && !matches!(
+                        tokens.get(at + 1).map(|next| &next.kind),
+                        Some(TokKind::LParen)
+                    ) => token.end,
+            TokKind::ThreeDRef { first, last }
+                if !text[token.start..].starts_with('\'')
+                    && drops(first)
+                    && !sheets.iter().any(|sheet| sheet_names_equal(sheet, first))
+                    && sheets.iter().any(|sheet| sheet_names_equal(sheet, last)) =>
+            {
+                token.start + first.len()
+            }
+            _ => continue,
+        };
+        out.push_str(&text[copied..token.start]);
+        out.push_str("#REF!");
+        copied = end;
     }
     (copied > 0).then(|| {
         out.push_str(&text[copied..]);
         out
     })
-}
-
-/// Whether `rest`, the tokens after a bare word, makes that word the first
-/// sheet of a 3-D range: a `:` and then a reference qualified by the last
-/// sheet (`First:Last!A1`).
-fn first_sheet_of_range(rest: &[xlsx_calc::Token]) -> bool {
-    use xlsx_calc::TokKind;
-    matches!(rest.first().map(|token| &token.kind), Some(TokKind::Colon))
-        && matches!(
-            rest.get(1).map(|token| &token.kind),
-            Some(
-                TokKind::Ref { sheet: Some(_), .. }
-                    | TokKind::Range { sheet: Some(_), .. }
-                    | TokKind::ColumnRange { sheet: Some(_), .. }
-                    | TokKind::RowRange { sheet: Some(_), .. }
-            )
-        )
 }
 
 /// Whether `text` names a table in `dropped` in a form the rewrite cannot
@@ -2804,6 +2790,7 @@ mod tests {
     #[test]
     fn structured_references_to_a_dropped_table_become_ref() {
         let dropped = ["Amounts".to_owned()];
+        let sheets = ["Amounts".to_owned(), "Data".to_owned(), "Data two".to_owned()];
         for (source, expected) in [
             ("SUM(Amounts[Amt])", Some("SUM(#REF!)")),
             ("SUM(amounts[[#This Row],[Amt]])*2", Some("SUM(#REF!)*2")),
@@ -2820,7 +2807,7 @@ mod tests {
             ("[1]!B1+SUM(Amounts[Amt])", Some("[1]!B1+SUM(#REF!)")),
         ] {
             assert_eq!(
-                remove_table_references(source, &dropped).as_deref(),
+                remove_table_references(source, &dropped, &sheets).as_deref(),
                 expected,
                 "{source}"
             );
@@ -2838,12 +2825,12 @@ mod tests {
             ("Data!Amounts", None),
         ] {
             assert_eq!(
-                remove_table_references(source, &dropped).as_deref(),
+                remove_table_references(source, &dropped, &sheets).as_deref(),
                 expected,
                 "{source}"
             );
         }
-        assert!(names_unrewritable_table(
+        assert!(!names_unrewritable_table(
             "[Book.xlsx]Data!A1+SUM(Amounts[Amt])",
             &dropped
         ));
@@ -2852,7 +2839,119 @@ mod tests {
             &dropped
         ));
         assert!(!names_unrewritable_table("[Book.xlsx]Data!A1", &dropped));
-        assert_eq!(remove_table_references("SUM(Amounts[Amt])", &[]), None);
+        assert_eq!(
+            remove_table_references("SUM(Amounts[Amt])", &[], &sheets),
+            None
+        );
+    }
+
+    #[test]
+    fn a_deleted_3d_address_does_not_name_a_dropped_table() {
+        let source = "SUM(Sales:Q2!#REF!)+SUM([1]Sales:Q2!#REF!)";
+        let dropped = ["Sales".to_owned()];
+        let sheets = ["Sales".to_owned(), "Q2".to_owned()];
+        assert!(!names_unrewritable_table(source, &dropped));
+        assert_eq!(remove_table_references(source, &dropped, &sheets), None);
+    }
+
+    #[test]
+    fn a_dropped_table_can_be_the_first_operand_of_a_qualified_range_join() {
+        let sheets = ["Other".to_owned()];
+        for (table, operand) in [
+            ("Amounts", "Amounts:Other!B5"),
+            ("Amounts", "Amounts:Other!A1:B5"),
+            ("Amounts", "Amounts:Other!$A:$A"),
+            ("Amounts", "Amounts:Other!1:3"),
+            ("Amounts", "Amounts : Other!B5"),
+            (r"\Table1", r"\Table1:Other!A1"),
+            ("A1B", "A1B:Other!A1"),
+            ("XFD1048577", "XFD1048577:Other!A1"),
+        ] {
+            let source = format!("IFERROR(SUM({operand}),0)");
+            assert_eq!(
+                remove_table_references(&source, &[table.to_owned()], &sheets),
+                Some(source.replacen(table, "#REF!", 1)),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_dropped_table_name_before_if_or_let_is_rewritten() {
+        for source in [
+            "SUM(Amt:IF(C1,B1,B2))",
+            "SUM(Amt:LET(x,B1,x))",
+            "SUM(Amt:IF (C1,B1,B2))",
+        ] {
+            assert_eq!(
+                remove_table_references(source, &["Amt".to_owned()], &[]),
+                Some(source.replace("Amt", "#REF!"))
+            );
+        }
+    }
+
+    #[test]
+    fn local_qualified_and_external_selectors_do_not_block_table_removal() {
+        let dropped = ["Prices".to_owned()];
+        for prefix in [
+            "[@Qty]",
+            "SUM([@Col]:[@Col2])",
+            "Sheet1!Table1[Col]",
+            "'Sheet 1'!Table1[Col]",
+            "[1]Sheet1!Prices[Amt]",
+            "'[1]Sheet 1'!Prices[Amt]",
+            "[Book.xlsx]Sheet1!A1",
+            r"C:\dir\[Book.xlsx]Sheet1!A1",
+        ] {
+            let source = format!("{prefix}+Prices[Amt]");
+            assert!(!names_unrewritable_table(&source, &dropped), "{source}");
+            assert_eq!(
+                remove_table_references(&source, &dropped, &[]),
+                Some(format!("{prefix}+#REF!"))
+            );
+        }
+        let literal = r#"[@Notes]&"Prices""#;
+        assert!(!names_unrewritable_table(literal, &dropped));
+        assert_eq!(remove_table_references(literal, &dropped, &[]), None);
+    }
+
+    #[test]
+    fn removing_a_sheet_replaces_the_entire_qualified_table_reference() {
+        let mut workbook = wb(&["Data", "Report"]);
+        workbook.tables.push(xlsx_model::Table {
+            name: "Prices".into(),
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A2").unwrap(),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Amt".into()],
+            style: Vec::new(),
+        });
+        set_formula(
+            &mut workbook,
+            SheetId(1),
+            "B1",
+            "SUM(Data!Prices[Amt])+SUM(Prices:Report!A1)",
+        );
+        crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
+        assert_eq!(
+            formula(&workbook, SheetId(0), "B1").as_deref(),
+            Some("SUM(#REF!)+SUM(#REF!:Report!A1)")
+        );
+    }
+
+    #[test]
+    fn an_intersection_after_a_numeric_local_column_can_drop_its_table() {
+        let dropped = ["Prices".to_owned()];
+        for (source, expected) in [
+            ("SUM([2024] Prices[Amt])", "SUM([2024] #REF!)"),
+            ("SUM([1] Prices)", "SUM([1] #REF!)"),
+        ] {
+            assert_eq!(
+                remove_table_references(source, &dropped, &[]).as_deref(),
+                Some(expected)
+            );
+        }
     }
 
     fn r(a1: &str) -> CellRef {

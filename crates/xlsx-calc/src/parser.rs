@@ -257,6 +257,12 @@ impl Parser<'_> {
                 depth: ast_depth,
             };
         }
+        if matches!(self.peek().map(|t| &t.kind), Some(TokKind::Intersection)) {
+            return Err(ParseError::new(
+                self.here(),
+                "reference intersection is unsupported",
+            ));
+        }
         Ok(lhs)
     }
 
@@ -293,8 +299,25 @@ impl Parser<'_> {
             TokKind::RowRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::RowRange { sheet, range }))
             }
-            TokKind::TableRef { table, spec } => {
+            TokKind::TableRef { sheet: None, table, spec } if !table.is_empty() => {
                 Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
+            }
+            TokKind::TableRef { sheet: Some(_), .. } => Err(ParseError::new(
+                pos,
+                "sheet-qualified structured references are unsupported",
+            )),
+            TokKind::TableRef { .. } => Err(ParseError::new(
+                pos,
+                "local structured references are unsupported",
+            )),
+            TokKind::ThreeDRef { .. } => {
+                Err(ParseError::new(pos, "3-D references are unsupported"))
+            }
+            TokKind::ExternalRef(_) => {
+                Err(ParseError::new(pos, "external references are unsupported"))
+            }
+            TokKind::Intersection => {
+                Err(ParseError::new(pos, "reference intersection is unsupported"))
             }
             TokKind::LParen => {
                 let start = self.here();
@@ -764,6 +787,76 @@ mod tests {
                 },
             )
         );
+    }
+
+    #[test]
+    fn unsupported_reference_shapes_report_positioned_errors() {
+        for (source, pos, message) in [
+            ("SUM(Sales:Q2!#REF!)", 4, "3-D references"),
+            ("Amounts:Other!B5", 0, "3-D references"),
+            ("'It''s':'Other'!A1", 0, "3-D references"),
+            ("[Book.xlsx]Sheet1:Sheet2!A1", 0, "external references"),
+            ("[1]Sheet1:Sheet2!#REF!", 0, "external references"),
+            ("[1]Sheet1!A1", 0, "external references"),
+            ("[1]!Name", 0, "external references"),
+            (r"'C:\x\[Book.xlsx]Sheet1'!A1", 0, "external references"),
+            (
+                "Sheet1!Table1[Col]",
+                0,
+                "sheet-qualified structured references",
+            ),
+            ("[@Col]", 0, "local structured references"),
+            ("[#This Row]", 0, "local structured references"),
+            ("[Col]", 0, "local structured references"),
+            ("A1 B1", 2, "reference intersection"),
+        ] {
+            let error = parse_formula(source).unwrap_err();
+            assert_eq!(error.pos, pos, "{source}");
+            assert!(error.message.contains(message), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn address_shaped_range_operands_keep_their_own_qualifiers() {
+        for source in ["A1:Sheet2!B2", "$A$1:Sheet2!B2:C3", "LOG10:Sheet2!B2"] {
+            let Expr::RangeJoin { start, .. } = parse_formula(source).unwrap() else {
+                panic!("expected a range join: {source}");
+            };
+            assert!(matches!(*start, Expr::Ref { sheet: None, .. }), "{source}");
+        }
+        for source in ["A1!B2", "TRUE!A1", "Sheet1:B2!A1", "1:2!A1", "$1:$2!A1"] {
+            assert!(parse_formula(source).is_err(), "{source}");
+        }
+        assert!(matches!(
+            parse_formula("'A1:Sheet2'!B2"),
+            Err(ParseError { message, .. }) if message.contains("3-D")
+        ));
+    }
+
+    #[test]
+    fn cell_shaped_calls_are_not_range_endpoints() {
+        let Expr::RangeJoin { end, .. } = parse_formula("A1:LOG10(1)").unwrap() else {
+            panic!("expected a range join");
+        };
+        assert!(matches!(*end, Expr::FuncCall { name, .. } if name == "LOG10"));
+        assert!(matches!(
+            parse_formula("Sheet1!LOG10(1)").unwrap(),
+            Expr::FuncCall { name, .. } if name == "Sheet1!LOG10"
+        ));
+        assert!(matches!(
+            parse_formula("Sheet1:Sheet2!LOG10(1)").unwrap(),
+            Expr::RangeJoin { .. }
+        ));
+    }
+
+    #[test]
+    fn spaced_cell_ranges_inherit_the_sheet_qualifier() {
+        for source in ["Sheet1!A1 : B2", "Sheet1 ! A1 : B2", "'Sheet1' ! A1 : B2"] {
+            assert_eq!(
+                parse_formula(source).unwrap(),
+                parse_formula("Sheet1!A1:B2").unwrap()
+            );
+        }
     }
 
     #[test]

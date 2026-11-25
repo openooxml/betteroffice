@@ -3,8 +3,9 @@
 
 use crate::TableSpec;
 use crate::functions::Func;
+use crate::lexer::is_unquoted_sheet;
 use crate::parser::{BinaryOp, Expr, UnaryOp};
-use xlsx_model::CellRef;
+use xlsx_model::sheet_qualifier::sheet_token;
 
 // mirrors the parser's precedence table so parens are emitted only where
 // re-parsing would otherwise change the tree
@@ -39,33 +40,9 @@ fn binary_token(op: &BinaryOp) -> &'static str {
 
 /// quote a sheet name when it needs it (anything beyond ascii alnum + `_`).
 pub(crate) fn sheet_prefix(sheet: &Option<String>) -> String {
-    match sheet {
-        None => String::new(),
-        Some(name) => {
-            let simple = !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
-                && CellRef::parse_a1(name).is_err()
-                && !is_r1c1_reference(name);
-            if simple {
-                format!("{name}!")
-            } else {
-                format!("'{}'!", name.replace('\'', "''"))
-            }
-        }
-    }
-}
-
-fn is_r1c1_reference(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if matches!(upper.as_str(), "R" | "C") {
-        return true;
-    }
-    let Some(rest) = upper.strip_prefix('R') else {
-        return false;
-    };
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    rest.as_bytes().get(digits) == Some(&b'C')
+    sheet
+        .as_deref()
+        .map_or_else(String::new, |name| format!("{}!", sheet_token(name)))
 }
 
 impl Expr {
@@ -104,7 +81,22 @@ impl Expr {
             }
             Expr::Percent(expr) => format!("{}%", expr.print(6)),
             // 7 > every other bp: `:` binds tighter than anything around it
-            Expr::RangeJoin { start, end } => format!("{}:{}", start.print(7), end.print(7)),
+            Expr::RangeJoin { start, end } => {
+                let separator = if matches!(start.as_ref(), Expr::Name { scope: None, name }
+                    if is_unquoted_sheet(name))
+                    && matches!(
+                        end.as_ref(),
+                        Expr::Ref { sheet: Some(_), .. }
+                            | Expr::Range { sheet: Some(_), .. }
+                            | Expr::ColumnRange { sheet: Some(_), .. }
+                            | Expr::RowRange { sheet: Some(_), .. }
+                    ) {
+                    " : "
+                } else {
+                    ":"
+                };
+                format!("{}{separator}{}", start.print(7), end.print(7))
+            }
             Expr::Binary { op, lhs, rhs } => {
                 let bp = binary_bp(op);
                 // left-associative: the right child needs parens at equal bp
@@ -264,5 +256,22 @@ mod tests {
             parse_formula("'R1C1b'!B2").unwrap().to_formula(),
             "'R1C1b'!B2"
         );
+        for source in ["'a1'!B2", "'TRUE'!B2", "'false'!B2"] {
+            assert_eq!(parse_formula(source).unwrap().to_formula(), source);
+            round_trips(source);
+        }
+    }
+
+    #[test]
+    fn printing_a_range_join_preserves_its_unqualified_name_operand() {
+        for source in [
+            "A1B : Data!B5",
+            "A1B : 'Data Set'!B5:C6",
+            "A1B : Data!$A:$B",
+            "A1B : Data!1:3",
+        ] {
+            assert_eq!(parse_formula(source).unwrap().to_formula(), source);
+            round_trips(source);
+        }
     }
 }
