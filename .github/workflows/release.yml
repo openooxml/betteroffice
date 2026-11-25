@@ -73,12 +73,16 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
+      - name: Note skipped tests
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'
+        run: echo "::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests."
+
       - name: Type check
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run typecheck:packages
 
       - name: Test
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run test
 
       - name: Build packages
