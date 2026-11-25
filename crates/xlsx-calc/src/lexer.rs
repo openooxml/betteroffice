@@ -224,11 +224,55 @@ pub fn may_reference_table_column(input: &str, table: &str, local: bool, column:
     if !input.contains('[') {
         return false;
     }
-    let folded = input.to_lowercase();
+    let table = format!("{}[", table.to_lowercase());
     let column = column.to_lowercase();
-    (local || folded.contains(&format!("{}[", table.to_lowercase())))
-        && (folded.contains(&column)
-            || folded.replace('\'', "").contains(&column.replace('\'', "")))
+    let unescaped_column = column.replace('\'', "");
+    let mut has_selector = false;
+    let mut has_column = false;
+    let mut candidate = |code: &str| {
+        let folded = code.to_lowercase();
+        has_selector |= if local {
+            folded.contains('[')
+        } else {
+            folded.contains(&table)
+        };
+        has_column |= folded.contains(&column)
+            || folded.replace('\'', "").contains(&unescaped_column);
+        has_selector && has_column
+    };
+    if !input.contains('"') {
+        return candidate(input);
+    }
+    let mut start = 0;
+    let mut brackets = 0_usize;
+    let mut quoted_sheet = false;
+    let mut string = false;
+    let mut chars = input.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '"' if brackets == 0 && !quoted_sheet => {
+                if string {
+                    if chars.next_if(|&(_, next)| next == '"').is_some() {
+                        continue;
+                    }
+                    start = index + 1;
+                } else if candidate(&input[start..index]) {
+                    return true;
+                }
+                string = !string;
+            }
+            _ if string => {}
+            '\'' if brackets > 0 => {
+                chars.next();
+            }
+            '\'' => quoted_sheet = !quoted_sheet,
+            _ if quoted_sheet => {}
+            '[' => brackets += 1,
+            ']' => brackets = brackets.saturating_sub(1),
+            _ => {}
+        }
+    }
+    !string && candidate(&input[start..])
 }
 
 #[doc(hidden)]
@@ -271,7 +315,7 @@ pub fn rewrite_table_columns<'a>(
     ) in references.zip(table_refs)
     {
         let external = external_prefix_before(index)
-            || sheet.as_deref().is_some_and(|sheet| sheet.starts_with('['));
+            || sheet.as_deref().is_some_and(external_workbook_scope);
         if external {
             continue;
         }
@@ -288,7 +332,7 @@ pub fn rewrite_table_columns<'a>(
             };
             if (is_name && previous.end == token.start)
                 || ((is_name || scope.is_some()) && external_prefix_before(index - 1))
-                || scope.is_some_and(external_name_scope)
+                || scope.is_some_and(external_workbook_scope)
             {
                 continue;
             }
@@ -358,13 +402,15 @@ pub fn rewrite_table_columns<'a>(
     Ok(Some(result))
 }
 
-fn external_name_scope(scope: &str) -> bool {
-    scope.contains('[')
-        || scope.rsplit_once('.').is_some_and(|(_, extension)| {
-            ["xls", "xlsx", "xlsm", "xlsb", "xla", "xlam"]
-                .iter()
-                .any(|kind| extension.eq_ignore_ascii_case(kind))
-        })
+fn external_workbook_scope(scope: &str) -> bool {
+    scope
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .is_some_and(|(book, _)| !book.is_empty())
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '\\')
 }
 
 struct Lexer<'a> {
@@ -395,7 +441,11 @@ impl Lexer<'_> {
                 '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
                 '[' if self.table_refs.is_some() => {
-                    self.lex_table_ref(None, String::new(), start)?
+                    if let Some(end) = self.unquoted_external_scope_end(start) {
+                        self.lex_unquoted_sheet_ref(start, end)?
+                    } else {
+                        self.lex_table_ref(None, String::new(), start)?
+                    }
                 }
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
@@ -486,12 +536,8 @@ impl Lexer<'_> {
     /// read a maximal name/reference run.
     fn read_word(&mut self) -> String {
         let start = self.pos;
-        while let Some(c) = self.peek() {
-            if c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '\\') {
-                self.bump();
-            } else {
-                break;
-            }
+        while self.peek().is_some_and(is_word_char) {
+            self.bump();
         }
         self.input[start..self.pos].to_string()
     }
@@ -607,6 +653,29 @@ impl Lexer<'_> {
         TokKind::Ident(self.input[start..self.pos].to_string())
     }
 
+    fn unquoted_external_scope_end(&self, start: usize) -> Option<usize> {
+        let tail = &self.input[self.pos..];
+        let tail = if self.pos == start || self.input[start..self.pos].ends_with('\\') {
+            tail
+        } else if self.pos == start + 1 && self.input.as_bytes()[start].is_ascii_alphabetic() {
+            tail.strip_prefix(":\\")?.trim_start_matches(is_word_char)
+        } else {
+            return None;
+        };
+        let (book, sheet) = tail.strip_prefix('[')?.split_once(']')?;
+        if book.is_empty() || book.contains(['[', '"', '\'']) {
+            return None;
+        }
+        let reference = sheet.trim_start_matches(is_word_char).strip_prefix('!')?;
+        Some(self.input.len() - reference.len() - 1)
+    }
+
+    fn lex_unquoted_sheet_ref(&mut self, start: usize, end: usize) -> Result<TokKind, ParseError> {
+        let sheet = self.input[start..end].to_owned();
+        self.pos = end + 1;
+        self.lex_reference(Some(sheet), start)
+    }
+
     /// `'Quoted Sheet'!A1` or `'Quoted Sheet'!A1:B2`. `''` escapes a quote.
     fn lex_quoted_sheet_ref(&mut self) -> Result<TokKind, ParseError> {
         let start = self.pos;
@@ -645,6 +714,17 @@ impl Lexer<'_> {
         if self.peek() == Some('!') {
             self.bump();
             return self.lex_reference(Some(word), start);
+        }
+
+        if self.table_refs.is_some() && let Some(end) = self.unquoted_external_scope_end(start) {
+            return self.lex_unquoted_sheet_ref(start, end);
+        }
+
+        if self.external_prefixes && let Some(second) = self.input[self.pos..].strip_prefix(':') {
+            let tail = second.trim_start_matches(is_word_char);
+            if tail.len() < second.len() && let Some(reference) = tail.strip_prefix('!') {
+                return self.lex_unquoted_sheet_ref(start, self.input.len() - reference.len() - 1);
+            }
         }
 
         if self.peek() == Some('[') {
@@ -936,6 +1016,32 @@ mod tests {
                 .as_deref(),
             Some("SUM(Data!AllowedRange [@New])+[1]!ExternalFn([@New])")
         );
+    }
+
+    #[test]
+    fn table_column_candidates_skip_strings_with_escaped_quotes() {
+        let literal = r#"SUM(Jan:Mar!A1)+N("Table1[""Status""]")"#;
+        for local in [false, true] {
+            assert!(!may_reference_table_column(literal, "Table1", local, "Status"));
+        }
+        let source = r#"'Data "Q"'!Table1["Status"]+N("Table1[""Status""]")"#;
+        assert_eq!(
+            rewrite_table_column(source, "Table1", "Data \"Q\"", false, "\"Status\"", "State")
+                .unwrap()
+                .as_deref(),
+            Some(r#"'Data "Q"'!Table1[State]+N("Table1[""Status""]")"#)
+        );
+    }
+
+    #[test]
+    fn the_rewrite_lexer_accepts_3d_qualifiers() {
+        for source in ["Jan:Mar!A1", "'Jan:Mar'!A1"] {
+            assert!(matches!(
+                &lex_for_rewrite(source).unwrap()[0].kind,
+                TokKind::Ref { sheet: Some(sheet), .. } if sheet == "Jan:Mar"
+            ));
+        }
+        assert!(lex("Jan:Mar!A1").is_err());
     }
 
     #[test]

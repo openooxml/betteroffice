@@ -74,7 +74,9 @@ pub fn normalize_table_header(
     let base = match &cell.value {
         CellValue::Empty => String::new(),
         CellValue::Text { value } => value.clone(),
-        CellValue::Number { value } => value.to_string(),
+        CellValue::Number { .. } => {
+            xlsx_model::numfmt::format_value(&cell.value, "General", workbook.date_system).text
+        }
         CellValue::Bool { value: true } => "TRUE".to_owned(),
         CellValue::Bool { value: false } => "FALSE".to_owned(),
         CellValue::Error { value } => value.as_str().to_owned(),

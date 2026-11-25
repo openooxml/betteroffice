@@ -499,7 +499,10 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
     let mut depth = 0;
     let mut table: Option<Table> = None;
     let mut style = None;
-    let mut columns = false;
+    let mut alternate = false;
+    let mut alternate_columns = false;
+    let mut branch = false;
+    let mut columns = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if depth == 1 && local_name(&e) == b"table" => {
@@ -528,11 +531,22 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
             Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
                 style = TableStyleInfo::parse(&e)?;
             }
-            Event::Start(e) if depth == 2 && local_name(&e) == b"tableColumns" => {
-                columns = true;
+            Event::Start(e) if depth == 2 && local_name(&e) == b"AlternateContent" => {
+                alternate = true;
+                alternate_columns = false;
             }
-            Event::End(_) if depth == 1 => columns = false,
-            Event::Start(e) if columns && depth == 3 && local_name(&e) == b"tableColumn" => {
+            Event::Start(e) if alternate && depth == 3 => {
+                branch = !alternate_columns
+                    && matches!(local_name(&e).as_slice(), b"Choice" | b"Fallback");
+            }
+            Event::Start(e)
+                if (depth == 2 || branch && depth == 4) && local_name(&e) == b"tableColumns" =>
+            {
+                columns = Some(depth);
+            }
+            Event::Start(e)
+                if columns.is_some_and(|at| depth == at + 1) && local_name(&e) == b"tableColumn" =>
+            {
                 if let Some(table) = table.as_mut() {
                     if table.columns.len() >= MAX_TABLE_COLUMNS {
                         return Err(ParseError::Malformed(
@@ -541,6 +555,18 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, Parse
                     }
                     let name = attr(&e, b"name")?.unwrap_or_default();
                     table.columns.push(unescape_name(&name));
+                    alternate_columns |= branch;
+                }
+            }
+            Event::End(_) => {
+                if columns == Some(depth + 1) {
+                    columns = None;
+                }
+                if depth == 2 {
+                    branch = false;
+                }
+                if depth == 1 {
+                    alternate = false;
                 }
             }
             Event::Eof => break,

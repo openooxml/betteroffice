@@ -431,6 +431,25 @@ fn numeric_input_in_a_header_is_stored_as_text() {
 }
 
 #[test]
+fn a_large_numeric_value_in_a_header_uses_general_formatting() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::SetCell {
+                sheet: SHEET1,
+                at: at("B1"),
+                cell: CellState {
+                    value: CellValue::Number { value: 1e300 },
+                    ..CellState::default()
+                },
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_saved_headers(&workbook.save().unwrap(), ["Name", "1E+300", "Rev"]);
+}
+
+#[test]
 fn setting_the_existing_numeric_header_value_normalizes_the_cell_and_caption() {
     let source = replace_part(
         &book(),
@@ -1016,6 +1035,43 @@ fn a_header_rename_is_refused_when_two_sheets_share_the_table_part() {
 }
 
 #[test]
+fn alternate_content_columns_resolve_but_cannot_be_renamed() {
+    let path = "xl/tables/table1.xml";
+    let columns = concat!(
+        r#"<tableColumns count="3"><tableColumn id="1" name="Name"/>"#,
+        r#"<tableColumn id="2" name="Status"/><tableColumn id="3" name="Rev"/></tableColumns>"#,
+    );
+    let alternate = format!(
+        concat!(
+            r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:extension">"#,
+            r#"<mc:Choice Requires="x">{0}</mc:Choice><mc:Fallback>{0}</mc:Fallback>"#,
+            r#"</mc:AlternateContent><extLst><ext uri="urn:extension"><tableColumn name="Extension"/></ext></extLst>"#,
+        ),
+        columns,
+    );
+    let source = replace_part(&book(), path, columns, &alternate);
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(
+        workbook.model().table("Table1").unwrap().columns,
+        ["Name", "Status", "Rev"]
+    );
+    edit(&mut workbook, "H1", "=COUNTA(Table1[Status])");
+    assert_eq!(
+        workbook.model().value(SHEET1, at("H1")),
+        CellValue::Number { value: 3.0 }
+    );
+    assert_refused_header(
+        &mut workbook,
+        "B1",
+        "State",
+        "table column count does not match",
+    );
+    let before = ooxml_opc::unzip_parts(&source).unwrap();
+    let after = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert_eq!(part(&after, path), part(&before, path));
+}
+
+#[test]
 fn a_header_rename_is_refused_when_the_source_column_name_is_missing() {
     let source = replace_part(
         &book(),
@@ -1314,9 +1370,10 @@ fn a_header_rename_rewrites_only_the_matching_qualified_table_reference() {
 #[test]
 fn a_header_rename_preserves_other_workbook_and_table_selectors() {
     let other_refs = concat!(
-        "'Other.xlsx'!OtherTable[Status]+[1]Sheet1!Other[Status]+",
+        r"'C:\Books\[Other.xlsx]Data'!OtherTable[Status]+[1]Sheet1!Other[Status]+",
         "[1]Sheet1!Table1[Status]+OtherTable[Status]+",
-        "'Other.xlsx'!OtherTable [Status]+[1]Sheet1!Other [Status]+",
+        r"'C:\Books\[Other.xlsx]Data'!OtherTable [Status]+",
+        r"C:\Books\[Other.xlsx]Data!OtherTable [Status]+[1]Sheet1!Other [Status]+",
     );
     let local_refs = "OtherTable [Status]+SUM(AllowedRange [@Status])+[@Status]";
     let source = replace_part(
@@ -1339,6 +1396,61 @@ fn a_header_rename_preserves_other_workbook_and_table_selectors() {
     let local_rewritten = "OtherTable [State]+SUM(AllowedRange [@State])+[@State]";
     let rewritten = format!("{other_refs}{local_rewritten}");
     for (address, formula) in [("C2", rewritten.as_str()), ("H2", local_refs)] {
+        assert_eq!(
+            reopened.model().sheets[0]
+                .cell(at(address))
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some(formula)
+        );
+    }
+}
+
+#[test]
+fn a_sheet_name_ending_in_xlsx_does_not_hide_a_local_selector() {
+    let source = replace_part(&book(), "xl/workbook.xml", "Sheet1", "Data.xlsx");
+    let source = replace_part(
+        &source,
+        "xl/worksheets/sheet1.xml",
+        r#"<c r="C2"><v>1</v></c>"#,
+        r#"<c r="C2"><f>SUM('Data.xlsx'!$B$2:$B$4 [@Status])</f><v>1</v></c>"#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+    assert_eq!(
+        reopened.model().sheets[0]
+            .cell(at("C2"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("SUM('Data.xlsx'!$B$2:$B$4 [@State])")
+    );
+}
+
+#[test]
+fn a_header_rename_preserves_3d_references_and_string_literals() {
+    let sheet = "xl/worksheets/sheet1.xml";
+    let literal = r#"SUM(Jan:Mar!A1)+N("Table1[Status]")"#;
+    let reference = r#"SUM(Jan:Mar!A1,'Jan:Mar'!A1,Table1[Status])+N("Table1[Status]")"#;
+    let source = replace_part(
+        &book(),
+        sheet,
+        r#"<c r="C2"><v>1</v></c>"#,
+        &format!(r#"<c r="C2"><f>{literal}</f><v>1</v></c>"#),
+    );
+    let source = replace_part(
+        &source,
+        sheet,
+        r#"<c r="C3"><v>2</v></c>"#,
+        &format!(r#"<c r="C3"><f>{reference}</f><v>2</v></c>"#),
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit(&mut workbook, "B1", "State");
+    let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
+    let rewritten = r#"SUM(Jan:Mar!A1,'Jan:Mar'!A1,Table1[State])+N("Table1[Status]")"#;
+    for (address, formula) in [("C2", literal), ("C3", rewritten)] {
         assert_eq!(
             reopened.model().sheets[0]
                 .cell(at(address))
