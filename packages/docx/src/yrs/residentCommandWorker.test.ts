@@ -15,6 +15,7 @@ import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
 import { createdListKey } from './listDefinitionSave';
+import { proposalRevisionPreview } from './proposals';
 import { resolveReservations, type DocxReservation } from './reservations';
 import type { DocxCommandAck, DocxCommandEnvelope, DocxCommandFrame, DocxCommandInitRequest } from './residentCommandProtocol';
 import type { DocxEngineWorkerResponse } from './residentEngineWorkerProtocol';
@@ -1997,6 +1998,60 @@ test('review_commands_order_proposals_preview_withdrawal_and_revision_resolution
     expect(rejected.outcomes[0]?.status).toBe('applied');
     expect(engine.paragraphs('body')[0]?.text).toBe('Bud');
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('worker reuses layout input until the proposal preview changes', async () => {
+  const { client, engine, init } = await openWorker();
+  const layouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
+  const stringify = spyOn(JSON, 'stringify');
+  const rewrites = (input: string) => stringify.mock.results.filter(result => result.type === 'return' && result.value === input).length;
+  try {
+    const first = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
+    expect(first.outcomes[0]?.status).toBe('applied');
+    const second = await client.edit(intent(2, first.version, 'insertText', { text: '?' }));
+    expect(second.outcomes[0]?.status).toBe('applied');
+    const ids = await client.documentRead({ kind: 'paragraphIdentities' });
+    const proposed = await client.edit(intent(3, second.version, 'propose', { expectVersion: ids.version, proposals: [{
+      id: 'one', op: 'replaceText', paragraph: ids.value.paragraphs[0]!.session!, search: 'Seed', replaceWith: 'Bud',
+      suggest: { author: 'Ada', date: '2026-01-01' },
+    }] }));
+    expect(proposed.outcomes[0]?.status).toBe('applied');
+    const input = layouts.mock.calls[0]![0];
+    expect(layouts.mock.calls).toEqual([[input], [input], [input]]);
+    expect(rewrites(input)).toBe(1);
+
+    const review = await client.documentRead({ kind: 'reviewSnapshot' });
+    const decided = await client.edit(intent(4, proposed.version, 'setProposalStates', {
+      expectVersion: review.version, expectPreviewVersion: review.value!.proposals.previewVersion,
+      changes: [{ id: 'one', state: 'accepted' }],
+    }));
+    expect(decided.outcomes[0]?.status).toBe('applied');
+    expect(layouts.mock.calls).toHaveLength(4);
+    const previewedInput = layouts.mock.calls[3]![0];
+    expect(previewedInput).not.toBe(input);
+    expect(rewrites(previewedInput)).toBe(1);
+
+    const snapshot = (await client.documentRead({ kind: 'reviewSnapshot' })).value!.proposals;
+    const preview = proposalRevisionPreview(snapshot);
+    expect(preview).toBeDefined();
+    const request = JSON.parse(init.layoutInput);
+    request.renderEnv = { ...request.renderEnv, revisionPreview: preview };
+    expect(JSON.parse(previewedInput)).toEqual(request);
+
+    const cold = await createResidentEngineSession();
+    try {
+      const font = init.fonts[0];
+      if (!(font instanceof Uint8Array)) throw new Error('Expected layout font bytes');
+      request.measurement.fontChains = { 'liberation sans|0|0': [cold.registerFont(font)] };
+      cold.loadState(engine.encodeState());
+      const expected = cold.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request));
+      expect(JSON.parse(engine.retainedLayoutJson())).toEqual(JSON.parse(expected));
+    } finally { cold.destroy(); }
+  } finally {
+    stringify.mockRestore();
+    layouts.mockRestore();
+    client.destroy();
+  }
 }, TIMEOUT);
 
 test('identity assigning save presents its native version before version checked reads', async () => {
@@ -4082,6 +4137,32 @@ test('round two resident geometry matches the reference walk on built pages', as
     expect(normalize(await readResidentFrameGeometry(engine, unresolved, range, 1)))
       .toEqual(normalize(await reference(engine, unresolved, range, 1)));
   } finally { client.destroy(); }
+}, TIMEOUT);
+
+test('published part geometry looks up each repeated header and footer once per call', async () => {
+  const bodyXml = Array.from({ length: 8 }, (_, index) => '<w:p>' +
+    (index === 0 ? '' : '<w:pPr><w:pageBreakBefore/></w:pPr>') +
+    `<w:r><w:t>Page ${index + 1}</w:t></w:r></w:p>`).join('');
+  const { client, engine } = await openWorker({ headersFooters: true, bodyXml });
+  const stories = spyOn(engine, 'partStory');
+  try {
+    for (let call = 0; call < 2; call++) {
+      stories.mockClear();
+      const { frame: published } = await client.requestFullFrame();
+      const frame = applyFrameDeltaOwned(null, decodeFrameDelta(published!.payload.frame));
+      expect(frame.pages).toHaveLength(8);
+      expect(new Set(frame.pages.map(({ page }) => page.header?.rId))).toEqual(new Set(['rIdHeader']));
+      expect(new Set(frame.pages.map(({ page }) => page.footer?.rId))).toEqual(new Set(['rIdFooter']));
+      expect(stories.mock.calls.map(([id]) => id).sort()).toEqual(['rIdFooter', 'rIdHeader']);
+
+      const cold = frame.pages.flatMap(page => engine.partGeometry({ ...frame, pages: [page] }));
+      expect(cold).toHaveLength(16);
+      expect(published!.payload.parts).toEqual(cold);
+    }
+  } finally {
+    stories.mockRestore();
+    client.destroy();
+  }
 }, TIMEOUT);
 
 test('round two resident geometry after edits matches a cold read and the reference walk', async () => {
