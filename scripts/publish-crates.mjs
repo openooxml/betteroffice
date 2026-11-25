@@ -117,7 +117,7 @@ export function newCrateRateLimitRetryAt(output, nowMs) {
   if (
     index < 2 ||
     !/^\s*Caused by:\s*$/.test(lines[index - 1]) ||
-    !/^error: failed to publish to registry at https:\/\/crates\.io\b/.test(lines[index - 2])
+    !/^error: failed to publish (?:\S+ v\S+ )?to registry at https:\/\/crates\.io\b/.test(lines[index - 2])
   ) {
     return null;
   }

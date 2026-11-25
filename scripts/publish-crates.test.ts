@@ -28,6 +28,11 @@ const NEW_CRATE_REFUSAL =
   '  the remote server responded with an error (status 429 Too Many Requests): ' +
   'You have published too many new crates in a short period of time.';
 
+const CARGO_NEW_CRATE_REFUSAL =
+  'error: failed to publish betteroffice-fonts-cjk-kr v0.6.0 to registry at https://crates.io\n' +
+  'Caused by:\n' +
+  '  the remote server responded with an error (status 429 Too Many Requests): You have published too many new crates in a short period of time. Please try again after Wed, 25 Nov 2026 16:06:03 GMT and see https://crates.io/docs/rate-limits for more details.\n';
+
 function newCrateRefusal(retryAt: number) {
   return `${NEW_CRATE_REFUSAL} Please try again after ${new Date(retryAt).toUTCString()} and see https://crates.io/docs/rate-limits for more details.`;
 }
@@ -64,6 +69,7 @@ describe('newCrateRateLimitRetryAt', () => {
     ['a retry date', newCrateRefusal(RETRY_MS), RETRY_MS],
     ['a past retry date', newCrateRefusal(START_MS - 60_000), START_MS - 60_000],
     ['a missing retry date', NEW_CRATE_REFUSAL, START_MS + 600_000],
+    ['cargo\'s refusal naming the crate and version', CARGO_NEW_CRATE_REFUSAL, Date.parse('2026-11-25T16:06:03Z')],
     ['an invalid retry date', `${NEW_CRATE_REFUSAL} Please try again after an invalid date GMT`, START_MS + 600_000],
     ['the phrase without the 429 status line', 'HTTP 429: too many new crates', null],
     ['the status and the phrase on different lines', `status 429 Too Many Requests\nwarning: too many new crates`, null],
