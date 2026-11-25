@@ -9088,7 +9088,7 @@ fn inline_strings_inside_cell_alternate_content_are_read() {
         ),
     ] {
         let workbook = alternate_cell(&format!(
-            r#"<c r="A1" t="inlineStr"><mc:AlternateContent {MC}><mc:Choice Requires="x14">{inline}</mc:Choice><mc:Fallback>{inline}</mc:Fallback></mc:AlternateContent></c>"#
+            r#"<c r="A1" t="inlineStr"><mc:AlternateContent {MC}><mc:Choice Requires="x14"><is><t>choice</t></is></mc:Choice><mc:Fallback>{inline}</mc:Fallback></mc:AlternateContent></c>"#
         ));
         assert_eq!(
             cell_at(&workbook, "A1").value,
@@ -9098,4 +9098,21 @@ fn inline_strings_inside_cell_alternate_content_are_read() {
             "{inline}"
         );
     }
+}
+
+#[test]
+fn two_direct_formulas_keep_the_last_one() {
+    let workbook = alternate_cell(r#"<c r="A1"><f>1+1</f><f>2+2</f><v>4</v></c>"#);
+    assert_eq!(cell_at(&workbook, "A1").formula.as_deref(), Some("2+2"));
+}
+
+#[test]
+fn an_alternate_content_block_in_another_namespace_is_not_read() {
+    let workbook = alternate_cell(
+        r#"<c r="A1"><v>2</v><x:AlternateContent xmlns:x="urn:example"><x:Fallback><x:v>99</x:v></x:Fallback></x:AlternateContent></c>"#,
+    );
+    assert_eq!(
+        cell_at(&workbook, "A1").value,
+        CellValue::Number { value: 2.0 }
+    );
 }
