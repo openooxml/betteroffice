@@ -301,9 +301,11 @@ fn digit_advance_em(family: Option<&str>) -> f64 {
 
 const CALIBRI_DIGIT_EM: f64 = 1038.0 / 2048.0;
 
-/// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
-/// cached hint it recomputes; `None` keeps stored heights. gated on calibri
-/// because [`autofit_row_height_pt`] is a calibri measurement.
+/// scale factor `fitted / declared` for stored `ht` when `defaultRowHeight`
+/// (`declared`) is unpinned (`!customHeight`) and the normal font is calibri
+/// or unspecified (`fitted = fit.natural(normal.size_pt)`). screen returns
+/// `Some` when `fitted != declared`, print only when `fitted < declared`;
+/// `None` skips rescaling (print still floors to the device grid).
 fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
@@ -319,7 +321,11 @@ fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Op
         return None;
     }
     let fitted = fit.natural(normal.size_pt);
-    (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+    let scales = match fit {
+        RowFit::Screen => fitted != declared,
+        RowFit::Print { .. } => fitted < declared,
+    };
+    (fitted.is_finite() && fitted > 0.0 && scales).then_some(fitted / declared)
 }
 
 /// the height a cell's font contributes to row autofit, if any: a declared
