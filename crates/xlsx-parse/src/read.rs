@@ -791,8 +791,7 @@ fn parse_worksheet(
                             record_array_formula(&e, origin, &mut sheet, facts)?;
                         }
                         c.formula = Some(text);
-                        facts.source.alternate_formulas |=
-                            alternate_depth > 0 || c.fallback.is_some();
+                        facts.source.alternate_formulas |= alternate_depth > 0;
                     }
                     b"is" => {
                         let (text, runs) = collect_string_item(&mut reader, &mut buf, &mut depth)?;
