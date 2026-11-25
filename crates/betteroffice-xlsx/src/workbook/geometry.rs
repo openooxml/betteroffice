@@ -25,7 +25,7 @@ impl Workbook {
         let mut delta = GeometryDelta::default();
         for op in ops {
             match op {
-                Op::SetCell { sheet, at, .. } | Op::RestoreTableHeader { sheet, at, .. } => {
+                Op::SetCell { sheet, at, .. } => {
                     delta.sheets.entry(*sheet).or_default().rows.insert(at.row);
                 }
                 Op::SetRowHeight { sheet, row, .. }

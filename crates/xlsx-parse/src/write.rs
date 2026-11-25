@@ -518,6 +518,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             .all(|(index, origin)| *origin == Some(index))
         && active_sheet == package.active_sheet
     {
+        if !wb.tables.is_empty() {
+            let mut parts = PartStore::new(&package.parts);
+            tables::patch_table_parts(wb, package, &claimed, &mut parts)?;
+            return Ok(parts.finish());
+        }
         return Ok(package
             .parts
             .iter()

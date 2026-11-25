@@ -2108,7 +2108,6 @@ impl AuthoritySnapshotEncoder {
             plain_style_cells: _,
             snapshot_revision: _,
             base,
-            source_header_text: _,
             history: _,
             next_sheet_id: _,
             undo_stack: _,

@@ -710,18 +710,6 @@ impl Codec for Op {
                     .collect::<Vec<StyledTable>>()
                     .write(w);
             }
-            Self::RestoreTableHeader {
-                sheet,
-                at,
-                cell,
-                name,
-            } => {
-                w.u8(45);
-                sheet.write(w);
-                at.write(w);
-                cell.write(w);
-                name.write(w);
-            }
         }
     }
 
@@ -941,12 +929,6 @@ impl Codec for Op {
                     .into_iter()
                     .map(styled_table)
                     .collect(),
-            },
-            45 => Self::RestoreTableHeader {
-                sheet: Codec::read(r)?,
-                at: Codec::read(r)?,
-                cell: Codec::read(r)?,
-                name: Codec::read(r)?,
             },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })

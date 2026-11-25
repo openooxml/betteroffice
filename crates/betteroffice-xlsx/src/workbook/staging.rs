@@ -58,6 +58,22 @@ impl Workbook {
         history: CommitHistory,
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
+        if staged.model.defined_names != self.model.defined_names
+            && ops.iter().any(|op| matches!(op, Op::SetCell { .. }))
+            && !ops.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::MoveSheet { .. }
+                )
+            })
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(
+                &staged.model,
+                package.materialize()?,
+                &self.preserved.origins,
+            )?;
+        }
         if baseline.is_none() && self.defers_staging() {
             return Ok(PreparedCommit {
                 ops,

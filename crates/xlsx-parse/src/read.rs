@@ -491,10 +491,7 @@ pub(crate) fn take_table_parses() -> usize {
 
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(
-    data: &[u8],
-    sheet: SheetId,
-) -> Result<Option<ParsedTable>, ParseError> {
+fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, ParseError> {
     #[cfg(test)]
     TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
@@ -502,9 +499,10 @@ fn parse_table(
     let mut depth = 0;
     let mut table: Option<Table> = None;
     let mut style = None;
+    let mut columns = false;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
-            Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
+            Event::Start(e) if depth == 1 && local_name(&e) == b"table" => {
                 let Some(reference) = attr(&e, b"ref")? else {
                     return Ok(None);
                 };
@@ -530,7 +528,11 @@ fn parse_table(
             Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
                 style = TableStyleInfo::parse(&e)?;
             }
-            Event::Start(e) if local_name(&e) == b"tableColumn" => {
+            Event::Start(e) if depth == 2 && local_name(&e) == b"tableColumns" => {
+                columns = true;
+            }
+            Event::End(_) if depth == 1 => columns = false,
+            Event::Start(e) if columns && depth == 3 && local_name(&e) == b"tableColumn" => {
                 if let Some(table) = table.as_mut() {
                     if table.columns.len() >= MAX_TABLE_COLUMNS {
                         return Err(ParseError::Malformed(

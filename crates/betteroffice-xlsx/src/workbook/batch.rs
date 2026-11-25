@@ -987,10 +987,15 @@ impl Workbook {
                             validate_cell_state(&state)
                         })
                         .map_err(|error| {
-                            at(
-                                EditFailureCode::InvalidStep,
-                                format!("the input for {}: {error}", cell.to_a1()),
-                            )
+                            let message = if matches!(
+                                error,
+                                Error::Operation(OpError::TableHeaderFormulaUnsupported)
+                            ) {
+                                error.to_string()
+                            } else {
+                                format!("the input for {}: {error}", cell.to_a1())
+                            };
+                            at(EditFailureCode::InvalidStep, message)
                         })?;
                     if format.is_some()
                         || table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
@@ -1046,10 +1051,15 @@ impl Workbook {
                         )),
                     )
                     .map_err(|error| {
-                        at(
-                            EditFailureCode::InvalidStep,
-                            format!("the formula for {}: {error}", cell.to_a1()),
-                        )
+                        let message = if matches!(
+                            error,
+                            Error::Operation(OpError::TableHeaderFormulaUnsupported)
+                        ) {
+                            error.to_string()
+                        } else {
+                            format!("the formula for {}: {error}", cell.to_a1())
+                        };
+                        at(EditFailureCode::InvalidStep, message)
                     })?;
                     let state = CellState {
                         value: CellValue::Empty,
@@ -1167,6 +1177,14 @@ impl Workbook {
                         continue;
                     }
                     let input = format!("{prefix}{next}");
+                    if input.starts_with('=')
+                        && table_header_at(&self.model.tables, resolved.sheet, cell).is_some()
+                    {
+                        return Err(at(
+                            EditFailureCode::InvalidStep,
+                            OpError::TableHeaderFormulaUnsupported.to_string(),
+                        ));
+                    }
                     *units = units.saturating_add(utf16_units(&input));
                     if *units > MAX_TEXT_UNITS {
                         return Err(at(
@@ -1343,16 +1361,27 @@ impl Workbook {
         let mut staged_ops = Vec::with_capacity(ops.len());
         for (step, op) in ops {
             validate_op(&preview, &op)?;
-            if let Op::SetCell { sheet, at, cell } = &op
-                && table_header_at(&preview.tables, *sheet, *at).is_some()
-                && cell_write_is_unchanged(&preview, *sheet, *at, cell)?
-            {
-                continue;
-            }
             let formats = preview.styles.cell_xfs.len();
-            let inverse = match xlsx_ops::apply_in_place(&mut preview, &op) {
-                Ok(inverse) => inverse.0,
-                Err(error @ (OpError::InvalidStyle(_) | OpError::NumFmtTableFull)) => {
+            let staged = (|| -> Result<_> {
+                if let Op::SetCell { sheet, at, cell } = &op
+                    && cell_write_is_unchanged(&preview, *sheet, *at, cell)?
+                {
+                    return Ok(None);
+                }
+                self.ensure_table_header_references(&preview, &self.preserved.origins, &op)?;
+                Ok(Some(xlsx_ops::apply_in_place(&mut preview, &op)?.0))
+            })();
+            let inverse = match staged {
+                Ok(Some(inverse)) => inverse,
+                Ok(None) => continue,
+                Err(Error::Operation(
+                    error @ (OpError::InvalidStyle(_)
+                    | OpError::NumFmtTableFull
+                    | OpError::TableHeaderFormulaUnsupported
+                    | OpError::TableHeaderTextTooLong
+                    | OpError::TableHeaderReferenceUnsupported { .. }
+                    | OpError::MissingTableColumn { .. }),
+                )) => {
                     let code = match error {
                         OpError::NumFmtTableFull => EditFailureCode::LimitExceeded,
                         _ => EditFailureCode::InvalidStep,
@@ -1362,7 +1391,7 @@ impl Workbook {
                         failure(code, error.to_string(), Some(planned.target.clone())).at(step),
                     );
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             if (formats..preview.styles.cell_xfs.len())
                 .any(|index| !cell_format_fits(&preview.styles.cell_format(Some(index as u32))))
@@ -1377,9 +1406,13 @@ impl Workbook {
                     .at(step),
                 );
             }
-            for undone in &inverse {
-                if let Op::SetCell { at, .. } | Op::RestoreTableHeader { at, .. } = undone {
-                    changed[step as usize].insert((at.row, at.col));
+            if let Op::SetCell { at, .. } = &op {
+                changed[step as usize].insert((at.row, at.col));
+            } else {
+                for undone in &inverse {
+                    if let Op::SetCell { at, .. } = undone {
+                        changed[step as usize].insert((at.row, at.col));
+                    }
                 }
             }
             per_op.push(inverse);

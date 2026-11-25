@@ -442,7 +442,11 @@ impl PreservedPackage {
                 #[cfg(test)]
                 MOVE_GUARD_READS.set(MOVE_GUARD_READS.get() + 1);
                 let unsupported = if table {
-                    table_move_unsupported(bytes, |formula| formula_affected(index, formula))
+                    contains_formula(
+                        bytes,
+                        &[b"calculatedColumnFormula", b"totalsRowFormula"],
+                        |formula| formula_affected(index, formula),
+                    )
                 } else {
                     comment_move_unsupported(bytes, |at| comment_affected(index, at))
                 };
@@ -452,6 +456,72 @@ impl PreservedPackage {
             }
         }
         None
+    }
+
+    #[doc(hidden)]
+    pub fn table_header_reference(
+        &self,
+        origin: Option<usize>,
+        table: &str,
+        matches: impl Fn(&str, bool) -> bool,
+    ) -> Result<Option<&str>, ParseError> {
+        for (index, sheet) in self.sheets.iter().enumerate() {
+            for child in &sheet.template.children {
+                if !matches!(
+                    child.local_name.as_str(),
+                    "dataValidations" | "extLst" | "AlternateContent"
+                ) {
+                    continue;
+                }
+                if contains_formula(
+                    &child.bytes,
+                    &[b"formula1", b"formula2", b"formula", b"f"],
+                    |formula| matches(formula, origin == Some(index)),
+                )? {
+                    return Ok(Some(&sheet.path));
+                }
+            }
+        }
+        for (source, path) in self.original_workbook.tables.iter().zip(&self.table_parts) {
+            let local = origin == Some(source.sheet.0 as usize)
+                && source.name.eq_ignore_ascii_case(table);
+            if let Some(bytes) = self.part_bytes(path)
+                && contains_formula(
+                    bytes,
+                    &[b"calculatedColumnFormula", b"totalsRowFormula"],
+                    |formula| matches(formula, local),
+                )?
+            {
+                return Ok(Some(path));
+            }
+        }
+        let model_charts = self
+            .original_workbook
+            .sheets
+            .iter()
+            .flat_map(|sheet| &sheet.charts)
+            .map(|chart| chart.part.as_str())
+            .collect::<HashSet<_>>();
+        let is_chart = |kind: &str| {
+            let kind = kind.to_ascii_lowercase();
+            kind.ends_with(".chart+xml") || kind.ends_with(".chartex+xml")
+        };
+        let chart_parts = self
+            .content_types
+            .iter()
+            .filter(|entry| entry.attribute("ContentType").is_some_and(is_chart))
+            .filter_map(|entry| entry.attribute("PartName").map(normalized_part_name))
+            .collect::<HashSet<_>>();
+        for (path, bytes) in &self.parts {
+            let normalized = normalized_part_name(path);
+            if !model_charts.contains(path.as_str())
+                && (chart_parts.contains(&normalized) || normalized.starts_with("xl/charts/"))
+                && contains_formula(bytes, &[b"f", b"formula"], |formula| matches(formula, false))?
+            {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// What of source sheet `index` a fill cannot keep, if anything.
@@ -657,8 +727,9 @@ pub(crate) fn take_move_guard_reads() -> usize {
     MOVE_GUARD_READS.replace(0)
 }
 
-fn table_move_unsupported(
+fn contains_formula(
     bytes: &[u8],
+    elements: &[&[u8]],
     affected: impl Fn(&str) -> bool,
 ) -> Result<bool, ParseError> {
     let mut xml = reader(bytes);
@@ -667,11 +738,14 @@ fn table_move_unsupported(
     loop {
         match next_event(&mut xml, &mut buffer, &mut depth)? {
             Event::Start(start)
-                if matches!(
-                    local_name(&start).as_slice(),
-                    b"calculatedColumnFormula" | b"totalsRowFormula"
-                ) =>
+                if elements.contains(&b"formula".as_slice())
+                    && start.local_name().as_ref() == b"cfvo"
+                    && attr(&start, b"type")?.as_deref() == Some("formula")
+                    && attr(&start, b"val")?.as_deref().is_some_and(&affected) =>
             {
+                return Ok(true);
+            }
+            Event::Start(start) if elements.contains(&start.local_name().as_ref()) => {
                 let formula = collect_text(&mut xml, &mut buffer, &mut depth)?;
                 if affected(&formula) {
                     return Ok(true);

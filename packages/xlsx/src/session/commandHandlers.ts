@@ -125,7 +125,10 @@ function checkedBatch(handle: WorkbookHandle, state: WorkbookCommandState, steps
   const flush = () => {
     if (chunk.length === 0) return;
     const result = handle.validateEdits({ expectVersion, steps: chunk });
-    if (!result.ok) throw new WorkbookCommandRefusal(result.failure.code, result);
+    if (!result.ok) {
+      if (isTableHeaderRefusal(result.failure.message)) throw structuralRefusal(result.failure.message);
+      throw new WorkbookCommandRefusal(result.failure.code, result);
+    }
     chunk = [];
     cells = text = 0;
     bytes = requestBytes;
@@ -411,12 +414,18 @@ export interface WorkbookStructuralRefusalResult {
   failure: { code: 'unsupported'; cause: WorkbookStructuralRefusalCause; message: string };
 }
 
+function isTableHeaderRefusal(message: string): boolean {
+  return message === 'formulas are not supported in Excel table headers' ||
+    message.startsWith('cannot rename table ');
+}
+
 /** Reads the cause from a structural refusal the engine raised. */
 export function structuralRefusalCause(message: string): WorkbookStructuralRefusalCause {
   if (/^(?:chart |anchor \d+ of )/.test(message) || message === 'range move cannot safely preserve charts' ||
     message === 'fill cannot safely preserve charts anchored in the filled range') return 'chart';
   if (message === 'range move cannot safely preserve Excel tables' ||
-    message === 'fill cannot safely preserve Excel tables') return 'table';
+    message === 'fill cannot safely preserve Excel tables' ||
+    isTableHeaderRefusal(message)) return 'table';
   if (/^cannot move sheet \d+ tracks: table .+ covers the moved tracks$/.test(message)) return 'table';
   if (message === 'fill cannot safely preserve hyperlinks' ||
     message === 'fill cannot safely preserve comments' ||
@@ -444,9 +453,7 @@ export function classifyRefusal(error: unknown, method?: WorkbookReplayMethod): 
     return new WorkbookCommandRefusal('stale-proposal', { cells: error.cells, targets: error.targets });
   }
   if (!(error instanceof Error) || isEngineTrap(error)) return undefined;
-  if (error.message === 'formulas are not supported in Excel table headers') {
-    return new WorkbookCommandRefusal('unsupported');
-  }
+  if (isTableHeaderRefusal(error.message)) return structuralRefusal(error.message);
   if (/^(?:[A-Z]+[1-9]\d* is locked on protected sheet |sheet [\s\S]+ is protected$)/.test(error.message)) {
     return new WorkbookCommandRefusal('locked-target', { ok: false, failure: { code: 'locked-target', message: error.message } });
   }

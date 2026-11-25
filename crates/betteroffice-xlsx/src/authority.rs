@@ -102,7 +102,6 @@ const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
 const CONTENTS: &str = "contents";
-const AUTHORED_TABLE_HEADER: i64 = 2;
 const COL_WIDTHS: &str = "colWidths";
 const COL_STYLES: &str = "colStyles";
 const ROW_STYLES: &str = "rowStyles";
@@ -992,8 +991,6 @@ fn with_schema_six_key_validation<T>(body: impl FnOnce() -> T) -> T {
     body()
 }
 
-type SourceHeaderText = BTreeMap<(SheetId, (u32, u32)), String>;
-
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
@@ -1001,7 +998,6 @@ pub(crate) struct WorkbookAuthority {
     plain_style_cells: AtomicU64,
     snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
-    source_header_text: Arc<SourceHeaderText>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
     undo_stack: Vec<StackItem<()>>,
@@ -1099,10 +1095,8 @@ impl WorkbookAuthority {
         writer.var_usize(update.len());
         let mut tail = Writer::new();
         base.row_styles.write(&mut tail);
-        let has_header_text = !self.source_header_text.is_empty();
         let gridless = base.formats.iter().any(|format| format.hide_gridlines);
-        let sized = has_header_text
-            || gridless
+        let sized = gridless
             || base.formats.iter().any(|format| {
                 format.default_col_width.is_some() || format.base_col_width.is_some()
             });
@@ -1128,15 +1122,12 @@ impl WorkbookAuthority {
                     .collect::<Vec<_>>()
                     .write(&mut tail);
             }
-            if gridless || has_header_text {
+            if gridless {
                 base.formats
                     .iter()
                     .map(|format| format.hide_gridlines)
                     .collect::<Vec<_>>()
                     .write(&mut tail);
-            }
-            if has_header_text {
-                self.source_header_text.write(&mut tail);
             }
         }
         Ok([writer.into_bytes(), update, tail.into_bytes()])
@@ -1271,11 +1262,6 @@ impl WorkbookAuthority {
                 format.hide_gridlines = hidden;
             }
         }
-        let source_header_text = if reader.is_empty() {
-            BTreeMap::new()
-        } else {
-            Codec::read(&mut reader)?
-        };
         reader.finish()?;
         let doc = loop {
             let candidate = Doc::new();
@@ -1296,7 +1282,6 @@ impl WorkbookAuthority {
         }
         let mut authority = Self::hydrated(doc, Arc::new(base), next_sheet_id);
         authority.collaborative = collaborative;
-        authority.source_header_text = Arc::new(source_header_text);
         authority.strict_materialize().map_err(SnapshotError::new)?;
         Ok(authority)
     }
@@ -1310,7 +1295,6 @@ impl WorkbookAuthority {
             plain_style_cells: AtomicU64::new(u64::MAX),
             snapshot_revision,
             base,
-            source_header_text: Arc::default(),
             history: SheetOrderHistory::default(),
             next_sheet_id,
             undo_stack: Vec::new(),
@@ -1323,7 +1307,6 @@ impl WorkbookAuthority {
     fn hydrated_alike(&self, doc: Doc) -> Self {
         Self {
             collaborative: self.collaborative,
-            source_header_text: self.source_header_text.clone(),
             ..Self::hydrated(doc, self.base.clone(), self.next_sheet_id)
         }
     }
@@ -1439,9 +1422,6 @@ impl WorkbookAuthority {
         }
         let mut authority = Self::hydrated(doc, Arc::new(base), 0);
         authority.collaborative = client_id.is_some();
-        if authority.collaborative {
-            authority.source_header_text = Arc::new(source_header_text(model));
-        }
         xlsx_model::open_timing! {
             drop(timing_hydrate);
             let _timing_projection = xlsx_model::open_timing::span("authority_projection");
@@ -1677,14 +1657,8 @@ impl WorkbookAuthority {
             let mut txn = self.doc.transact_mut_with(origin.as_str());
             sync_cell_formats(&prepared.cell_formats, &mut txn, &prepared.styles)
                 .map_err(AuthorityError::InvalidState)?;
-            sync_authored_cell(
-                &prepared.sheet_map,
-                &mut txn,
-                &prepared.sheet,
-                prepared.at,
-                None,
-            )
-            .map_err(AuthorityError::InvalidState)?;
+            sync_authored_cell(&prepared.sheet_map, &mut txn, &prepared.sheet, prepared.at)
+                .map_err(AuthorityError::InvalidState)?;
             if prepared.formatted {
                 sync_cell_format(
                     &prepared.sheet_map,
@@ -1728,7 +1702,7 @@ impl WorkbookAuthority {
         let authored_styles = ops
             .iter()
             .filter_map(|op| match op {
-                Op::SetCell { sheet, at, .. } | Op::RestoreTableHeader { sheet, at, .. } => Some((
+                Op::SetCell { sheet, at, .. } => Some((
                     (sheet.0, *at),
                     model
                         .sheet(*sheet)
@@ -1738,13 +1712,23 @@ impl WorkbookAuthority {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
+        let mut rewritten = HashSet::new();
         let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model);
         for op in ops {
-            batch.apply(op).map_err(|error| {
-                AuthorityError::InvalidState(format!(
-                    "cannot apply local operation to authored state: {error}"
-                ))
-            })?;
+            batch
+                .apply_with_inverse(op, |inverse| {
+                    if matches!(op, Op::SetCell { .. }) {
+                        rewritten.extend(inverse.iter().skip(1).filter_map(|op| match op {
+                            Op::SetCell { sheet, at, .. } => Some((*sheet, *at)),
+                            _ => None,
+                        }));
+                    }
+                })
+                .map_err(|error| {
+                    AuthorityError::InvalidState(format!(
+                        "cannot apply local operation to authored state: {error}"
+                    ))
+                })?;
         }
         if !collaborative && self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
@@ -1761,8 +1745,15 @@ impl WorkbookAuthority {
             } else {
                 None
             };
-        self.sync_model(&model, ops, origin, &authored_styles, collaborative)
-            .map_err(AuthorityError::InvalidState)?;
+        self.sync_model(
+            &model,
+            ops,
+            origin,
+            &authored_styles,
+            &rewritten,
+            collaborative,
+        )
+        .map_err(AuthorityError::InvalidState)?;
         if !collaborative && self.base.tables != model.tables {
             Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
@@ -3276,7 +3267,7 @@ impl WorkbookAuthority {
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         if self.collaborative {
             project_filter_names(&mut model, &keys, &self.base)?;
-            project_table_headers(&mut model, &self.source_header_text, &txn, &sheets, &keys)?;
+            project_table_headers(&mut model);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
@@ -3377,6 +3368,7 @@ impl WorkbookAuthority {
         ops: &[Op],
         origin: SyncOrigin,
         authored_styles: &HashMap<(u32, CellRef), Option<u32>>,
+        rewritten: &HashSet<(SheetId, CellRef)>,
         collaborative: bool,
     ) -> Result<(), String> {
         let current_keys = self.current_sheet_keys()?;
@@ -3444,14 +3436,15 @@ impl WorkbookAuthority {
         let mut auto_filters = BTreeSet::new();
         let mut chart_anchors = BTreeSet::new();
         if !full_sync {
+            authored_cells.extend(
+                rewritten
+                    .iter()
+                    .filter_map(|(sheet, at)| Some((keys.get(sheet.0 as usize)?.clone(), *at))),
+            );
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
-                    (
-                        Op::SetCell { sheet, at, cell }
-                        | Op::RestoreTableHeader { sheet, at, cell, .. },
-                        Some(key),
-                    ) => {
+                    (Op::SetCell { sheet, at, cell }, Some(key)) => {
                         let current_style = authored_styles.get(&(sheet.0, *at)).copied().flatten();
                         if cell.style != current_style {
                             formatted_cells.insert((key.clone(), *at));
@@ -3665,16 +3658,7 @@ impl WorkbookAuthority {
             for (key, at) in order_cells(authored_cells) {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
-                let source_header = if collaborative && !self.source_header_text.is_empty() {
-                    base_sheet_index(&key).and_then(|index| {
-                        self.source_header_text
-                            .get(&(SheetId(index as u32), (at.row, at.col)))
-                            .map(String::as_str)
-                    })
-                } else {
-                    None
-                };
-                sync_authored_cell(&sheet_map, &mut txn, sheet_model, at, source_header)?;
+                sync_authored_cell(&sheet_map, &mut txn, sheet_model, at)?;
             }
             for (key, at) in order_cells(formatted_cells) {
                 let (sheet_map, sheet_model) =
@@ -5192,7 +5176,6 @@ fn targeted_sheet_keys(
 fn op_sheet(op: &Op) -> Option<SheetId> {
     match op {
         Op::SetCell { sheet, .. }
-        | Op::RestoreTableHeader { sheet, .. }
         | Op::RestoreArrayFormula { sheet, .. }
         | Op::ClipArrayFormula { sheet, .. }
         | Op::InsertRows { sheet, .. }
@@ -5476,7 +5459,6 @@ fn sync_authored_cell(
     txn: &mut TransactionMut<'_>,
     sheet: &Sheet,
     at: CellRef,
-    source_header: Option<&str>,
 ) -> Result<(), String> {
     let contents: MapRef = sheet_map.get_or_init(txn, CONTENTS);
     let key = cell_key(at);
@@ -5487,14 +5469,7 @@ fn sync_authored_cell(
                 Some(_) => return Err(format!("cell content {key} is not an atomic value")),
                 None => None,
             };
-            if source_header.is_some() && literal_header_text(sheet, at.row, at.col) == source_header
-            {
-                let authored = any_array(vec![
-                    Any::BigInt(AUTHORED_TABLE_HEADER),
-                    value_to_any(&cell.value),
-                ]);
-                sync_optional(&contents, txn, &key, Some(authored));
-            } else if !authored_content_equal(current.as_ref(), Some(cell)) {
+            if !authored_content_equal(current.as_ref(), Some(cell)) {
                 sync_optional(&contents, txn, &key, content_to_any(cell));
             }
         }
@@ -5678,23 +5653,6 @@ fn remap_styles<'a>(
                         style,
                         ..cell.clone()
                     },
-                })
-            }
-            Op::RestoreTableHeader {
-                sheet,
-                at,
-                cell,
-                name,
-            } => {
-                let style = resolve(cell.style)?;
-                (style != cell.style).then(|| Op::RestoreTableHeader {
-                    sheet: *sheet,
-                    at: *at,
-                    cell: CellState {
-                        style,
-                        ..cell.clone()
-                    },
-                    name: name.clone(),
                 })
             }
             Op::RestoreSheet {
@@ -5996,34 +5954,7 @@ impl Default for SheetFallbacks<'_> {
     }
 }
 
-fn source_header_text(model: &WorkbookModel) -> SourceHeaderText {
-    let mut text = BTreeMap::new();
-    for table in &model.tables {
-        if table.header_rows == 0 {
-            continue;
-        }
-        let Some(sheet) = model.sheets.get(table.sheet.0 as usize) else {
-            continue;
-        };
-        let start = table.range.start;
-        for (col, name) in (start.col..=table.range.end.col).zip(&table.columns) {
-            if let Some(value) = literal_header_text(sheet, start.row, col)
-                && value != name
-            {
-                text.insert((table.sheet, (start.row, col)), value.to_owned());
-            }
-        }
-    }
-    text
-}
-
-fn project_table_headers<T: ReadTxn>(
-    model: &mut WorkbookModel,
-    source_text: &SourceHeaderText,
-    txn: &T,
-    sheets: &MapRef,
-    keys: &[String],
-) -> Result<(), String> {
+fn project_table_headers(model: &mut WorkbookModel) {
     for table in &mut model.tables {
         if table.header_rows == 0 {
             continue;
@@ -6033,46 +5964,17 @@ fn project_table_headers<T: ReadTxn>(
         };
         let start = table.range.start;
         for (col, name) in (start.col..=table.range.end.col).zip(&mut table.columns) {
-            let Some(value) = literal_header_text(sheet, start.row, col) else {
-                continue;
-            };
-            if value == name {
-                continue;
-            }
-            if source_text
-                .get(&(table.sheet, (start.row, col)))
-                .map(String::as_str)
-                == Some(value)
+            if let Some(Cell {
+                formula: None,
+                value: CellValue::Text { value },
+                ..
+            }) = sheet.cell(CellRef::new(start.row, col))
+                && !value.is_empty()
+                && value != name
             {
-                let key = &keys[table.sheet.0 as usize];
-                let sheet_map = sheets
-                    .get(txn, key)
-                    .and_then(|value| value.cast::<MapRef>().ok())
-                    .ok_or_else(|| format!("missing sheet {key}"))?;
-                let contents = nested_map(&sheet_map, txn, CONTENTS)?;
-                let key = cell_key(CellRef::new(start.row, col));
-                if !matches!(
-                    contents.get(txn, &key),
-                    Some(Out::Any(Any::Array(values)))
-                        if matches!(values.first(), Some(Any::BigInt(AUTHORED_TABLE_HEADER)))
-                ) {
-                    continue;
-                }
+                name.clone_from(value);
             }
-            *name = value.to_owned();
         }
-    }
-    Ok(())
-}
-
-fn literal_header_text(sheet: &Sheet, row: u32, col: u32) -> Option<&str> {
-    match sheet.cell(CellRef::new(row, col))? {
-        Cell {
-            formula: None,
-            value: CellValue::Text { value },
-            ..
-        } if !value.is_empty() => Some(value),
-        _ => None,
     }
 }
 
@@ -6482,13 +6384,8 @@ fn content_from_any(value: &Any) -> Result<Cell, String> {
         .first()
         .ok_or_else(|| "cell content is empty".to_string())?;
     match any_i64(kind, "cell content kind")? {
-        kind @ (0 | AUTHORED_TABLE_HEADER) if values.len() == 2 => {
+        0 if values.len() == 2 => {
             let value = value_from_any(&values[1])?;
-            if kind == AUTHORED_TABLE_HEADER
-                && !matches!(&value, CellValue::Text { value } if !value.is_empty())
-            {
-                return Err("authored table header must be non-empty text".to_string());
-            }
             if matches!(&value, CellValue::Empty) {
                 return Err("empty literal cell content must be omitted".to_string());
             }
@@ -6507,7 +6404,7 @@ fn content_from_any(value: &Any) -> Result<Cell, String> {
                 ..Cell::default()
             })
         }
-        0 | 1 | AUTHORED_TABLE_HEADER => Err("cell content has the wrong payload length".to_string()),
+        0 | 1 => Err("cell content has the wrong payload length".to_string()),
         kind => Err(format!("unsupported cell content kind {kind}")),
     }
 }
@@ -7821,9 +7718,6 @@ impl WorkbookAuthority {
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
         let mut authority = Self::hydrated(doc, Arc::new(base), 0);
         authority.collaborative = client_id.is_some();
-        if authority.collaborative {
-            authority.source_header_text = Arc::new(source_header_text(model));
-        }
         authority
             .materialize_internal_oracle(true)
             .map_err(AuthorityError::InvalidState)?;
@@ -7977,7 +7871,7 @@ impl WorkbookAuthority {
         NameOverlay::read(&txn)?.apply(&mut model.defined_names, &keys)?;
         if self.collaborative {
             project_filter_names(&mut model, &keys, &self.base)?;
-            project_table_headers(&mut model, &self.source_header_text, &txn, &sheets, &keys)?;
+            project_table_headers(&mut model);
         }
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets

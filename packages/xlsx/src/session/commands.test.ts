@@ -2092,6 +2092,8 @@ describe('workbook commands', () => {
       ['resizeChart', 'chart xl/drawings/drawing1.xml#0 cannot be resized: a one-cell extent is not written back', 'chart'],
       ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
       ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['editCell', 'formulas are not supported in Excel table headers', 'table'],
+      ['editCells', 'cannot rename table Sales column Region: a reference in xl/tables/table1.xml cannot be safely rewritten', 'table'],
       ['applyOps', 'cannot move sheet 0 tracks: merged range B4:D5 crosses the moved tracks', 'other'],
       ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
       ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],

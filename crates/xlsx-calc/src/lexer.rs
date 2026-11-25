@@ -166,6 +166,7 @@ pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
         input,
         pos: 0,
         external_prefixes: false,
+        local_table_refs: false,
     }
     .run()
 }
@@ -186,18 +187,112 @@ pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
         input,
         pos: 0,
         external_prefixes: true,
+        local_table_refs: false,
     }
     .run()
+}
+
+#[doc(hidden)]
+pub fn rewrite_table_column(
+    input: &str,
+    table: &str,
+    local: bool,
+    old: &str,
+    new: &str,
+) -> Result<Option<String>, ParseError> {
+    if !input.contains('[') {
+        return Ok(None);
+    }
+    let table = table.to_lowercase();
+    let old = old.to_lowercase();
+    let folded = input.to_lowercase();
+    if (!local && !folded.contains(&table))
+        || (!folded.contains(&old)
+            && !folded.replace('\'', "").contains(&old.replace('\'', "")))
+    {
+        return Ok(None);
+    }
+    if input.len() > MAX_FORMULA_BYTES {
+        return Err(ParseError::new(
+            MAX_FORMULA_BYTES,
+            "formula length exceeded cap",
+        ));
+    }
+    let mut lexer = Lexer {
+        input,
+        pos: 0,
+        external_prefixes: true,
+        local_table_refs: true,
+    };
+    let tokens = lexer.run()?;
+    let mut spans = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let TokKind::TableRef { table: name, spec } = &token.kind else {
+            continue;
+        };
+        let external = index > 0
+            && matches!(&tokens[index - 1].kind, TokKind::Ident(word) if word.starts_with('['));
+        let matches = |column: &str| column.to_lowercase() == old;
+        let same_table = if name.is_empty() {
+            local
+        } else {
+            name.to_lowercase() == table
+        };
+        if external
+            || !same_table
+            || ![&spec.first_column, &spec.last_column]
+                .into_iter()
+                .flatten()
+                .any(|column| matches(column))
+        {
+            continue;
+        }
+        lexer.pos = token.start + name.len();
+        lexer.read_table_spec(token.start, |column, span| {
+            if matches(column) {
+                spans.push(span);
+            }
+        })?;
+    }
+    if spans.is_empty() {
+        return Ok(None);
+    }
+    let mut escaped = String::new();
+    for ch in new.chars() {
+        if matches!(ch, '[' | ']' | '#' | '@' | '\'') {
+            escaped.push('\'');
+        }
+        escaped.push(ch);
+    }
+    let length = spans.iter().fold(input.len(), |length, span| {
+        (length - span.len()).saturating_add(escaped.len())
+    });
+    if length > MAX_FORMULA_BYTES {
+        return Err(ParseError::new(
+            MAX_FORMULA_BYTES,
+            "formula length exceeded cap",
+        ));
+    }
+    let mut result = String::with_capacity(length);
+    let mut cursor = 0;
+    for span in spans {
+        result.push_str(&input[cursor..span.start]);
+        result.push_str(&escaped);
+        cursor = span.end;
+    }
+    result.push_str(&input[cursor..]);
+    Ok(Some(result))
 }
 
 struct Lexer<'a> {
     input: &'a str,
     pos: usize,
     external_prefixes: bool,
+    local_table_refs: bool,
 }
 
 impl Lexer<'_> {
-    fn run(mut self) -> Result<Vec<Token>, ParseError> {
+    fn run(&mut self) -> Result<Vec<Token>, ParseError> {
         let mut out = Vec::new();
         loop {
             self.skip_ws();
@@ -211,6 +306,7 @@ impl Lexer<'_> {
                 '\'' => self.lex_quoted_sheet_ref()?,
                 '[' if self.workbook_function_end().is_some() => self.lex_workbook_function(),
                 '[' if self.external_prefix_end().is_some() => self.lex_external_prefix(),
+                '[' if self.local_table_refs => self.lex_table_ref(String::new(), start)?,
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
@@ -400,6 +496,12 @@ impl Lexer<'_> {
             return None;
         }
         let bang = usize::from(after.starts_with('!'));
+        if self.local_table_refs
+            && bang == 0
+            && !after.starts_with(|c: char| c.is_alphabetic() || matches!(c, '\'' | '_' | '\\'))
+        {
+            return None;
+        }
         Some(self.pos + "[".len() + index.len() + "]".len() + bang)
     }
 
@@ -485,20 +587,30 @@ impl Lexer<'_> {
     /// `Table[...]`: either one bare item (`Table[Col]`, `Table[#Headers]`,
     /// `Table[@Col]`) or a bracketed list (`Table[[#This Row],[Col]]`).
     fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
+        let spec = self.read_table_spec(start, |_, _| {})?;
+        Ok(TokKind::TableRef { table, spec })
+    }
+
+    fn read_table_spec(
+        &mut self,
+        start: usize,
+        mut column: impl FnMut(&str, std::ops::Range<usize>),
+    ) -> Result<TableSpec, ParseError> {
         self.bump();
         let mut spec = TableSpec::default();
         if self.peek() == Some(']') {
             self.bump();
-            return Ok(TokKind::TableRef { table, spec });
+            return Ok(spec);
         }
         let rest = &self.input[self.pos..];
-        if !rest
-            .trim_start_matches([' ', '\t', '\n', '\r'])
-            .starts_with('[')
-        {
-            let item = self.read_table_item(start)?;
-            add_table_item(&mut spec, &item, start)?;
-            return Ok(TokKind::TableRef { table, spec });
+        let nested = rest.trim_start_matches([' ', '\t', '\n', '\r']);
+        if nested.starts_with("@[") {
+            self.skip_ws();
+            self.bump();
+            spec.bands.push(TableBand::ThisRow);
+        } else if !nested.starts_with('[') {
+            self.read_table_spec_item(&mut spec, start, &mut column)?;
+            return Ok(spec);
         }
         let mut items = 0;
         loop {
@@ -513,8 +625,7 @@ impl Lexer<'_> {
                             "table reference item count exceeded cap",
                         ));
                     }
-                    let item = self.read_table_item(start)?;
-                    add_table_item(&mut spec, &item, start)?;
+                    self.read_table_spec_item(&mut spec, start, &mut column)?;
                 }
                 Some(',' | ':') => {
                     self.bump();
@@ -526,26 +637,51 @@ impl Lexer<'_> {
                 _ => return Err(ParseError::new(start, "malformed table reference")),
             }
         }
-        Ok(TokKind::TableRef { table, spec })
+        Ok(spec)
     }
 
-    /// read up to and including the item's closing `]`; `'` escapes the next
-    /// character, which is how excel writes `[`, `]`, `#`, `@` and `'` in a
-    /// column name.
-    fn read_table_item(&mut self, start: usize) -> Result<String, ParseError> {
-        let mut out = String::new();
+    fn read_table_spec_item(
+        &mut self,
+        spec: &mut TableSpec,
+        start: usize,
+        column: &mut impl FnMut(&str, std::ops::Range<usize>),
+    ) -> Result<(), ParseError> {
+        if self.peek() == Some('@') {
+            self.bump();
+            spec.bands.push(TableBand::ThisRow);
+        }
+        let item_start = self.pos;
+        let is_band = self.peek() == Some('#');
+        let mut item = String::new();
         loop {
             match self.bump() {
                 None => return Err(ParseError::new(start, "unterminated table reference")),
                 Some(']') => break,
                 Some('\'') => match self.bump() {
                     None => return Err(ParseError::new(start, "unterminated table reference")),
-                    Some(escaped) => out.push(escaped),
+                    Some(escaped) => item.push(escaped),
                 },
-                Some(c) => out.push(c),
+                Some(c) => item.push(c),
             }
         }
-        Ok(out)
+        if item.is_empty() {
+            return Ok(());
+        }
+        if is_band {
+            let band = TableBand::parse(&item)
+                .ok_or_else(|| ParseError::new(start, "unknown table band selector"))?;
+            spec.bands.push(band);
+        } else {
+            column(&item, item_start..self.pos - 1);
+            if spec.first_column.is_none() {
+                spec.first_column = Some(item);
+            } else if spec.last_column.is_none() {
+                spec.last_column = Some(item);
+            } else {
+                return Err(ParseError::new(start, "too many table columns"));
+            }
+        }
+        Ok(())
     }
 
     /// parse the reference part after a resolved sheet qualifier.
@@ -644,42 +780,30 @@ impl Lexer<'_> {
     }
 }
 
-/// classify one bracket item as a band keyword, an `@` shorthand, or a column
-/// name, and fold it into `spec`. spaces inside the brackets belong to the
-/// column name, as excel keeps them in the table's header.
-fn add_table_item(spec: &mut TableSpec, mut item: &str, start: usize) -> Result<(), ParseError> {
-    if item.is_empty() {
-        return Ok(());
-    }
-    if let Some(rest) = item.strip_prefix('@') {
-        spec.bands.push(TableBand::ThisRow);
-        item = rest;
-        if item.is_empty() {
-            return Ok(());
-        }
-    }
-    if item.starts_with('#') {
-        let band = TableBand::parse(item)
-            .ok_or_else(|| ParseError::new(start, "unknown table band selector"))?;
-        spec.bands.push(band);
-        return Ok(());
-    }
-    if spec.first_column.is_none() {
-        spec.first_column = Some(item.to_string());
-    } else if spec.last_column.is_none() {
-        spec.last_column = Some(item.to_string());
-    } else {
-        return Err(ParseError::new(start, "too many table columns"));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn kinds(src: &str) -> Vec<TokKind> {
         lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    }
+
+    #[test]
+    fn rewrites_only_the_matching_structured_reference_columns() {
+        let source =
+            r#"T[Old]+t[[#This Row], [old]]+T[[Old]:[X]]+T[@OLD]+[@Old]+Other[Old]+"T[Old]""#;
+        let expected =
+            r#"T['#New']]+t[[#This Row], ['#New']]]+T[['#New']]:[X]]+T[@'#New']]+[@'#New']]+Other[Old]+"T[Old]""#;
+        let rewritten = rewrite_table_column(source, "T", true, "Old", "#New]")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rewritten, expected);
+        assert_eq!(
+            rewrite_table_column(&rewritten, "T", true, "#New]", "New")
+                .unwrap()
+                .unwrap(),
+            r#"T[New]+t[[#This Row], [New]]+T[[New]:[X]]+T[@New]+[@New]+Other[Old]+"T[Old]""#
+        );
     }
 
     /// Only the rewrite lexer reads the prefix of a reference into another
