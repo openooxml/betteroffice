@@ -130,14 +130,14 @@ wasmTest('openPresentationSession retries a failed converter load on the next fr
   expect(load).toHaveBeenCalledTimes(2);
 });
 
-wasmTest('openPresentationSession holds a frame for a converter load that settles before the cap', async () => {
+wasmTest('openPresentationSession holds a frame until a slow converter load settles', async () => {
   const pending = deferred<MetafileSvgModule>();
   const load = loader(() => pending.promise);
   const client = await openPresentationSession(await deck(1), { worker: sessionWorker });
   clients.push(client);
   let settled = false;
   const framing = client.call.frame(0).then((frame) => { settled = true; return frame; });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await new Promise((resolve) => setTimeout(resolve, 3500));
   expect(settled).toBe(false);
   pending.resolve(svgModule());
   expect((await framing).media.get('ppt/media/picture.emf')).toEqual(svg);
