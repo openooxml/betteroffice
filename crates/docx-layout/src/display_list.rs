@@ -5568,8 +5568,9 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
         return;
     }
 
-    let width = (content_width - (columns.count - 1) as f64 * columns.gap) / columns.count as f64;
-    for index in 0..columns.count - 1 {
+    let count = columns.count.min(crate::types::MAX_COLUMNS);
+    let width = (content_width - (count - 1) as f64 * columns.gap) / count as f64;
+    for index in 0..count - 1 {
         let x = page.margins.left
             + (index + 1) as f64 * width
             + index as f64 * columns.gap
@@ -5607,7 +5608,7 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     let Some(columns) = &page.columns else {
         return (content.clone(), vec![content]);
     };
-    let count = columns.count.clamp(1, 45);
+    let count = columns.count.clamp(1, crate::types::MAX_COLUMNS);
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
         let bounds = crate::page_flow::unequal_column_rectangles(
             content_width,
