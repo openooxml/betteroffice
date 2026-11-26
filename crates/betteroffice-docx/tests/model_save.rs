@@ -302,13 +302,19 @@ fn repository_documents_save_as_source_bytes_or_write_readdressed_models() {
         let readdressed = document.model_mut().body.content != raw_content;
         let saved = document.save_report().unwrap();
         if saved.bytes == source {
-            assert!(!saved.whole_model_write, "{name}: reported a whole-model write");
+            assert!(
+                !saved.whole_model_write,
+                "{name}: reported a whole-model write"
+            );
             assert!(!readdressed, "{name}: reused source after readdressing IDs");
             reused_source += 1;
         } else {
             assert!(saved.whole_model_write, "{name}: missing whole-model write");
             let expected = write_plain_model(&source, &document, &SaveOptions::default());
-            assert!(saved.bytes == expected, "{name}: differs from the plain writer");
+            assert!(
+                saved.bytes == expected,
+                "{name}: differs from the plain writer"
+            );
             let outcome = if readdressed {
                 "used the plain writer output after readdressing IDs"
             } else {
