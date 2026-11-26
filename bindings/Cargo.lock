@@ -95,6 +95,7 @@ dependencies = [
  "betteroffice-docx-raster",
  "betteroffice-fonts",
  "betteroffice-ooxml-text",
+ "betteroffice-opc",
  "serde_json",
  "sha2",
 ]
