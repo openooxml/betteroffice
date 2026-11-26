@@ -301,9 +301,11 @@ fn digit_advance_em(family: Option<&str>) -> f64 {
 
 const CALIBRI_DIGIT_EM: f64 = 1038.0 / 2048.0;
 
-/// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
-/// cached hint it recomputes; `None` keeps stored heights. gated on calibri
-/// because [`autofit_row_height_pt`] is a calibri measurement.
+/// scale factor `fitted / declared` for stored `ht` when `defaultRowHeight`
+/// (`declared`) is unpinned (`!customHeight`) and the normal font is calibri
+/// or unspecified (`fitted = fit.natural(normal.size_pt)`). screen returns
+/// `Some` when `fitted != declared`, print only when `fitted < declared`;
+/// `None` skips rescaling (print still floors to the device grid).
 fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
@@ -319,7 +321,11 @@ fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>, fit: RowFit) -> Op
         return None;
     }
     let fitted = fit.natural(normal.size_pt);
-    (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+    let scales = match fit {
+        RowFit::Screen => fitted != declared,
+        RowFit::Print { .. } => fitted < declared,
+    };
+    (fitted.is_finite() && fitted > 0.0 && scales).then_some(fitted / declared)
 }
 
 /// the height a cell's font contributes to row autofit, if any: a declared
@@ -1577,6 +1583,144 @@ mod tests {
         );
         let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
         assert!((grid.row_y(1) - row_pt_to_px(20.0)).abs() < 0.001);
+    }
+
+    fn synthetic_print_workbook(
+        normal_family: &str,
+        normal_size_pt: f64,
+        sheet_xml: &str,
+    ) -> xlsx_model::Workbook {
+        let styles = format!(
+            r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="{normal_size_pt}"/><name val="{normal_family}"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#
+        );
+        let parts = vec![
+            (
+                "xl/workbook.xml".into(),
+                br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels".into(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec(),
+            ),
+            ("xl/styles.xml".into(), styles.into_bytes()),
+            ("xl/worksheets/sheet1.xml".into(), sheet_xml.as_bytes().to_vec()),
+        ];
+        xlsx_parse::parse_workbook(&parts).unwrap()
+    }
+
+    #[test]
+    fn print_does_not_scale_stored_ht_up_when_calibri_default_is_below_natural() {
+        let rows: String = (1..=55)
+            .map(|r| {
+                let ht = if r <= 50 { 13 } else { 15 };
+                let cell = format!(r#"<c r="A{r}"><v>{r}</v></c>"#);
+                format!(r#"<row r="{r}" ht="{ht}" customHeight="1">{cell}</row>"#)
+            })
+            .collect();
+        let sheet_xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="12.75"/><cols><col min="1" max="4" width="10" customWidth="1"/></cols><sheetData>{rows}</sheetData></worksheet>"#
+        );
+        let workbook = synthetic_print_workbook("Calibri", 11.0, &sheet_xml);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        let grid = GridGeometry::for_print(&workbook.sheets[0], &workbook.styles, &metrics);
+        let actual_height = grid.row_y(55) - grid.row_y(0);
+        let expected_height = row_pt_to_px(50.0 * 13.0 + 5.0 * 15.0);
+        assert!(
+            (actual_height - expected_height).abs() < 0.01,
+            "expected {expected_height}px (725pt), got {actual_height}px"
+        );
+        let actual_width = grid.col_x(4) - grid.col_x(0);
+        assert!(
+            (actual_width - 320.0).abs() < 0.01,
+            "expected 320px, got {actual_width}px"
+        );
+    }
+
+    #[test]
+    fn print_shrinks_stored_ht_when_calibri_default_is_above_natural() {
+        let sheet_xml = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="15"/><sheetData><row r="1" ht="15" customHeight="1"><c r="A1"><v>1</v></c></row><row r="2" ht="24" customHeight="1"><c r="A2"><v>2</v></c></row></sheetData></worksheet>"#;
+        let workbook = synthetic_print_workbook("Calibri", 11.0, sheet_xml);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 15.0,
+            default_column_width: None,
+            font_size_pt: 11.0,
+            font_family: "Calibri".into(),
+            font_ascent: 10.0,
+            font_descent: 3.0,
+        };
+        let grid = GridGeometry::for_print(&workbook.sheets[0], &workbook.styles, &metrics);
+        for (row, expected_pt) in [(0, 14.0), (1, 22.0)] {
+            let actual = grid.row_y(row + 1) - grid.row_y(row);
+            let expected = row_pt_to_px(expected_pt);
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "row {row}: expected {expected}px ({expected_pt}pt), got {actual}px"
+            );
+        }
+    }
+
+    fn assert_unpinned_default_print_height(
+        family: &str,
+        size_pt: f64,
+        declared_pt: f32,
+        expected_row_pt: f64,
+        populated_rows: u32,
+        total_rows: u32,
+    ) {
+        assert!(populated_rows <= total_rows);
+        let rows: String = (1..=populated_rows)
+            .map(|r| format!(r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c></row>"#))
+            .collect();
+        let sheet_xml = format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="{declared_pt}"/><cols><col min="1" max="4" width="10" customWidth="1"/></cols><sheetData>{rows}</sheetData></worksheet>"#
+        );
+        let workbook = synthetic_print_workbook(family, size_pt, &sheet_xml);
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: declared_pt,
+            default_column_width: None,
+            font_size_pt: size_pt as f32,
+            font_family: family.into(),
+            font_ascent: size_pt as f32 * 0.9,
+            font_descent: size_pt as f32 * 0.2,
+        };
+        let grid = GridGeometry::for_print(&workbook.sheets[0], &workbook.styles, &metrics);
+        let actual_height = grid.row_y(total_rows) - grid.row_y(0);
+        let expected_pt = f64::from(total_rows) * expected_row_pt;
+        let expected_height = row_pt_to_px(expected_pt);
+        assert!(
+            (actual_height - expected_height).abs() < 0.01,
+            "expected {expected_height}px ({expected_pt}pt), got {actual_height}px"
+        );
+        let actual_width = grid.col_x(4) - grid.col_x(0);
+        assert!(
+            (actual_width - 320.0).abs() < 0.01,
+            "expected 320px, got {actual_width}px"
+        );
+    }
+
+    #[test]
+    #[ignore = "unmeasured: Excel print row pitch for unpinned Arial 10 defaultRowHeight=15"]
+    fn print_recomputes_unpinned_arial_10_default_row_height_above_natural() {
+        assert_unpinned_default_print_height("Arial", 10.0, 15.0, 13.0, 25, 55);
+    }
+
+    #[test]
+    #[ignore = "unmeasured: Excel print row pitch for unpinned Calibri 11 defaultRowHeight=16.8"]
+    fn print_recomputes_unpinned_calibri_11_default_row_height_above_natural() {
+        assert_unpinned_default_print_height("Calibri", 11.0, 16.8, 14.0, 25, 50);
     }
 
     #[test]

@@ -9,6 +9,7 @@ on:
       - 'scripts/native-bindings-smoke.mjs'
       - 'scripts/native-raw-smoke.mjs'
       - 'scripts/glibc-floor.mjs'
+      - 'scripts/cargo-glibc.sh'
       - 'scripts/native-engine.ts'
       - 'packages/xlsx/src/**'
       - 'packages/xlsx/package.json'
