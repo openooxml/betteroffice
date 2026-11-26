@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 import { parseDocx } from './parser';
-import { repackDocx, repackDocxWithWarnings } from './rezip';
+import { createEmptyDocx, repackDocx, repackDocxWithWarnings } from './rezip';
 import { rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { modelPartsRewrittenWarning, readModelSaveDirectory } from './modelSave';
 import { writeDocumentWithRust } from './rustSaveFacade';
@@ -327,6 +327,27 @@ test('model matching uses the value the writer serializes from a text proxy', as
   const xml = unzipContainer(new Uint8Array(saved.buffer))['word/document.xml'];
   expect(new TextDecoder().decode(xml)).toContain('Edited by proxy');
   expect(saved.warnings.some((warning) => warning.startsWith(CODE))).toBe(true);
+});
+
+test('model matching preserves the writer clearing boxed NaN paragraph formatting', async () => {
+  const parts = new Map(Object.entries(unzipContainer(new Uint8Array(await createEmptyDocx()))));
+  const path = 'word/document.xml';
+  const xml = new TextDecoder().decode(parts.get(path)).replace(
+    '<w:p>', '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>'
+  );
+  parts.set(path, toBytes(xml));
+  const document = await parse(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+  const paragraph = document.package.document.content[0];
+  if (paragraph?.type !== 'paragraph') throw new Error('Missing the centered paragraph');
+  expect(paragraph.formatting?.alignment).toBe('center');
+  paragraph.formatting = Object.assign(
+    Object.setPrototypeOf(new Number(NaN), Object.prototype),
+    paragraph.formatting
+  );
+
+  const saved = await repackDocx(document, WITHOUT_STAMP);
+  const written = unzipContainer(new Uint8Array(saved))[path];
+  expect(new TextDecoder().decode(written)).not.toContain('<w:jc');
 });
 
 test('a changed model uses the plan-less writer and reports the rewritten parts', async () => {

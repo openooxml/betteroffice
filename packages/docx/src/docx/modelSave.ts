@@ -104,8 +104,10 @@ export function modelMatchesSource(
     });
     const original = saveModel(document, determinism);
     const originalWire = withSessionRevisionIds(original, () => JSON.stringify(original));
-    const current = snapshot(saveModel(caller, determinism), new WeakSet()) as object;
-    return withSessionRevisionIds(current, () => JSON.stringify(current)) === originalWire;
+    const current = saveModel(caller, determinism);
+    const detached = snapshot(current, new WeakSet()) as object;
+    return withSessionRevisionIds(detached, () => JSON.stringify(detached)) === originalWire &&
+      withSessionRevisionIds(current, () => JSON.stringify(current)) === originalWire;
   } catch {
     return false;
   }
