@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { sessionWasmFactory } from '../../../../shared/office-session/testing/wasmWorker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureFontCdn } from '@betteroffice/fonts';
+import { createPptxWorkerSession } from './commandSession';
+import { preparePresentationFontDecoder, takePresentationFontWorker } from './fontWorker';
 
 type Client = typeof import('./fontWorker');
 let factory: Awaited<ReturnType<typeof sessionWasmFactory<Client>>>;
@@ -202,8 +204,50 @@ test.each([
   const options = slicedFonts === undefined ? undefined : { slicedFonts };
   const prepared = h.client.preparePresentationFontDecoder(source, options);
   try {
-    expect(h.client.takePresentationFontWorker(source, options) as unknown).toBe(h.workers[0]);
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
   } finally { prepared.release(); h.workers[0]?.terminate(); }
+});
+
+test('the public take and a session with defaults adopt the same font mode', async () => {
+  setWorkerRendering();
+  const workers: TestWorker[] = [];
+  class TestWorker extends EventTarget {
+    readonly requests: unknown[] = [];
+    constructor() { super(); workers.push(this); }
+    postMessage(message: unknown) { this.requests.push(message); }
+    terminate() {}
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  Object.defineProperty(globalThis, 'Worker', { configurable: true, value: TestWorker });
+  restorers.push(() => {
+    if (original) Object.defineProperty(globalThis, 'Worker', original);
+    else Reflect.deleteProperty(globalThis, 'Worker');
+  });
+
+  const source = new Uint8Array();
+  const whole = preparePresentationFontDecoder(source, { slicedFonts: false });
+  const prepared = preparePresentationFontDecoder(source);
+  let sessionPrepared: typeof prepared | undefined;
+  let session: ReturnType<typeof createPptxWorkerSession> | undefined;
+  const open = expect.objectContaining({ kind: 'call', method: 'openCommandEditor' });
+  try {
+    expect(takePresentationFontWorker(source) as unknown).toBe(workers[1]);
+    sessionPrepared = preparePresentationFontDecoder(source);
+    session = createPptxWorkerSession(source);
+    expect(workers).toHaveLength(3);
+    expect(workers[2]!.requests).toContainEqual(open);
+    expect(Reflect.apply(takePresentationFontWorker, undefined, [source, { slicedFonts: false }])).toBeUndefined();
+
+    await session.dispose();
+    session = createPptxWorkerSession(source, { slicedFonts: false });
+    expect(workers).toHaveLength(3);
+    expect(workers[0]!.requests).toContainEqual(open);
+  } finally {
+    await session?.dispose();
+    sessionPrepared?.release();
+    prepared.release();
+    whole.release();
+  }
 });
 
 test('preparing one file in different font modes keeps the workers and prefetches separate', async () => {
@@ -221,7 +265,7 @@ test('preparing one file in different font modes keeps the workers and prefetche
     expect(h.workers.map((_, index) => prefetches(h, index).map(message => message.args)))
       .toEqual([[], [[['cjk-jp'], false]], [[['cjk-jp'], true]]]);
     expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[2]);
-    expect(h.client.takePresentationFontWorker(source, { slicedFonts: false }) as unknown).toBe(h.workers[1]);
+    expect(whole.take() as unknown).toBe(h.workers[1]);
   } finally {
     disabled.release(); whole.release(); sliced.release();
     for (const worker of h.workers) worker.terminate();
