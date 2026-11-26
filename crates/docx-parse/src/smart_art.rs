@@ -415,9 +415,13 @@ fn collect_scene_shapes<'a>(
     if let Some(children) = &mut node.children {
         let mut index = 0;
         while index < children.len() {
-            if let Some(frame) =
-                collect_scene_shapes(children.get_mut(index), shapes, sources, text_colors, guides)
-            {
+            if let Some(frame) = collect_scene_shapes(
+                children.get_mut(index),
+                shapes,
+                sources,
+                text_colors,
+                guides,
+            ) {
                 index += 1;
                 children.insert(index, frame);
             }

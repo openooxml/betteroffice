@@ -52,9 +52,10 @@ pub fn parse_notes(
         };
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         if parser.budget.preview_connectors.is_some() {
-            parser
-                .budget
-                .connector_story(parser.part, (note_type != "separator").then(|| id.to_string()));
+            parser.budget.connector_story(
+                parser.part,
+                (note_type != "separator").then(|| id.to_string()),
+            );
         }
         let content = parser.parse_blocks(element, 0, false)?;
         parser.budget.connector_story = None;

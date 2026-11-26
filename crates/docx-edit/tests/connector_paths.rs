@@ -194,7 +194,10 @@ fn connector_hit_follows_the_painted_detour() {
 
 fn with_connector_document(edit: impl FnOnce(&str) -> String) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(&connector_package()).unwrap();
-    let (_, document) = parts.iter_mut().find(|(path, _)| path == "word/document.xml").unwrap();
+    let (_, document) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
     *document = edit(std::str::from_utf8(document).unwrap()).into_bytes();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
@@ -202,24 +205,33 @@ fn with_connector_document(edit: impl FnOnce(&str) -> String) -> Vec<u8> {
 #[test]
 fn state_only_connector_with_empty_guides_uses_the_released_default() {
     let bytes = with_connector_document(|xml| {
-        xml.replace(r#"<a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/>"#, "")
+        xml.replace(
+            r#"<a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/>"#,
+            "",
+        )
     });
     let source = EngineSession::new(1);
     seed_from_docx(source.doc(), &bytes).unwrap();
     let replica = EngineSession::new(2);
-    replica.doc().apply_update_v1(&source.doc().encode_state_as_update_v1()).unwrap();
+    replica
+        .doc()
+        .apply_update_v1(&source.doc().encode_state_as_update_v1())
+        .unwrap();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let request = fixture::region_request(&source, &bytes, font).to_string();
     draw_connector(&replica, &request);
     let shape = painted_connector(&replica);
     let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| shape[key].as_f64().unwrap());
-    assert_eq!(shape["geometryPath"], json!([
-        {"type": "move", "x": px(x), "y": px(y)},
-        {"type": "line", "x": px(x + w * 0.5), "y": px(y)},
-        {"type": "line", "x": px(x + w * 0.25), "y": px(y + h * 0.5)},
-        {"type": "line", "x": px(x + w * 0.75), "y": px(y + h * 0.5)},
-        {"type": "line", "x": px(x + w), "y": px(y + h)}
-    ]));
+    assert_eq!(
+        shape["geometryPath"],
+        json!([
+            {"type": "move", "x": px(x), "y": px(y)},
+            {"type": "line", "x": px(x + w * 0.5), "y": px(y)},
+            {"type": "line", "x": px(x + w * 0.25), "y": px(y + h * 0.5)},
+            {"type": "line", "x": px(x + w * 0.75), "y": px(y + h * 0.5)},
+            {"type": "line", "x": px(x + w), "y": px(y + h)}
+        ])
+    );
 }
 
 #[test]
@@ -246,23 +258,43 @@ fn grouped_connector_hits_its_drawing_atom() {
         let engine = EngineSession::new(1);
         seed_from_docx(engine.doc(), &bytes).unwrap();
         let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
-        draw_connector(&engine, &fixture::region_request(&engine, &bytes, font).to_string());
-        engine.with_display_list(|display| {
-            let mut shapes = display.pages[0].primitives.iter().filter_map(|primitive| match primitive {
-                Primitive::Shape(shape) => Some(shape),
-                _ => None,
-            });
-            let frame = shapes.next().unwrap();
-            let connector = shapes.next().unwrap();
-            let [x, y, w, h] = [&connector.x, &connector.y, &connector.w, &connector.h]
-                .map(|value| value.as_f64().unwrap());
-            let pos = frame.attrs.doc_start.unwrap();
-            let hit = |x, y| hit_test_regions(display, 0, x, y).unwrap();
-            let painted = hit(x + w * 1.25, y);
-            assert_eq!((painted.target, painted.pos), (HoverTarget::Image, Some(pos)), "anchored={anchored}");
-            assert_eq!(docx_layout::hit::hit_test(display, 0, x + w * 1.25, y), Some(pos));
-            assert_ne!(hit(x + w * 0.5, y + h * 0.5).target, HoverTarget::Image, "anchored={anchored}");
-        }).unwrap();
+        draw_connector(
+            &engine,
+            &fixture::region_request(&engine, &bytes, font).to_string(),
+        );
+        engine
+            .with_display_list(|display| {
+                let mut shapes =
+                    display.pages[0]
+                        .primitives
+                        .iter()
+                        .filter_map(|primitive| match primitive {
+                            Primitive::Shape(shape) => Some(shape),
+                            _ => None,
+                        });
+                let frame = shapes.next().unwrap();
+                let connector = shapes.next().unwrap();
+                let [x, y, w, h] = [&connector.x, &connector.y, &connector.w, &connector.h]
+                    .map(|value| value.as_f64().unwrap());
+                let pos = frame.attrs.doc_start.unwrap();
+                let hit = |x, y| hit_test_regions(display, 0, x, y).unwrap();
+                let painted = hit(x + w * 1.25, y);
+                assert_eq!(
+                    (painted.target, painted.pos),
+                    (HoverTarget::Image, Some(pos)),
+                    "anchored={anchored}"
+                );
+                assert_eq!(
+                    docx_layout::hit::hit_test(display, 0, x + w * 1.25, y),
+                    Some(pos)
+                );
+                assert_ne!(
+                    hit(x + w * 0.5, y + h * 0.5).target,
+                    HoverTarget::Image,
+                    "anchored={anchored}"
+                );
+            })
+            .unwrap();
     }
 }
 
@@ -270,8 +302,12 @@ fn grouped_connector_hits_its_drawing_atom() {
 fn preview_connector_keeps_guides_when_the_uncut_story_exceeds_bookmark_limits() {
     let bytes = with_connector_document(|xml| {
         let attributes = (1..docx_parse::xml::ParseLimits::default().max_attributes_per_element)
-            .map(|index| format!(r#" b{index}="""#)).collect::<String>();
-        let tail = format!(r#"{}<w:bookmarkStart z:id="1"{attributes}/>"#, "<w:p/>".repeat(70));
+            .map(|index| format!(r#" b{index}="""#))
+            .collect::<String>();
+        let tail = format!(
+            r#"{}<w:bookmarkStart z:id="1"{attributes}/>"#,
+            "<w:p/>".repeat(70)
+        );
         xml.replace("<w:body>", r#"<w:body xmlns:z="urn:test">"#)
             .replace("<w:sectPr>", &format!("{tail}<w:sectPr>"))
     });
@@ -279,7 +315,10 @@ fn preview_connector_keeps_guides_when_the_uncut_story_exceeds_bookmark_limits()
     assert!(seed_docx_preview(engine.doc(), &bytes, 1).unwrap());
     assert!(matches!(
         docx_parse::parse_docx_s9_wire(&bytes, Default::default()),
-        Err(docx_parse::xml::ParseError::ResourceLimit { kind: "bookmarkNamespaceAliases", .. })
+        Err(docx_parse::xml::ParseError::ResourceLimit {
+            kind: "bookmarkNamespaceAliases",
+            ..
+        })
     ));
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let request = fixture::region_request(&engine, &connector_package(), font);

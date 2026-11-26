@@ -25,7 +25,10 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
             || x > left + width
             || y < top
             || y > top + height
-            || group.opacity.as_ref().is_some_and(|opacity| num(opacity) <= 0.0)
+            || group
+                .opacity
+                .as_ref()
+                .is_some_and(|opacity| num(opacity) <= 0.0)
         {
             return false;
         }
@@ -35,7 +38,11 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
     let width = paint("width")
         .and_then(Value::as_f64)
         .or_else(|| stroke.map(|stroke| num(&stroke.width)))
-        .unwrap_or(if attrs.stroke_paint.is_some() { 1.0 } else { 0.0 });
+        .unwrap_or(if attrs.stroke_paint.is_some() {
+            1.0
+        } else {
+            0.0
+        });
     let color = paint("color")
         .and_then(Value::as_str)
         .or_else(|| stroke.map(|stroke| stroke.color.as_str()));
@@ -86,7 +93,14 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
             }
             Line { x, y } => ((num(x), num(y)), None),
             Quad { cpx, cpy, x, y } => ((num(x), num(y)), Some(((num(cpx), num(cpy)), None))),
-            Cubic { cp1x, cp1y, cp2x, cp2y, x, y } => (
+            Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => (
                 (num(x), num(y)),
                 Some(((num(cp1x), num(cp1y)), Some((num(cp2x), num(cp2y))))),
             ),
@@ -135,7 +149,9 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
 fn dash_pattern(custom: Option<&Value>, name: Option<&str>, width: f64) -> Vec<f64> {
     let gap = (width * 2.0).max(2.0);
     let dash = (width * 3.0).max(2.0);
-    let custom = custom.and_then(Value::as_array).filter(|values| !values.is_empty());
+    let custom = custom
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty());
     let mut pattern = if let Some(values) = custom {
         values
             .iter()
@@ -173,7 +189,11 @@ struct Stroke<'a> {
 impl Stroke<'_> {
     fn contains(&self, path: &[Point], solid: bool) -> bool {
         let closed = path.len() > 2 && path.first() == path.last();
-        let period = if solid { 0.0 } else { self.dash.iter().sum::<f64>() };
+        let period = if solid {
+            0.0
+        } else {
+            self.dash.iter().sum::<f64>()
+        };
         let mut phase = 0.0;
         for (index, pair) in path.windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
@@ -310,7 +330,11 @@ impl Stroke<'_> {
 }
 
 fn line_end(end: &Value, tip: Point, toward: Point, width: f64, stroke: &Stroke<'_>) -> bool {
-    let Some(kind) = end.get("type").and_then(Value::as_str).filter(|kind| *kind != "none") else {
+    let Some(kind) = end
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| *kind != "none")
+    else {
         return false;
     };
     let scale = |key| match end.get(key).and_then(Value::as_str) {

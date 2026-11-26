@@ -8111,7 +8111,13 @@ pub(crate) fn parse_docx_preview(
         &mut docx_parse::xml::ParseBudget::new(&limits),
     )
     .map_err(|error| error.to_string())?;
-    Ok(Some((envelope, media, budget_stopped, document_path, connectors)))
+    Ok(Some((
+        envelope,
+        media,
+        budget_stopped,
+        document_path,
+        connectors,
+    )))
 }
 
 /// Seeds a preview parse and keeps the media its images name; returns the

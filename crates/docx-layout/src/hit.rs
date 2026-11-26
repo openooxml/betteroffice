@@ -998,7 +998,8 @@ fn connector_group(node: &Value) -> bool {
         .is_some_and(|children| {
             !children.is_empty()
                 && children.iter().all(|child| {
-                    child.pointer("/shape/shapeType")
+                    child
+                        .pointer("/shape/shapeType")
                         .and_then(Value::as_str)
                         .is_some_and(ooxml_drawingml::is_corrected_connector_preset)
                         || connector_group(child)
@@ -4105,8 +4106,10 @@ mod tests {
             assert_eq!(hit_test(&dl, 0, 132.0, y), None);
             for (x, y) in [(110.0, y), (151.0, y + 13.0)] {
                 let painted = hit(x, y);
-                assert_eq!((painted.region, painted.pos, painted.target),
-                    (HitRegion::Body, Some(10), HoverTarget::Image));
+                assert_eq!(
+                    (painted.region, painted.pos, painted.target),
+                    (HitRegion::Body, Some(10), HoverTarget::Image)
+                );
             }
         }
     }
@@ -4122,7 +4125,10 @@ mod tests {
             "stroke": {"color": "#000000", "width": 1}
         });
         let dl = band_page("header", 0.0, vec![connector]);
-        assert_eq!(hit_test_regions(&dl, 0, 200.0, 37.0).unwrap().region, HitRegion::Header);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 200.0, 37.0).unwrap().region,
+            HitRegion::Header
+        );
         assert_eq!(hit_test(&dl, 0, 200.0, 37.0), Some(10));
     }
 }

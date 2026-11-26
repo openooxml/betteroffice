@@ -388,8 +388,16 @@ pub fn parse_docx_s9_preview_with_media_table_with_budget(
     limits: &ParseLimits,
     paragraph_budget: Option<usize>,
 ) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
-    parse_media_preview(parts, table, blocks, options, limits, paragraph_budget, false)
-        .map(|preview| preview.map(|(envelope, stopped, _)| (envelope, stopped)))
+    parse_media_preview(
+        parts,
+        table,
+        blocks,
+        options,
+        limits,
+        paragraph_budget,
+        false,
+    )
+    .map(|preview| preview.map(|(envelope, stopped, _)| (envelope, stopped)))
 }
 
 #[doc(hidden)]
@@ -401,7 +409,15 @@ pub fn parse_docx_preview_with_connectors(
     limits: &ParseLimits,
     paragraph_budget: Option<usize>,
 ) -> Result<Option<PreviewWithConnectors>, ParseError> {
-    parse_media_preview(parts, table, blocks, options, limits, paragraph_budget, true)
+    parse_media_preview(
+        parts,
+        table,
+        blocks,
+        options,
+        limits,
+        paragraph_budget,
+        true,
+    )
 }
 
 fn parse_media_preview(
