@@ -73,7 +73,7 @@ test('native model writers preserve an unedited archive and reopen a model edit'
     };
   };
   expect(write_docx_s13_wasm(JSON.stringify(request), source)).toEqual(source);
-  expect(withWarnings().bytes).toEqual(source);
+  expect(withWarnings()).toEqual({ bytes: source, warnings: [] });
 
   request.document.content[1].content[0].content[0].text = 'Other edited';
   const reported = withWarnings();

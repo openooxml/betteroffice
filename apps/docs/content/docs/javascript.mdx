@@ -961,7 +961,7 @@ if (!result.ok) console.warn(result.failure.code);
 const { bytes: saved } = await saveYrsDocx(session);
 ```
 
-Use `saveYrsDocx(session)` to save editing-session changes and preserve source markup.
+Use `saveYrsDocx(session)` to patch changed paragraphs in place where possible.
 For document-model workflows, use `parseDocx` followed by `repackDocx`.
 
 Offsets are UTF-16 positions in the paragraph text, where each inline atom (hard

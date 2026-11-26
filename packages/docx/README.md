@@ -13,7 +13,7 @@ No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency
 
 ## Usage
 
-Open a DOCX in an editing session and save it while preserving untouched package parts.
+Open a DOCX in an editing session and save it. Session saves patch changed paragraphs in place where possible.
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';

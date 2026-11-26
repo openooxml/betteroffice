@@ -11,7 +11,7 @@ import { sameSaveTree } from '../docx/rustSaveFacade';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo, materializeSessionRevisionIds } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
-import { isHostEnvelope, rememberSaveProjection } from './saveProjection';
+import { rememberSaveProjection } from './saveProjection';
 import {
   crossingFallback,
   crossStoryComments,
@@ -3338,7 +3338,7 @@ const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>
  * opened document; for a session seeded without one, in `base`, scanned once per base document.
  */
 function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
-  const opened = isHostEnvelope(base) ? null : sessionMaterializedSource(session);
+  const opened = sessionMaterializedSource(session);
   const key: object = opened ?? base;
   let crossing = openedCrossings.get(key);
   if (!crossing) {
@@ -4961,7 +4961,7 @@ export function yrsToDocument(
   options: YrsToDocumentOptions = {}
 ): Document {
   let projection = projectDocument(session, base, options);
-  if (options.commentIds === undefined) {
+  if (options.storyIds === undefined && options.commentIds === undefined) {
     const materialized = materializeSessionRevisionIds(projection, (source, clone) => {
       const block = projectedBlocks.get(source as BlockContent);
       if (block) projectedBlocks.set(clone as BlockContent, block);
@@ -4975,8 +4975,6 @@ export function yrsToDocument(
       noteWrittenWhole(materialized, crossingWrittenWhole(projection));
       projection = materialized;
     }
-  }
-  if (options.storyIds === undefined && options.commentIds === undefined) {
     rememberSaveProjection(session, base, projection);
   }
   return projection;
@@ -5090,6 +5088,7 @@ function projectStories(
   const headers = projectHeaderFooters(base.package.headers);
   const footers = projectHeaderFooters(base.package.footers);
 
+  let keptNotes: Set<string> | undefined;
   const projectNotes = <T extends Footnote | Endnote>(
     notes: T[] | undefined,
     prefix: string
@@ -5102,7 +5101,15 @@ function projectStories(
       const storyId = `${prefix}${note.id}`;
       if (!context.storyIds.has(storyId) || !shouldProject(storyId)) return note;
       const content = restoreNoteMarks(context.storyToBlocks(storyId), note.content);
-      return sameSaveTree(content, note.content) ? note : { ...note, content, verbatimXml: undefined };
+      if (note.verbatimXml) {
+        if (sameSaveTree(content, note.content)) return note;
+        if (options.storyIds === undefined && options.commentIds === undefined && sessionSourcePackage(session)) {
+          keptNotes ??= new Set(session.paragraphSavePlan().patchedParts.map(({ part }) => part.toLowerCase()));
+          const part = prefix === 'fn:' ? 'word/footnotes.xml' : 'word/endnotes.xml';
+          if (keptNotes.has(part)) return note;
+        }
+      }
+      return { ...note, content, verbatimXml: undefined };
     });
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');

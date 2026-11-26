@@ -21,6 +21,7 @@ export interface RustS9ParseOptions {
   detectVariables: boolean;
   determinismSeed?: string;
   includeCanonical?: boolean;
+  reportSourceDigest?: true;
 }
 
 export interface RustS9Result {
@@ -30,6 +31,7 @@ export interface RustS9Result {
   fontTableRelationshipsXml?: string;
   rustCanonicalBytes?: Uint8Array;
   rustCanonicalSha256?: string;
+  sourceDigest?: string;
 }
 
 /** Rehydrates parser wire data into the public Document. */
@@ -56,9 +58,10 @@ export function decodeS9EnvelopeValue(value: unknown, originalBuffer: ArrayBuffe
       'fontTableRelationshipsXml',
       'canonicalBase64',
       'canonicalSha256',
+      'sourceDigest',
     ],
     'wire',
-    ['fontTableRelationshipsXml', 'canonicalBase64', 'canonicalSha256']
+    ['fontTableRelationshipsXml', 'canonicalBase64', 'canonicalSha256', 'sourceDigest']
   );
   if (envelope.wireVersion !== 1) throw new TypeError('wire.wireVersion must be 1');
   const document = decodeS9Document(envelope.document, originalBuffer);
@@ -82,6 +85,9 @@ export function decodeS9EnvelopeValue(value: unknown, originalBuffer: ArrayBuffe
     wireVersion: 1,
     document,
     embeddedFonts,
+    ...(envelope.sourceDigest === undefined ? {} : {
+      sourceDigest: stringAt(envelope.sourceDigest, 'wire.sourceDigest'),
+    }),
     ...(envelope.fontTableRelationshipsXml === undefined
       ? {}
       : {

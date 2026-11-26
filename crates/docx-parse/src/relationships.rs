@@ -163,11 +163,24 @@ pub fn office_document_path(
     parts: &[(String, Vec<u8>)],
     budget: &mut ParseBudget<'_>,
 ) -> Result<String, ParseError> {
-    let default_path = || {
-        crate::s8::find_part(parts, "word/document.xml")
-            .map_or_else(|| "word/document.xml".to_owned(), |(path, _)| path.to_owned())
+    document_path(parts, budget, true)
+}
+
+fn document_path(
+    parts: &[(String, Vec<u8>)],
+    budget: &mut ParseBudget<'_>,
+    ignore_case: bool,
+) -> Result<String, ParseError> {
+    let find_part = |expected: &str| {
+        parts.iter().find(|(path, _)| {
+            if ignore_case { path.eq_ignore_ascii_case(expected) } else { path == expected }
+        })
     };
-    let Some((path, xml)) = crate::s8::find_part(parts, "_rels/.rels") else {
+    let default_path = || {
+        find_part("word/document.xml")
+            .map_or_else(|| "word/document.xml".to_owned(), |(path, _)| path.clone())
+    };
+    let Some((path, xml)) = find_part("_rels/.rels") else {
         return Ok(default_path());
     };
     let relationships = parse_relationships(xml, path, budget)?;
@@ -178,18 +191,25 @@ pub fn office_document_path(
     }) else {
         return Ok(default_path());
     };
-    let RelationshipTarget::Internal(target) = resolve_relationship_target("_rels/.rels", relationship)?
+    let RelationshipTarget::Internal(target) = resolve_relationship_target(if ignore_case { "_rels/.rels" } else { path }, relationship)?
     else {
         return Err(ParseError::Relationship {
             part: path.to_owned(),
             message: "officeDocument target must be internal".to_owned(),
         });
     };
-    crate::s8::find_part(parts, &target)
-        .map(|(path, _)| path.to_owned())
+    find_part(&target)
+        .map(|(path, _)| path.clone())
         .ok_or_else(|| ParseError::Container(format!(
             "not a Word document: main document part is missing: {target}"
         )))
+}
+
+pub(crate) fn office_document_path_exact(
+    parts: &[(String, Vec<u8>)],
+    budget: &mut ParseBudget<'_>,
+) -> Result<String, ParseError> {
+    document_path(parts, budget, false)
 }
 
 pub(crate) fn relationship_part_path(part: &str) -> String {

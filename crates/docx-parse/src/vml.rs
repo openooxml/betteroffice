@@ -343,9 +343,16 @@ fn vml_shape_images(
             height = group_length_to_px(style.get("height").map(String::as_str), group.scale_y);
         }
         if width.is_none() || height.is_none() {
-            if let Some((intrinsic_width, intrinsic_height)) = intrinsic_size_px(
-                image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
-            ) && intrinsic_width > 0.0
+            let intrinsic = if let Some(parts) = budget.as_deref().and_then(ParseBudget::comparison_media) {
+                intrinsic_size_px(crate::media::comparison_image_bytes(
+                    relationship_id, relationships, media, parts,
+                ))
+            } else {
+                intrinsic_size_px(
+                    image_src_bytes(resolved.src.as_deref(), budget.as_deref_mut()).as_deref(),
+                )
+            };
+            if let Some((intrinsic_width, intrinsic_height)) = intrinsic && intrinsic_width > 0.0
                 && intrinsic_height > 0.0
             {
                 match (width, height) {

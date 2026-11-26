@@ -114,28 +114,50 @@ export function modelSaveFields(document: Document) {
 const NO_BINDING_CHANGES = 'DOCX_SAVE_BINDINGS 0';
 
 const parsedModels = new WeakMap<Document, {
-  fields: ReturnType<typeof modelSaveFields>;
-  source: Promise<string | undefined>;
+  body: string;
+  fingerprint: string;
+  sourceDigest: string;
 }>();
 
-export function snapshotSaveTree<T>(value: T): T {
-  const copies = new WeakMap<object, object>();
-  const clone = (field: unknown): unknown => {
-    if (!field || typeof field !== 'object') return field;
-    const existing = copies.get(field);
-    if (existing) return existing;
-    if (Array.isArray(field)) {
-      const array: unknown[] = [];
-      copies.set(field, array);
-      for (const child of field) array.push(clone(child));
-      return array;
-    }
-    const object: Record<string, unknown> = Object.create(null);
-    copies.set(field, object);
-    for (const [key, child] of Object.entries(field)) object[key] = clone(child);
-    return object;
+function bodySaveFields({ content, finalSectionProperties, customRootBindings }: Document['package']['document']) {
+  return { content, finalSectionProperties, customRootBindings };
+}
+
+export function saveTreeFingerprint(value: unknown): string {
+  assertSafeSaveTree(value, 'save');
+  const hash = new Uint32Array([0x811c9dc5, 0x243f6a88, 0xb7e15162, 0x9e3779b9]);
+  const add = (word: number): void => {
+    hash[0] = Math.imul(hash[0]! ^ word, 0x01000193);
+    hash[1] = Math.imul(hash[1]! ^ word, 0x85ebca77);
+    hash[2] = Math.imul(hash[2]! ^ word, 0xc2b2ae3d);
+    hash[3] = Math.imul(hash[3]! ^ word, 0x27d4eb2f);
   };
-  return clone(value) as T;
+  const addString = (text: string): void => {
+    add(text.length);
+    for (let index = 0; index < text.length; index += 1) add(text.charCodeAt(index));
+  };
+  const visit = (field: unknown): void => {
+    if (Array.isArray(field)) {
+      add(1);
+      add(field.length);
+      for (const child of field) visit(child);
+    } else if (field !== null && typeof field === 'object') {
+      add(2);
+      const object = field as Record<string, unknown>;
+      const keys = Object.keys(object).filter(key => key !== 'sourceOrdinal' && object[key] !== undefined).sort();
+      add(keys.length);
+      for (const key of keys) {
+        addString(key);
+        visit(object[key]);
+      }
+    } else {
+      add(3);
+      addString(typeof field);
+      addString(String(field));
+    }
+  };
+  visit(value);
+  return Array.from(hash, word => word.toString(16).padStart(8, '0')).join('');
 }
 
 export function sameSaveTree(left: unknown, right: unknown): boolean {
@@ -157,19 +179,21 @@ export function sameSaveTree(left: unknown, right: unknown): boolean {
     fields.every(key => Object.hasOwn(b, key) && sameSaveTree(a[key], b[key]));
 }
 
-export function rememberParsedModel(document: Document): void {
-  if (!document.originalBuffer) return;
+export function rememberParsedModel(document: Document, sourceDigest: string): void {
+  const fields = modelSaveFields(document);
   parsedModels.set(document, {
-    fields: snapshotSaveTree(modelSaveFields(document)),
-    source: typeof globalThis.crypto?.subtle !== 'undefined'
-      ? sha256Hex(new Uint8Array(document.originalBuffer)).catch(() => undefined)
-      : Promise.resolve(undefined),
+    body: saveTreeFingerprint(bodySaveFields(fields.document)),
+    fingerprint: saveTreeFingerprint(fields),
+    sourceDigest,
   });
 }
 
-export function parsedModelUnchanged(document: Document): ReturnType<typeof parsedModels.get> {
+export function parsedModelUnchanged(
+  document: Document,
+  fields = modelSaveFields(document)
+): ReturnType<typeof parsedModels.get> {
   const baseline = parsedModels.get(document);
-  return baseline && sameSaveTree(modelSaveFields(document), baseline.fields) ? baseline : undefined;
+  return baseline && baseline.fingerprint === saveTreeFingerprint(fields) ? baseline : undefined;
 }
 
 /** Encode the public Document through the inverse allowlisted package wire. */
@@ -183,7 +207,7 @@ export async function writeDocumentWithRust(
   skipMutations = false,
   yieldSave?: () => Promise<void>,
   styleLanguages?: Readonly<Record<string, unknown>>,
-  modelMode?: 'fresh' | 'projected'
+  modelMode?: 'fresh'
 ): Promise<RustSaveResult> {
   const guarded = modelMode !== 'fresh' && paragraphIds === undefined && selective === undefined;
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
@@ -196,33 +220,53 @@ export async function writeDocumentWithRust(
       );
     }
   }
-  const fixed =
-    determinism ??
-    ({
-      seed: await sha256Hex(new Uint8Array(originalBuffer)),
-      now: new Date().toISOString(),
-    } satisfies RustSaveDeterminism);
+  const saveOptions = {
+    updateModifiedDate: options.updateModifiedDate ?? true,
+    ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),
+  };
+  const baseline = guarded ? parsedModelUnchanged(document) : undefined;
+  const now = determinism?.now ?? new Date().toISOString();
+  if (baseline) {
+    const fixed = determinism ?? { seed: baseline.sourceDigest, now };
+    validateDeterminism(fixed);
+    const request = {
+      determinism: fixed,
+      options: saveOptions,
+      unchangedSourceSha256: baseline.sourceDigest,
+    };
+    try {
+      const { bytes, warnings } = writeDocxS13WithWarningsWire(
+        JSON.stringify(request), new Uint8Array(originalBuffer)
+      );
+      engineProgress();
+      return {
+        buffer: exactArrayBuffer(bytes),
+        determinism: fixed,
+        warnings: [...(document.warnings ?? []), ...warnings],
+      };
+    } catch (error) {
+      if (String(error).replace(/^Error: /, '') !== 'DOCX_SOURCE_CHANGED') throw error;
+    }
+  }
+  const fixed = determinism ?? { seed: await sha256Hex(new Uint8Array(originalBuffer)), now };
   validateDeterminism(fixed);
   if (yieldSave) await yieldSave();
-
-  const baseline = guarded && modelMode === undefined ? parsedModels.get(document) : undefined;
-  const sourceDigest = await baseline?.source;
+  const fields = modelSaveFields(document);
+  const parsed = guarded ? parsedModels.get(document) : undefined;
+  const unchangedBody = parsed && parsed.sourceDigest === fixed.seed &&
+    parsed.body === saveTreeFingerprint(bodySaveFields(fields.document));
   const request = {
-    ...modelSaveFields(document),
+    ...fields,
+    ...(unchangedBody ? { unchangedBodySha256: fixed.seed } : {}),
     ...(modelMode === 'fresh' ? { freshPackage: true } : {}),
-    ...(modelMode === 'projected' ? { rewriteBody: true } : {}),
-    ...(sourceDigest === fixed.seed && parsedModelUnchanged(document)
-      ? { unchangedSourceSha256: sourceDigest } : {}),
+    reportBindings: true,
     determinism: fixed,
     ...(styleLanguages === undefined ? {} : { styleLanguages }),
     ...(!guarded && {
       headerEntries: headerFooterSaveEntries(document.package.headers),
       footerEntries: headerFooterSaveEntries(document.package.footers),
     }),
-    options: {
-      updateModifiedDate: options.updateModifiedDate ?? true,
-      ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),
-    },
+    options: saveOptions,
     ...(selective === undefined
       ? {}
       : {

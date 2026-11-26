@@ -13,8 +13,6 @@ use docx_edit::content_controls::{
     find_package_content_controls, list_package_content_controls,
 };
 use docx_edit::save::session_paragraph_ids;
-use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_body_policy};
-use docx_parse::serializer::s13::save_core_only;
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
@@ -38,6 +36,8 @@ use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
+use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_native_model};
+use docx_parse::serializer::s13::save_core_only;
 use docx_parse::serializer::{
     S13ParagraphId, S13ParagraphIds, S13SaveOptions, S13SaveReport, S13SaveRequest,
     SerializerDeterminism,
@@ -622,13 +622,32 @@ impl Document {
         } else {
             #[cfg(test)]
             session_save_tests::count_package_write();
-            write_model_with_body_policy(
-                request, &self.source, &self.original_parts, &self.parse_limits, rewrite_body,
+            write_native_model(
+                request,
+                &self.source,
+                &self.original_parts,
+                &self.parse_limits,
+                rewrite_body,
+                self.has_derived_list_edits().then_some("derived list rendering changed"),
             )?
         };
         let mut report = report;
         let saved = save_report(bytes, &mut report);
         Ok((saved, report.warnings))
+    }
+
+    fn has_derived_list_edits(&self) -> bool {
+        let Some(baseline) = &self.session_baseline else {
+            return false;
+        };
+        if self.dirty != Dirty::ModelChanged {
+            return false;
+        }
+        let original = baseline.paragraphs_by_ordinal();
+        self.paragraphs().into_iter().any(|paragraph| {
+            paragraph.source_ordinal.and_then(|ordinal| original.get(&ordinal))
+                .is_some_and(|before| paragraph.list_rendering != before.list_rendering)
+        })
     }
 
     /// The editing session's paragraph save plan for the current model, as the

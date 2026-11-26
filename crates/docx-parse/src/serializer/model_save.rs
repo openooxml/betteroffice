@@ -1,13 +1,16 @@
 use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::document::DocumentBody;
 use crate::header_footer::HeaderFooter;
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
 use crate::relationships::{
-    Relationship, RelationshipTarget, relationship_types, resolve_relationship_target,
+    Relationship, RelationshipMap, RelationshipTarget, parse_relationships, relationship_part_path,
+    relationship_types, resolve_relationship_target,
 };
 use crate::s9::{S9PackageWire, S9ParseOptions, parse_save_source};
 use crate::xml::{ParseBudget, ParseError, ParseLimits};
@@ -31,13 +34,14 @@ struct Coverage {
     source_ordinals: bool,
     notes: [bool; 4],
     rewrite_body: bool,
+    unchanged_body: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SaveWire {
     determinism: SerializerDeterminism,
-    document: DocumentBody,
+    document: Option<DocumentBody>,
     #[serde(default)]
     header_entries: Vec<(String, HeaderFooter)>,
     #[serde(default)]
@@ -61,8 +65,9 @@ struct SaveWire {
     #[serde(default)]
     fresh_package: bool,
     #[serde(default)]
-    rewrite_body: bool,
+    report_bindings: bool,
     unchanged_source_sha256: Option<String>,
+    unchanged_body_sha256: Option<String>,
 }
 
 fn present_notes<'de, D: serde::Deserializer<'de>>(
@@ -77,9 +82,33 @@ pub(crate) fn write_json(
     wire_diagnostics: Option<&mut Vec<String>>,
 ) -> Result<(Vec<u8>, S13SaveReport), String> {
     let wire: SaveWire = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let wire_diagnostics = if wire.report_bindings { wire_diagnostics } else { None };
+    if let Some(digest) = wire.unchanged_source_sha256 {
+        if wire.document.is_some() || wire.fresh_package || wire.style_languages.is_some()
+            || wire.paragraph_ids.is_some() || wire.selective.is_some()
+        {
+            return Err("unchangedSourceSha256 requires a metadata-only save request".to_owned());
+        }
+        if digest != format!("{:x}", Sha256::digest(original_docx)) {
+            return Err("DOCX_SOURCE_CHANGED".to_owned());
+        }
+        wire.determinism.validate().map_err(|error| error.to_string())?;
+        let bytes = super::s13::save_unchanged_archive(
+            &wire.options, &wire.determinism.now, original_docx,
+        ).map_err(|error| error.to_string())?;
+        if let Some(wire) = wire_diagnostics {
+            wire.push(NO_BINDING_CHANGES.to_owned());
+        }
+        return Ok((bytes, S13SaveReport::default()));
+    }
+    let source_digest = wire.unchanged_body_sha256.map(|expected| {
+        let digest = format!("{:x}", Sha256::digest(original_docx));
+        (digest == expected, digest)
+    });
     let coverage = Coverage {
+        unchanged_body: source_digest.as_ref().is_some_and(|(matched, _)| *matched),
         source_ordinals: json.contains("\"sourceOrdinal\""),
-        rewrite_body: wire.rewrite_body,
+        rewrite_body: false,
         notes: [
             wire.footnotes.is_some(),
             wire.endnotes.is_some(),
@@ -89,7 +118,7 @@ pub(crate) fn write_json(
     };
     let request = S13SaveRequest {
         determinism: wire.determinism,
-        document: wire.document,
+        document: wire.document.ok_or("missing field `document`")?,
         header_entries: wire.header_entries,
         footer_entries: wire.footer_entries,
         footnotes: wire.footnotes.unwrap_or_default(),
@@ -113,24 +142,21 @@ pub(crate) fn write_json(
         return write_parts(request, &parts, Some(original_docx), WriteSettings {
             style_languages: wire.style_languages.as_ref(),
             wire: wire_diagnostics,
+            product_save: true,
             ..WriteSettings::default()
         })
         .map_err(|error| error.to_string());
     }
-    if let Some(digest) = wire.unchanged_source_sha256 {
-        use sha2::{Digest, Sha256};
-        if digest == format!("{:x}", Sha256::digest(original_docx)) {
-            let limits = ParseLimits::default();
-            let path = crate::relationships::office_document_path(&parts, &mut ParseBudget::new(&limits))
-                .map_err(|error| error.to_string())?;
-            if let Some(wire) = wire_diagnostics {
-                wire.push(NO_BINDING_CHANGES.to_owned());
-            }
-            return save_core_only(&request, &path, &parts, original_docx)
-                .map_err(|error| error.to_string());
-        }
-    }
-    write_model(request, original_docx, &parts, &ParseLimits::default(), coverage, wire_diagnostics)
+    write_model(
+        request,
+        original_docx,
+        &parts,
+        &ParseLimits::default(),
+        coverage,
+        wire_diagnostics,
+        None,
+        source_digest.map(|(_, digest)| digest),
+    )
         .map_err(|error| error.to_string())
 }
 
@@ -151,6 +177,18 @@ pub fn write_model_with_body_policy(
     limits: &ParseLimits,
     rewrite_body: bool,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
+    write_native_model(request, original_docx, parts, limits, rewrite_body, None)
+}
+
+#[doc(hidden)]
+pub fn write_native_model(
+    request: S13SaveRequest,
+    original_docx: &[u8],
+    parts: &[(String, Vec<u8>)],
+    limits: &ParseLimits,
+    rewrite_body: bool,
+    whole_model_reason: Option<&str>,
+) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     write_model(
         request,
         original_docx,
@@ -160,11 +198,15 @@ pub fn write_model_with_body_policy(
             source_ordinals: true,
             notes: [true; 4],
             rewrite_body,
+            unchanged_body: false,
         },
+        None,
+        whole_model_reason,
         None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_model(
     mut request: S13SaveRequest,
     bytes: &[u8],
@@ -172,9 +214,11 @@ fn write_model(
     limits: &ParseLimits,
     coverage: Coverage,
     wire: Option<&mut Vec<String>>,
+    whole_model_reason: Option<&str>,
+    source_digest: Option<String>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     if request.paragraph_ids.is_some() || request.selective.is_some() {
-        return write_parts(request, parts, Some(bytes), WriteSettings { wire, ..WriteSettings::default() });
+        return write_parts(request, parts, Some(bytes), WriteSettings { wire, product_save: true, ..WriteSettings::default() });
     }
     request.determinism.validate()?;
     let parse_options = S9ParseOptions {
@@ -182,17 +226,44 @@ fn write_model(
         parse_headers_footers: !request.header_entries.is_empty() || !request.footer_entries.is_empty(),
         parse_notes: coverage.notes.iter().any(|covered| *covered),
         source_ordinals: coverage.source_ordinals,
+        determinism_seed: source_digest,
         ..S9ParseOptions::default()
     };
     let (body_path, source) = match parse_save_source(bytes, parts, parse_options, limits) {
         Ok(source) => source,
-        Err(error) => return write_fallback(request, bytes, parts, coverage, &error.to_string()),
+        Err(error) => {
+            if let Some(requested) = &request.numbering
+                && let Some((path, xml)) = crate::s8::find_part(parts, NUMBERING)
+            {
+                let original = crate::numbering::parse_numbering(
+                    Some(xml), path, &mut ParseBudget::new(limits),
+                )?;
+                if requested != &original.definitions {
+                    return Err(save_error("cannot replace existing numbering definitions"));
+                }
+            }
+            return write_fallback(request, bytes, parts, coverage, &error.to_string());
+        }
     };
     let part_paths = PartPaths::new(parts);
+    let mut numbering_added = false;
+    if let Some(numbering) = &request.numbering
+        && numbering != &source.numbering
+    {
+        if part_paths.contains(NUMBERING) || source.relationship_entries.iter().any(|(_, relationship)| {
+            relationship.relationship_type == relationship_types::NUMBERING
+        }) {
+            return Err(save_error("cannot replace existing numbering definitions"));
+        }
+        numbering_added = !numbering.abstract_nums.is_empty() || !numbering.nums.is_empty();
+    }
+    if let Some(reason) = whole_model_reason {
+        return write_fallback(request, bytes, parts, coverage, reason);
+    }
     if let Err(error) = validate_relationships(&body_path, &request.relationship_entries, &source.relationship_entries) {
         return write_fallback(request, bytes, parts, coverage, &error.to_string());
     }
-    let aliases = header_footer_paths(&request, &source, &body_path, &part_paths)?;
+    let aliases = header_footer_paths(&request, &source, &body_path, &part_paths, parts, limits)?;
     if aliases.edits.values().any(|edit| {
         edit.path.eq_ignore_ascii_case(&body_path)
             || [COMMENTS, FOOTNOTES, ENDNOTES, NUMBERING]
@@ -204,9 +275,9 @@ fn write_model(
     let mut changed = BTreeSet::new();
     let reuse_document_root =
         request.document.custom_root_bindings == source.document.custom_root_bindings;
-    if coverage.rewrite_body || !same_model(&request.document.content, &source.document.content)
-        || request.document.final_section_properties != source.document.final_section_properties
-        || !reuse_document_root
+    if coverage.rewrite_body || !reuse_document_root || (!coverage.unchanged_body
+        && (!same_model(&request.document.content, &source.document.content)
+            || request.document.final_section_properties != source.document.final_section_properties))
     {
         changed.insert(body_path.clone());
     }
@@ -243,17 +314,8 @@ fn write_model(
         }
     }
 
-    if let Some(numbering) = &request.numbering
-        && numbering != &source.numbering
-    {
-        if part_paths.contains(NUMBERING) || source.relationship_entries.iter().any(|(_, relationship)| {
-            relationship.relationship_type == relationship_types::NUMBERING
-        }) {
-            return write_fallback(request, bytes, parts, coverage, "cannot replace existing numbering definitions");
-        }
-        if !numbering.abstract_nums.is_empty() || !numbering.nums.is_empty() {
-            changed.insert(NUMBERING.to_owned());
-        }
+    if numbering_added {
+        changed.insert(NUMBERING.to_owned());
     }
     let added_story_relationship = request.relationship_entries.iter().any(|(id, relationship)| {
         matches!(relationship.relationship_type.as_str(), relationship_types::HEADER | relationship_types::FOOTER)
@@ -271,7 +333,7 @@ fn write_model(
     let mut empty_notes = [false; 2];
     for (index, notes) in note_parts.into_iter().enumerate() {
         if changed.contains(notes.path) {
-            notes.prepare(limits);
+            notes.prepare(limits)?;
             empty_notes[index] = true;
         }
     }
@@ -295,10 +357,11 @@ fn write_model(
         empty_notes,
         wire,
         report_bindings,
+        product_save: true,
         ..WriteSettings::default()
     })?;
     report.warnings.extend(changed.into_iter().map(|part| format!(
-        "DOCX_PART_REWRITTEN {part} was written from the document model. Content the model does not carry may be lost. Edit through a session (createYrsSession, saveYrsDocx) to preserve that content."
+        "DOCX_PART_REWRITTEN {part} was rewritten from the document model. Content the model does not carry may be lost. Saving edits through a session (createYrsSession, saveYrsDocx) patches changed paragraphs in place where it can."
     )));
     Ok((saved, report))
 }
@@ -344,6 +407,7 @@ fn write_fallback(
     });
     let (saved, mut report) = write_parts(request, parts, Some(bytes), WriteSettings {
         empty_notes,
+        product_save: true,
         ..WriteSettings::default()
     })?;
     report.warnings.push(format!(
@@ -441,9 +505,9 @@ fn header_footer_paths(
     source: &S9PackageWire,
     body_path: &str,
     paths: &PartPaths<'_>,
+    parts: &[(String, Vec<u8>)],
+    limits: &ParseLimits,
 ) -> Result<HeaderFooterPlan, ParseError> {
-    let source_relationships: HashMap<_, _> = source.relationship_entries.iter()
-        .map(|(id, rel)| (id.as_str(), rel)).collect();
     let relationships: HashMap<_, _> = request.relationship_entries.iter()
         .map(|(id, rel)| (id.as_str(), rel)).collect();
     let originals: HashMap<_, _> = source.header_entries.iter().chain(&source.footer_entries)
@@ -459,24 +523,40 @@ fn header_footer_paths(
     }
     let mut edits = HashMap::<String, AliasEdit>::new();
     let mut targets = Vec::new();
+    let mut story_relationships = HashMap::<String, RelationshipMap>::new();
+    let mut budget = ParseBudget::new(limits);
     for (entries, kind) in [
         (&request.header_entries, relationship_types::HEADER),
         (&request.footer_entries, relationship_types::FOOTER),
     ] {
         for (id, story) in entries {
-            let target = relationships.get(id.as_str()).or_else(|| source_relationships.get(id.as_str()))
+            let target = relationships.get(id.as_str())
                 .and_then(|rel| story_path(body_path, rel, kind).ok().flatten());
             let path = target.as_deref().map(|target| paths.resolve(target));
             let key = path.map(str::to_ascii_lowercase);
             if let (Some(path), Some(key)) = (path, &key) {
                 let original = originals.get(id.as_str()).copied()
                     .or_else(|| original_targets.get(&(key.clone(), kind)).copied());
-                if original.is_none_or(|original| !same_model(story, original)) {
+                let owner_relationships = if story.watermark.is_some()
+                    || original.is_some_and(|original| original.watermark.is_some())
+                {
+                    if !story_relationships.contains_key(key) {
+                        let rels_path = relationship_part_path(path);
+                        let relationships = crate::s8::find_part(parts, &rels_path)
+                            .and_then(|(name, bytes)| parse_relationships(bytes, name, &mut budget).ok())
+                            .unwrap_or_default();
+                        story_relationships.insert(key.clone(), relationships);
+                    }
+                    story_relationships.get(key)
+                } else {
+                    None
+                };
+                if original.is_none_or(|original| !same_model_with_relationships(story, original, owner_relationships)) {
                     if let Some(edit) = edits.get_mut(key) {
                         let owner_id = &edit.relationship_id;
                         let owner_base = originals.get(owner_id.as_str()).copied()
                             .or_else(|| original_targets.get(&(key.clone(), edit.kind)).copied());
-                        if let Some(merged) = merge_alias(&edit.story, story, owner_base, original) {
+                        if let Some(merged) = merge_alias(&edit.story, story, owner_base, original, owner_relationships) {
                             edit.story = merged;
                         } else {
                             return Err(save_error(format!(
@@ -505,9 +585,8 @@ fn merge_alias(
     right: &HeaderFooter,
     source_left: Option<&HeaderFooter>,
     source_right: Option<&HeaderFooter>,
+    relationships: Option<&RelationshipMap>,
 ) -> Option<HeaderFooter> {
-    use serde_json::Value;
-
     fn tree(story: &HeaderFooter) -> Option<Value> {
         let mut value = serde_json::to_value(story).ok()?;
         if let Some(object) = value.as_object_mut() {
@@ -525,11 +604,13 @@ fn merge_alias(
     // Each alias has its own parsed baseline, including generated paragraph metadata.
     fn merge(
         left: &Value, right: &Value, source_left: &Value, source_right: &Value,
+        relationships: Option<&RelationshipMap>,
     ) -> Option<Value> {
-        if right == source_right || left == right {
+        let same = |a, b| same_value(a, b, relationships);
+        if same(right, source_right) || same(left, right) {
             return Some(left.clone());
         }
-        if left == source_left && (source_left == source_right || !right.is_object() && !right.is_array()) {
+        if same(left, source_left) && (same(source_left, source_right) || !right.is_object() && !right.is_array()) {
             return Some(right.clone());
         }
         if let (Some(left), Some(right)) = (left.as_object(), right.as_object()) {
@@ -539,7 +620,7 @@ fn merge_alias(
                 .collect();
             let mut fields = serde_json::Map::new();
             for key in keys {
-                let value = if matches!(key.as_str(), "sourceOrdinal" | "repeatedParaId") {
+                let value = if ignores_model_field(key, left, right, relationships) {
                     left.get(key).cloned().unwrap_or_default()
                 } else {
                     merge(
@@ -547,6 +628,7 @@ fn merge_alias(
                         right.get(key).unwrap_or(&Value::Null),
                         &source_left[key.as_str()],
                         &source_right[key.as_str()],
+                        relationships,
                     )?
                 };
                 if !value.is_null() {
@@ -559,10 +641,10 @@ fn merge_alias(
             && left.len() == right.len()
         {
             return left.iter().zip(right).enumerate().map(|(index, (first, second))| {
-                merge(first, second, &source_left[index], &source_right[index])
+                merge(first, second, &source_left[index], &source_right[index], relationships)
             }).collect::<Option<Vec<_>>>().map(Value::Array);
         }
-        if left == source_left {
+        if same(left, source_left) {
             return Some(right.clone());
         }
         // A previously absent object can be edited independently by both aliases.
@@ -578,7 +660,7 @@ fn merge_alias(
     let right_tree = tree(right)?;
     let source_left = source_left.map(tree).unwrap_or(Some(Value::Null))?;
     let source_right = source_right.map(tree).unwrap_or(Some(Value::Null))?;
-    let mut result = merge(&left_tree, &right_tree, &source_left, &source_right)?;
+    let mut result = merge(&left_tree, &right_tree, &source_left, &source_right, relationships)?;
     let object = result.as_object_mut()?;
     object.insert("type".into(), Value::String(left.story_type.clone()));
     object.insert("hdrFtrType".into(), Value::String(left.hdr_ftr_type.clone()));
@@ -606,7 +688,7 @@ impl NotePart<'_> {
             || (self.separators_read && !same_notes(self.separators, self.source_separators))
     }
 
-    fn prepare(self, limits: &ParseLimits) {
+    fn prepare(self, limits: &ParseLimits) -> Result<(), ParseError> {
         if !self.notes_read {
             self.notes.extend_from_slice(self.source_notes);
         }
@@ -620,32 +702,43 @@ impl NotePart<'_> {
                 originals.entry(note_key(note)).or_default().push(note);
             }
         }
+        let source_xml: BTreeSet<_> = originals.values().flatten()
+            .filter_map(|note| note.verbatim_xml.as_deref())
+            .collect();
         let mut budget = ParseBudget::new(limits);
         for note in self.notes.iter_mut().chain(self.separators.iter_mut()) {
             let originals = originals.get(&note_key(note)).map(Vec::as_slice).unwrap_or_default();
-            clear_stale_note_xml(note, originals, self.path, &mut budget);
+            clear_stale_note_xml(note, originals, &source_xml, self.path, &mut budget)?;
         }
+        Ok(())
     }
 }
 
 fn clear_stale_note_xml(
     note: &mut Note,
     originals: &[&Note],
+    source_xml: &BTreeSet<&str>,
     path: &str,
     budget: &mut ParseBudget<'_>,
-) {
+) -> Result<(), ParseError> {
     let matching = originals.iter().copied().find(|original| same_note_content(note, original));
     let Some(xml) = note.verbatim_xml.as_deref() else {
         note.verbatim_xml = matching.and_then(|original| original.verbatim_xml.clone());
         note.source_ordinal = matching.and_then(|original| original.source_ordinal);
-        return;
+        return Ok(());
     };
     if matching.is_some_and(|original| original.verbatim_xml.as_deref() == Some(xml)) {
         note.source_ordinal = matching.and_then(|original| original.source_ordinal);
-        return;
+        return Ok(());
     }
-    let stale = originals.iter().any(|original| original.verbatim_xml.as_deref() == Some(xml));
-    let valid = !stale && parse_verbatim_note(xml, note, path, budget).is_some_and(|edited| {
+    if source_xml.contains(xml)
+        || (originals.is_empty() && verbatim_note_has_other_id(xml, note, path, budget))
+    {
+        note.verbatim_xml = None;
+        note.source_ordinal = None;
+        return Ok(());
+    }
+    let consistent = parse_verbatim_note(xml, note, path, budget).is_some_and(|edited| {
         if same_model(&edited, &note.content) {
             return true;
         }
@@ -653,10 +746,32 @@ fn clear_stale_note_xml(
             .and_then(|source| parse_verbatim_note(source, note, path, budget))
             .is_some_and(|source| same_verbatim_note_content(&edited, &source, path, budget))
     });
-    if !valid {
-        note.verbatim_xml = None;
+    if !consistent {
+        return Err(save_error(format!(
+            "{} {} in {path} has verbatimXml that conflicts with its content",
+            note.story_type, note.id
+        )));
     }
     note.source_ordinal = None;
+    Ok(())
+}
+
+fn verbatim_note_has_other_id(
+    xml: &str,
+    note: &Note,
+    path: &str,
+    budget: &mut ParseBudget<'_>,
+) -> bool {
+    let Ok(parsed) = crate::xml::parse_xml_strict(xml.as_bytes(), path, budget) else {
+        return false;
+    };
+    let [element] = parsed.roots.as_slice() else {
+        return false;
+    };
+    element.local_name() == note.story_type
+        && element.attribute(Some("w"), "id")
+            .and_then(|id| id.trim().parse::<i64>().ok())
+            .is_some_and(|id| id as f64 != note.id)
 }
 
 fn parse_verbatim_note(
@@ -739,37 +854,58 @@ fn same_note_content(note: &Note, original: &Note) -> bool {
 }
 
 fn same_model<T: serde::Serialize + PartialEq + ?Sized>(left: &T, right: &T) -> bool {
-    use serde_json::Value;
+    same_model_with_relationships(left, right, None)
+}
 
-    fn same(left: &Value, right: &Value) -> bool {
-        match (left, right) {
-            (Value::Object(left), Value::Object(right)) => {
-                let linked_image = |fields: &serde_json::Map<String, Value>| {
-                    fields.get("type").and_then(Value::as_str) == Some("image")
-                        && fields.get("rId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
-                };
-                let linked_watermark = |fields: &serde_json::Map<String, Value>| {
-                    fields.get("kind").and_then(Value::as_str) == Some("picture")
-                        && fields.get("relId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
-                };
-                let image = linked_image(left) && linked_image(right);
-                let watermark = linked_watermark(left) && linked_watermark(right);
-                let ignore = |key: &str| matches!(key, "sourceOrdinal" | "repeatedParaId")
-                    || (image && matches!(key, "src" | "mimeType" | "filename"))
-                    || (watermark && matches!(key, "dataUrl" | "contentType"));
-                left.keys().filter(|key| !ignore(key)).count() == right.keys().filter(|key| !ignore(key)).count()
-                    && left.iter().filter(|(key, _)| !ignore(key)).all(|(key, value)| {
-                        right.get(key).is_some_and(|other| same(value, other))
-                    })
-            }
-            (Value::Array(left), Value::Array(right)) => left.len() == right.len()
-                && left.iter().zip(right).all(|(left, right)| same(left, right)),
-            _ => left == right,
-        }
-    }
+fn same_model_with_relationships<T: serde::Serialize + PartialEq + ?Sized>(
+    left: &T,
+    right: &T,
+    relationships: Option<&RelationshipMap>,
+) -> bool {
     left == right || match (serde_json::to_value(left), serde_json::to_value(right)) {
-        (Ok(left), Ok(right)) => same(&left, &right),
+        (Ok(left), Ok(right)) => same_value(&left, &right, relationships),
         _ => false,
+    }
+}
+
+fn ignores_model_field(
+    key: &str,
+    left: &Map<String, Value>,
+    right: &Map<String, Value>,
+    relationships: Option<&RelationshipMap>,
+) -> bool {
+    let linked_image = |fields: &Map<String, Value>| {
+        fields.get("type").and_then(Value::as_str) == Some("image")
+            && fields.get("rId").and_then(Value::as_str).is_some_and(|id| !id.is_empty())
+    };
+    let linked_watermark = |fields: &Map<String, Value>| {
+        fields.get("kind").and_then(Value::as_str) == Some("picture")
+            && (fields.get("mediaPath").and_then(Value::as_str).is_some_and(|path| !path.is_empty())
+                || fields.get("relId").and_then(Value::as_str).is_some_and(|id| {
+                    relationships.is_some_and(|relationships| relationships.contains_key(id))
+                }))
+    };
+    match key {
+        "sourceOrdinal" | "repeatedParaId" => true,
+        "src" | "mimeType" => linked_image(left) && linked_image(right),
+        "dataUrl" | "contentType" => linked_watermark(left) && linked_watermark(right),
+        _ => false,
+    }
+}
+
+fn same_value(left: &Value, right: &Value, relationships: Option<&RelationshipMap>) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            let ignore = |key| ignores_model_field(key, left, right, relationships);
+            left.keys().filter(|key| !ignore(key.as_str())).count()
+                == right.keys().filter(|key| !ignore(key.as_str())).count()
+                && left.iter().filter(|(key, _)| !ignore(key.as_str())).all(|(key, value)| {
+                    right.get(key).is_some_and(|other| same_value(value, other, relationships))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) => left.len() == right.len()
+            && left.iter().zip(right).all(|(left, right)| same_value(left, right, relationships)),
+        _ => left == right,
     }
 }
 

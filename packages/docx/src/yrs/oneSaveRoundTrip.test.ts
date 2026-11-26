@@ -948,3 +948,42 @@ it('uses the session save plan with a separate byte-identical raw buffer', () =>
     expect(unzipContainer(new Uint8Array(saved))).toEqual(unzipContainer((await saveYrsDocx(session, noStamp)).bytes));
   })
 );
+
+it('removes comment markers from a Windows-1252 main part without changing its text', async () => {
+  const original = await parseDocx(fixture.bytes, { preloadFonts: false });
+  const id = original.package.document.comments![0]!.id;
+  const body = `<?xml version="1.0" encoding="windows-1252"?><w:document xmlns:w="${NS.w}"><w:body><w:p><w:commentRangeStart w:id="${id}"/><w:r><w:t>Café</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p></w:body></w:document>`;
+  const parts = { ...sourceParts, [BODY]: Uint8Array.from(body, char => char.charCodeAt(0)) };
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  document.package.document.comments = [];
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  const xml = new TextDecoder('windows-1252').decode(saved[BODY]);
+  expect(xml).toContain('encoding="windows-1252"');
+  expect(xml).toContain('<w:t>Café</w:t>');
+  expect(xml).not.toMatch(/<w:comment(?:RangeStart|RangeEnd|Reference)\b/);
+});
+
+it('reports a conflicting verbatim note edit with its note ID', async () => {
+  const document = await parseDocx(bookmarkedNotePackage(), { preloadFonts: false });
+  const note = document.package.footnotes![0]!;
+  note.verbatimXml = note.verbatimXml!.replace('Original note', 'Conflicting note');
+  await expect(repackDocx(document, noStamp))
+    .rejects.toThrow('footnote 73 in word/footnotes.xml has verbatimXml that conflicts with its content');
+});
+
+it('rejects a replacement numbering definition before rewriting the body', async () => {
+  const parts = {
+    ...sourceParts,
+    'word/numbering.xml': encodePart(`<w:numbering xmlns:w="${NS.w}"><w:abstractNum w:abstractNumId="2"/><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>`),
+  };
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  document.package.numbering!.nums[0]!.abstractNumId = 3;
+  await expect(repackDocx(document, noStamp)).rejects.toThrow('cannot replace existing numbering definitions');
+});
+
+it('rejects cycles before comparing a parsed model with its save fingerprint', async () => {
+  const document = await parseDocx(fixture.bytes, { preloadFonts: false });
+  const body = document.package.document;
+  Object.assign(body, { cycle: body });
+  await expect(repackDocx(document, noStamp)).rejects.toThrow('save.document.cycle contains a cycle');
+});

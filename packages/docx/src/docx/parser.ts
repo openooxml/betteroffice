@@ -39,7 +39,7 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
   try {
     onProgress('Extracting DOCX...', 0);
     const parsed = parseDocumentWithRust(buffer, rustOptions(options));
-    rememberParsedModel(parsed.document);
+    if (parsed.sourceDigest) rememberParsedModel(parsed.document, parsed.sourceDigest);
     emitProgress(options, onProgress);
     await loadHostFonts(parsed, options.preloadFonts ?? true, onProgress);
     onProgress('Assembling document...', 95);
@@ -65,6 +65,7 @@ function rustOptions(options: ParseOptions): RustS9ParseOptions {
     parseNotes: options.parseNotes ?? true,
     detectVariables: false,
     includeCanonical: false,
+    reportSourceDigest: true,
   };
 }
 

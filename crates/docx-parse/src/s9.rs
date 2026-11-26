@@ -476,6 +476,8 @@ fn parse_s9_package_impl(
     let mut budget = ParseBudget::new(limits);
     if let Some(table) = media_table {
         budget.read_media_from(table);
+    } else if save_comparison {
+        budget.compare_media_from(parts);
     }
     if options.source_ordinals {
         budget.record_source_ordinals();

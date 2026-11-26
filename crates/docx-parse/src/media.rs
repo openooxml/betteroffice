@@ -551,32 +551,41 @@ pub fn resolve_image_data(
         return ResolvedImageData::default();
     }
     let target = &relationship.target;
-    let normalized = normalize_media_path(target);
     let filename = target.rsplit('/').next().map(str::to_owned);
-    if let Some(media) = media {
-        for candidate in [
-            normalized,
-            target.trim_start_matches('/').to_owned(),
-            format!("word/{}", target.trim_start_matches('/')),
-        ] {
-            if let Some(file) = find_case_insensitive(media, &candidate) {
-                return ResolvedImageData {
-                    src: Some(if file.data_url.is_empty() {
-                        file.base64.clone()
-                    } else {
-                        file.data_url.clone()
-                    }),
-                    mime_type: Some(file.mime_type.clone()),
-                    filename,
-                };
-            }
-        }
+    if let Some(file) = media.and_then(|media| find_relationship_media(media, target)) {
+        return ResolvedImageData {
+            src: Some(if file.data_url.is_empty() {
+                file.base64.clone()
+            } else {
+                file.data_url.clone()
+            }),
+            mime_type: Some(file.mime_type.clone()),
+            filename,
+        };
     }
     ResolvedImageData {
         src: None,
         mime_type: Some(media_mime_type(target).to_owned()),
         filename,
     }
+}
+
+pub(crate) fn comparison_image_bytes<'a>(
+    relationship_id: &str,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    parts: &'a [(String, Vec<u8>)],
+) -> Option<&'a [u8]> {
+    let target = &relationships?.get(relationship_id)?.target;
+    let file = find_relationship_media(media?, target)?;
+    crate::s8::find_part(parts, &file.path).map(|(_, bytes)| bytes)
+}
+
+fn find_relationship_media<'a>(media: &'a MediaMap, target: &str) -> Option<&'a MediaFile> {
+    let relative = target.trim_start_matches('/');
+    [normalize_media_path(target), relative.to_owned(), format!("word/{relative}")]
+        .into_iter()
+        .find_map(|candidate| find_case_insensitive(media, &candidate))
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
