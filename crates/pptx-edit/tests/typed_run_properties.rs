@@ -158,7 +158,14 @@ fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["bold", "color", "fontFamily", "fontSizePt", "italic", "underline"]
+            [
+                "bold",
+                "color",
+                "fontFamily",
+                "fontSizePt",
+                "italic",
+                "underline"
+            ]
         );
     }
 }
