@@ -3504,11 +3504,10 @@ fn segment_properties(
     let source_family = template
         .and_then(|element| element.child("latin"))
         .and_then(|latin| latin.attribute("typeface"));
-    if let Some(family) = segment.properties.font_family.as_deref()
-        && source_family != Some(family)
-        && !source_family.is_some_and(|source| {
-            source.starts_with('+') && resolve_theme_font_ref(theme, source) == family
-        })
+    if let Some(source) = source_family
+        && let Some(family) = segment.properties.font_family.as_deref()
+        && source != family
+        && !(source.starts_with('+') && resolve_theme_font_ref(theme, source) == family)
         && ooxml_text::font_slot_characters(segment.text, false, false).any(|(_, slot)| slot == 2)
     {
         apply_font_typeface(
@@ -4904,7 +4903,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_with_a_resolved_theme_font_keeps_the_source_east_asian_typeface() {
+    fn picking_the_resolved_direct_latin_font_cannot_replace_the_east_asian_typeface() {
         let mut theme = Theme::default();
         theme.font_scheme.minor_font.latin = "Aptos".to_owned();
         theme.font_scheme.major_font.ea = "Yu Gothic".to_owned();
@@ -4945,6 +4944,43 @@ mod tests {
                 assert!(xml.contains(&appended), "{xml}");
             }
         }
+    }
+
+    fn rebuild_run_with_inherited_latin(text: &str, family: &str) -> String {
+        let mut theme = Theme::default();
+        theme.font_scheme.minor_font.latin = "Aptos".to_owned();
+        let source = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pPr><a:defRPr><a:latin typeface="+mn-lt"/></a:defRPr></a:pPr><a:r><a:rPr><a:ea typeface="SimSun"/></a:rPr><a:t>中</a:t></a:r></a:p>"#;
+        rebuilt_paragraph_with_theme(
+            source.as_bytes(),
+            &[(
+                text,
+                RunProperties {
+                    font_family: Some(family.to_owned()),
+                    ..RunProperties::default()
+                },
+            )],
+            Some(&theme),
+        )
+    }
+
+    #[test]
+    fn typing_with_inherited_latin_keeps_the_source_east_asian_typeface() {
+        let xml = rebuild_run_with_inherited_latin("中文", "Aptos");
+        assert!(
+            xml.contains(r#"<a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_font_pick_without_direct_latin_cannot_replace_the_east_asian_typeface() {
+        let xml = rebuild_run_with_inherited_latin("中", "Microsoft YaHei");
+        assert!(
+            xml.contains(
+                r#"<a:latin typeface="Microsoft YaHei"/><a:ea typeface="SimSun"/></a:rPr><a:t>中</a:t>"#
+            ),
+            "{xml}"
+        );
     }
 
     #[test]
