@@ -1077,7 +1077,7 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
   const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
   const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
-    ...fonts, default: fonts, createFontProvider: () => source,
+    ...fonts, createFontProvider: () => source,
   });
   const fetch = spyOnFontFetch(fontAssetResponse);
   const repainted = deferred<void>();
@@ -1120,7 +1120,7 @@ test.each([
   browser();
   const previous = getFontCdnConfiguration();
   const runtime = fontRuntimeWithoutPacks();
-  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const fetch = spyOnFontFetch(async () => {
     if (failure === 'network') throw new TypeError('Offline');
     return new Response(null, { status: 403 });
@@ -1207,7 +1207,7 @@ test('families that share a script file share the explicit CDN cooldown', async 
   browser();
   const previous = getFontCdnConfiguration();
   const runtime = fontRuntimeWithoutPacks();
-  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
@@ -1247,7 +1247,7 @@ test('T14: repaint, editing another face and reopening share the CDN cooldown', 
   const runtime = fontRuntimeWithoutPacks();
   const source = runtime.createFontProvider(undefined, { strict: true });
   const resolve = spyOn(source, 'resolve');
-  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, createFontProvider: () => source });
+  const load = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, createFontProvider: () => source });
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
