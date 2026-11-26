@@ -11,6 +11,7 @@ import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../sh
 import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import type { PptxPaintFont } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { engineKind } from '../wasm/enginePng';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace, initWasm, openPresentation } from '../wasm/loader';
@@ -893,7 +894,7 @@ for (const [latinFamily, arabicFamily, italic, separateSlides] of [
       zip.file(path, slide.replace('i="1"', 'b="1" i="1"').replace('2026', 'مرحبا'));
       bytes = await zip.generateAsync({ type: 'uint8array' });
     }
-    const installed: { family: string; digest: string; descriptors: FontFaceDescriptors }[] = [];
+    const installed: (Pick<PptxPaintFont, 'family' | 'descriptors'> & { digest: string })[] = [];
     const drawn: { text: string; font: string }[] = [];
     const digest = (bytes: ArrayBuffer) => createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
     const latinDigest = digest(latin);
@@ -920,8 +921,8 @@ for (const [latinFamily, arabicFamily, italic, separateSlides] of [
       const latinFont = drawn.find(({ text }) => /[0-9]/.test(text))?.font;
       const arabicFont = drawn.find(({ text }) => /[\u0600-\u06ff]/.test(text))?.font;
       const firstFamily = (font: string | undefined) => font?.match(/px (?:"([^"]*)"|([^,]+))/)?.slice(1).find(Boolean);
-      const latinCss = firstFamily(latinFont);
-      const arabicCss = firstFamily(arabicFont);
+      const latinCss = firstFamily(latinFont)!;
+      const arabicCss = firstFamily(arabicFont)!;
       expect(installed).toContainEqual({ family: latinCss, digest: latinDigest,
         descriptors: { weight: bold ? '700' : '400', style: italic ? 'italic' : 'normal' } });
       expect(installed.filter((face) => face.family === arabicCss)).toEqual([{
