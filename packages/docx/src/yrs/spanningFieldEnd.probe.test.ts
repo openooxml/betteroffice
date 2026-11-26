@@ -6,19 +6,24 @@ import { createYrsSession, saveYrsDocx } from './index';
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const DOCUMENT_PART = 'word/document.xml';
 const BODY_NEXT = 'BODYNEXT';
+const INSERTED = 'INSERTED';
+const ENTRY_TWO = 'ENTRYTWO';
 const PAGE_MARKERS = ['PAGEONE', 'PAGETWO', 'PAGETHREE'] as const;
 const S1_EDITS = [
   ['last', 'SPANEND'],
   ['first', 'SPANSTART'],
   ['after', BODY_NEXT],
   ['none', null],
+  ['insert_inside', null],
 ] as const;
 const TOC_EDITS = [
   ['last', 'ENTRYTHREE'],
-  ['middle', 'ENTRYTWO'],
+  ['middle', ENTRY_TWO],
   ['first', 'ENTRYONE'],
   ['after', BODY_NEXT],
   ['none', null],
+  ['insert_inside', null],
+  ['delete_middle', null],
 ] as const;
 
 const fieldChar = (kind: string) => `<w:r><w:fldChar w:fldCharType="${kind}"/></w:r>`;
@@ -38,7 +43,7 @@ function body(scenario: 'S1' | 'TA' | 'TB'): string {
     textRun('SPANEND') + end + textRun('AFTERSPAN'),
   ] : [
     fieldStart('TOC \\o "1-3" \\h \\z \\u') + entry(1, 'ENTRYONE', PAGE_MARKERS[0]),
-    entry(2, 'ENTRYTWO', PAGE_MARKERS[1]),
+    entry(2, ENTRY_TWO, PAGE_MARKERS[1]),
     entry(3, 'ENTRYTHREE', PAGE_MARKERS[2]) + (scenario === 'TA' ? end : ''),
   ];
   if (scenario === 'TB') paragraphs.push(end);
@@ -115,6 +120,7 @@ test('measure paragraph-spanning field ends after a session save', async () => {
       let reopen: 'swallowed' | 'ok' | 'err' = 'err';
       let nested = 'nnn';
       let nestedModel = 'nnn';
+      let routeNote = 'n/a';
       try {
         const source = await packageBytes(body(scenario));
         const session = await createYrsSession();
@@ -124,8 +130,21 @@ test('measure paragraph-spanning field ends after a session save', async () => {
             const match = session.searchText(marker, { caseSensitive: true }).find(({ story }) => story === 'body');
             if (!match) throw new Error(`Missing edit marker ${marker}`);
             session.insertText({ story: match.story, paraId: match.paraId, offset: match.end }, ' edited');
+          } else if (edit === 'insert_inside' || edit === 'delete_middle') {
+            const story = 'body';
+            const paragraph = session.paragraphs(story)[scenario === 'S1' ? 0 : 1];
+            if (!paragraph) throw new Error(`Missing paragraph for ${edit}`);
+            const { paraId } = paragraph;
+            const result = session.applyEdits({
+              expectVersion: session.version(),
+              steps: [edit === 'insert_inside'
+                ? { op: 'insertParagraphs', target: { story, paraId }, at: 'end', paragraphs: [{ text: INSERTED }] }
+                : { op: 'deleteParagraphs', story, firstParaId: paraId, lastParaId: paraId }],
+            });
+            if (!result.ok) throw new Error(`Session refused ${edit}`);
           }
-          const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
+          const { bytes, structureDropped } = await saveYrsDocx(session, { updateModifiedDate: false });
+          if (structureDropped?.length) routeNote = `whole:${structureDropped.map(({ part }) => part).join(',')}`;
           const zip = await JSZip.loadAsync(bytes);
           const part = zip.file(DOCUMENT_PART);
           if (!part) throw new Error('Missing word/document.xml');
@@ -135,9 +154,14 @@ test('measure paragraph-spanning field ends after a session save', async () => {
           endPara = outerEndParagraph(xml);
           const text = Array.from(xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g), (match) => match[1]).join('');
           nested = nestedFlags((target) => text.includes(target));
-          const markers = edits.flatMap(([, target]) => target === null ? [] : [target]);
+          const deletedMiddle = edit === 'delete_middle';
+          const expectedNested = deletedMiddle ? 'yny' : 'yyy';
+          const markers = edits.flatMap(([, target]) =>
+            target === null || (deletedMiddle && target === ENTRY_TWO) ? [] : [target]);
           textOk = markers.every((target) => text.includes(target === marker ? `${target} edited` : target)) &&
-            (scenario === 'S1' ? text.includes('AFTERSPAN') : nested === 'yyy');
+            (scenario === 'S1' ? text.includes('AFTERSPAN') : nested === expectedNested) &&
+            (edit !== 'insert_inside' || text.includes(INSERTED)) &&
+            (!deletedMiddle || !text.includes(ENTRY_TWO));
           const document = await parseDocx(bytes, { preloadFonts: false });
           const blocks = document.package.document.content;
           const swallowed = blocks.some((block, index) => fieldContainsBodyNext(block, blocks.slice(index + 1)));
@@ -150,7 +174,7 @@ test('measure paragraph-spanning field ends after a session save', async () => {
         reopen = 'err';
       }
       console.log(`SPAN session ${scenario} ${edit} | begins=${begins} ends=${ends} | end_para=${endPara} | ` +
-        `text_ok=${textOk ? 'yes' : 'no'} | reopen=${reopen} | nested=${nested} | nested_model=${nestedModel}`);
+        `text_ok=${textOk ? 'yes' : 'no'} | reopen=${reopen} | nested=${nested} | nested_model=${nestedModel} | route_note=${routeNote}`);
     }
   }
 }, 30_000);

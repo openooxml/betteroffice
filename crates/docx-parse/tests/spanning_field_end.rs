@@ -21,19 +21,38 @@ const DOCUMENT_PART: &str = "word/document.xml";
 const BEGIN: &str = r#"w:fldCharType="begin""#;
 const END: &str = r#"w:fldCharType="end""#;
 const BODY_NEXT: &str = "BODYNEXT";
+const INSERTED: &str = "INSERTED";
+const ENTRY_TWO: &str = "ENTRYTWO";
 const PAGE_MARKERS: [&str; 3] = ["PAGEONE", "PAGETWO", "PAGETHREE"];
-const S1_EDITS: &[(&str, Option<&str>)] = &[
-    ("last", Some("SPANEND")),
-    ("first", Some("SPANSTART")),
-    ("after", Some(BODY_NEXT)),
-    ("none", None),
+
+#[derive(Clone, Copy)]
+enum Edit {
+    Text(&'static str),
+    Paragraph(ParagraphEdit),
+    None,
+}
+
+#[derive(Clone, Copy)]
+enum ParagraphEdit {
+    InsertAfter(usize),
+    Delete(usize),
+}
+
+const S1_EDITS: &[(&str, Edit)] = &[
+    ("last", Edit::Text("SPANEND")),
+    ("first", Edit::Text("SPANSTART")),
+    ("after", Edit::Text(BODY_NEXT)),
+    ("none", Edit::None),
+    ("insert_inside", Edit::Paragraph(ParagraphEdit::InsertAfter(0))),
 ];
-const TOC_EDITS: &[(&str, Option<&str>)] = &[
-    ("last", Some("ENTRYTHREE")),
-    ("middle", Some("ENTRYTWO")),
-    ("first", Some("ENTRYONE")),
-    ("after", Some(BODY_NEXT)),
-    ("none", None),
+const TOC_EDITS: &[(&str, Edit)] = &[
+    ("last", Edit::Text("ENTRYTHREE")),
+    ("middle", Edit::Text(ENTRY_TWO)),
+    ("first", Edit::Text("ENTRYONE")),
+    ("after", Edit::Text(BODY_NEXT)),
+    ("none", Edit::None),
+    ("insert_inside", Edit::Paragraph(ParagraphEdit::InsertAfter(1))),
+    ("delete_middle", Edit::Paragraph(ParagraphEdit::Delete(1))),
 ];
 
 fn field_char(kind: &str) -> String {
@@ -72,7 +91,7 @@ fn body(scenario: &str) -> String {
     } else {
         let toc = field_start(r#"TOC \o "1-3" \h \z \u"#);
         let first = format!("{toc}{}", entry(1, "ENTRYONE", PAGE_MARKERS[0]));
-        let second = entry(2, "ENTRYTWO", PAGE_MARKERS[1]);
+        let second = entry(2, ENTRY_TWO, PAGE_MARKERS[1]);
         let third = entry(3, "ENTRYTHREE", PAGE_MARKERS[2]);
         if scenario == "TB" {
             vec![first, second, third, end]
@@ -135,7 +154,50 @@ fn edit_runs(value: &mut Value, marker: &str, edited: &str) -> usize {
     }
 }
 
-fn save(source: &[u8], marker: Option<&str>) -> Result<Vec<u8>, Box<dyn Error>> {
+fn splice_paragraphs(
+    paragraphs: &mut Vec<Value>,
+    edit: ParagraphEdit,
+    digest: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let (ParagraphEdit::InsertAfter(index) | ParagraphEdit::Delete(index)) = edit;
+    if index >= paragraphs.len() {
+        return Err("missing paragraph for structural edit".into());
+    }
+    for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
+        paragraph["sourceOrdinal"] = json!(ordinal);
+    }
+    let (inserted, removed) = match edit {
+        ParagraphEdit::InsertAfter(index) => {
+            let mut paragraph = paragraphs.last().ok_or("missing plain paragraph")?.clone();
+            paragraph
+                .as_object_mut()
+                .ok_or("invalid plain paragraph")?
+                .remove("sourceOrdinal");
+            if edit_runs(&mut paragraph, BODY_NEXT, INSERTED) == 0 {
+                return Err("missing plain paragraph text".into());
+            }
+            paragraphs.insert(index + 1, paragraph);
+            (vec![json!({"after": index})], Vec::new())
+        }
+        ParagraphEdit::Delete(index) => {
+            paragraphs.remove(index);
+            (Vec::new(), vec![index])
+        }
+    };
+    let ordinals: Vec<_> = paragraphs
+        .iter()
+        .filter_map(|paragraph| paragraph["sourceOrdinal"].as_u64())
+        .collect();
+    Ok(json!({"splicedParts": [{
+        "part": DOCUMENT_PART,
+        "sha256": digest,
+        "paragraphs": ordinals,
+        "inserted": inserted,
+        "removed": removed,
+    }]}))
+}
+
+fn save(source: &[u8], edit: Edit) -> Result<Vec<u8>, Box<dyn Error>> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default())?;
     let mut package = serde_json::to_value(parsed.document.package)?;
     package["document"]
@@ -147,22 +209,27 @@ fn save(source: &[u8], marker: Option<&str>) -> Result<Vec<u8>, Box<dyn Error>> 
         "document": package["document"],
         "options": {"updateModifiedDate": false}
     });
-    let mut targets = Vec::new();
-    if let Some(marker) = marker {
-        let edited = format!("{marker} edited");
-        let block = request["document"]["content"]
-            .as_array_mut()
-            .ok_or("missing body blocks")?
-            .iter_mut()
-            .enumerate()
-            .find_map(|(index, value)| (edit_runs(value, marker, &edited) > 0).then_some(index))
-            .ok_or("missing edit marker")?;
-        targets.push(json!({"path": [0, block], "block": block}));
-    }
     let digest = format!("{:x}", Sha256::digest(document_xml(source)?.as_bytes()));
-    request["selective"] = json!({
-        "sourceParagraphs": {"partSha256": digest, "paragraphs": targets}
-    });
+    let paragraphs = request["document"]["content"]
+        .as_array_mut()
+        .ok_or("missing body blocks")?;
+    if let Edit::Paragraph(edit) = edit {
+        request["paragraphIds"] = splice_paragraphs(paragraphs, edit, &digest)?;
+    } else {
+        let mut targets = Vec::new();
+        if let Edit::Text(marker) = edit {
+            let edited = format!("{marker} edited");
+            let block = paragraphs
+                .iter_mut()
+                .enumerate()
+                .find_map(|(index, value)| (edit_runs(value, marker, &edited) > 0).then_some(index))
+                .ok_or("missing edit marker")?;
+            targets.push(json!({"path": [0, block], "block": block}));
+        }
+        request["selective"] = json!({
+            "sourceParagraphs": {"partSha256": digest, "paragraphs": targets}
+        });
+    }
     let request: S13SaveRequest = serde_json::from_value(request)?;
     Ok(write_docx_s13(request, source)?)
 }
@@ -292,27 +359,36 @@ struct Measurement {
     nested_model: String,
 }
 
-fn edits(scenario: &str) -> &'static [(&'static str, Option<&'static str>)] {
+fn edits(scenario: &str) -> &'static [(&'static str, Edit)] {
     if scenario == "S1" { S1_EDITS } else { TOC_EDITS }
 }
 
-fn measure(scenario: &str, marker: Option<&str>) -> Result<Measurement, Box<dyn Error>> {
+fn measure(scenario: &str, edit: Edit) -> Result<Measurement, Box<dyn Error>> {
     let source = package(&body(scenario))?;
-    let saved = save(&source, marker)?;
+    let saved = save(&source, edit)?;
     let xml = document_xml(&saved)?;
     let text = visible(&xml);
     let nested = nested_flags(|target| text.contains(target));
+    let deleted_middle = matches!(edit, Edit::Paragraph(ParagraphEdit::Delete(_)));
+    let inserted_inside = matches!(edit, Edit::Paragraph(ParagraphEdit::InsertAfter(_)));
+    let expected_nested = if deleted_middle { "yny" } else { "yyy" };
     let text_ok = edits(scenario)
         .iter()
-        .filter_map(|&(_, target)| target)
+        .filter_map(|&(_, edit)| match edit {
+            Edit::Text(target) => Some(target),
+            _ => None,
+        })
+        .filter(|&target| !deleted_middle || target != ENTRY_TWO)
         .chain((scenario == "S1").then_some("AFTERSPAN"))
+        .chain(inserted_inside.then_some(INSERTED))
         .all(|target| {
-            if marker == Some(target) {
+            if matches!(edit, Edit::Text(marker) if marker == target) {
                 text.contains(&format!("{target} edited"))
             } else {
                 text.contains(target)
             }
-        }) && (scenario == "S1" || nested == "yyy");
+        }) && (scenario == "S1" || nested == expected_nested)
+        && (!deleted_middle || !text.contains(ENTRY_TWO));
     let (reopen, nested_model) = reopen(&saved).unwrap_or_else(|_| ("err", "nnn".to_owned()));
     Ok(Measurement {
         begins: xml.matches(BEGIN).count(),
@@ -329,8 +405,8 @@ fn measure(scenario: &str, marker: Option<&str>) -> Result<Measurement, Box<dyn 
 #[ignore]
 fn spanning_field_end_probe() {
     for scenario in ["S1", "TA", "TB"] {
-        for &(edit, marker) in edits(scenario) {
-            let measured = measure(scenario, marker).unwrap_or_else(|_| Measurement {
+        for &(name, edit) in edits(scenario) {
+            let measured = measure(scenario, edit).unwrap_or_else(|_| Measurement {
                 begins: 0,
                 ends: 0,
                 end_para: None,
@@ -344,7 +420,7 @@ fn spanning_field_end_probe() {
                 .map_or_else(|| "none".to_owned(), |index| index.to_string());
             let text_ok = if measured.text_ok { "yes" } else { "no" };
             println!(
-                "SPAN facade {scenario} {edit} | begins={} ends={} | end_para={end_para} | text_ok={text_ok} | reopen={} | nested={} | nested_model={}",
+                "SPAN facade {scenario} {name} | begins={} ends={} | end_para={end_para} | text_ok={text_ok} | reopen={} | nested={} | nested_model={} | route_note=n/a",
                 measured.begins,
                 measured.ends,
                 measured.reopen,
@@ -358,8 +434,8 @@ fn spanning_field_end_probe() {
 #[test]
 fn a_spanning_field_keeps_its_end_when_its_closing_paragraph_is_edited() {
     let measured = [
-        ("S1", measure("S1", Some("SPANEND"))),
-        ("TA", measure("TA", Some("ENTRYTHREE"))),
+        ("S1", measure("S1", Edit::Text("SPANEND"))),
+        ("TA", measure("TA", Edit::Text("ENTRYTHREE"))),
     ];
     let passes = measured.iter().all(|(_, result)| {
         result
