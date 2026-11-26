@@ -2919,68 +2919,115 @@ fn cached_result_children(field_value: &Value) -> impl DoubleEndedIterator<Item 
         })
 }
 
-fn nested_field_hidden(node: &Value, styles: &StyleResolver) -> bool {
-    let formatting = field(Some(node), "formatting");
-    let effective = styles.run_formatting(None, formatting);
-    // The parser can adopt a result run's formatting when the field has none.
-    boolean(field(effective.as_ref(), "hidden")) == Some(true)
-        && formatting != first_field_run_formatting(flat_field_result(node))
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CachedResultScope {
+    Owner,
+    OwnerHyperlink,
+    Container,
+    Nested,
 }
 
 fn cached_result_fragments<'a>(
     field_value: &'a Value,
+    runs: &'a [Value],
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
-    projected_result_indexes: Option<&HashSet<usize>>,
+    projected: bool,
 ) -> Option<Vec<&'a str>> {
+    let inline = structured_field_result(field_value)?;
+    let default_character = styles
+        .default_style("character")
+        .and_then(|style| field(Some(style), "rPr"));
+    let default_run = default_character
+        .and_then(|formatting| merge_style_run_formatting(style_formatting, Some(formatting)));
+    let style_formatting = default_run.as_ref().or(style_formatting);
+    let flattened_complex_result =
+        !projected && string(field(Some(field_value), "type")) == Some("complexField");
+    let mut owner_runs = runs
+        .iter()
+        .filter(|run| string(field(Some(run), "type")) == Some("run"))
+        .peekable();
+    let mut pending: Vec<_> = inline
+        .iter()
+        .rev()
+        .filter(|child| {
+            !projected
+                || !matches!(
+                    string(field(Some(child), "type")),
+                    Some("hyperlink" | "simpleField")
+                )
+        })
+        .map(|child| (child, CachedResultScope::Owner))
+        .collect();
     let mut fragments = Vec::new();
     let mut has_nested_result = false;
-    let mut pending: Vec<_> = structured_field_result(field_value)?
-        .iter()
-        .enumerate()
-        .rev()
-        .filter(|(index, _)| {
-            projected_result_indexes.is_none_or(|indexes| !indexes.contains(index))
-        })
-        .map(|(_, child)| (child, None))
-        .collect();
-    while let Some((node, nested_hidden)) = pending.pop() {
-        let children = match string(field(Some(node), "type")) {
+    while let Some((node, scope)) = pending.pop() {
+        let kind = string(field(Some(node), "type"));
+        let (children, child_scope) = match kind {
             Some("run") => {
-                let hidden = nested_hidden.is_some_and(|fallback| {
+                if scope == CachedResultScope::Nested {
                     let formatting =
                         styles.run_formatting(style_formatting, field(Some(node), "formatting"));
-                    boolean(field(formatting.as_ref(), "hidden")).unwrap_or(fallback)
-                });
-                if !hidden {
-                    fragments.extend(cached_run_texts(node));
+                    if boolean(field(formatting.as_ref(), "hidden")) != Some(true) {
+                        fragments.extend(cached_run_texts(node));
+                    }
+                } else if matches!(
+                    scope,
+                    CachedResultScope::Owner | CachedResultScope::OwnerHyperlink
+                ) && let Some(run) =
+                    owner_runs.next_if(|run| cached_run_texts(run).eq(cached_run_texts(node)))
+                {
+                    fragments.extend(cached_run_texts(run));
                 }
                 continue;
             }
-            Some(kind @ ("complexField" | "simpleField")) => {
+            Some("complexField" | "simpleField") => {
                 has_nested_result = true;
-                let hidden = nested_hidden.unwrap_or(false)
-                    || (kind == "complexField" && nested_field_hidden(node, styles));
+                if flattened_complex_result
+                    && scope == CachedResultScope::Owner
+                    && kind == Some("simpleField")
+                {
+                    for run in flat_field_result(node)
+                        .iter()
+                        .filter(|run| string(field(Some(run), "type")) == Some("run"))
+                    {
+                        let _ = owner_runs
+                            .next_if(|owner| cached_run_texts(owner).eq(cached_run_texts(run)));
+                    }
+                }
                 pending.extend(
                     cached_result_children(node)
                         .rev()
-                        .map(|child| (child, Some(hidden))),
+                        .map(|child| (child, CachedResultScope::Nested)),
                 );
                 continue;
             }
-            Some("inlineSdt") => field(Some(node), "content"),
-            Some("hyperlink") => field(Some(node), "structuredChildren")
-                .filter(|value| !value.is_null())
-                .or_else(|| field(Some(node), "children")),
-            _ => None,
+            Some("inlineSdt") => (field(Some(node), "content"), CachedResultScope::Container),
+            Some("hyperlink") => (
+                field(Some(node), "structuredChildren")
+                    .filter(|value| !value.is_null())
+                    .or_else(|| field(Some(node), "children")),
+                if flattened_complex_result && scope == CachedResultScope::Owner {
+                    CachedResultScope::OwnerHyperlink
+                } else {
+                    CachedResultScope::Container
+                },
+            ),
+            _ => continue,
+        };
+        let child_scope = if scope == CachedResultScope::Nested {
+            scope
+        } else {
+            child_scope
         };
         pending.extend(
             array(children)
                 .iter()
                 .rev()
-                .map(|child| (child, nested_hidden)),
+                .map(|child| (child, child_scope)),
         );
     }
+    fragments.extend(owner_runs.flat_map(cached_run_texts));
     has_nested_result.then_some(fragments)
 }
 
@@ -2990,7 +3037,7 @@ fn field_payload(
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
-    field_payload_with_projection(field_value, style_formatting, styles, source, None)
+    field_payload_with_projection(field_value, style_formatting, styles, source, false)
 }
 
 fn field_payload_with_projection(
@@ -2998,26 +3045,29 @@ fn field_payload_with_projection(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     source: &BTreeMap<String, String>,
-    projected_result_indexes: Option<&HashSet<usize>>,
+    projected: bool,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
-    let runs = if projected_result_indexes.is_some() {
+    let runs = if projected {
         structured_field_result(field_value).unwrap_or(&[])
     } else {
         flat_field_result(field_value)
     };
+    let cached_text: String = runs
+        .iter()
+        .filter(|child| string(field(Some(child), "type")) == Some("run"))
+        .flat_map(cached_run_texts)
+        .collect();
+    let has_cached_result = !cached_text.is_empty();
     let display_text: String = match cached_result_fragments(
         field_value,
+        runs,
         style_formatting,
         styles,
-        projected_result_indexes,
+        projected,
     ) {
         Some(fragments) => fragments.into_iter().collect(),
-        None => runs
-            .iter()
-            .filter(|child| string(field(Some(child), "type")) == Some("run"))
-            .flat_map(cached_run_texts)
-            .collect(),
+        None => cached_text,
     };
     let formatting = field_formatting_from_runs(field_value, runs);
     let merged = merge_text_formatting(style_formatting, formatting);
@@ -3030,7 +3080,7 @@ fn field_payload_with_projection(
             "fldLock": boolean(field(Some(field_value), "fldLock")).unwrap_or(false),
             "dirty": boolean(field(Some(field_value), "dirty")).unwrap_or(false),
             "displayMode": string(field(field(Some(field_value), "fieldTree"), "displayMode")).unwrap_or("result"),
-            "hasCachedResult": !display_text.is_empty(),
+            "hasCachedResult": has_cached_result,
             "fieldData": source_json(field_value, source),
             "modelKind": "field"
         })),
@@ -3602,7 +3652,6 @@ fn field_to_units(
         );
     let mut units = Vec::new();
     let mut children = Vec::new();
-    let mut projected_result_indexes = HashSet::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
             Some("hyperlink") => {
@@ -3623,9 +3672,6 @@ fn field_to_units(
             }
             _ => continue,
         };
-        if let Ok(index) = usize::try_from(index) {
-            projected_result_indexes.insert(index);
-        }
         let items: Vec<Value> = projected.iter().map(|unit| match &unit.content {
             UnitContent::Text(text) => json!({"kind":"text", "text":text, "attributes":unit.attrs}),
             UnitContent::Embed {kind, payload} => json!({"kind":"embed", "embedKind":kind, "payload":payload, "attributes":unit.attrs}),
@@ -3660,7 +3706,7 @@ fn field_to_units(
         style_formatting,
         styles,
         source,
-        (!children.is_empty()).then_some(&projected_result_indexes),
+        !children.is_empty(),
     );
     if !children.is_empty() {
         payload.insert(
