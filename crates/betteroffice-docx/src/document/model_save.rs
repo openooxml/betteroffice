@@ -1,5 +1,7 @@
 use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism, update_core_properties};
-use docx_parse::{S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report};
+use docx_parse::{
+    S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report,
+};
 
 use super::{body_from_wire, save_report};
 use crate::{Document, Result, SaveOptions, SaveReport};

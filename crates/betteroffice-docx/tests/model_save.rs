@@ -97,7 +97,10 @@ fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOpt
     let (expected, _) = write_docx_s13_parts_with_report(request, &original, None).unwrap();
     let saved = document.save_report_with_options(options).unwrap();
     assert!(saved.whole_model_write);
-    assert!(saved.bytes == expected, "the save differs from the plan-less writer");
+    assert!(
+        saved.bytes == expected,
+        "the save differs from the plan-less writer"
+    );
 }
 
 #[test]
@@ -138,7 +141,10 @@ fn stamping_an_unchanged_model_only_updates_core_properties() {
     assert_ne!(updated.as_bytes(), expected[CORE].as_slice());
     expected.insert(CORE.to_owned(), updated.into_bytes());
     assert_eq!(parts(&saved.bytes), expected);
-    assert_eq!(parts(&document.save_with_options(options).unwrap()), expected);
+    assert_eq!(
+        parts(&document.save_with_options(options).unwrap()),
+        expected
+    );
 }
 
 #[test]
