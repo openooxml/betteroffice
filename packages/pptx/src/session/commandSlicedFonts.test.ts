@@ -577,3 +577,20 @@ test('completeExport rejects a sliced face whose strict whole-face load fails', 
   });
   expect(replaceExportFace).not.toHaveBeenCalled();
 });
+
+test('a sliced face reports whole-face CDN failures through its session', async () => {
+  const sliced = createSlicedFontFaces();
+  const failure = Object.assign(new Error('Offline'), {
+    diagnostic: { pack: 'cjk', reason: 'cdn-unavailable', detail: 'Offline' },
+  });
+  const reportCdnFailure = mock((_error: unknown) => {});
+  const whole = Object.assign(async () => new ArrayBuffer(4), {
+    slices: { loadWholeForExport: async () => { throw failure; } },
+    reportCdnFailure,
+  });
+  try {
+    sliced.add('Noto Sans JP', fakeFace(), whole);
+    await expect(sliced.whole('Noto Sans JP')).rejects.toBe(failure);
+    expect(reportCdnFailure).toHaveBeenCalledWith(failure);
+  } finally { sliced.dispose(); }
+});
