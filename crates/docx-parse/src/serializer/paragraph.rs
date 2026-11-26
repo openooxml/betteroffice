@@ -9,7 +9,6 @@ use crate::formatting::{
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
     MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
-    inline_holds_field,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -20,7 +19,7 @@ use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
 use super::context::{DeferredFormData, SerializerContext, shared_direction_prefix};
-use super::field_spans::paragraph_key;
+use super::field_spans::{paragraph_key, spans_paragraphs};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -1120,7 +1119,7 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
     let runs = |node: &&InlineNode| matches!(node, InlineNode::Run(_));
     (end_later
         && nodes.iter().flat_map(field_runs).eq(&field.field_result)
-        && (field.field_type == "TOC" || !inline_holds_field(nodes))
+        && closed_inline_fields(nodes)
         && nodes.iter().all(|node| match node {
             InlineNode::Hyperlink(link) => {
                 link.structured_children.as_ref().is_none_or(|children| {
@@ -1134,6 +1133,40 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
         })
         && !super::splice::spanning_result_has_unprojected_comments(nodes))
     .then_some((nodes, true))
+}
+
+fn closed_inline_fields(nodes: &[InlineNode]) -> bool {
+    let mut depth = 0;
+    for node in nodes {
+        match node {
+            InlineNode::Run(run) => {
+                for item in &run.content {
+                    if let RunContent::FieldChar { char_type, .. } = item {
+                        match char_type.as_str() {
+                            "begin" => depth += 1,
+                            "separate" if depth > 0 => {}
+                            "end" if depth > 0 => depth -= 1,
+                            _ => return false,
+                        }
+                    }
+                }
+            }
+            InlineNode::Hyperlink(link) => {
+                if !closed_inline_fields(
+                    link.structured_children.as_deref().unwrap_or(&link.children),
+                ) {
+                    return false;
+                }
+            }
+            InlineNode::InlineSdt(sdt) if !closed_inline_fields(&sdt.content) => return false,
+            InlineNode::Tracked(change) if !closed_inline_fields(&change.content) => {
+                return false;
+            }
+            InlineNode::ComplexField(field) if spans_paragraphs(field) => return false,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 pub fn serialize_inline_sdt(

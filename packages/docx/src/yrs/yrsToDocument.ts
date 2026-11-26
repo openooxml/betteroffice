@@ -3810,14 +3810,23 @@ function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
   const children = source.structuredChildren ?? source.children;
   const start = children.findIndex(child => child.type === 'run' &&
     child.content.some(item => item.type === 'fieldChar'));
-  const markers = children.slice(start).filter((child): child is Run => child.type === 'run' &&
-    child.content.length > 0 && child.content.every(item => item.type === 'fieldChar' || item.type === 'instrText'));
+  if (start < 1) return link;
+  const markers = children.slice(start).flatMap((child): Run[] => {
+    if (child.type !== 'run') return [];
+    const [first, ...rest] = child.content;
+    if (first?.type === 'fieldChar' && first.charType === 'separate' &&
+      rest.length > 0 && rest.every(item => item.type === 'text')) {
+      return [{ ...child, content: [first] }];
+    }
+    return child.content.length > 0 &&
+      child.content.every(item => item.type === 'fieldChar' || item.type === 'instrText') ? [child] : [];
+  });
   const types = markers.flatMap(run => run.content.flatMap(item => item.type === 'fieldChar' ? [item.charType] : []));
   const instruction = markers.flatMap(run => run.content.flatMap(item => item.type === 'instrText' ? [item.text] : [])).join('');
   const label = children.slice(0, start);
   const labelEnd = pageReferenceTab(label);
   if (
-    start < 1 || labelEnd === undefined || labelEnd !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
+    labelEnd === undefined || labelEnd !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
     types.join(',') !== 'begin,separate,end' || !/^\s*PAGEREF\b/i.test(instruction) ||
     children[start] !== markers[0] || children.at(-1) !== markers.at(-1) ||
     !markers.at(-1)!.content.every(item => item.type === 'fieldChar' && item.charType === 'end')

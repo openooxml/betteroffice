@@ -34,6 +34,10 @@ const fieldStart = (code: string) =>
   fieldChar('begin') + `<w:r><w:instrText xml:space="preserve"> ${code} </w:instrText></w:r>` + fieldChar('separate');
 const textRun = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
 const paragraph = (content: string) => `<w:p>${content}</w:p>`;
+const blockSdt = (content: string) =>
+  '<w:sdt><w:sdtPr><w:id w:val="42"/><w:docPartObj>' +
+  '<w:docPartGallery w:val="Table of Contents"/><w:docPartUnique/>' +
+  `</w:docPartObj></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
 
 function entry(number: number, marker: string, pageMarker: string): string {
   return `<w:hyperlink w:anchor="_Toc${number}" w:history="1">${textRun(marker)}<w:r><w:tab/></w:r>` +
@@ -221,11 +225,59 @@ for (const scenario of ['S1', 'TA', 'TB'] as const) {
   }
 }
 
-function insertInText(session: YrsSession, marker: string, offset: number, text: string): void {
-  const match = session.searchText(marker, { caseSensitive: true }).find(({ story }) => story === 'body');
+function insertInText(session: YrsSession, marker: string, offset: number, text: string, storyId = 'body'): void {
+  const match = session.searchText(marker, { caseSensitive: true }).find(({ story }) => story === storyId);
   if (!match) throw new Error(`Missing editable text ${marker}`);
   session.insertText({ story: match.story, paraId: match.paraId, offset: match.start + offset }, text);
 }
+
+for (const fullWrite of [false, true]) {
+  test(`a block SDT keeps its TOC on ${fullWrite ? 'whole' : 'session'} saves`, async () => {
+    const source = blockSdt(body('TA').replace(paragraph(textRun(BODY_NEXT)), '')) +
+      paragraph(textRun(BODY_NEXT));
+    const story = 'body:sdt0';
+    for (const marker of ['ENTRYONE', 'ENTRYTHREE']) {
+      const xml = await editAndSave(source, session => {
+        insertInText(session, marker, 1, ' EDIT ', story);
+      }, fullWrite);
+      expect(inspect(xml)).toEqual(inspect(source.replace(marker, marker[0] + ' EDIT ' + marker.slice(1))));
+      expect(inspect(xml.split('</w:sdtContent>')[0]!).fields[0]?.end).toBe(2);
+    }
+    const middle = paragraph(entry(2, ENTRY_TWO, PAGE_MARKERS[1]));
+    for (const edit of ['insert', 'delete'] as const) {
+      const xml = await editAndSave(source, session => {
+        const { paraId } = session.paragraphs(story)[1]!;
+        const result = session.applyEdits({
+          expectVersion: session.version(),
+          steps: [edit === 'insert'
+            ? { op: 'insertParagraphs', target: { story, paraId }, at: 'end', paragraphs: [{ text: INSERTED }] }
+            : { op: 'deleteParagraphs', story, firstParaId: paraId, lastParaId: paraId }],
+        });
+        expect(result.ok).toBe(true);
+      }, fullWrite);
+      const expected = source.replace(middle, edit === 'insert' ? middle + paragraph(textRun(INSERTED)) : '');
+      expect(inspect(xml)).toEqual(inspect(expected));
+      expect(inspect(xml.split('</w:sdtContent>')[0]!).fields[0]?.end).toBe(edit === 'insert' ? 3 : 1);
+    }
+  }, 30_000);
+}
+
+test('deleting the sole continuation puts the carried end after an empty field result', async () => {
+  const opening = textRun('BEFORE') + fieldStart('QUOTE');
+  const tail = paragraph(textRun(BODY_NEXT));
+  const source = paragraph(opening) + paragraph(fieldChar('end')) + tail;
+  for (const fullWrite of [false, true]) {
+    const xml = await editAndSave(source, session => {
+      const { paraId } = session.paragraphs('body')[1]!;
+      const result = session.applyEdits({
+        expectVersion: session.version(),
+        steps: [{ op: 'deleteParagraphs', story: 'body', firstParaId: paraId, lastParaId: paraId }],
+      });
+      expect(result.ok).toBe(true);
+    }, fullWrite);
+    expect(inspect(xml)).toEqual(inspect(paragraph(opening + fieldChar('end')) + tail));
+  }
+}, 30_000);
 
 async function editAndSave(
   source: string,
@@ -328,6 +380,29 @@ test('editing both sides of a TOC entry keeps the PAGEREF result after the label
   }
 }, 30_000);
 
+test('a spanning QUOTE keeps a complete nested field in its edited opening result', async () => {
+  const source = body('TA').replace('TOC \\o "1-3" \\h \\z \\u', 'QUOTE');
+  for (const fullWrite of [false, true]) {
+    const xml = await editAndSave(source, session => insertInText(session, 'ENTRYONE', 1, ' EDIT '), fullWrite);
+    expect(inspect(xml)).toEqual(inspect(source.replace('ENTRYONE', 'E EDIT NTRYONE')));
+  }
+}, 30_000);
+
+test('a PAGEREF separator can share the source run with its page text', async () => {
+  const source = body('TA').replace(
+    fieldChar('separate') + textRun(PAGE_MARKERS[0]),
+    '<w:r><w:fldChar w:fldCharType="separate"/><w:t>PAGEONE</w:t></w:r>',
+  );
+  for (const fullWrite of [false, true]) {
+    const xml = await editAndSave(source, session => {
+      insertInText(session, 'ENTRYONE', 1, ' EDIT ');
+      insertInText(session, 'PAGEONE', 1, ' EDIT ');
+    }, fullWrite);
+    const expected = source.replace('ENTRYONE', 'E EDIT NTRYONE').replace('PAGEONE', 'P EDIT AGEONE');
+    expect(inspect(xml)).toEqual(inspect(expected));
+  }
+}, 30_000);
+
 test('nested spanning opens keep the legacy full write', async () => {
   const end = fieldChar('end');
   const outer = fieldStart('QUOTE OUTER') + textRun('OUTER');
@@ -340,7 +415,7 @@ test('nested spanning opens keep the legacy full write', async () => {
   expect(inspect(xml)).toEqual(inspect(expected));
 }, 30_000);
 
-test('cross-container closes keep the legacy opening paragraph for tables and text boxes', async () => {
+test('cross-container closes keep the legacy opening paragraph', async () => {
   const end = fieldChar('end');
   const outer = fieldStart('QUOTE OUTER') + textRun('OUTER');
   const nested = fieldStart('QUOTE LOCAL') + textRun('LOCAL') + end;
@@ -348,13 +423,26 @@ test('cross-container closes keep the legacy opening paragraph for tables and te
   const box = paragraph(`<w:r><w:pict><v:shape><v:textbox><w:txbxContent>${
     paragraph(end + textRun('BOX'))
   }</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`);
-  for (const [container, text] of [[cell, 'CELL'], [box, 'BOX']] as const) {
+  const control = blockSdt(paragraph(end + textRun('CONTROL')));
+  for (const [container, text] of [[cell, 'CELL'], [box, 'BOX'], [control, 'CONTROL']] as const) {
     const source = paragraph(outer + nested) + container + paragraph(textRun('AFTER'));
     const xml = await editAndSave(source, session => insertInText(session, 'AFTER', 5, ' edited'), true);
     expect(inspect(xml.slice(0, xml.indexOf('</w:p>') + '</w:p>'.length))).toEqual(inspect(paragraph(outer + end)));
     expect(xml).toContain(`>${text}<`);
     expect(xml).toContain('>AFTER edited<');
   }
+}, 30_000);
+
+test('a shared end and begin run keeps the legacy opening paragraph', async () => {
+  const first = fieldStart('QUOTE FIRST') + textRun('FIRST');
+  const shared = '<w:r><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="begin"/></w:r>' +
+    '<w:r><w:instrText>QUOTE SECOND</w:instrText></w:r>' + fieldChar('separate') + textRun('SECOND');
+  const source = [first, shared, textRun('LAST') + fieldChar('end')].map(paragraph).join('');
+  const xml = await editAndSave(source, session => insertInText(session, 'LAST', 4, ' edited'), true);
+  const opening = xml.slice(0, xml.indexOf('</w:p>') + '</w:p>'.length);
+  expect(inspect(opening)).toEqual(inspect(paragraph(first + fieldChar('end'))));
+  expect(xml).toContain('>SECOND<');
+  expect(xml).toContain('>LAST edited<');
 }, 30_000);
 
 test('both seeders keep the projection id after a same-paragraph raw end', async () => {

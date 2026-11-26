@@ -4003,11 +4003,14 @@ fn build_source_patched_document_xml(
         let selected: HashSet<_> = sources
             .paragraphs
             .iter()
-            .map(|target| target.block)
+            .filter_map(|target| blocks.get(target.block)?.1.paragraph_ordinal)
             .collect();
-        context.field_spans = FieldSpans::from_body(body, &document.content, &[], |block, _| {
-            selected.contains(&block)
-        });
+        context.field_spans =
+            FieldSpans::from_blocks(&blocks, &document.content, |element, _| {
+                element
+                    .paragraph_ordinal
+                    .is_some_and(|ordinal| selected.contains(&ordinal))
+            });
     }
     let mut replacements = Vec::with_capacity(sources.paragraphs.len());
     for target in &sources.paragraphs {

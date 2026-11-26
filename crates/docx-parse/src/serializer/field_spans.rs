@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::block::{BlockContent, story_block_elements};
-use crate::inline::{InlineNode, RunContent, parse_run};
+use crate::inline::{ComplexField, InlineNode, RunContent, parse_run};
 use crate::paragraph::{Paragraph, ParagraphContent, TrackedInline, parse_tracked_change_info};
 use crate::paragraph_identity::parse_paragraph_id;
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
@@ -22,6 +22,24 @@ pub(super) struct FieldParagraph {
 
 pub(super) fn paragraph_key(paragraph: &Paragraph) -> usize {
     std::ptr::from_ref(paragraph) as usize
+}
+
+pub(super) fn spans_paragraphs(field: &ComplexField) -> bool {
+    [field.structured_code.as_ref(), field.structured_result.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|part| part.spans_paragraphs())
+}
+
+fn story_has_span(model: &[BlockContent]) -> bool {
+    model.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => paragraph.content.iter().any(|child| {
+            matches!(child, ParagraphContent::Inline(InlineNode::ComplexField(field))
+                if spans_paragraphs(field))
+        }),
+        BlockContent::BlockSdt(sdt) => story_has_span(&sdt.content),
+        _ => false,
+    })
 }
 
 struct Opening {
@@ -52,6 +70,17 @@ impl Closing<'_> {
 
     fn standalone(&self) -> bool {
         self.separate_run() && self.separate_revision()
+    }
+
+    fn alone_in(&self, paragraph: &XmlElement) -> bool {
+        let mut children = paragraph
+            .child_elements()
+            .filter(|child| child.name != "w:pPr");
+        self.standalone()
+            && children
+                .next()
+                .is_some_and(|child| std::ptr::eq(child, self.revision.unwrap_or(self.run)))
+            && children.next().is_none()
     }
 
     fn marker(&self) -> ParagraphContent {
@@ -265,22 +294,35 @@ fn project_paragraphs(
     paragraphs: &[Option<SourceParagraph<'_>>],
     removed: &HashSet<u32>,
 ) -> Vec<Option<usize>> {
-    let ordinal = unique(model.iter().map(|block| paragraph(block)?.source_ordinal));
+    let ordinals = unique(model.iter().map(|block| paragraph(block)?.source_ordinal));
     let ids = unique(
         model
             .iter()
             .map(|block| parse_paragraph_id(paragraph(block)?.para_id.as_deref()?)),
     );
     let source_ids = unique(source.iter().map(|(_, element)| source_id(element)));
+    let controls = unique(model.iter().map(|block| match block {
+        BlockContent::BlockSdt(sdt) => sdt.properties.id.map(f64::to_bits),
+        _ => None,
+    }));
+    let source_controls = unique(source.iter().map(|(_, element)| control_id(element)));
     let mut matches: Vec<_> = source
         .iter()
         .enumerate()
         .map(|(index, (_, element))| {
-            if removed.contains(&element.paragraph_ordinal?) {
+            if let Some(id) = control_id(element) {
+                return if source_controls.get(&id) == Some(&Some(index)) {
+                    controls.get(&id).copied().flatten()
+                } else {
+                    None
+                };
+            }
+            let ordinal = element.paragraph_ordinal?;
+            if removed.contains(&ordinal) {
                 return None;
             }
-            ordinal
-                .get(&element.paragraph_ordinal?)
+            ordinals
+                .get(&ordinal)
                 .copied()
                 .flatten()
                 .or_else(|| {
@@ -320,6 +362,12 @@ fn project_paragraphs(
             }
         }
     }
+    let is_removed = |index: usize| {
+        source[index]
+            .1
+            .paragraph_ordinal
+            .is_some_and(|ordinal| removed.contains(&ordinal))
+    };
     let mut prior = (0, 0);
     for (next_source, next_model) in matches
         .clone()
@@ -328,21 +376,41 @@ fn project_paragraphs(
         .filter_map(|(index, projected)| Some((index, projected?)))
         .chain(std::iter::once((source.len(), model.len())))
     {
-        if next_source >= prior.0
-            && next_model >= prior.1
-            && next_source - prior.0 == next_model - prior.1
-        {
+        if next_source < prior.0 || next_model < prior.1 {
+            return matches;
+        }
+        if next_source - prior.0 == next_model - prior.1 {
             for (index, live) in (prior.0..next_source).zip(prior.1..next_model) {
-                if paragraphs[index].is_some()
-                    && paragraph(&model[live]).is_some()
-                    && !source[index]
-                        .1
-                        .paragraph_ordinal
-                        .is_some_and(|ordinal| removed.contains(&ordinal))
+                if !is_removed(index)
+                    && match &model[live] {
+                        BlockContent::Paragraph(_) => paragraphs[index].is_some(),
+                        BlockContent::BlockSdt(sdt) => {
+                            source[index].1.matches_name("w", "sdt")
+                                && control_id(source[index].1)
+                                    == sdt.properties.id.map(f64::to_bits)
+                        }
+                        _ => false,
+                    }
                     && used.insert(live)
                 {
                     matches[index] = Some(live);
                 }
+            }
+        } else if next_source - prior.0 == 1
+            && !is_removed(prior.0)
+            && paragraphs[prior.0].as_ref().is_some_and(|entry| {
+                matches!(entry.closings.as_slice(), [Some(closing)]
+                    if closing.alone_in(source[prior.0].1))
+            })
+        {
+            let mut empty = (prior.1..next_model).filter(|&live| {
+                paragraph(&model[live]).is_some_and(|paragraph| paragraph.content.is_empty())
+            });
+            if let Some(live) = empty.next()
+                && empty.next().is_none()
+                && used.insert(live)
+            {
+                matches[prior.0] = Some(live);
             }
         }
         prior = (next_source + 1, next_model + 1);
@@ -356,6 +424,17 @@ fn source_id(element: &XmlElement) -> Option<u32> {
             .attributes
             .get(element.para_id_attribute.as_ref()?)?,
     )
+}
+
+fn control_id(element: &XmlElement) -> Option<u64> {
+    if !element.matches_name("w", "sdt") {
+        return None;
+    }
+    let value = element
+        .child("w", "sdtPr")?
+        .child("w", "id")?
+        .attribute(Some("w"), "val")?;
+    crate::xml::parse_javascript_integer_prefix(value).map(f64::to_bits)
 }
 
 fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
@@ -401,10 +480,60 @@ fn anchored_offset(before: &str, after: &str, current: &str) -> Option<usize> {
         .last();
     match (left, right) {
         (Some(left), Some(right)) if left <= right => Some(right),
-        (Some(left), None) => Some(left),
-        (None, right) => right,
+        (Some(left), None) if current.match_indices(after).nth(1).is_none() => Some(left),
+        (None, Some(right)) if current.match_indices(before).nth(1).is_none() => Some(right),
         _ => None,
     }
+}
+
+fn run_boundary(
+    source: &XmlElement,
+    closing: &Closing<'_>,
+    paragraph: &Paragraph,
+) -> Option<usize> {
+    if !closing.standalone() || closing.revision.is_some() {
+        return None;
+    }
+    let mut cut = None;
+    let mut original = Vec::new();
+    for child in source.child_elements().filter(|child| child.name != "w:pPr") {
+        if std::ptr::eq(child, closing.run) {
+            cut = Some(original.len());
+            continue;
+        }
+        if child.name != "w:r" {
+            return None;
+        }
+        let mut text = String::new();
+        for item in child.child_elements().filter(|item| item.name != "w:rPr") {
+            if item.name != "w:t" {
+                return None;
+            }
+            text.push_str(&item.text_content());
+        }
+        original.push(text);
+    }
+    let cut = cut?;
+    if cut == 0 || cut == original.len() || original.len() != paragraph.content.len() {
+        return None;
+    }
+    let live = paragraph
+        .content
+        .iter()
+        .map(|child| {
+            let ParagraphContent::Inline(InlineNode::Run(run)) = child else {
+                return None;
+            };
+            run.content
+                .iter()
+                .map(|item| match item {
+                    RunContent::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<String>>()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (original[..cut] == live[..cut] || original[cut..] == live[cut..]).then_some(cut)
 }
 
 fn place(
@@ -496,12 +625,23 @@ fn place(
 }
 
 fn place_closing(
+    source: &XmlElement,
     paragraph: &Paragraph,
     closing: &Closing<'_>,
     text: &str,
     removed: bool,
 ) -> Option<Vec<ParagraphContent>> {
     let mut marker = closing.marker();
+    if removed {
+        let mut content = paragraph.content.clone();
+        content.push(marker);
+        return Some(content);
+    }
+    if let Some(boundary) = run_boundary(source, closing, paragraph) {
+        let mut content = paragraph.content.clone();
+        content.insert(boundary, marker);
+        return Some(content);
+    }
     let shared_run_end = if closing.separate_run() {
         None
     } else {
@@ -559,12 +699,8 @@ fn place_closing(
         return Some(content);
     }
     let live = visible_text(paragraph);
-    let offset = if removed {
-        live.len()
-    } else {
-        let (before, after) = text.split_at(closing.offset);
-        anchored_offset(before, after, &live)?
-    };
+    let (before, after) = text.split_at(closing.offset);
+    let offset = anchored_offset(before, after, &live)?;
     place(paragraph.content.clone(), offset, marker, shared_run_end)
 }
 
@@ -573,9 +709,9 @@ impl FieldSpans {
         source: &str,
         model: &[BlockContent],
         removed: &[u32],
-        selected: impl Fn(usize, &Paragraph) -> bool,
+        selected: impl Fn(&XmlElement, &Paragraph) -> bool,
     ) -> Self {
-        if !source.contains("fldChar") {
+        if !source.contains("fldChar") || !story_has_span(model) {
             return Self::default();
         }
         let limits = ParseLimits::default();
@@ -586,20 +722,37 @@ impl FieldSpans {
         ) else {
             return Self::default();
         };
-        xml.root()
-            .and_then(|root| root.child("w", "body"))
-            .map_or_else(Self::default, |body| {
-                Self::from_body(body, model, removed, selected)
-            })
+        let mut plan = Self::default();
+        if let Some(body) = xml.root().and_then(|root| root.child("w", "body")) {
+            plan.plan_story(
+                &story_block_elements(body),
+                model,
+                &removed.iter().copied().collect(),
+                &selected,
+            );
+        }
+        plan
     }
 
-    pub(super) fn from_body(
-        body: &XmlElement,
+    pub(super) fn from_blocks(
+        source: &[(Vec<u32>, &XmlElement)],
         model: &[BlockContent],
-        removed: &[u32],
-        selected: impl Fn(usize, &Paragraph) -> bool,
+        selected: impl Fn(&XmlElement, &Paragraph) -> bool,
     ) -> Self {
-        let source = story_block_elements(body);
+        let mut plan = Self::default();
+        if story_has_span(model) {
+            plan.plan_story(source, model, &HashSet::new(), &selected);
+        }
+        plan
+    }
+
+    fn plan_story(
+        &mut self,
+        source: &[(Vec<u32>, &XmlElement)],
+        model: &[BlockContent],
+        removed: &HashSet<u32>,
+        selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
+    ) {
         let mut paragraphs: Vec<_> = source
             .iter()
             .enumerate()
@@ -607,13 +760,7 @@ impl FieldSpans {
                 (element.name == "w:p").then(|| SourceParagraph::read(index, element))
             })
             .collect();
-        if !paragraphs.iter().flatten().any(|entry| {
-            matches!(entry.openings.as_slice(), [opening] if opening.direct && opening.separated)
-        }) {
-            return Self::default();
-        }
-        let removed: HashSet<_> = removed.iter().copied().collect();
-        let matches = project_paragraphs(&source, model, &paragraphs, &removed);
+        let matches = project_paragraphs(source, model, &paragraphs, removed);
         let mut following = vec![None; matches.len()];
         let mut next = None;
         for (index, &matched) in matches.iter().enumerate().rev() {
@@ -627,11 +774,22 @@ impl FieldSpans {
                 Some(*group)
             })
             .collect();
-        let mut plan = Self::default();
         let mut pending = None;
         for (end, entry) in paragraphs.iter_mut().enumerate() {
             let Some(entry) = entry else {
                 pending = None;
+                if let Some(index) = matches[end]
+                    && let BlockContent::BlockSdt(sdt) = &model[index]
+                    && story_has_span(&sdt.content)
+                    && let Some(content) = source[end].1.child("w", "sdtContent")
+                {
+                    self.plan_story(
+                        &story_block_elements(content),
+                        &sdt.content,
+                        removed,
+                        selected,
+                    );
+                }
                 continue;
             };
             if !entry.closings.is_empty() {
@@ -644,18 +802,18 @@ impl FieldSpans {
                         .is_some_and(|id| removed.contains(&id));
                     let next = following[end]
                         .or_else(|| (end + 1 == matches.len()).then_some(model.len()));
-                    plan.pair(
+                    self.pair(
                         opening,
                         closing,
                         end,
                         &entry.text,
                         model,
                         &matches,
-                        &source,
+                        source,
                         deleted,
                         next,
                         &model_groups,
-                        &selected,
+                        selected,
                     );
                 }
             }
@@ -671,7 +829,6 @@ impl FieldSpans {
                 };
             }
         }
-        plan
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -687,7 +844,7 @@ impl FieldSpans {
         deleted: bool,
         next: Option<usize>,
         model_groups: &[usize],
-        selected: &impl Fn(usize, &Paragraph) -> bool,
+        selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
     ) {
         let Some(owner) = matches[opening.block] else {
             return;
@@ -700,10 +857,7 @@ impl FieldSpans {
                 child,
                 ParagraphContent::Inline(InlineNode::ComplexField(field))
                     if field.instruction.trim() == opening.instruction.trim()
-                        && [field.structured_code.as_ref(), field.structured_result.as_ref()]
-                            .into_iter()
-                            .flatten()
-                            .any(|part| part.spans_paragraphs())
+                        && spans_paragraphs(field)
             )
         }) else {
             return;
@@ -740,13 +894,13 @@ impl FieldSpans {
         let Some(closer) = paragraph(&model[target]) else {
             return;
         };
-        let writes_opener = selected(opening.block, opener);
-        let writes_closer = selected(end, closer);
+        let writes_opener = selected(source[opening.block].1, opener);
+        let writes_closer = selected(source[end].1, closer);
         if !removed && !writes_opener && !writes_closer {
             return;
         }
         if removed || (writes_closer && !has_end(closer)) {
-            let Some(content) = place_closing(closer, closing, text, removed) else {
+            let Some(content) = place_closing(source[end].1, closer, closing, text, removed) else {
                 return;
             };
             let entry = self.paragraphs.entry(paragraph_key(closer)).or_default();
