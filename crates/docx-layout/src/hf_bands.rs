@@ -645,7 +645,6 @@ fn compose_region(
     // Field widths are scoped to one header/footer variant.
     let field_widths = field_width_map(v);
     let ctx = RenderCtx {
-        page,
         page_number,
         page_label: page.page_label.clone(),
         page_index,

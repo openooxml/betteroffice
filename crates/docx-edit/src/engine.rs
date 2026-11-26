@@ -1548,9 +1548,6 @@ where
             _ => None,
         })
         .collect::<Vec<_>>();
-    let has_cell_shapes = input.measured.iter().any(|measured| {
-        docx_layout::measure_blocks::has_page_relative_cell_shape_wrap(&measured.block)
-    });
     let unequal = unequal_column_blocks(input, regions);
     let has_unequal = unequal.iter().any(|unequal| *unequal);
     let has_continuous = input.options.body_break_type == Some(SectionBreakType::Continuous)
@@ -1569,7 +1566,7 @@ where
                     if paragraph.runs.iter().any(|run| matches!(run, Run::Image(_)))
             )
         });
-    if shapes.is_empty() && !has_cell_shapes && !has_unequal && !has_continuous_pictures {
+    if shapes.is_empty() && !has_unequal && !has_continuous_pictures {
         return Ok(false);
     }
     let mut blocks = input
@@ -1601,7 +1598,7 @@ where
         Vec::new()
     };
     let has_continuous_floats = !pictures.is_empty();
-    if shapes.is_empty() && !has_cell_shapes && !has_unequal && !has_continuous_floats {
+    if shapes.is_empty() && !has_unequal && !has_continuous_floats {
         return Ok(false);
     }
     let geometry = initial_float_page_geometry(input, regions);
@@ -1619,7 +1616,7 @@ where
     };
     let mut pinned = BTreeSet::new();
     let mut touched = false;
-    let max_phases = if has_unequal || has_continuous_floats || has_cell_shapes {
+    let max_phases = if has_unequal || has_continuous_floats {
         32 + input.measured.len()
     } else {
         shapes.len() + 2
@@ -1636,13 +1633,6 @@ where
         } else {
             (place(input, phase)?, Vec::new())
         };
-        let cell_frames_changed = has_cell_shapes
-            && docx_layout::display_list::update_cell_shape_page_frames(
-                &mut blocks,
-                &input.measured,
-                &layout,
-            )
-            .map_err(docx_layout::LayoutError::Invalid)?;
         let mut next_widths = widths.clone();
         let mut bands =
             placed_column_measurement_frames(input, &layout, &recorded, &unequal, &mut next_widths);
@@ -1700,7 +1690,6 @@ where
             && next_widths == widths
             && bands == previous_bands
             && !frames_changed
-            && !cell_frames_changed
         {
             return Ok(touched);
         }
@@ -1713,13 +1702,9 @@ where
                         && *seen_bands == bands
                         && *seen_frames == next_wrap_frames
                 });
-        let accept = has_unequal
-            && !frames_changed
-            && !cell_frames_changed
-            && (repeated.is_some() || phase + 1 == max_phases);
-        if let Some(first) =
-            repeated.filter(|_| has_continuous_floats && !has_unequal && !cell_frames_changed)
-        {
+        let accept =
+            has_unequal && !frames_changed && (repeated.is_some() || phase + 1 == max_phases);
+        if let Some(first) = repeated.filter(|_| has_continuous_floats && !has_unequal) {
             let cycling = pictures
                 .iter()
                 .copied()
@@ -11877,14 +11862,7 @@ impl EngineSession {
 
     /// Builds and retains the typed display list.
     pub fn build_display_list_json(&self, input_json: &str) -> Result<String, String> {
-        let list = {
-            let pagination = self.pagination.borrow();
-            let measured = pagination
-                .input
-                .as_ref()
-                .map_or(&[][..], |input| input.measured.as_slice());
-            docx_layout::build_display_list_value_with_cell_anchors(input_json, measured)?
-        };
+        let list = docx_layout::build_display_list_value(input_json)?;
         let display_json =
             serde_json::to_string(&list).map_err(|error| format!("serialize: {error}"))?;
         let mut display = self.display.borrow_mut();

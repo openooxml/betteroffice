@@ -72,9 +72,6 @@ pub struct TextBox {
     pub size: ImageSize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImagePosition>,
-    #[doc(hidden)]
-    #[serde(skip)]
-    pub layout_in_cell: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap: Option<ImageWrap>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,7 +197,6 @@ pub fn parse_text_box(drawing: &XmlElement) -> Option<TextBox> {
         name,
         size,
         position: anchored.then(|| parse_anchor_position(container)).flatten(),
-        layout_in_cell: anchored.then(|| crate::shape::anchor_layout_in_cell(container)),
         wrap: anchored.then(|| parse_anchor_wrap(container)),
         fill: parse_fill(properties),
         outline: parse_outline(properties),
@@ -450,7 +446,6 @@ pub fn parse_text_box_from_shape(
         name,
         size,
         position,
-        layout_in_cell: None,
         wrap,
         fill: parse_fill(properties),
         outline: parse_outline(properties),

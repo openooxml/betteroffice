@@ -283,8 +283,6 @@ fn lower_shape(
             .or_else(|| position.as_ref().and_then(|value| value.relative_height)),
         behind_doc: position.as_ref().and_then(|value| value.behind_doc),
         position,
-        outside_cell: false,
-        cell_page_frame: None,
         decorative: field(shape, "decorative").and_then(Value::as_bool),
         title: string(shape, "title"),
         description: string(shape, "description"),

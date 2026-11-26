@@ -726,7 +726,6 @@ impl StoryParser<'_, '_> {
             .as_ref()
             .and_then(|position| position.hidden);
         shape.position = text_box.position;
-        shape.layout_in_cell = text_box.layout_in_cell;
         shape.wrap = text_box.wrap;
         shape.fill = text_box.fill;
         shape.outline = text_box.outline;

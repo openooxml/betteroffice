@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use docx_parse::media::MediaTable;
 use docx_parse::paragraph::{apply_shape_metadata, parse_alternate_content_branch};
 use docx_parse::relationships::{RelationshipMap, parse_relationships};
 use docx_parse::shape::{
-    anchor_layout_in_cell, parse_shape_from_drawing, resolve_shape_fill_pictures, shape_for_rendering,
+    parse_shape_from_drawing, resolve_shape_fill_pictures, shape_for_rendering,
 };
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 use ooxml_opc::{PackageBytes, RetainedPackage};
@@ -18,14 +18,12 @@ type StoryShapes = BTreeMap<String, BTreeMap<String, Vec<Value>>>;
 #[derive(Clone, Debug, Default)]
 pub struct GroupPictureSources {
     shapes: Arc<StoryShapes>,
-    external_anchors: Arc<BTreeMap<String, BTreeSet<String>>>,
     media: Option<Arc<MediaTable>>,
 }
 
 impl PartialEq for GroupPictureSources {
     fn eq(&self, other: &Self) -> bool {
         self.shapes == other.shapes
-            && self.external_anchors == other.external_anchors
             && match (&self.media, &other.media) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),
                 (None, None) => true,
@@ -39,7 +37,6 @@ pub(crate) fn source_shapes(
     roots: &std::collections::HashMap<String, SourceStory>,
 ) -> GroupPictureSources {
     let mut sources = BTreeMap::new();
-    let mut external_anchors = BTreeMap::new();
     let Ok(package) = RetainedPackage::from_bytes(bytes) else {
         return GroupPictureSources::default();
     };
@@ -66,10 +63,9 @@ pub(crate) fn source_shapes(
             continue;
         };
         let has = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
-        let has_groups = (has(b":pic") || has(b"<pic") || has(b"txbx"))
-            && (has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"));
-        let has_cell_anchors = has(b"layoutInCell");
-        if !has_groups && !has_cell_anchors {
+        if !(has(b":pic") || has(b"<pic") || has(b"txbx"))
+            || !(has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"))
+        {
             continue;
         }
         let Ok(document) = parse_xml(&bytes, path, &mut budget) else {
@@ -100,68 +96,16 @@ pub(crate) fn source_shapes(
                 root
             };
             let mut shapes = BTreeMap::new();
-            if has_groups {
-                collect(story_root, &relationships, &media, &mut shapes, &mut budget);
-            }
+            collect(story_root, &relationships, &media, &mut shapes, &mut budget);
             if !shapes.is_empty() {
                 sources.insert(story.clone(), shapes);
-            }
-            if has_cell_anchors {
-                let mut anchors = BTreeSet::new();
-                collect_external_anchors(story_root, &mut anchors, &relationships, &mut budget);
-                if !anchors.is_empty() {
-                    external_anchors.insert(story.clone(), anchors);
-                }
             }
         }
     }
     GroupPictureSources {
         shapes: Arc::new(sources),
-        external_anchors: Arc::new(external_anchors),
         media: Some(Arc::new(table)),
     }
-}
-
-fn collect_external_anchors(
-    node: &XmlElement,
-    anchors: &mut BTreeSet<String>,
-    relationships: &RelationshipMap,
-    budget: &mut ParseBudget<'_>,
-) {
-    if node.local_name() == "AlternateContent" {
-        if let Ok(Some((branch, _))) =
-            parse_alternate_content_branch(node, Some(relationships), budget, None, false)
-        {
-            collect_external_anchors(branch, anchors, relationships, budget);
-        }
-        return;
-    }
-    if node.name == "wp:anchor"
-        && !anchor_layout_in_cell(node)
-        && let Some(id) = node
-            .child_by_full_name("wp:docPr")
-            .and_then(|pr| pr.attribute(None, "id"))
-    {
-        anchors.insert(id.to_owned());
-    }
-    for child in node.child_elements() {
-        collect_external_anchors(child, anchors, relationships, budget);
-    }
-}
-
-pub(super) fn has_external_anchor(
-    sources: &GroupPictureSources,
-    story: &str,
-    shape: &Value,
-) -> bool {
-    shape.get("id").and_then(Value::as_str).is_some_and(|id| {
-        sources.external_anchors.iter().any(|(root, anchors)| {
-            anchors.contains(id)
-                && (story == root.as_str() || story
-                    .strip_prefix(root.as_str())
-                    .is_some_and(|suffix| suffix.starts_with(':')))
-        })
-    })
 }
 
 fn collect(

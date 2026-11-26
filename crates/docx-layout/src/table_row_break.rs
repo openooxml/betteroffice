@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::cell_layout::{
     cell_vertical_offset, is_floating_image, layout_cell_content, nested_table_float_offset,
+    stacks_cell_shape,
 };
 use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
@@ -97,9 +98,7 @@ fn cell_unbreakable_ranges(
             BlockExtent::Chart(value) => Some(value.height),
             _ => None,
         };
-        if let Some(LayoutBlock::Shape(shape)) = block
-            && shape.position.is_some()
-        {
+        if matches!(block, Some(LayoutBlock::Shape(shape)) if !stacks_cell_shape(shape)) {
             continue;
         }
         if let Some(height) = height {
