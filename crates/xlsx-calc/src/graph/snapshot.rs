@@ -243,7 +243,8 @@ impl SnapshotGraphBuilder {
                     let owner = defined.local_sheet.unwrap_or(sheet);
                     if formula.expanded.insert(key)
                         && let Some(expression) =
-                            self.graph.parse_definition(&self.graph.asts, owner, defined)
+                            self.graph
+                                .parse_definition(&self.graph.asts, owner, defined)
                     {
                         formula.names.pop_front();
                         formula.expression(&self.graph, owner, &expression);

@@ -1094,7 +1094,10 @@ fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr, dated: bool) -> bool 
         let Some(defined) = model.defined_name(owner, &name) else {
             continue;
         };
-        let formula = defined.formula.strip_prefix('=').unwrap_or(&defined.formula);
+        let formula = defined
+            .formula
+            .strip_prefix('=')
+            .unwrap_or(&defined.formula);
         let scope = defined.local_sheet.unwrap_or(owner);
         let Ok(definition) = parse_definition_for_cell(formula, model, scope) else {
             continue;
