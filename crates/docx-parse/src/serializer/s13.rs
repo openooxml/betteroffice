@@ -32,9 +32,10 @@ use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
 use super::context::{S13SaveReport, SerializerContext};
-use super::field_spans::FieldSpans;
 use super::numbering::serialize_numbering_xml;
-use super::paragraph::{field_result_nodes, field_result_nodes_mut, serialize_paragraph};
+use super::paragraph::{
+    field_result_nodes, field_result_nodes_mut, serialize_paragraph, serialize_story_paragraph,
+};
 use super::paragraph_ids::{
     COMMENTS_PART, S13ParagraphIds, S13SplicedPart, S13TouchedPart, S13WholePart,
     apply_assignments, comment_companions, model_paragraph_ids, patch_comment_parts, patch_part,
@@ -472,6 +473,7 @@ pub fn write_docx_s13_parts_with_report(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
+    context.carry_removed_field_ends = request.selective.is_none();
     context.set_document_source(
         package
             .original_bytes(&package.document_path)
@@ -1742,7 +1744,9 @@ impl StoryParts<'_> {
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
         context.begin_splice(part.paragraphs.iter().copied(), token_prefix);
+        let removed = std::mem::replace(&mut context.removed_paragraphs, part.removed.clone());
         let serialized = serialize(context);
+        context.removed_paragraphs = removed;
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
@@ -3595,9 +3599,6 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn story(&mut self, blocks: &[BlockContent]) -> Option<()> {
-        if !FieldSpans::in_story(blocks).is_empty() {
-            return None;
-        }
         for block in blocks {
             match block {
                 BlockContent::Paragraph(paragraph) => self.paragraph(paragraph)?,
@@ -3688,6 +3689,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 Some(())
             }
             InlineNode::ComplexField(field) => {
+                if field.span_end.is_some() {
+                    return None;
+                }
                 for run in &field.field_code {
                     self.run(run)?;
                 }
@@ -3931,7 +3935,6 @@ fn build_source_patched_document_xml(
         .find(|(_, element)| element.matches_name("w", "body"))
         .ok_or_else(|| save_error("the main document part has no body"))?;
     let blocks = crate::block::story_block_elements(body);
-    let mut field_spans = FieldSpans::in_story(&document.content);
     let mut replacements = Vec::with_capacity(sources.paragraphs.len());
     for target in &sources.paragraphs {
         let Some((relative, element)) = blocks.get(target.block) else {
@@ -3957,10 +3960,12 @@ fn build_source_patched_document_xml(
         };
         let span = element_span(original_xml, &target.path)
             .ok_or_else(|| save_error("an addressed paragraph has no lexical span"))?;
-        std::mem::swap(&mut context.field_spans, &mut field_spans);
-        let serialized = serialize_paragraph(paragraph, context);
-        std::mem::swap(&mut context.field_spans, &mut field_spans);
-        let serialized = serialized?;
+        let serialized = serialize_story_paragraph(
+            paragraph,
+            &document.content[target.block + 1..],
+            &mut super::field_spans::PendingFieldEnds::default(),
+            context,
+        )?;
         let replacement = replace_paragraph_content(&original_xml[span.clone()], &serialized)
             .ok_or_else(|| save_error("an addressed paragraph cannot be patched"))?;
         replacements.push((span, replacement));

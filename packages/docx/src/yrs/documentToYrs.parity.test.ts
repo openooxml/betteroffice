@@ -1658,10 +1658,13 @@ describe('fields spanning paragraphs', () => {
     expect(projectedField(projected).structuredResult?.blockCount).toBe(2);
     const xml = new TextDecoder().decode(saved['word/document.xml']);
     expect([...xml.matchAll(/w:fldCharType="(\w+)"/g)].map((match) => match[1])).toEqual(['begin', 'separate', 'end']);
-    const texts = [...xml.matchAll(/<w:p\b(?:[^>]*\/>|[^>]*>[\s\S]*?<\/w:p>)/g)]
-      .map(([paragraph]) => [...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map((match) => match[1]).join(''))
-      .filter((value) => value !== '');
-    expect(texts).toEqual([...new Set(texts)]);
+    const paragraphs = [...xml.matchAll(/<w:p\b(?:[^>]*\/>|[^>]*>[\s\S]*?<\/w:p>)/g)].map(([paragraph]) => paragraph);
+    expect(paragraphs.findIndex(paragraph => paragraph.includes('w:fldCharType="end"'))).toBe(2);
+    expect(paragraphs[2]).toContain(`w14:paraId="${ids[2]}"`);
+    const texts = paragraphs.map(paragraph =>
+      [...paragraph.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map((match) => match[1]).join('')
+    );
+    expect(texts).toEqual(['Entry 1', 'Entry 2', '', 'After']);
   });
 
   it.each(['field', 'paragraph'])('drops the recorded span blocks with the %s that holds them', async (removed) => {

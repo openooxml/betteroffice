@@ -4,7 +4,8 @@ use crate::block::{BlockContent, BlockSdt};
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
-use super::paragraph::{serialize_paragraph, synthesize_sdt_properties};
+use super::field_spans::PendingFieldEnds;
+use super::paragraph::{serialize_paragraph, serialize_story_paragraph, synthesize_sdt_properties};
 use super::raw::validate_raw_subtree;
 use super::run::append_generated;
 use super::table::serialize_table;
@@ -31,14 +32,18 @@ pub(super) fn serialize_story_blocks(
     context: &mut SerializerContext,
     mut append: impl FnMut(&str),
 ) -> Result<(), ParseError> {
-    let spans = super::field_spans::FieldSpans::in_story(blocks);
-    let previous = std::mem::replace(&mut context.field_spans, spans);
-    let result = blocks.iter().try_for_each(|block| {
-        append(&serialize_block_content(block, context)?);
-        Ok(())
-    });
-    context.field_spans = previous;
-    result
+    let mut pending = PendingFieldEnds::default();
+    for (index, block) in blocks.iter().enumerate() {
+        let xml = if let BlockContent::Paragraph(paragraph) = block {
+            ooxml_opc::progress::tick();
+            pending.block = index;
+            serialize_story_paragraph(paragraph, &blocks[index + 1..], &mut pending, context)?
+        } else {
+            serialize_block_content(block, context)?
+        };
+        append(&xml);
+    }
+    Ok(())
 }
 
 pub fn serialize_block_sdt(

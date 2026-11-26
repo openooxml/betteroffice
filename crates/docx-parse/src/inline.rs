@@ -187,6 +187,8 @@ pub enum RunContent {
     FieldChar {
         #[serde(rename = "charType")]
         char_type: String,
+        #[serde(rename = "spanEnd", skip_serializing_if = "Option::is_none")]
+        span_end: Option<u32>,
         #[serde(rename = "fldLock", skip_serializing_if = "Option::is_none")]
         fld_lock: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -576,6 +578,7 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
     .to_owned();
     RunContent::FieldChar {
         char_type,
+        span_end: None,
         fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
         dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
@@ -1479,6 +1482,8 @@ pub struct ComplexField {
     pub field_code: Vec<Run>,
     #[serde(rename = "fieldResult")]
     pub field_result: Vec<Run>,
+    #[serde(rename = "spanEnd", skip_serializing_if = "Option::is_none")]
+    pub span_end: Option<FieldSpanEnd>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formatting: Option<TextFormatting>,
     #[serde(rename = "fldLock", skip_serializing_if = "Option::is_none")]
@@ -1509,6 +1514,12 @@ pub struct ComplexField {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub direction_scopes: Vec<DirectionScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FieldSpanEnd {
+    pub paragraph: u32,
+    pub marker: Box<crate::paragraph::ParagraphContent>,
 }
 
 impl ComplexField {
@@ -2629,6 +2640,7 @@ impl OpenComplexField {
             instruction,
             field_code: self.code_runs,
             field_result: self.result_runs,
+            span_end: None,
             formatting: self.formatting,
             fld_lock: self.fld_lock.then_some(true),
             dirty: self.dirty.then_some(true),

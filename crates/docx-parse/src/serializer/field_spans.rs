@@ -1,89 +1,78 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::block::BlockContent;
-use crate::inline::{ComplexField, InlineNode, RunContent, StructuredFieldContent};
-use crate::paragraph::ParagraphContent;
+use crate::inline::{FieldSpanEnd, InlineNode, RunContent};
+use crate::paragraph::{Paragraph, ParagraphContent};
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct FieldSpans(HashMap<usize, bool>);
+fn is_end(content: &ParagraphContent, paragraph: u32) -> bool {
+    let node = match content {
+        ParagraphContent::Inline(node) => node,
+        ParagraphContent::Tracked(change) if change.content.len() == 1 => &change.content[0],
+        _ => return false,
+    };
+    matches!(node, InlineNode::Run(run) if matches!(
+        run.content.as_slice(),
+        [RunContent::FieldChar { char_type, span_end: Some(id), .. }]
+            if char_type == "end" && *id == paragraph
+    ))
+}
 
-impl FieldSpans {
-    pub(super) fn in_story(blocks: &[BlockContent]) -> Self {
-        let mut spans = Self::default();
-        let mut open = Vec::new();
-        for block in blocks {
-            let BlockContent::Paragraph(paragraph) = block else {
-                continue;
-            };
-            for content in &paragraph.content {
-                match content {
-                    ParagraphContent::Inline(node) => spans.visit(node, &mut open),
-                    ParagraphContent::Tracked(change) => {
-                        for node in &change.content {
-                            spans.visit(node, &mut open);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        spans
-    }
-
-    pub(super) fn has_separate_later(&self, field: &ComplexField) -> Option<bool> {
-        self.0.get(&field_key(field)).copied()
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn visit(&mut self, node: &InlineNode, open: &mut Vec<Option<(usize, bool)>>) {
-        let children = match node {
-            InlineNode::ComplexField(field) => {
-                if [&field.structured_code, &field.structured_result]
-                    .into_iter()
-                    .flatten()
-                    .any(StructuredFieldContent::spans_paragraphs)
-                {
-                    open.push(Some((field_key(field), false)));
-                }
-                return;
-            }
-            _ if open.is_empty() => return,
-            InlineNode::Run(run) => {
-                for item in &run.content {
-                    let RunContent::FieldChar { char_type, .. } = item else {
-                        continue;
-                    };
-                    match char_type.as_str() {
-                        "begin" => open.push(None),
-                        "separate" => {
-                            if let Some(Some((_, separate))) = open.last_mut() {
-                                *separate = true;
-                            }
-                        }
-                        "end" => {
-                            if let Some(Some((key, separate))) = open.pop() {
-                                self.0.insert(key, separate);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                return;
-            }
-            InlineNode::Hyperlink(link) => &link.children,
-            InlineNode::InlineSdt(sdt) => &sdt.content,
-            InlineNode::Tracked(change) => &change.content,
-            _ => return,
-        };
-        for child in children {
-            self.visit(child, open);
-        }
+fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
+    match block {
+        BlockContent::Paragraph(paragraph) => Some(paragraph),
+        _ => None,
     }
 }
 
-fn field_key(field: &ComplexField) -> usize {
-    std::ptr::from_ref(field) as usize
+pub(super) fn has_end(
+    id: u32,
+    remaining: &[ParagraphContent],
+    following: &[BlockContent],
+) -> bool {
+    remaining.iter().any(|content| is_end(content, id))
+        || following
+            .iter()
+            .filter_map(paragraph)
+            .any(|p| p.content.iter().any(|content| is_end(content, id)))
+}
+
+pub(super) fn has_source_paragraph(id: u32, following: &[BlockContent]) -> bool {
+    following
+        .iter()
+        .filter_map(paragraph)
+        .any(|p| p.source_ordinal == Some(id))
+}
+
+#[derive(Default)]
+pub(super) struct PendingFieldEnds {
+    pub(super) block: usize,
+    markers: BTreeMap<usize, Vec<ParagraphContent>>,
+}
+
+impl PendingFieldEnds {
+    pub(super) fn carry(&mut self, end: &FieldSpanEnd, following: &[BlockContent]) -> bool {
+        if !is_end(&end.marker, end.paragraph) {
+            return false;
+        }
+        let target = following
+            .iter()
+            .enumerate()
+            .take_while(|(_, block)| {
+                paragraph(block)
+                    .and_then(|p| p.source_ordinal)
+                    .is_none_or(|ordinal| ordinal < end.paragraph)
+            })
+            .filter_map(|(index, block)| paragraph(block).map(|_| self.block + index + 1))
+            .last()
+            .unwrap_or(self.block);
+        self.markers
+            .entry(target)
+            .or_default()
+            .push((*end.marker).clone());
+        true
+    }
+
+    pub(super) fn take(&mut self) -> Vec<ParagraphContent> {
+        self.markers.remove(&self.block).unwrap_or_default()
+    }
 }

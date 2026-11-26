@@ -835,6 +835,7 @@ function fieldFromPayload(
 
 /** `_kind` of the embed a kept inline element holding content seeds as. @internal */
 export const RAW_INLINE_KIND = 'rawInline';
+export const FIELD_END_ANCHOR = 'fieldEnd:';
 
 /** Kept inline elements written back from their embed, one story unit each. */
 const rawInlineEmbeds = new WeakSet<RawXml>();
@@ -1533,6 +1534,13 @@ function isTrackedWrapper(content: ParagraphContent | undefined): content is Tra
     content?.type === 'moveFrom' ||
     content?.type === 'moveTo'
   );
+}
+
+export function fieldEndId(content: ParagraphContent): number | undefined {
+  const run = isTrackedWrapper(content) && content.content.length === 1 ? content.content[0] : content;
+  const marker = run?.type === 'run' && run.content.length === 1 ? run.content[0] : undefined;
+  const id = marker?.type === 'fieldChar' && marker.charType === 'end' ? marker.spanEnd : undefined;
+  return id !== undefined && Number.isInteger(id) && id >= 0 && id <= 0xffffffff ? id : undefined;
 }
 
 function buildParagraphContent(
@@ -3793,22 +3801,22 @@ function restoreSpanningFieldRuns(
 ): BlockContent[] {
   const live = new Map(storyBlockKeys(blocks, storyId).map((key, index) => [key, blocks[index]!]));
   const keys = storyBlockKeys(base, storyId);
-  const sources = new Map<string, { paragraph: Paragraph; keepRuns: boolean }>();
+  const sources = new Map<string, Paragraph>();
   let last = -1;
-  let kept = -1;
   for (const [index, block] of base.entries()) {
     const key = keys[index];
     if (block.type !== 'paragraph' || key === undefined) continue;
     const current = live.get(key);
     for (const field of spanningFields(block.content)) {
+      const closing = field.spanEnd?.paragraph;
+      if (closing === undefined) continue;
       const end = index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult);
-      if (end <= index) continue;
-      last = Math.max(last, end);
-      if (current?.type === 'paragraph' && spanningFields(current.content).some(candidate => candidate.instruction === field.instruction)) {
-        kept = Math.max(kept, end);
+      if (current?.type === 'paragraph' && spanningFields(current.content)
+        .some(candidate => candidate.spanEnd?.paragraph === closing)) {
+        last = Math.max(last, end);
       }
     }
-    if (index <= last) sources.set(key, { paragraph: block, keepRuns: index <= kept });
+    if (index <= last) sources.set(key, block);
   }
   if (sources.size === 0) return blocks;
   return blocks.map((block) => {
@@ -3816,8 +3824,82 @@ function restoreSpanningFieldRuns(
     const key = projectedSessionKey(block);
     const source = key === undefined ? undefined : sources.get(`P${key}`);
     if (!source) return block;
-    const content = restoreFieldRuns(block.content, source.paragraph.content, source.keepRuns);
+    const content = restoreFieldRuns(block.content, source.content, false);
     return content === block.content ? block : cloneProjectedParagraph(block, { content });
+  });
+}
+
+function restoreFieldEnds(
+  blocks: BlockContent[],
+  base: readonly BlockContent[],
+  storyId: string,
+  anchors: ReadonlyMap<number, { key: string; offset: number }>,
+): BlockContent[] {
+  const keys = storyBlockKeys(blocks, storyId);
+  const live = new Map(keys.map((key, index) => [key, index]));
+  const sourceKeys = storyBlockKeys(base, storyId);
+  const sources = new Map<number, number>();
+  base.forEach((block, index) => {
+    if (block.type !== 'paragraph') return;
+    for (const child of block.content) {
+      const id = fieldEndId(child);
+      if (id !== undefined) sources.set(id, index);
+    }
+  });
+  const placements = new Map<number, Array<{ offset: number; marker: ParagraphContent }>>();
+  const kept = new Map<number, number>();
+  const used = new Set<number>();
+  blocks.forEach((block, owner) => {
+    if (block.type !== 'paragraph') return;
+    for (const field of spanningFields(block.content)) {
+      const end = field.spanEnd;
+      if (!end || used.has(end.paragraph) || fieldEndId(end.marker) !== end.paragraph) continue;
+      const anchor = anchors.get(end.paragraph);
+      const source = sources.get(end.paragraph);
+      const sourceIndex = source === undefined ? undefined : live.get(sourceKeys[source]);
+      if (!anchor && (source === undefined || sourceIndex !== undefined)) {
+        if (sourceIndex !== undefined) kept.set(end.paragraph, sourceIndex);
+        continue;
+      }
+      used.add(end.paragraph);
+      let index = anchor && live.get(anchor.key);
+      let offset = anchor?.offset ?? Number.MAX_SAFE_INTEGER;
+      if (source !== undefined && sourceIndex === undefined) {
+        const nextKey = sourceKeys.slice(source + 1).find(key => key !== undefined && live.has(key));
+        const outside = nextKey === undefined ? blocks.length : live.get(nextKey)!;
+        if (index === undefined || index >= outside) {
+          index = outside - 1;
+          while (index > owner && blocks[index]?.type !== 'paragraph') index -= 1;
+          offset = Number.MAX_SAFE_INTEGER;
+        }
+      }
+      if (index === undefined || index < owner || blocks[index]?.type !== 'paragraph') {
+        index = owner;
+        offset = Number.MAX_SAFE_INTEGER;
+      }
+      const target = blocks[index] as Paragraph;
+      if (target === base[source ?? -1] && target.content.some(child => fieldEndId(child) === end.paragraph)) {
+        kept.set(end.paragraph, index);
+        continue;
+      }
+      const bucket = placements.get(index) ?? [];
+      bucket.push({ offset, marker: end.marker });
+      placements.set(index, bucket);
+    }
+  });
+  return blocks.map((block, index) => {
+    if (block.type !== 'paragraph') return block;
+    const content = block.content.filter(child => {
+      const id = fieldEndId(child);
+      return id === undefined || kept.get(id) === index;
+    });
+    const markers = placements.get(index);
+    if (!markers) return content.length === block.content.length ? block : cloneProjectedParagraph(block, { content });
+    const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+    const restored = insertBoundaries(content, markers.map((marker, id) => ({
+      id, kind: 'start', offset: Math.min(marker.offset, length),
+    })), boundary => markers[boundary.id]!.marker);
+    return cloneProjectedParagraph(block, { content: restored });
   });
 }
 
@@ -3850,50 +3932,22 @@ function parsedBlockCount(content: StructuredFieldContent | undefined): number {
   return content?.blockCount ?? content?.blocks?.length ?? 0;
 }
 
-function* fieldCharacters(content: readonly ParagraphContent[]): Iterable<'begin' | 'separate' | 'end'> {
-  for (const child of content) {
-    if (child.type === 'run') {
-      for (const entry of child.content) {
-        if (entry.type === 'fieldChar') yield entry.charType;
-      }
-    } else if (child.type === 'hyperlink') {
-      yield* fieldCharacters(child.structuredChildren ?? child.children);
-    } else if (child.type === 'inlineSdt' || isTrackedWrapper(child)) {
-      yield* fieldCharacters(child.content);
-    }
-  }
-}
-
-function externalFieldCharacter(block: BlockContent | undefined, wanted: 'separate' | 'end'): boolean {
-  if (block?.type !== 'paragraph') return false;
-  let depth = 0;
-  for (const kind of fieldCharacters(block.content)) {
-    if (depth === 0 && kind === wanted) return true;
-    if (kind === 'begin') depth += 1;
-    else if (kind === 'end') depth = Math.max(0, depth - 1);
-  }
-  return false;
-}
-
 function keptSpan(
   field: ComplexField,
   payload: Attrs | undefined,
   owner: number,
   blocks: readonly BlockContent[],
-  keys: ReadonlyArray<string | undefined>
+  keys: ReadonlyArray<string | undefined>,
+  closingBlocks: ReadonlyMap<number, number>,
 ): FieldBlockSpan {
   const code = parsedBlockCount(field.structuredCode);
   const result = parsedBlockCount(field.structuredResult);
+  if (field.spanEnd) {
+    const closing = closingBlocks.get(field.spanEnd.paragraph);
+    if (closing !== undefined && closing >= owner) return { code: 0, result: closing - owner };
+  }
   const recorded = payload?.fieldSpanBlocks;
   if (!Array.isArray(recorded)) return { code, result };
-  const last = recorded.at(-1);
-  const closing = typeof last === 'string' ? keys.indexOf(last, owner + 1) : -1;
-  if (externalFieldCharacter(blocks[closing], 'end')) {
-    const kept = closing - owner;
-    const separate = blocks.slice(owner + 1, closing + 1).findIndex(block => externalFieldCharacter(block, 'separate'));
-    if (separate >= 0) return { code: separate, result: kept - separate };
-    return result > 0 ? { code: 0, result: kept } : { code: kept, result: 0 };
-  }
   let index = owner + 1;
   let end = owner;
   for (const id of recorded) {
@@ -3983,6 +4037,14 @@ function withKeptBlockCounts(
 ): BlockContent[] {
   if (payloads.size === 0) return blocks;
   const keys = storyBlockKeys(blocks, storyId).map((key) => key?.slice(1));
+  const closingBlocks = new Map<number, number>();
+  blocks.forEach((block, index) => {
+    if (block.type !== 'paragraph') return;
+    for (const child of block.content) {
+      const id = fieldEndId(child);
+      if (id !== undefined) closingBlocks.set(id, index);
+    }
+  });
   let changed = false;
   const next = blocks.map((block, owner) => {
     const key = keys[owner];
@@ -3992,7 +4054,7 @@ function withKeptBlockCounts(
     const replacements = new Map(
       fields.map((field, index) => {
         const payload = fields.length === embeds.length ? embeds[index] : undefined;
-        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys))] as const;
+        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys, closingBlocks))] as const;
       })
     );
     const content = replaceFields(block.content, replacements);
@@ -4870,6 +4932,7 @@ class SaveContext {
     };
 
     const storyRawMarks = this.storyRawMarks(storyId);
+    const fieldEndAnchors = new Map<number, { key: string; offset: number }>();
     const rawMarksInOrder = storyRawMarks.every(
       (mark, index) => index === 0 || storyRawMarks[index - 1]!.offset <= mark.offset
     );
@@ -4924,7 +4987,14 @@ class SaveContext {
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
-        const rawMarks = paragraphRawMarks(storyOffset);
+        const rawMarks = paragraphRawMarks(storyOffset).filter(mark => {
+          if (!mark.xml.startsWith(FIELD_END_ANCHOR)) return true;
+          const id = Number(mark.xml.slice(FIELD_END_ANCHOR.length));
+          if (Number.isSafeInteger(id) && id >= 0) {
+            fieldEndAnchors.set(id, { key: `P${segment.paraId}`, offset: mark.offset });
+          }
+          return false;
+        });
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
@@ -5117,7 +5187,10 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const restored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
+    const rawRestored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
+    const restored = fieldEndAnchors.size || spanningEmbeds.size
+      ? restoreFieldEnds(rawRestored, baseBlocks ?? [], storyId, fieldEndAnchors)
+      : rawRestored;
     const projected = withKeptBlockCounts(
       baseBlocks && spanningEmbeds.size ? restoreSpanningFieldRuns(restored, baseBlocks, storyId) : restored,
       storyId,

@@ -240,7 +240,6 @@ fn each_reference(paragraph: &Paragraph, found: &mut impl FnMut(f64)) {
     }
 }
 
-/// The inline nodes the serializer writes as a complex field's result, when not its runs.
 /// Removes the references `drops` flags, visiting them in [`each_reference`] order, and the runs
 /// that held nothing else.
 struct Remover<'a> {
@@ -341,6 +340,23 @@ mod tests {
 
     fn holds_reference(value: &Value) -> bool {
         value.to_string().contains("commentReference")
+    }
+
+    #[test]
+    fn removes_an_emptied_run_from_a_structured_field_result() {
+        let text = json!({"type": "run", "content": [{"type": "text", "text": "Result"}]});
+        let mut node: InlineNode = serde_json::from_value(json!({
+            "type": "complexField",
+            "instruction": "QUOTE",
+            "fieldType": "QUOTE",
+            "fieldCode": [],
+            "fieldResult": [],
+            "structuredResult": {"inline": [reference(), text.clone()]}
+        })).unwrap();
+        let mut remover = Remover { drops: &[true], next: 0 };
+        assert!(!remover.node(&mut node));
+        let result = serde_json::to_value(node).unwrap();
+        assert_eq!(result["structuredResult"]["inline"], json!([text]));
     }
 
     #[test]

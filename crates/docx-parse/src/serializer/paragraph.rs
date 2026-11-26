@@ -2,6 +2,7 @@
 
 use std::borrow::Borrow;
 
+use crate::block::BlockContent;
 use crate::borders::Borders;
 use crate::formatting::{
     NumberingProperties, ParagraphCnfStyle, ParagraphFormatting, ParagraphFrame,
@@ -20,6 +21,7 @@ use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
 use super::context::{DeferredFormData, SerializerContext, shared_direction_prefix};
+use super::field_spans::{PendingFieldEnds, has_end, has_source_paragraph};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -46,9 +48,20 @@ pub fn serialize_paragraph(
     paragraph: &Paragraph,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    serialize_story_paragraph(paragraph, &[], &mut PendingFieldEnds::default(), context)
+}
+
+pub(super) fn serialize_story_paragraph(
+    paragraph: &Paragraph,
+    following: &[BlockContent],
+    pending: &mut PendingFieldEnds,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let enclosing = std::mem::take(&mut context.direction);
-    let result = serialize_paragraph_inner(paragraph, context);
+    let outer_end = context.spanning_field_end.take();
+    let result = serialize_paragraph_inner(paragraph, following, pending, context);
+    context.spanning_field_end = outer_end;
     context.direction = enclosing;
     context.leave_paragraph();
     result.map(
@@ -92,6 +105,8 @@ fn word_2010_prefix(attributes: &[RawAttribute]) -> (String, bool) {
 
 fn serialize_paragraph_inner(
     paragraph: &Paragraph,
+    following: &[BlockContent],
+    pending: &mut PendingFieldEnds,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(512);
@@ -143,7 +158,20 @@ fn serialize_paragraph_inner(
                 context.direction.look_ahead(scopes[index]);
             }
         }
+        if let ParagraphContent::Inline(InlineNode::ComplexField(field)) = content
+            && let Some(end) = &field.span_end
+        {
+            let found = has_end(end.paragraph, &paragraph.content[index + 1..], following);
+            let carried = !found
+                && (context.removed_paragraphs.contains(&end.paragraph)
+                    || (context.carry_removed_field_ends
+                        && paragraph.source_ordinal.is_some_and(|ordinal| ordinal < end.paragraph)
+                        && !has_source_paragraph(end.paragraph, following)))
+                && pending.carry(end, following);
+            context.spanning_field_end = (found || carried).then_some(end.paragraph);
+        }
         append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
+        context.spanning_field_end = None;
         if let ParagraphContent::CommentRange(marker) = content
             && !generated_comment_references.contains(&marker.id)
             && needs_comment_reference(paragraph, content)
@@ -161,6 +189,9 @@ fn serialize_paragraph_inner(
                 .end_element();
             generated_comment_references.push(marker.id);
         }
+    }
+    for marker in pending.take() {
+        append_generated(&mut writer, &serialize_paragraph_content(&marker, context)?);
     }
     let closing = context.direction.close_all();
     if !closing.is_empty() {
@@ -920,26 +951,25 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
     bookmarks
 }
 
-fn writes_field_nodes(part: &StructuredFieldContent) -> bool {
-    !part.spans_paragraphs() || part.inline.as_deref().is_some_and(inline_holds_field)
+fn writes_field_nodes(field: &ComplexField, part: &StructuredFieldContent) -> bool {
+    !part.spans_paragraphs()
+        || (field.span_end.is_some() && part.inline.as_deref().is_some_and(inline_holds_field))
 }
 
 pub(super) fn field_result_nodes(field: &ComplexField) -> Option<&[InlineNode]> {
     field
         .structured_result
         .as_ref()
-        .filter(|part| writes_field_nodes(part))?
+        .filter(|part| writes_field_nodes(field, part))?
         .inline
         .as_deref()
 }
 
-pub(super) fn field_result_nodes_mut(field: &mut ComplexField) -> Option<&mut [InlineNode]> {
-    field
-        .structured_result
-        .as_mut()
-        .filter(|part| writes_field_nodes(part))?
-        .inline
-        .as_deref_mut()
+pub(super) fn field_result_nodes_mut(field: &mut ComplexField) -> Option<&mut Vec<InlineNode>> {
+    if !writes_field_nodes(field, field.structured_result.as_ref()?) {
+        return None;
+    }
+    field.structured_result.as_mut()?.inline.as_mut()
 }
 
 fn serialize_complex_field(
@@ -947,9 +977,10 @@ fn serialize_complex_field(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let shared = complex_field_direction_scopes(field);
-    let separate_later = context.field_spans.has_separate_later(field);
+    let end_later = field.span_end.as_ref()
+        .is_some_and(|end| context.spanning_field_end == Some(end.paragraph));
     if let Some(source) = field.source_run_xml.as_deref()
-        && separate_later.is_none()
+        && !end_later
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
@@ -998,7 +1029,7 @@ fn serialize_complex_field(
     let code_nodes = field
         .structured_code
         .as_ref()
-        .filter(|content| writes_field_nodes(content))
+        .filter(|content| writes_field_nodes(field, content))
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
@@ -1049,12 +1080,10 @@ fn serialize_complex_field(
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
-    if separate_later.is_none_or(|later| !later && field.structured_result.is_some()) {
-        output.push_str(&context.direction.transition(result_scopes));
-        output.push_str("<w:r>");
-        output.push_str(&properties);
-        output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    }
+    output.push_str(&context.direction.transition(result_scopes));
+    output.push_str("<w:r>");
+    output.push_str(&properties);
+    output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
     if let Some(nodes) = field_result_nodes(field) {
         let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
         for (index, node) in nodes.iter().enumerate() {
@@ -1081,7 +1110,7 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
-    if separate_later.is_none() {
+    if !end_later {
         output.push_str(&context.direction.transition(result_scopes));
         output.push_str("<w:r>");
         output.push_str(&properties);

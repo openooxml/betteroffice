@@ -47,7 +47,7 @@ import {
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
-import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
+import { FIELD_END_ANCHOR, RAW_INLINE_KIND, fieldEndId, noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
@@ -1556,11 +1556,6 @@ function unitsForParagraphContent(content: ParagraphContent): number {
   return paragraphContentUnitCounts.get(content as object) ?? 0;
 }
 
-function fieldEndRun(run: Run): boolean {
-  const markers = run.content.filter(entry => entry.type !== 'instrText');
-  return markers.length > 0 && markers.every(entry => entry.type === 'fieldChar' && entry.charType === 'end');
-}
-
 function paragraphUnits(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
@@ -1577,10 +1572,12 @@ function paragraphUnits(
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
+    const fieldEnd = fieldEndId(content);
     if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
       commentMarks.push({ unit: start, start: content.type === 'commentRangeStart', id: content.id });
-    } else if (content.type === 'run' && fieldEndRun(content)) {
+    } else if (fieldEnd !== undefined) {
       fieldEnds += 1;
+      rawMarks.push({ unit: start, assoc: 'after', xml: FIELD_END_ANCHOR + fieldEnd });
     } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
@@ -2147,7 +2144,8 @@ function cachedResultBlocks(
   const start = owner + 1 + span.code;
   const last = blocks[start + span.result - 1];
   if (!last || isRawXml(last) || last.type !== 'paragraph' ||
-      last.content?.some(child => child.type !== 'run' || !fieldEndRun(child))) return null;
+      last.content?.some(child => field.type !== 'complexField' ||
+        field.spanEnd === undefined || fieldEndId(child) !== field.spanEnd.paragraph)) return null;
   return { start, count: span.result };
 }
 
