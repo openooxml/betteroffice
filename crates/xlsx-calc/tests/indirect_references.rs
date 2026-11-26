@@ -111,6 +111,91 @@ fn indirect_a1_new_structured_references_keep_cached_values() {
     }
 }
 
+fn check_indirect_recalculation(formula: &str, expected: CellValue, has_gap: bool) {
+    let mut wb = workbook();
+    let sheet = SheetId(0);
+    let at = CellRef::parse_a1("D4").unwrap();
+    wb.sheets[0].set_cell(
+        at,
+        Cell {
+            formula: Some(formula.into()),
+            value: n(42.0),
+            ..Cell::default()
+        },
+    );
+    let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+    assert_eq!(wb.value(sheet, at), expected, "{formula}");
+    let expected_gaps = if has_gap {
+        vec![xlsx_calc::UnevaluatedCell {
+            sheet,
+            cell: at,
+            functions: vec![],
+        }]
+    } else {
+        vec![]
+    };
+    assert_eq!(graph.unevaluated_cells(), expected_gaps, "{formula}");
+}
+
+#[test]
+fn indirect_release_nested_this_row_range_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("Table1[@[Unit Price]]:Table1[@[Qty]]")"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_cell_to_nested_this_row_range_keeps_cache() {
+    check_indirect_recalculation(r#"INDIRECT("A1:Table1[@[Unit Price]]")"#, n(42.0), true);
+}
+
+#[test]
+fn indirect_release_escaped_table_column_range_keeps_cache() {
+    check_indirect_recalculation(r#"INDIRECT("Table1['#a]:Table1['#b]")"#, n(42.0), true);
+}
+
+#[test]
+fn indirect_release_nested_this_row_union_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("(Table1[@[Unit Price]],Table1[@[Qty]])")"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_path_plus_table_reference_returns_ref() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'C:\Books\Data.xlsx'!A1 + Table1[Col]")"#,
+        CellValue::Error {
+            value: ErrorValue::Ref,
+        },
+        false,
+    );
+}
+
+#[test]
+fn indirect_release_r1c1_external_sheet_span_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'[Book.xlsx]Jan:Mar'!R1C1",FALSE)"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_external_sheet_span_ref_error_returns_ref() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'[Book.xlsx]Jan:Mar'!#REF!")"#,
+        CellValue::Error {
+            value: ErrorValue::Ref,
+        },
+        false,
+    );
+}
+
 #[test]
 fn spaced_a1_cell_ranges_recalculate_to_release_errors() {
     let mut wb = workbook();
