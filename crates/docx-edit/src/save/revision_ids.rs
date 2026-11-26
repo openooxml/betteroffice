@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Write};
-use std::ptr;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
@@ -13,12 +12,11 @@ use docx_parse::inline::{
 use docx_parse::paragraph::{Paragraph, ParagraphContent, TrackedInline};
 use docx_parse::shape::{DrawingSceneNode, Shape};
 use docx_parse::table::Table;
-use serde::Serialize;
-use serde::ser::{
-    self, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
-    SerializeTupleStruct, SerializeTupleVariant, Serializer,
-};
 use serde_json::{Map, Value};
+
+mod collect;
+
+use collect::collect;
 
 const MAX_ID: u32 = 1 << 31;
 const PLACEHOLDER_LIMIT: f64 = (1u64 << 53) as f64;
@@ -45,6 +43,7 @@ struct Work {
     reservation_inserts: usize,
     site_inserts: usize,
     collected_blocks: usize,
+    body_block_selections: usize,
     block_inserts: usize,
     block_probes: usize,
     make_mut: usize,
@@ -76,7 +75,7 @@ impl fmt::Display for RevisionIdsError {
 
 impl std::error::Error for RevisionIdsError {}
 
-impl ser::Error for RevisionIdsError {
+impl serde::ser::Error for RevisionIdsError {
     fn custom<T: fmt::Display>(message: T) -> Self {
         Self::Serialize(message.to_string())
     }
@@ -129,7 +128,7 @@ fn assign(
         return Ok(BTreeMap::new());
     }
     let session_ids = SessionIds::new(session);
-    let mut found = collect_with::<false, _>(request, &session_ids)?;
+    let mut found = collect::<false>(request, &session_ids);
     pass_complete();
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
@@ -138,6 +137,7 @@ fn assign(
         &session_ids,
         paths,
         &found.blocks_with_sites,
+        &found.body_blocks_with_sites,
         found.site_count,
     );
     walker.request(request);
@@ -197,24 +197,27 @@ fn assign(
 }
 
 struct SessionIds {
-    first: u64,
+    first: f64,
     ids: FastSet<u64>,
 }
 
 impl SessionIds {
     fn new(session: &BTreeSet<u64>) -> Self {
         Self {
-            first: session.first().copied().unwrap_or(u64::MAX),
+            first: session.first().map_or(f64::INFINITY, |&id| id as f64),
             ids: session.iter().copied().collect(),
         }
     }
 
     fn placeholder(&self, number: f64) -> Option<u64> {
-        placeholder(number).filter(|id| self.contains(*id))
+        if number < self.first {
+            return None;
+        }
+        placeholder(number).filter(|id| self.ids.contains(id))
     }
 
     fn contains(&self, id: u64) -> bool {
-        id >= self.first && self.ids.contains(&id)
+        self.ids.contains(&id)
     }
 }
 
@@ -230,7 +233,7 @@ pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<RevisionIdReservations, RevisionIdsError> {
-    let found = collect_with::<true, _>(request, &SessionIds::new(session))?;
+    let found = collect::<true>(request, &SessionIds::new(session));
     Ok(RevisionIdReservations {
         used: found.used.into_iter().collect(),
         max: found.max,
@@ -269,229 +272,22 @@ struct Collected {
     used: FastSet<u32>,
     sites: FastMap<u64, SiteCount>,
     reservations: BTreeMap<(String, u32), usize>,
-    pending: Vec<Observation>,
-    pending_depth: usize,
-    pointer: Option<String>,
     site_count: usize,
     blocks_with_sites: FastSet<*const ()>,
+    body_blocks_with_sites: Vec<usize>,
 }
 
-enum Observation {
-    Reservation(u32, bool, Option<String>),
-    Site(u64, Option<u64>),
+fn is_model_info(key: &str) -> bool {
+    matches!(key, "info" | "pPrIns" | "pPrDel")
 }
 
-impl Collected {
-    fn begin_pointer(&mut self, key: &str) -> Option<usize> {
-        self.pointer.as_mut().map(|pointer| {
-            let length = pointer.len();
-            push_pointer(pointer, key);
-            length
-        })
+fn block_key(block: &BlockContent) -> Option<*const ()> {
+    match block {
+        BlockContent::Paragraph(block) => Some(Arc::as_ptr(block).cast()),
+        BlockContent::Table(block) => Some(Arc::as_ptr(block).cast()),
+        BlockContent::BlockSdt(block) => Some(Arc::as_ptr(block).cast()),
+        BlockContent::RawXml(_) => None,
     }
-
-    fn end_pointer(&mut self, start: Option<usize>) {
-        if let Some(start) = start {
-            self.pointer.as_mut().unwrap().truncate(start);
-        }
-    }
-
-    fn note(&mut self, id: Kind, raises_base: bool, key: Option<&str>) {
-        if let Kind::Number(id) = id
-            && (0.0..f64::from(MAX_ID)).contains(&id)
-            && id.fract() == 0.0
-        {
-            let pointer = self.pointer.as_mut().map(|pointer| {
-                let length = pointer.len();
-                if let Some(key) = key {
-                    push_pointer(pointer, key);
-                }
-                let reservation = pointer.clone();
-                pointer.truncate(length);
-                reservation
-            });
-            self.observe(Observation::Reservation(id as u32, raises_base, pointer));
-        }
-    }
-
-    fn observe(&mut self, observation: Observation) {
-        if self.pending_depth == 0 {
-            self.record(observation);
-        } else {
-            self.pending.push(observation);
-        }
-    }
-
-    fn record(&mut self, observation: Observation) {
-        match observation {
-            Observation::Reservation(id, raises_base, pointer) => {
-                #[cfg(test)]
-                count_work(|work| work.reservation_inserts += 1);
-                self.used.insert(id);
-                if let Some(pointer) = pointer {
-                    *self.reservations.entry((pointer, id)).or_default() += 1;
-                }
-                if raises_base {
-                    self.max = self.max.max(id);
-                }
-            }
-            Observation::Site(id, hidden) => {
-                #[cfg(test)]
-                count_work(|work| work.site_inserts += 1);
-                self.site_count += 1;
-                let count = self.sites.entry(id).or_default();
-                count.remaining += 1;
-                if let Some(hidden) = hidden {
-                    count.hidden = Some(count.hidden.map_or(hidden, |prior| prior.min(hidden)));
-                }
-            }
-        }
-    }
-
-    fn finish_info(&mut self, start: usize, session_id: Option<u64>) {
-        self.pending_depth -= 1;
-        if let Some(id) = session_id {
-            let hidden = self
-                .pending
-                .drain(start..)
-                .filter_map(|observation| match observation {
-                    Observation::Site(id, _) => Some(id),
-                    Observation::Reservation(..) => None,
-                })
-                .min();
-            self.observe(Observation::Site(id, hidden));
-        }
-        if self.pending_depth == 0 {
-            while let Some(observation) = self.pending.pop() {
-                self.record(observation);
-            }
-        }
-    }
-
-    fn scan_xml(&mut self, text: &str) {
-        #[cfg(test)]
-        count_work(|work| {
-            work.strings += 1;
-            work.string_bytes += text.len();
-        });
-        let bytes = text.as_bytes();
-        if bytes.len() < 8 {
-            return;
-        }
-        for index in memchr::memchr_iter(b'w', bytes) {
-            if !bytes[index..].starts_with(b"w:id")
-                || (index > 0
-                    && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
-            {
-                continue;
-            }
-            let tail = text[index + 4..].trim_start_matches(js_space);
-            let Some(tail) = tail.strip_prefix('=') else {
-                continue;
-            };
-            let Some(tail) = tail.trim_start_matches(js_space).strip_prefix(['\'', '"']) else {
-                continue;
-            };
-            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-            if matches!(tail.as_bytes().get(digits), Some(b'\'' | b'"'))
-                && let Ok(id) = tail[..digits].parse::<u32>()
-            {
-                self.note(Kind::Number(f64::from(id)), true, None);
-            }
-        }
-    }
-}
-
-fn js_space(character: char) -> bool {
-    matches!(
-        character,
-        '\u{0009}'..='\u{000D}'
-            | ' '
-            | '\u{00A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'..='\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
-    )
-}
-
-#[derive(Clone, Copy, Default)]
-enum Symbol {
-    #[default]
-    Other,
-    Author,
-    Id,
-    RevisionId,
-    Content,
-    Type,
-    Info,
-    CommentMarker,
-    Annotation,
-}
-
-impl From<&str> for Symbol {
-    fn from(text: &str) -> Self {
-        match text {
-            "author" => Self::Author,
-            "id" => Self::Id,
-            "revisionId" => Self::RevisionId,
-            "content" => Self::Content,
-            "type" => Self::Type,
-            "info" | "pPrIns" | "pPrDel" => Self::Info,
-            "commentRangeStart" | "commentRangeEnd" | "commentReference" => Self::CommentMarker,
-            "bookmarkStart" | "bookmarkEnd" | "moveFromRangeStart" | "moveFromRangeEnd"
-            | "moveToRangeStart" | "moveToRangeEnd" => Self::Annotation,
-            _ => Self::Other,
-        }
-    }
-}
-
-#[derive(Default)]
-enum Kind {
-    #[default]
-    Other,
-    String(Symbol),
-    Number(f64),
-    Array,
-}
-
-#[cfg(test)]
-fn collect<T: Serialize>(
-    value: &T,
-    session: &BTreeSet<u64>,
-) -> Result<Collected, RevisionIdsError> {
-    collect_with::<false, _>(value, &SessionIds::new(session))
-}
-
-fn collect_with<const PATHS: bool, T: Serialize>(
-    value: &T,
-    session: &SessionIds,
-) -> Result<Collected, RevisionIdsError> {
-    let mut found = Collected {
-        pointer: PATHS.then(String::new),
-        ..Collected::default()
-    };
-    value.serialize(Visitor::<PATHS> {
-        session,
-        found: &mut found,
-        model: false,
-        info: false,
-        key: false,
-        node_type: false,
-    })?;
-    Ok(found)
-}
-
-struct Visitor<'a, const PATHS: bool> {
-    session: &'a SessionIds,
-    found: &'a mut Collected,
-    model: bool,
-    info: bool,
-    key: bool,
-    node_type: bool,
 }
 
 fn push_pointer(pointer: &mut String, key: &str) {
@@ -503,488 +299,6 @@ fn push_pointer(pointer: &mut String, key: &str) {
         start = index + 1;
     }
     pointer.push_str(&key[start..]);
-}
-
-impl<const PATHS: bool> Visitor<'_, PATHS> {
-    fn at<T>(&mut self, key: &str, visit: impl FnOnce(&mut Self) -> T) -> T {
-        if !PATHS {
-            return visit(self);
-        }
-        let start = self.found.begin_pointer(key);
-        let value = visit(self);
-        self.found.end_pointer(start);
-        value
-    }
-
-    fn child(&mut self, key: Symbol, model: bool) -> Visitor<'_, PATHS> {
-        Visitor {
-            session: self.session,
-            found: self.found,
-            model,
-            info: model && matches!(key, Symbol::Info),
-            key: false,
-            node_type: matches!(key, Symbol::Type),
-        }
-    }
-
-    fn number(self, value: impl fmt::Display, number: f64) -> Kind {
-        if self.key {
-            if PATHS && let Some(pointer) = &mut self.found.pointer {
-                write!(pointer, "/{value}").unwrap();
-            }
-            Kind::Other
-        } else {
-            Kind::Number(number)
-        }
-    }
-}
-
-struct Record<'a, const PATHS: bool> {
-    visitor: Visitor<'a, PATHS>,
-    kind: RecordKind,
-    key: Symbol,
-    key_start: Option<usize>,
-    variant_start: Option<usize>,
-    pending_start: Option<usize>,
-    block: Option<(*const (), usize)>,
-    author: bool,
-    id: Kind,
-    revision_id: Kind,
-    content_array: bool,
-    node_type: Symbol,
-}
-
-#[derive(Clone, Copy)]
-enum RecordKind {
-    Other,
-    Block,
-    ShapeTextBody,
-    Shape,
-    TablePatch,
-}
-
-impl<'a, const PATHS: bool> Record<'a, PATHS> {
-    fn new(visitor: Visitor<'a, PATHS>, name: &'static str) -> Self {
-        let kind = match name {
-            "Paragraph" | "Table" | "BlockSdt" => RecordKind::Block,
-            "ShapeTextBody" => RecordKind::ShapeTextBody,
-            "Shape" => RecordKind::Shape,
-            "S13TablePatch" => RecordKind::TablePatch,
-            _ => RecordKind::Other,
-        };
-        let info = visitor.info || matches!(name, "TrackedChangeInfo" | "PropertyChangeInfo");
-        let pending_start = info.then(|| {
-            visitor.found.pending_depth += 1;
-            visitor.found.pending.len()
-        });
-        let block = (!PATHS && matches!(kind, RecordKind::Block))
-            .then(|| (ptr::null(), visitor.found.site_count));
-        Self {
-            visitor,
-            kind,
-            key: Symbol::Other,
-            key_start: None,
-            variant_start: None,
-            pending_start,
-            block,
-            author: false,
-            id: Kind::Other,
-            revision_id: Kind::Other,
-            content_array: false,
-            node_type: Symbol::Other,
-        }
-    }
-
-    fn field(&mut self, key: Symbol, kind: Kind) {
-        match key {
-            Symbol::Author => self.author = matches!(kind, Kind::String(_)),
-            Symbol::Id => self.id = kind,
-            Symbol::RevisionId => self.revision_id = kind,
-            Symbol::Content => self.content_array = matches!(kind, Kind::Array),
-            Symbol::Type => {
-                self.node_type = match kind {
-                    Kind::String(symbol) => symbol,
-                    _ => Symbol::Other,
-                };
-            }
-            _ => {}
-        }
-    }
-
-    fn named_field<T: Serialize + ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), RevisionIdsError> {
-        #[cfg(test)]
-        count_work(|work| work.fields += 1);
-        let symbol = Symbol::from(key);
-        if matches!(symbol, Symbol::Type) {
-            #[cfg(test)]
-            if matches!(self.kind, RecordKind::Block) {
-                count_work(|work| work.collected_blocks += 1);
-            }
-            if let Some((key, _)) = &mut self.block {
-                *key = ptr::from_ref(value).cast::<()>();
-            }
-        }
-        let model = self.visitor.model
-            || matches!(
-                (self.kind, key),
-                (RecordKind::ShapeTextBody, "content")
-                    | (RecordKind::Shape, "drawingModel")
-                    | (RecordKind::TablePatch, "before" | "after")
-            );
-        let kind = self
-            .visitor
-            .at(key, |visitor| value.serialize(visitor.child(symbol, model)))?;
-        self.field(symbol, kind);
-        Ok(())
-    }
-
-    fn finish(self) -> Kind {
-        let found = self.visitor.found;
-        if let Some((key, site_count)) = self.block
-            && !key.is_null()
-            && found.site_count != site_count
-        {
-            #[cfg(test)]
-            count_work(|work| work.block_inserts += 1);
-            found.blocks_with_sites.insert(key);
-        }
-        if let Some(start) = self.pending_start {
-            let session_id = match (self.author, &self.id) {
-                (true, Kind::Number(id)) => self.visitor.session.placeholder(*id),
-                _ => None,
-            };
-            found.finish_info(start, session_id);
-            if session_id.is_some() {
-                if PATHS {
-                    found.end_pointer(self.variant_start);
-                }
-                return Kind::Other;
-            }
-        }
-        if self.author {
-            let raises_base = !self.content_array;
-            found.note(self.id, raises_base, Some("id"));
-            found.note(self.revision_id, raises_base, Some("revisionId"));
-        } else if let symbol @ (Symbol::CommentMarker | Symbol::Annotation) = self.node_type {
-            found.note(self.id, matches!(symbol, Symbol::Annotation), Some("id"));
-        }
-        if PATHS {
-            found.end_pointer(self.variant_start);
-        }
-        Kind::Other
-    }
-}
-
-impl<const PATHS: bool> SerializeMap for Record<'_, PATHS> {
-    type Ok = Kind;
-    type Error = RevisionIdsError;
-
-    fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
-        if PATHS {
-            self.key_start = self.visitor.found.pointer.as_ref().map(String::len);
-        }
-        let kind = key.serialize(Visitor::<PATHS> {
-            session: self.visitor.session,
-            found: self.visitor.found,
-            model: false,
-            info: false,
-            key: true,
-            node_type: false,
-        })?;
-        self.key = match kind {
-            Kind::String(symbol) => symbol,
-            _ => Symbol::Other,
-        };
-        Ok(())
-    }
-
-    fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-        #[cfg(test)]
-        count_work(|work| work.fields += 1);
-        let model = self.visitor.model;
-        let kind = value.serialize(self.visitor.child(self.key, model))?;
-        if PATHS {
-            self.visitor.found.end_pointer(self.key_start);
-        }
-        self.field(self.key, kind);
-        Ok(())
-    }
-
-    fn end(self) -> Result<Kind, Self::Error> {
-        Ok(self.finish())
-    }
-}
-
-impl<const PATHS: bool> SerializeStruct for Record<'_, PATHS> {
-    type Ok = Kind;
-    type Error = RevisionIdsError;
-
-    fn serialize_field<T: Serialize + ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error> {
-        self.named_field(key, value)
-    }
-
-    fn end(self) -> Result<Kind, Self::Error> {
-        Ok(self.finish())
-    }
-}
-
-impl<const PATHS: bool> SerializeStructVariant for Record<'_, PATHS> {
-    type Ok = Kind;
-    type Error = RevisionIdsError;
-
-    fn serialize_field<T: Serialize + ?Sized>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error> {
-        self.named_field(key, value)
-    }
-
-    fn end(self) -> Result<Kind, Self::Error> {
-        Ok(self.finish())
-    }
-}
-
-struct Sequence<'a, const PATHS: bool> {
-    visitor: Visitor<'a, PATHS>,
-    index: usize,
-    variant_start: Option<usize>,
-}
-
-macro_rules! sequence {
-    ($trait:ident, $field:ident, $kind:expr) => {
-        impl<const PATHS: bool> $trait for Sequence<'_, PATHS> {
-            type Ok = Kind;
-            type Error = RevisionIdsError;
-
-            fn $field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-                #[cfg(test)]
-                count_work(|work| work.fields += 1);
-                let model = self.visitor.model;
-                if !PATHS {
-                    value.serialize(self.visitor.child(Symbol::Other, model))?;
-                    return Ok(());
-                }
-                let start = self.visitor.found.pointer.as_mut().map(|pointer| {
-                    let start = pointer.len();
-                    write!(pointer, "/{}", self.index).unwrap();
-                    self.index += 1;
-                    start
-                });
-                value.serialize(self.visitor.child(Symbol::Other, model))?;
-                self.visitor.found.end_pointer(start);
-                Ok(())
-            }
-
-            fn end(self) -> Result<Kind, Self::Error> {
-                if PATHS {
-                    self.visitor.found.end_pointer(self.variant_start);
-                }
-                Ok($kind)
-            }
-        }
-    };
-}
-
-sequence!(SerializeSeq, serialize_element, Kind::Array);
-sequence!(SerializeTuple, serialize_element, Kind::Array);
-sequence!(SerializeTupleStruct, serialize_field, Kind::Array);
-sequence!(SerializeTupleVariant, serialize_field, Kind::Other);
-
-macro_rules! number {
-    ($($method:ident: $type:ty),+ $(,)?) => {
-        $(
-            fn $method(self, value: $type) -> Result<Kind, Self::Error> {
-                Ok(self.number(value, value as f64))
-            }
-        )+
-    };
-}
-
-impl<'a, const PATHS: bool> Serializer for Visitor<'a, PATHS> {
-    type Ok = Kind;
-    type Error = RevisionIdsError;
-    type SerializeSeq = Sequence<'a, PATHS>;
-    type SerializeTuple = Sequence<'a, PATHS>;
-    type SerializeTupleStruct = Sequence<'a, PATHS>;
-    type SerializeTupleVariant = Sequence<'a, PATHS>;
-    type SerializeMap = Record<'a, PATHS>;
-    type SerializeStruct = Record<'a, PATHS>;
-    type SerializeStructVariant = Record<'a, PATHS>;
-
-    number!(
-        serialize_i8: i8, serialize_i16: i16, serialize_i32: i32, serialize_i64: i64,
-        serialize_i128: i128, serialize_u8: u8, serialize_u16: u16, serialize_u32: u32,
-        serialize_u64: u64, serialize_u128: u128, serialize_f32: f32, serialize_f64: f64,
-    );
-
-    fn serialize_bool(self, value: bool) -> Result<Kind, Self::Error> {
-        if PATHS
-            && self.key
-            && let Some(pointer) = &mut self.found.pointer
-        {
-            write!(pointer, "/{value}").unwrap();
-        }
-        Ok(Kind::Other)
-    }
-
-    fn serialize_char(self, value: char) -> Result<Kind, Self::Error> {
-        self.serialize_str(value.encode_utf8(&mut [0; 4]))
-    }
-
-    fn serialize_str(self, value: &str) -> Result<Kind, Self::Error> {
-        if self.key {
-            if PATHS {
-                self.found.begin_pointer(value);
-            }
-            return Ok(Kind::String(Symbol::from(value)));
-        }
-        self.found.scan_xml(value);
-        Ok(Kind::String(if self.node_type {
-            Symbol::from(value)
-        } else {
-            Symbol::Other
-        }))
-    }
-
-    fn serialize_bytes(self, _: &[u8]) -> Result<Kind, Self::Error> {
-        Ok(Kind::Other)
-    }
-
-    fn serialize_none(self) -> Result<Kind, Self::Error> {
-        Ok(Kind::Other)
-    }
-
-    fn serialize_some<T: Serialize + ?Sized>(self, value: &T) -> Result<Kind, Self::Error> {
-        value.serialize(self)
-    }
-
-    fn serialize_unit(self) -> Result<Kind, Self::Error> {
-        Ok(Kind::Other)
-    }
-
-    fn serialize_unit_struct(self, _: &'static str) -> Result<Kind, Self::Error> {
-        self.serialize_unit()
-    }
-
-    fn serialize_unit_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-    ) -> Result<Kind, Self::Error> {
-        self.serialize_str(variant)
-    }
-
-    fn serialize_newtype_struct<T: Serialize + ?Sized>(
-        self,
-        _: &'static str,
-        value: &T,
-    ) -> Result<Kind, Self::Error> {
-        value.serialize(self)
-    }
-
-    fn serialize_newtype_variant<T: Serialize + ?Sized>(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-        value: &T,
-    ) -> Result<Kind, Self::Error> {
-        if !PATHS {
-            value.serialize(self)?;
-            return Ok(Kind::Other);
-        }
-        let start = self.found.begin_pointer(variant);
-        value.serialize(Visitor {
-            found: &mut *self.found,
-            ..self
-        })?;
-        self.found.end_pointer(start);
-        Ok(Kind::Other)
-    }
-
-    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-        Ok(Sequence {
-            visitor: self,
-            index: 0,
-            variant_start: None,
-        })
-    }
-
-    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        self.serialize_seq(None)
-    }
-
-    fn serialize_tuple_struct(
-        self,
-        _: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-        self.serialize_seq(None)
-    }
-
-    fn serialize_tuple_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        let variant_start = if PATHS {
-            self.found.begin_pointer(variant)
-        } else {
-            None
-        };
-        Ok(Sequence {
-            visitor: self,
-            index: 0,
-            variant_start,
-        })
-    }
-
-    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
-        Ok(Record::new(self, ""))
-    }
-
-    fn serialize_struct(
-        self,
-        name: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeStruct, Self::Error> {
-        Ok(Record::new(self, name))
-    }
-
-    fn serialize_struct_variant(
-        self,
-        _: &'static str,
-        _: u32,
-        variant: &'static str,
-        _: usize,
-    ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        let variant_start = if PATHS {
-            self.found.begin_pointer(variant)
-        } else {
-            None
-        };
-        let mut record = Record::new(
-            Visitor {
-                info: false,
-                ..self
-            },
-            "",
-        );
-        record.variant_start = variant_start;
-        Ok(record)
-    }
 }
 
 enum Site<'a> {
@@ -1043,6 +357,7 @@ impl Default for SiteOrder {
 struct SiteWalker<'a, 's, 'p> {
     session: &'s SessionIds,
     blocks_with_sites: &'s FastSet<*const ()>,
+    body_blocks_with_sites: &'s [usize],
     sites: Vec<PendingSite<'a>>,
     order: SiteOrder,
     paths: Option<&'p mut Vec<(String, u64)>>,
@@ -1054,6 +369,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         session: &'s SessionIds,
         mut paths: Option<&'p mut Vec<(String, u64)>>,
         blocks_with_sites: &'s FastSet<*const ()>,
+        body_blocks_with_sites: &'s [usize],
         site_count: usize,
     ) -> Self {
         if let Some(paths) = &mut paths {
@@ -1062,6 +378,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         Self {
             session,
             blocks_with_sites,
+            body_blocks_with_sites,
             sites: Vec::with_capacity(site_count),
             order: SiteOrder::default(),
             paths,
@@ -1110,7 +427,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     fn request(&mut self, request: &'a mut S13SaveRequest) {
         self.at("document", |walker| {
             walker.at("content", |walker| {
-                walker.blocks(&mut request.document.content)
+                walker.body_blocks(&mut request.document.content)
             });
             walker.field_entries(
                 "sections",
@@ -1232,41 +549,50 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         self.at("info", |walker| walker.id(id));
     }
 
-    fn block_mut<T: Clone>(
-        &mut self,
-        block: &'a mut Arc<T>,
-        node_type: impl FnOnce(&T) -> &String,
-    ) -> Option<&'a mut T> {
-        #[cfg(test)]
-        count_work(|work| work.block_probes += 1);
-        let key = ptr::from_ref(node_type(block.as_ref())).cast::<()>();
-        if !self.blocks_with_sites.contains(&key) {
-            return None;
+    fn body_blocks(&mut self, blocks: &'a mut [BlockContent]) {
+        let mut blocks = blocks.iter_mut();
+        let mut next = 0;
+        for &index in self.body_blocks_with_sites {
+            let block = blocks.nth(index - next).unwrap();
+            next = index + 1;
+            #[cfg(test)]
+            count_work(|work| work.body_block_selections += 1);
+            if self.paths.is_some() {
+                let length = self.path.len();
+                write!(self.path, "/{index}").unwrap();
+                self.block(block);
+                self.path.truncate(length);
+            } else {
+                self.block(block);
+            }
         }
-        #[cfg(test)]
-        count_work(|work| work.make_mut += 1);
-        Some(Arc::make_mut(block))
     }
 
     fn blocks(&mut self, blocks: &'a mut [BlockContent]) {
-        self.entries(blocks, |walker, block| match block {
-            BlockContent::Paragraph(paragraph) => {
-                if let Some(paragraph) = walker.block_mut(paragraph, |block| &block.node_type) {
-                    walker.paragraph(paragraph);
-                }
+        self.entries(blocks, |walker, block| {
+            let Some(key) = block_key(block) else {
+                return;
+            };
+            #[cfg(test)]
+            count_work(|work| work.block_probes += 1);
+            if walker.blocks_with_sites.contains(&key) {
+                walker.block(block);
             }
-            BlockContent::Table(table) => {
-                if let Some(table) = walker.block_mut(table, |block| &block.node_type) {
-                    walker.table(table);
-                }
-            }
-            BlockContent::BlockSdt(control) => {
-                if let Some(control) = walker.block_mut(control, |block| &block.node_type) {
-                    walker.at("content", |walker| walker.blocks(&mut control.content));
-                }
-            }
-            BlockContent::RawXml(_) => {}
         });
+    }
+
+    fn block(&mut self, block: &'a mut BlockContent) {
+        #[cfg(test)]
+        count_work(|work| work.make_mut += 1);
+        match block {
+            BlockContent::Paragraph(paragraph) => self.paragraph(Arc::make_mut(paragraph)),
+            BlockContent::Table(table) => self.table(Arc::make_mut(table)),
+            BlockContent::BlockSdt(control) => {
+                let control = Arc::make_mut(control);
+                self.at("content", |walker| walker.blocks(&mut control.content));
+            }
+            BlockContent::RawXml(_) => unreachable!(),
+        }
     }
 
     fn table(&mut self, table: &'a mut Table) {
@@ -1504,7 +830,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     }
 
     fn model_field(&mut self, parent: ModelKind, key: &str, value: &'a mut Value) {
-        let info = matches!(Symbol::from(key), Symbol::Info);
+        let info = is_model_info(key);
         self.at(key, |walker| walker.model(value, parent.child(key), info));
     }
 }

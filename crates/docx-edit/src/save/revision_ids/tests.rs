@@ -8,6 +8,10 @@ const FIRST: u64 = (1 << 53) - 1;
 const SECOND: u64 = 1 << 40;
 const DOCUMENT: &str = "word/document.xml";
 
+fn collect_for_test(value: &impl collect::Visit, session: &BTreeSet<u64>) -> Collected {
+    collect::<false>(value, &SessionIds::new(session))
+}
+
 fn request(content: Value) -> S13SaveRequest {
     serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
@@ -320,7 +324,7 @@ fn assigns_inline_revisions_before_paragraph_marks_and_properties() {
 
 #[test]
 fn notes_serialized_annotations_and_comments() {
-    let found = collect(
+    let found = collect_for_test(
         &json!([
             {"type": "bookmarkStart", "id": 7},
             {"type": "bookmarkEnd", "id": 8},
@@ -347,8 +351,7 @@ fn notes_serialized_annotations_and_comments() {
             {"author": "A", "id": 103, "revisionId": 104, "content": []},
         ]),
         &BTreeSet::new(),
-    )
-    .unwrap();
+    );
     assert_eq!(found.max, 22);
     assert_eq!(
         found.used,
@@ -358,7 +361,7 @@ fn notes_serialized_annotations_and_comments() {
 
 #[test]
 fn scans_xml_in_values_with_javascript_boundaries() {
-    let found = collect(
+    let found = collect_for_test(
         &json!({
             "w:id = '99'": [
                 "w:id=\u{feff}\"00031' éw:id\u{a0}= '42\"",
@@ -368,35 +371,21 @@ fn scans_xml_in_values_with_javascript_boundaries() {
             ]
         }),
         &BTreeSet::new(),
-    )
-    .unwrap();
+    );
     assert_eq!(found.max, 42);
     assert_eq!(found.used, [31, 42].into_iter().collect());
 }
 
 #[test]
-fn uses_serialized_names_and_does_not_descend_into_session_infos() {
-    #[derive(Serialize)]
-    struct Record {
-        author: String,
-        id: u32,
-        #[serde(rename = "revisionId")]
-        revision_id: u32,
-    }
-
-    let found = collect(
-        &Record {
-            author: "A".into(),
-            id: 3,
-            revision_id: 5,
-        },
+fn distinguishes_typed_and_unmarked_json_revision_infos() {
+    let found = collect_for_test(
+        &json!({"author": "A", "id": 3, "revisionId": 5}),
         &BTreeSet::from([3]),
-    )
-    .unwrap();
+    );
     assert!(found.sites.is_empty());
     assert_eq!(found.used, [3, 5].into_iter().collect());
 
-    let infos = [
+    let infos = vec![
         docx_parse::TrackedChangeInfo {
             id: 3.0,
             author: "w:id='55'".into(),
@@ -408,11 +397,115 @@ fn uses_serialized_names_and_does_not_descend_into_session_infos() {
             date: Some("w:id='12'".into()),
         },
     ];
-    let found = collect(&infos, &BTreeSet::from([3])).unwrap();
+    let found = collect_for_test(&infos, &BTreeSet::from([3]));
     assert_eq!(found.site_count, 1);
     assert_eq!(found.sites[&3].remaining, 1);
     assert_eq!(found.max, 12);
     assert_eq!(found.used, [5, 12].into_iter().collect());
+}
+
+#[test]
+fn reports_reservations_at_serialized_typed_and_json_paths() {
+    let mut wire = serde_json::to_value(request(json!([
+        {"type": "rawXml", "xml": "<w:customXml w:id='7'/>"},
+        {
+            "type": "paragraph",
+            "extraAttributes": [{"name": "custom", "value": "w:id='8'"}],
+            "pPrIns": {"id": FIRST, "author": "w:id='99'"},
+            "pPrDel": {"id": 9, "author": "w:id='10'"},
+            "content": [
+                {"type": "run", "content": [{"type": "text", "text": "w:id='11'"}]},
+                {
+                    "type": "complexField",
+                    "instruction": "w:id='12'",
+                    "fieldType": "PAGE",
+                    "fieldCode": [{
+                        "type": "run", "content": [{"type": "instrText", "text": "w:id='13'"}]
+                    }],
+                    "fieldResult": [],
+                    "rawFormDataXml": "<w:ffData w:id='14'/>",
+                    "sourceRunXml": "<w:r w:id='15'/>"
+                },
+                {"type": "run", "content": [{
+                    "type": "opaqueDrawing",
+                    "kind": "drawing",
+                    "xml": "<w:drawing w:id='16'/>",
+                    "textBox": {
+                        "type": "shape", "shapeType": "rect", "size": {"width": 1, "height": 1},
+                        "drawingRunXml": "<w:r w:id='17'/>",
+                        "drawingModel": {"marker": {"type": "bookmarkEnd", "id": 21}},
+                        "textBody": {"content": [{"a~/b": "w:id='18' w:id='18'"}]}
+                    }
+                }]}
+            ]
+        },
+        {
+            "type": "blockSdt",
+            "properties": {"sdtType": "richText", "rawEndPropertiesXml": "w:id='19'"},
+            "content": []
+        }
+    ])))
+    .unwrap();
+    wire["document"]["comments"] = json!([{"id": 80, "author": "Reviewer", "content": []}]);
+    wire["headerEntries"] = json!([["rId1", {
+        "type": "header", "hdrFtrType": "default", "content": [{"type": "rawXml", "xml": "w:id='20'"}]
+    }]]);
+    wire["paragraphIds"] = json!({
+        "sectionEdits": {"sha256": "", "edits": [{"properties": {"xml": "w:id='21'"}}]},
+        "splicedParts": [{
+            "part": "word/document.xml",
+            "sha256": "",
+            "tablePatches": [{"ordinal": 0, "before": null, "after": {"xml": "w:id='21'"}}],
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "", "resultSha256": "",
+                "seed": {
+                    "units": [{"kind": "atom", "atomKind": "opaque", "attrs": {},
+                        "payload": {"xml": "w:id='21'"}}],
+                    "properties": {},
+                    "unitSha256": ""
+                },
+                "textEdits": [], "runEdits": [], "paraDeltas": [], "paraInherit": {}
+            }]
+        }]
+    });
+    let mut request = serde_json::from_value(wire).unwrap();
+    let session = BTreeSet::from([FIRST]);
+    let found = session_revision_id_reservations(&request, &session).unwrap();
+    let expected = [
+        ("/document/content/0/xml", 7, 1),
+        ("/document/content/1/extraAttributes/0/value", 8, 1),
+        ("/document/content/1/pPrDel/id", 9, 1),
+        ("/document/content/1/pPrDel/author", 10, 1),
+        ("/document/content/1/content/0/content/0/text", 11, 1),
+        ("/document/content/1/content/1/instruction", 12, 1),
+        ("/document/content/1/content/1/fieldCode/0/content/0/text", 13, 1),
+        ("/document/content/1/content/1/rawFormDataXml", 14, 1),
+        ("/document/content/1/content/1/sourceRunXml", 15, 1),
+        ("/document/content/1/content/2/content/0/xml", 16, 1),
+        ("/document/content/1/content/2/content/0/textBox/drawingRunXml", 17, 1),
+        ("/document/content/1/content/2/content/0/textBox/drawingModel/marker/id", 21, 1),
+        ("/document/content/1/content/2/content/0/textBox/textBody/content/0/a~0~1b", 18, 2),
+        ("/document/content/2/properties/rawEndPropertiesXml", 19, 1),
+        ("/headerEntries/0/1/content/0/xml", 20, 1),
+        ("/paragraphIds/sectionEdits/edits/0/properties/xml", 21, 1),
+        ("/paragraphIds/splicedParts/0/tablePatches/0/after/xml", 21, 1),
+        ("/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/xml", 21, 1),
+        ("/document/comments/0/id", 80, 1),
+    ];
+    assert_eq!(
+        found.sites,
+        expected
+            .into_iter()
+            .map(|(path, id, count)| ((path.to_owned(), id), count))
+            .collect()
+    );
+    assert_eq!(found.used, (7..=21).chain([80]).collect());
+    assert_eq!(found.max, 21);
+
+    let mut paths = Vec::new();
+    let ids = assign_session_revision_ids_with_paths(&mut request, &session, &mut paths).unwrap();
+    assert_eq!(ids, BTreeMap::from([(FIRST, 22)]));
+    assert_eq!(paths, [("/document/content/1/pPrIns/id".to_owned(), FIRST)]);
 }
 
 #[test]
@@ -590,9 +683,15 @@ fn clones_only_shared_blocks_on_a_revision_site_path() {
     assert!(!Arc::ptr_eq(cell_changed, actual_cell_changed));
 
     let mut probe = original.clone();
-    let found = collect(&probe, &session).unwrap();
+    let found = collect_for_test(&probe, &session);
     let session = SessionIds::new(&session);
-    let mut walker = SiteWalker::new(&session, None, &found.blocks_with_sites, found.site_count);
+    let mut walker = SiteWalker::new(
+        &session,
+        None,
+        &found.blocks_with_sites,
+        &found.body_blocks_with_sites,
+        found.site_count,
+    );
     WORK.with_borrow_mut(|work| *work = Work::default());
     walker.request(&mut probe);
     assert_eq!(WORK.with_borrow(|work| work.make_mut), 2);
@@ -627,7 +726,9 @@ fn bounds_visits_to_nested_shared_blocks() {
                     assign_session_revision_ids(&mut actual, &BTreeSet::from([FIRST])).unwrap(),
                     BTreeMap::from([(FIRST, 1)])
                 );
-                let visits = WORK.with_borrow(|work| work.collected_blocks + work.block_probes);
+                let visits = WORK.with_borrow(|work| {
+                    work.collected_blocks + work.body_block_selections + work.block_probes
+                });
                 assert!(
                     visits <= 3 * (2 * depth + 1),
                     "{visits} visits at depth {depth}"
@@ -687,7 +788,12 @@ fn bounds_work_for_flat_revision_requests() {
             1,
         ),
         ("block inserts", small.block_inserts, large.block_inserts, 1),
-        ("block probes", small.block_probes, large.block_probes, 1),
+        (
+            "body block selections",
+            small.body_block_selections,
+            large.body_block_selections,
+            1,
+        ),
         ("make_mut", small.make_mut, large.make_mut, 1),
         ("id probes", small.id_probes, large.id_probes, 1),
         ("verified sites", small.verified, large.verified, 1),
@@ -704,7 +810,9 @@ fn bounds_work_for_flat_revision_requests() {
         assert_eq!(work.site_inserts, count / 10);
         assert_eq!(work.collected_blocks, count);
         assert_eq!(work.block_inserts, count / 10);
-        assert_eq!(work.block_probes, count);
+        assert_eq!(work.body_block_selections, count / 10);
+        assert_eq!(work.block_probes, 0);
+        assert_eq!(work.strings, 2 + 2 * count + count / 10 + count / 50);
         assert_eq!(work.make_mut, count / 10);
         assert_eq!(work.id_probes, count / 10);
         assert_eq!(work.verified, count / 10);
@@ -734,7 +842,7 @@ fn inserts_each_nested_model_reservation_once() {
                     [("info".to_owned(), model)].into_iter().collect(),
                 ));
                 WORK.with_borrow_mut(|work| *work = Work::default());
-                let found = collect(&shape, &BTreeSet::from([FIRST])).unwrap();
+                let found = collect_for_test(&shape, &BTreeSet::from([FIRST]));
                 assert_eq!(found.used, (1..=count).collect());
                 assert_eq!(
                     WORK.with_borrow(|work| work.reservation_inserts),
