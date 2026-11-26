@@ -14,7 +14,7 @@ function outline(view: Awaited<ReturnType<typeof open>>['view'], resizeHandles =
   expect(elements).toHaveLength(1);
   expect(view.queryAllByTestId(/pptx-resize-/)).toHaveLength(resizeHandles ? 8 : 0);
   const element = elements[0]!;
-  expect(element.style.border).toBe('2px dashed #6b7280');
+  expect(element.style.border).toBe('1px solid #6b7280');
   expect(element.style.boxShadow).toBe('0 0 0 1px rgba(255, 255, 255, 0.9)');
   return element;
 }
