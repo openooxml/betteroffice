@@ -10,6 +10,8 @@ import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import type { FontCdnDiagnostic, FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import type { DefaultFontFace, DefaultFontLanding } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontPaintFace } from '../../../../shared/office-session/render/pptxWorkerRender';
+import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces, UNCOVERED_EDITOR_SCRIPTS } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
@@ -857,14 +859,16 @@ test.each([false, true])('Simplified Arabic uses its last resort while the Naskh
   const source = provider(() => undefined, () => load);
   source.resolveLastResort.mockReturnValue(async () => bytes);
   const primary = { ...regular, family: 'Simplified Arabic' };
-  const registered: DefaultFontFace[] = [];
+  const registered: DefaultFontPaintFace[] = [];
   const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }],
     (face) => registered.push(face), () => {});
   try {
     expect(await manager.load()).toContainEqual(primary);
-    expect(registered.filter((face) => face.family === primary.family)).toEqual([
-      { ...primary, bytes, paintFamily: expect.any(String) },
-    ]);
+    const primaryFaces = () => registered.filter((face) => face.family === primary.family);
+    const paintFamily = primaryFaces()[0]?.paintFamily;
+    expect(paintFamily).toBeTypeOf('string');
+    const latin = { ...primary, bytes, paintFamily };
+    expect(primaryFaces()).toEqual([latin]);
     advance(delay - 1);
     expect(manager.hasPending()).toBe(false);
     expect(await manager.load()).toEqual([]);
@@ -872,9 +876,7 @@ test.each([false, true])('Simplified Arabic uses its last resort while the Naskh
     advance(1);
     expect(manager.hasPending()).toBe(true);
     expect(await manager.load()).toEqual([primary]);
-    expect(registered.filter((face) => face.family === primary.family)).toEqual([
-      { ...primary, bytes, paintFamily: expect.any(String) }, { ...primary, bytes: naskh },
-    ]);
+    expect(primaryFaces()).toEqual([latin, { ...primary, bytes: naskh }]);
     expect(load).toHaveBeenCalledTimes(2);
     expect(manager.hasPending()).toBe(false);
   } finally { manager.dispose(); }
@@ -887,19 +889,23 @@ test('retrying a styled Arabic default keeps the temporary Latin face in a separ
   const source = provider(() => undefined, () => load);
   source.resolveLastResort.mockReturnValue(async () => bytes);
   const primary = { family: 'Simplified Arabic', bold: true, italic: true };
-  const installed: DefaultFontFace[] = [];
+  const installed: (DefaultFontPaintFace & Pick<PngFontFace, 'face'>)[] = [];
   const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {},
     async (faces) => { installed.push(...faces); return faces; });
   try {
     expect(await manager.load()).toContainEqual(primary);
+    expect(load).toHaveBeenCalledTimes(1);
     advance(2000);
     expect(await manager.load()).toEqual([primary]);
+    expect(load).toHaveBeenCalledTimes(2);
     const requests = installed.filter((face) => face.family === primary.family);
     expect(requests).toHaveLength(2);
-    expect(requests[0]).toMatchObject({ ...primary, bytes, paintFamily: expect.any(String) });
-    expect(requests[0]).not.toHaveProperty('paintFamily', primary.family);
-    expect(requests[1]).toMatchObject({ ...primary, bytes: naskh, face: { bold: false, italic: false } });
-    expect(requests[1]).not.toHaveProperty('paintFamily');
+    const [latin, arabic] = requests;
+    expect(latin.paintFamily).toBeTypeOf('string');
+    expect(latin.paintFamily).not.toBe(primary.family);
+    expect(latin).toEqual({ ...primary, bytes, paintFamily: latin.paintFamily });
+    expect(arabic).toEqual({ ...primary, bytes: naskh, face: { bold: false, italic: false } });
+    expect(arabic).not.toHaveProperty('paintFamily');
   } finally { manager.dispose(); }
 });
 
