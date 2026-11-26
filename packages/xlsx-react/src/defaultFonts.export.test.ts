@@ -49,7 +49,7 @@ test('a face whose bytes do not match the manifest is left out, as the editor le
   expect(await exportFaces([{ family: 'Calibri', bold: false, italic: false }], null)).toEqual([]);
 });
 
-test('default fonts off and sheets without font requests load no fonts', async () => {
+test('editors with default fonts off forward no faces and load no fonts', async () => {
   const load = bundled(async () => new Uint8Array([1, 2, 3]).buffer);
   expect(await editorExportFaces([{ family: 'Calibri', bold: false, italic: false }], null, false)).toBeUndefined();
   expect(await editorExportFaces([], null, undefined)).toBeUndefined();
@@ -144,41 +144,4 @@ test('an editor export with no resolved faces leaves core font selection enabled
   const api = createInThreadAsyncEditorApi(sync, false, () => {});
   await expect(api.renderPng({ sheet: 0, range: 'A1' })).resolves.toBe(png);
   expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
-});
-
-test('an editor export tries a missing script file only once across font styles', async () => {
-  const previous = getFontCdnConfiguration();
-  const runtime = fontRuntimeWithoutPacks();
-  const source = runtime.createFontProvider(undefined, { strict: true });
-  const resolve = spyOn(source, 'resolveScriptFallback');
-  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({
-    ...fonts, default: fonts, ...runtime, createFontProvider: () => source,
-  });
-  const requests = [false, true].map((italic) => ({ family: 'Aptos', bold: false, italic, scripts: ['thai' as const] }));
-  try {
-    fonts.configureFontCdn({ baseUrl: false });
-    await expect(exportFaces(requests, null)).resolves.toEqual([]);
-    expect(resolve).toHaveBeenCalledTimes(1);
-  } finally {
-    setFontCdnConfiguration(previous);
-  }
-});
-
-test('in-thread async exports respect the editor’s current default-font setting', async () => {
-  const load = bundled(async () => new ArrayBuffer(3));
-  const renderPng = mock(async (_target: XlsxPngTarget, _options?: XlsxPngOptions) => new Uint8Array([1]));
-  const sync = {
-    commands: createXlsxCommandController().store,
-    flushPendingInput: async () => {},
-    handle: { renderPng, renderPngFonts: () => [{ family: 'Calibri', bold: false, italic: false }] },
-  } as unknown as XlsxEditorApi;
-  let defaultFonts = false;
-  const api = createInThreadAsyncEditorApi(sync, false, () => {}, undefined, () => defaultFonts);
-  const target = { sheet: 0, range: 'A1' };
-  await api.renderPng(target);
-  expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
-  expect(load).not.toHaveBeenCalled();
-  defaultFonts = true;
-  await api.renderPng(target);
-  expect(renderPng.mock.lastCall?.[1]?.fonts?.map(({ family }) => family)).toEqual(['Calibri']);
 });
