@@ -65,7 +65,7 @@ impl Document {
             selective: None,
             paragraph_ids: None,
         };
-        if original != *request {
+        if original.document != self.model.body || original != *request {
             return false;
         }
         // Signed zero can change emitted attributes even when typed equality holds.

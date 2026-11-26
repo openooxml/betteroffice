@@ -6,6 +6,7 @@ import { preloadOpcWasm, unzipContainer } from './wasm';
 import { writeDocxS13WithWarningsWire } from './parseWasm';
 import { parseDocx } from './parser';
 import { repackDocx, repackDocxWithWarnings } from './rezip';
+import { rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
 import { serializeDocumentSaveModel } from './modelSave';
 import { EDIT_PARAGRAPH_ID, oneSavePackage } from '../yrs/__fixtures__/oneSavePackage';
 import { createYrsSession } from '../yrs/index';
@@ -37,7 +38,7 @@ const fixturePaths = [
 async function expectUnchanged(source: Uint8Array) {
   const document = await parse(source);
   const result = await repackDocxWithWarnings(document, WITHOUT_STAMP);
-  expect(new Uint8Array(result.buffer)).toEqual(source);
+  expect(new Uint8Array(result.buffer)).toEqual(Uint8Array.from(source));
   expect(result.warnings).toEqual(document.warnings ?? []);
 }
 
@@ -50,7 +51,45 @@ for (const path of fixturePaths.sort()) {
 test('unchanged synthetic model saves byte for byte with stamping disabled', async () => {
   const { bytes } = oneSavePackage();
   await expectUnchanged(bytes);
-  expect(new Uint8Array(await repackDocx(await parse(bytes), WITHOUT_STAMP))).toEqual(bytes);
+  expect(new Uint8Array(await repackDocx(await parse(bytes), WITHOUT_STAMP)))
+    .toEqual(Uint8Array.from(bytes));
+});
+
+test('saving an unchanged model still applies the writer’s relationship ID updates', async () => {
+  const word = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+  const relationships = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const href = 'https://example.test/';
+  const source = rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes(
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '</Types>'
+    )],
+    ['_rels/.rels', toBytes(
+      `<Relationships xmlns="${relationships}"><Relationship Id="doc" Type="${office}/officeDocument" Target="word/document.xml"/></Relationships>`
+    )],
+    ['word/document.xml', toBytes(
+      `<w:document xmlns:w="${word}" xmlns:r="${office}"><w:body><w:p>` +
+      '<w:hyperlink r:id="second"><w:r><w:t>Link</w:t></w:r></w:hyperlink>' +
+      '</w:p></w:body></w:document>'
+    )],
+    ['word/_rels/document.xml.rels', toBytes(
+      `<Relationships xmlns="${relationships}">` +
+      `<Relationship Id="first" Type="${office}/hyperlink" Target="${href}" TargetMode="External"/>` +
+      `<Relationship Id="second" Type="${office}/hyperlink" Target="${href}" TargetMode="External"/>` +
+      '</Relationships>'
+    )],
+  ]));
+  const document = await parseDocx(source, { preloadFonts: false });
+  const paragraph = document.package.document.content[0];
+  const link = paragraph?.type === 'paragraph' ? paragraph.content[0] : undefined;
+  if (link?.type !== 'hyperlink') throw new Error('Missing the external hyperlink');
+
+  expect(link.rId).toBe('second');
+  const saved = await repackDocx(document, WITHOUT_STAMP);
+  expect(new Uint8Array(saved)).toEqual(new Uint8Array(source));
+  expect(link.rId).toBe('first');
 });
 
 test('the default stamp changes only the core properties of an unchanged model', async () => {
@@ -93,7 +132,7 @@ test('a changed model uses the plan-less writer and reports the rewritten parts'
       options: WITHOUT_STAMP,
     }), bytes);
     const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
-    expect(new Uint8Array(saved.buffer)).toEqual(expected.bytes);
+    expect(new Uint8Array(saved.buffer)).toEqual(Uint8Array.from(expected.bytes));
     const before = unzipContainer(bytes);
     const after = unzipContainer(expected.bytes);
     const rewritten = Object.entries(after)

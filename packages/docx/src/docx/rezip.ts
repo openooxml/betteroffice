@@ -12,9 +12,10 @@ import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
 import type { RawDocxContent } from './unzip';
 import { modelMatchesSource, modelPartsRewrittenWarning } from './modelSave';
+import { preloadParseWasm } from './parseWasm';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
-import { unzipContainer } from './wasm';
+import { preloadOpcWasm, unzipContainer } from './wasm';
 import { createEmptyDocx } from './rezip/createEmpty';
 import {
   findMaxRId,
@@ -75,11 +76,13 @@ async function repackModel(
 ): Promise<RepackResult> {
   const source = doc.originalBuffer;
   if (!source) return repackDocxModelWrite(doc, options);
-  if (await modelMatchesSource(doc, source)) {
-    const buffer = await saveUnchangedModel(source, options);
+  await Promise.all([preloadParseWasm(), preloadOpcWasm()]);
+  const matches = modelMatchesSource(doc, source);
+  const result = await repackDocxModelWrite(doc, options);
+  if (matches) {
+    const buffer = saveUnchangedModel(source, options);
     if (buffer) return { buffer, warnings: [...(doc.warnings ?? [])] };
   }
-  const result = await repackDocxModelWrite(doc, options);
   if (includeWarnings) result.warnings.push(modelPartsRewrittenWarning(source, result.buffer));
   return result;
 }
@@ -97,10 +100,10 @@ async function repackDocxModelWrite(
   return { buffer: result.buffer, warnings: result.warnings };
 }
 
-async function saveUnchangedModel(
+function saveUnchangedModel(
   source: ArrayBuffer,
   options: RepackOptions
-): Promise<ArrayBuffer | undefined> {
+): ArrayBuffer | undefined {
   const updateModifiedDate = options.updateModifiedDate ?? true;
   const modifiedBy = options.modifiedBy;
   if (typeof updateModifiedDate !== 'boolean' ||
@@ -110,9 +113,13 @@ async function saveUnchangedModel(
     const parts = loadParts(source);
     const core = partText(parts.get('docProps/core.xml'));
     if (core === undefined) return source.slice(0);
-    const updated = updateCoreProperties(core, { updateModifiedDate, modifiedBy });
+    const updated = updateCoreProperties(core, {
+      updateModifiedDate,
+      modifiedBy: modifiedBy?.replaceAll('$', () => '$$'),
+    });
     if (updated === core) return source.slice(0);
-    return await applyUpdatesToZip(parts, new Map([['docProps/core.xml', updated]]));
+    parts.set('docProps/core.xml', toBytes(updated));
+    return rezipPartsToArrayBuffer(parts);
   } catch {
     return undefined;
   }
