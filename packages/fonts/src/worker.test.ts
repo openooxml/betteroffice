@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import * as fonts from './index';
 import * as worker from './worker';
 import * as progressive from './progressive-entry';
@@ -201,5 +201,15 @@ test('the published main entry leaves all five slice manifests in the CJK add-on
   for (const file of manifests) {
     const index = JSON.parse(await readFile(new URL(urls![file]!), 'utf8')) as { chunks: { sha256: string }[] };
     expect(bundle).not.toContain(index.chunks[0]!.sha256);
+  }
+});
+
+test('published font declarations keep CDN session hooks internal', async () => {
+  const dist = new URL('../dist/', import.meta.url);
+  const entries = (await readdir(dist)).filter((file) => file.endsWith('.d.ts'));
+  expect(entries).toEqual(expect.arrayContaining(['index.d.ts', 'progressive.d.ts']));
+  for (const file of entries) {
+    const types = await readFile(new URL(file, dist), 'utf8');
+    expect(types).not.toMatch(/\b(?:FontCdnReporter|reportCdnFailure|checkImplicitCdnPack|onSubstitute)\b/);
   }
 });
