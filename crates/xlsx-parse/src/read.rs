@@ -70,12 +70,13 @@ pub struct LegacySheetDimensions {
 pub(crate) fn parse_workbook_indexed(
     parts: &[(String, Vec<u8>)],
 ) -> Result<IndexedWorkbook, ParseError> {
-    parse_workbook_indexed_subset(parts, None)
+    parse_workbook_indexed_subset(parts, None, |_| Ok(Vec::new()))
 }
 
 pub(crate) fn parse_workbook_indexed_subset(
     parts: &[(String, Vec<u8>)],
     included: Option<&BTreeSet<usize>>,
+    load_omitted: impl FnOnce(BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, ParseError>,
 ) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
@@ -84,13 +85,14 @@ pub(crate) fn parse_workbook_indexed_subset(
     let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
     let rels = wb_rels.map(parse_rels).transpose()?.unwrap_or_default();
 
+    let [strings_path, styles_path, theme_path] = workbook_style_and_string_paths(wb_rels)?;
     let (shared_strings, rich_shared_strings) =
-        match typed_part(parts, wb_rels, "sharedStrings", "xl/sharedStrings.xml")? {
+        match find_part(parts, &strings_path) {
             Some(bytes) => parse_shared_strings(bytes)?,
             None => Default::default(),
         };
-    let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
-    let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
+    let styles_bytes = find_part(parts, &styles_path);
+    let theme_bytes = find_part(parts, &theme_path);
     let (mut styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
@@ -99,16 +101,20 @@ pub(crate) fn parse_workbook_indexed_subset(
     let mut legacy_dimensions = Vec::with_capacity(meta.sheets.len());
     let mut declined_parts = Vec::new();
     let mut tables = Vec::new();
+    let mut omitted = BTreeSet::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
         xlsx_model::progress::pulse();
+        let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if included.is_some_and(|included| !included.contains(&idx)) {
+            if styles.cell_xfs.is_empty() && relationship.is_none_or(Relationship::is_worksheet) {
+                omitted.insert(worksheet_path(relationship, idx));
+            }
             sheets.push(Sheet::new(&entry.name));
             shared_string_cells.push(SharedStringCells::new());
             cell_facts.push(WorksheetCellFacts::default());
             legacy_dimensions.push(LegacySheetDimensions::default());
             continue;
         }
-        let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             let mut sheet = Sheet::new(&entry.name);
             if let Some(path) = relationship
@@ -143,7 +149,9 @@ pub(crate) fn parse_workbook_indexed_subset(
             &styles.dxfs,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
-        collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
+        if included.is_none() {
+            collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
+        }
         sheets.push(sheet);
         shared_string_cells.push(indices);
         cell_facts.push(facts);
@@ -151,8 +159,29 @@ pub(crate) fn parse_workbook_indexed_subset(
     }
 
     let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
-    if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
-        styles.cell_xfs.push(xlsx_model::Xf::default());
+    if styles.cell_xfs.is_empty() {
+        let mut zero = references_zero_style(&sheets);
+        if !zero && !omitted.is_empty() {
+            for (_, bytes) in load_omitted(omitted)? {
+                let sheet = parse_worksheet(
+                    "",
+                    &bytes,
+                    &shared_strings,
+                    &BTreeMap::new(),
+                    &mut SharedStringCells::new(),
+                    &mut LegacySheetDimensions::default(),
+                    &mut WorksheetCellFacts::default(),
+                    &styles.dxfs,
+                )?;
+                if references_zero_style(std::slice::from_ref(&sheet)) {
+                    zero = true;
+                    break;
+                }
+            }
+        }
+        if zero {
+            styles.cell_xfs.push(xlsx_model::Xf::default());
+        }
     }
     Ok(IndexedWorkbook {
         workbook: Workbook {
@@ -196,6 +225,16 @@ fn references_zero_style(sheets: &[Sheet]) -> bool {
             || sheet.col_styles.iter().any(|run| run.xf == 0)
             || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
     })
+}
+
+pub(crate) fn workbook_style_and_string_paths(
+    wb_rels: Option<&[u8]>,
+) -> Result<[String; 3], ParseError> {
+    Ok([
+        typed_part_name(wb_rels, "sharedStrings", "xl/sharedStrings.xml")?,
+        styles_part_name(wb_rels)?,
+        typed_part_name(wb_rels, "theme", "xl/theme/theme1.xml")?,
+    ])
 }
 
 /// resolve an optional part by relationship type suffix, falling back to

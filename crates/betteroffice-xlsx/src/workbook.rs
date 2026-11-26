@@ -3196,13 +3196,13 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let staged_calculation = if self.has_alternate_content() {
+        let preserved = self
+            .preserved_undo
+            .last()
+            .map_or(&self.preserved, |history| &history.before);
+        let staged_calculation = if self.has_alternate_content_in(&preserved.origins) {
             let mut preview = self.model.clone();
             xlsx_ops::apply_ops(&mut preview, &ops)?;
-            let preserved = self
-                .preserved_undo
-                .last()
-                .map_or(&self.preserved, |history| &history.before);
             let scope = before
                 .as_ref()
                 .map_or(scope, |inputs| scope.confirmed(inputs, &preview));
@@ -3295,13 +3295,13 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let staged_calculation = if self.has_alternate_content() {
+        let preserved = self
+            .preserved_redo
+            .last()
+            .map_or(&self.preserved, |history| &history.after);
+        let staged_calculation = if self.has_alternate_content_in(&preserved.origins) {
             let mut preview = self.model.clone();
             xlsx_ops::apply_ops(&mut preview, &ops)?;
-            let preserved = self
-                .preserved_redo
-                .last()
-                .map_or(&self.preserved, |history| &history.after);
             let scope = before
                 .as_ref()
                 .map_or(scope, |inputs| scope.confirmed(inputs, &preview));
@@ -4587,9 +4587,12 @@ impl Workbook {
     }
 
     fn has_alternate_content(&self) -> bool {
+        self.has_alternate_content_in(&self.preserved.origins)
+    }
+
+    fn has_alternate_content_in(&self, origins: &[Option<usize>]) -> bool {
         self.source_package.as_ref().is_some_and(|package| {
-            self.preserved
-                .origins
+            origins
                 .iter()
                 .flatten()
                 .any(|&origin| package.sheet_has_alternate_content(origin))
@@ -4611,10 +4614,7 @@ impl Workbook {
         axes: &[Option<xlsx_parse::SheetAxes>],
     ) -> Result<()> {
         if let Some(package) = &self.source_package
-            && origins
-                .iter()
-                .flatten()
-                .any(|&origin| package.sheet_has_alternate_content(origin))
+            && self.has_alternate_content_in(origins)
         {
             package.validate_alternate_content(model, origins, axes, self.is_collaborative())?;
         }
@@ -4643,25 +4643,30 @@ impl Workbook {
         options: CalculationOptions,
         cell_inputs: bool,
     ) -> Result<(MutationResult, Option<Vec<u8>>)> {
-        let mut graph = DepGraph::build(&self.model);
-        match &self.graph {
-            Some(previous) => graph.adopt_unevaluated(previous),
-            None => assume_unevaluated(&graph, &self.last_calculation),
-        }
-        for (sheet, cell, formula) in touched {
-            graph.set_formula(*sheet, *cell, formula.as_deref());
-        }
         let seeds = touched
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect::<Vec<_>>();
-        let result = recalc_after_with_seed(
-            &mut prepared.model,
-            &mut graph,
-            &seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let (graph, result) = if self.is_collaborative() {
+            self.recalculate_edit_preview(&mut prepared.model, &seeds, options.now_serial)
+        } else {
+            let mut graph = DepGraph::build(&self.model);
+            match &self.graph {
+                Some(previous) => graph.adopt_unevaluated(previous),
+                None => assume_unevaluated(&graph, &self.last_calculation),
+            }
+            for (sheet, cell, formula) in touched {
+                graph.set_formula(*sheet, *cell, formula.as_deref());
+            }
+            let result = recalc_after_with_seed(
+                &mut prepared.model,
+                &mut graph,
+                &seeds,
+                options.now_serial,
+                self.rand_seed,
+            );
+            (graph, result)
+        };
         let update = if cell_inputs {
             self.commit_prepared_cell_inputs(prepared)?
         } else {

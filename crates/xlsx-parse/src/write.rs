@@ -4,7 +4,7 @@
 //! that reserialization carries just the subset `read` models.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::iter::Peekable;
 use std::ops::Range;
@@ -3188,16 +3188,56 @@ pub struct AlternateContentSources {
 }
 
 impl AlternateContentSources {
-    pub fn from_parts(
-        parts: &[(String, Vec<u8>)],
+    pub fn from_source(
         sheets: &[(usize, &str)],
+        mut load: impl FnMut(BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, ParseError>,
     ) -> Result<Self, ParseError> {
+        let mut paths = BTreeSet::from([
+            "xl/workbook.xml".to_owned(),
+            "xl/_rels/workbook.xml.rels".to_owned(),
+        ]);
+        for &(_, path) in sheets {
+            paths.insert(path.to_owned());
+            paths.insert(relationship_part_path(path));
+        }
+        let mut parts = load(paths)?;
+        let workbook_rels = find_part(&parts, "xl/_rels/workbook.xml.rels");
+        let mut paths = BTreeSet::from(crate::read::workbook_style_and_string_paths(
+            workbook_rels,
+        )?);
+        let mut drawing_paths = BTreeSet::new();
+        for &(_, path) in sheets {
+            if let Some(rels) = find_part(&parts, &relationship_part_path(path)) {
+                drawing_paths.extend(crate::chart::sheet_drawing_paths(rels, path)?);
+            }
+        }
+        for path in &drawing_paths {
+            paths.insert(path.clone());
+            paths.insert(relationship_part_path(path));
+        }
+        parts.extend(load(paths)?);
+        let mut paths = BTreeSet::new();
+        for path in &drawing_paths {
+            if find_part(&parts, path).is_some()
+                && let Some(rels) = find_part(&parts, &relationship_part_path(path))
+            {
+                let dir = crate::chart::directory_of(path);
+                for (_, kind, target) in crate::chart::parse_relationships(rels)? {
+                    if crate::chart::type_is(&kind, "chart") {
+                        paths.insert(resolve_part_path(dir, &target));
+                    }
+                }
+            }
+        }
+        if !paths.is_empty() {
+            parts.extend(load(paths)?);
+        }
         let included = sheets.iter().map(|&(index, _)| index).collect();
-        let parsed = crate::read::parse_workbook_indexed_subset(parts, Some(&included))?;
+        let parsed = crate::read::parse_workbook_indexed_subset(&parts, Some(&included), load)?;
         let mut sources = BTreeMap::new();
         for &(index, path) in sheets {
             let bytes =
-                find_part(parts, path).ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
+                find_part(&parts, path).ok_or_else(|| ParseError::MissingPart(path.to_owned()))?;
             let template = XmlTemplate::capture(bytes)?;
             let mut facts = SourceCellFacts::default();
             template.capture_sheet_data_alternates(bytes, &mut facts)?;

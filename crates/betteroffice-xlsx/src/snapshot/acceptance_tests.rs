@@ -2928,6 +2928,118 @@ fn snapshot_facts_behavior_identity() {
     }
 }
 
+fn with_legacy_facts(chunks: Vec<Vec<u8>>, version: u8) -> Vec<Vec<u8>> {
+    let mut digest = Sha256::new();
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let (kind, ordinal, payload) = unframe(&chunk).unwrap();
+            let mut transport = Reader::new(payload);
+            let snapshot_id = transport.var_u64().unwrap();
+            let logical_ordinal = transport.var_u64().unwrap();
+            let length = transport.var_usize().unwrap();
+            assert_eq!(transport.var_usize().unwrap(), 0);
+            let logical = transport.rest();
+            assert_eq!(logical.len(), length);
+            let logical = match kind {
+                ChunkKind::Facts => {
+                    let (_, _, payload) = unframe(logical).unwrap();
+                    let mut reader = Reader::new(payload);
+                    let mut record = reader.bytes().unwrap().to_vec();
+                    reader.finish().unwrap();
+                    match record[0] {
+                        0 => record[1] = version,
+                        1 => {
+                            record.pop().unwrap();
+                            if version == 1 {
+                                assert!(matches!(record.pop().unwrap(), 0 | 1));
+                            }
+                        }
+                        _ => {}
+                    }
+                    let mut writer = Writer::new();
+                    writer.bytes(&record);
+                    frame(kind, logical_ordinal, &writer.into_bytes())
+                }
+                ChunkKind::End => frame(kind, logical_ordinal, &digest.clone().finalize()),
+                _ => {
+                    digest.update(logical);
+                    return chunk;
+                }
+            };
+            if kind != ChunkKind::End {
+                digest.update(&logical);
+            }
+            let mut writer = Writer::new();
+            writer.var_u64(snapshot_id);
+            writer.var_u64(logical_ordinal);
+            writer.var_usize(logical.len());
+            writer.var_usize(0);
+            writer.raw(&logical);
+            frame(kind, ordinal, &writer.into_bytes())
+        })
+        .collect()
+}
+
+#[test]
+fn legacy_package_facts_restore_the_deferred_alternate_content_guard() {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    let worksheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet3.xml")
+        .unwrap();
+    worksheet.1 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test">
+        <sheetData><row r="1"><mc:AlternateContent>
+        <mc:Choice Requires="x"><c r="A1"><v>1</v></c></mc:Choice>
+        <mc:Fallback><c r="A1"><v>1</v></c></mc:Fallback>
+        </mc:AlternateContent><c r="B1"><v>2</v></c></row></sheetData></worksheet>"#
+        .to_vec();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let original = Workbook::open(&bytes).unwrap();
+    let budget = budgets()[2];
+    for facts_version in [1, 2] {
+        let chunks = with_legacy_facts(encode(&original, budget), facts_version);
+        let (legacy, _) = completed_builder(&chunks, budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let resnapshotted = hydrate(&legacy, budget);
+        for mut workbook in [legacy, resnapshotted] {
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+            let model = workbook.model().clone();
+            let version = workbook.version();
+            let history = workbook.history_state();
+            let error = workbook
+                .edit_cell(SheetId(2), CellRef::new(0, 0), "5", context())
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+                    if message.contains("Empty") && message.contains("mc:AlternateContent")
+            ));
+            assert_eq!(workbook.model(), &model);
+            assert_eq!(workbook.version(), version);
+            assert_eq!(workbook.history_state(), history);
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+            assert_eq!(workbook.save().unwrap(), bytes);
+            assert!(
+                workbook
+                    .edit_cell(SheetId(2), CellRef::new(0, 1), "5", context())
+                    .unwrap()
+                    .applied
+            );
+            let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+            for (col, value) in [(0, 1.0), (1, 5.0)] {
+                assert_eq!(
+                    reopened.model().sheets[2].cell(CellRef::new(0, col)).unwrap().value,
+                    CellValue::Number { value }
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn snapshot_calculation_lists_advance_one_address_at_a_time() {
     let bytes = source(false, false);

@@ -314,7 +314,7 @@ pub(crate) fn scan_alternate_content(
                             has_fallback: false,
                         });
                     }
-                } else if grid && depth == 2 && name == b"row" {
+                } else if grid && depth == 2 && name == b"row" && !empty {
                     row = row_index(tag, None)?;
                     row_namespace_stable = attr(tag, b"xmlns")?.is_none_or(|value| {
                         value.as_bytes() == worksheet_ns.as_deref().unwrap_or_default()

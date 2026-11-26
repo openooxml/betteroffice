@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use betteroffice_xlsx::{
     CalculationOptions, CellRange, CellRef, CellValue, EditFailureCode, EditOperation, EditRequest,
     EditStep, Error, NumberFormatMutation, ProposalEditInput, ProposalRequest, RangeAddress,
@@ -645,6 +648,119 @@ fn collaborative_history_refuses_recalculation_that_dirties_a_wrapper() {
 }
 
 #[test]
+fn explicit_recalculation_refuses_wrapped_cache_changes() {
+    let formula = r#"<c r="A1"><f>NOW()</f><v>42</v></c>"#;
+    let wrapped = wrapper(formula, formula);
+    let bytes = package_with_sheet2(&in_row(&wrapped));
+    let (_, source_sheet) = ooxml_opc::unzip_parts(&bytes)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    assert_eq!(workbook.save().unwrap(), bytes);
+    workbook.recalculate_all(CalculationOptions {
+        now_serial: Some(43.0),
+    });
+    assert_eq!(
+        workbook.model().value(SheetId(1), cell_ref("A1")),
+        number(43.0)
+    );
+    let error = workbook.save().unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+            if message.contains("Sheet2") && message.contains("mc:AlternateContent")
+    ));
+    workbook.recalculate_all(CalculationOptions {
+        now_serial: Some(42.0),
+    });
+    let xml = saved(&workbook, &[(1, "A1", 42.0)]);
+    assert_eq!(xml.as_bytes(), source_sheet.as_slice());
+}
+
+#[test]
+fn undo_restoring_the_last_wrapped_sheet_checks_the_restored_cache() {
+    let formula = r#"<c r="A1"><f>NOW()</f><v>42</v></c>"#;
+    let wrapped = wrapper(formula, formula);
+    let bytes = package_with_sheet2(&in_row(&wrapped));
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let unchanged_cache = CalculationOptions {
+        now_serial: Some(42.0),
+    };
+    assert!(
+        workbook
+            .apply_ops(vec![Op::RemoveSheet { index: 1 }], unchanged_cache)
+            .unwrap()
+            .applied
+    );
+    assert_refused(&mut workbook, |workbook| {
+        workbook.undo(CalculationOptions {
+            now_serial: Some(43.0),
+        })
+    });
+    assert!(workbook.undo(unchanged_cache).unwrap().applied);
+    let xml = saved(&workbook, &[(0, "A1", 10.0), (1, "A1", 42.0)]);
+    assert!(xml.contains(&wrapped), "{xml}");
+}
+
+#[test]
+fn collaborative_local_and_remote_edits_use_the_same_wrapped_cache_check() {
+    for cached in [3, 4] {
+        let formula = format!(r#"<c r="A1"><f>2+2</f><v>{cached}</v></c>"#);
+        let wrapped = wrapper(&formula, &formula);
+        let bytes = package_with_sheet2(&in_row(&wrapped));
+        let mut sender = Workbook::open_collaborative(&bytes, 1).unwrap();
+        let mut receiver = Workbook::open_collaborative(&bytes, 2).unwrap();
+        let options = CalculationOptions::default();
+        if cached == 3 {
+            let state = sender.encode_state_as_update_v1();
+            let notified = Arc::new(AtomicBool::new(false));
+            let listener = Arc::clone(&notified);
+            let _subscription = sender
+                .observe_update_v1(move |_| listener.store(true, Ordering::Relaxed))
+                .unwrap();
+            assert_refused(&mut sender, |workbook| {
+                workbook.edit_cell(SheetId(0), cell_ref("A1"), "20", options)
+            });
+            assert_eq!(sender.encode_state_as_update_v1(), state);
+            assert!(!notified.load(Ordering::Relaxed));
+            continue;
+        }
+        edit(&mut sender, 0, "A1", "20");
+        let update = sender
+            .encode_diff_v1(&receiver.encode_state_vector_v1())
+            .unwrap();
+        assert!(receiver.apply_update_v1(&update, options).unwrap().applied);
+        for workbook in [&sender, &receiver] {
+            let xml = saved(
+                workbook,
+                &[(0, "A1", 20.0), (0, "I1", 22.0), (1, "A1", 4.0)],
+            );
+            assert!(xml.contains(&wrapped), "{xml}");
+        }
+        assert!(sender.undo(options).unwrap().applied);
+        saved(&sender, &[(0, "A1", 10.0), (0, "I1", 12.0), (1, "A1", 4.0)]);
+        assert!(sender.redo(options).unwrap().applied);
+        saved(&sender, &[(0, "A1", 20.0), (0, "I1", 22.0), (1, "A1", 4.0)]);
+    }
+}
+
+#[test]
+fn self_closing_row_before_an_inert_wrapper_allows_unrelated_edits() {
+    let empty = r#"<row r="1" ht="20" customHeight="1"/>"#;
+    let row = r#"<row r="2"><c r="A2"><v>2</v></c></row>"#;
+    let wrapped = wrapper(row, row);
+    let body = format!(
+        r#"<sheetData>{empty}{wrapped}<row r="3"><c r="A3"><v>3</v></c></row></sheetData>"#
+    );
+    let mut workbook = Workbook::open(&package_with_sheet2(&body)).unwrap();
+    edit(&mut workbook, 1, "A3", "9");
+    let xml = saved(&workbook, &[(1, "A2", 2.0), (1, "A3", 9.0)]);
+    assert!(xml.contains(&format!("{empty}{wrapped}")), "{xml}");
+}
+
+#[test]
 fn collaborative_edit_preserves_hidden_wrapped_row_height() {
     let row = r#"<row r="1" ht="25" hidden="1"><c r="A1"><v>1</v></c></row>"#;
     let wrapped = wrapper(row, row);
@@ -686,6 +802,71 @@ fn deferred_sheet_retains_grid_wrappers_and_their_edit_guard() {
             CalculationOptions::default(),
         )
     });
+}
+
+#[test]
+fn deferred_filter_edit_uses_the_source_default_style_without_loading_media() {
+    let formula = r#"<c r="A1"><f>2+2</f><v>4</v></c>"#;
+    let wrapped = wrapper(formula, formula);
+    let mut parts = ooxml_opc::unzip_parts(&package_with_wrapped_a1(&wrapped)).unwrap();
+    let sheet1 = "xl/worksheets/sheet1.xml";
+    let sheet2 = "xl/worksheets/sheet2.xml";
+    let source = parts.iter_mut().find(|(name, _)| name == sheet1).unwrap();
+    source.1 = std::str::from_utf8(&source.1)
+        .unwrap()
+        .replace(r#"<c r="A1">"#, r#"<c r="A1" s="0">"#)
+        .into_bytes();
+    let workbook_part = parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/workbook.xml")
+        .unwrap();
+    workbook_part.1 = std::str::from_utf8(&workbook_part.1)
+        .unwrap()
+        .replace(
+            "</workbook>",
+            concat!(
+                r#"<definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="1" hidden="1">"#,
+                "'Sheet2'!$A$1:$C$2</definedName></definedNames></workbook>",
+            ),
+        )
+        .into_bytes();
+    let media = "xl/media/unused.bin";
+    parts.push((media.to_owned(), vec![123; 64]));
+    xlsx_parse::AlternateContentSources::from_source(&[(1, sheet2)], |paths| {
+        assert!(!paths.contains(media));
+        Ok(parts
+            .iter()
+            .filter(|(name, _)| paths.contains(name))
+            .cloned()
+            .collect())
+    })
+    .unwrap();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut original = Workbook::open(&bytes).unwrap();
+    assert_eq!(original.model().styles.cell_xfs.len(), 1);
+    let mut deferred = hydrate(&original);
+    let range = CellRange::parse_a1("A1:C2").unwrap();
+    for workbook in [&mut original, &mut deferred] {
+        let defined_names = workbook.model().defined_names.clone();
+        assert!(
+            workbook
+                .apply_ops(
+                    vec![Op::SetAutoFilter {
+                        sheet: SheetId(1),
+                        range: Some(range),
+                    }],
+                    CalculationOptions::default(),
+                )
+                .unwrap()
+                .applied
+        );
+        assert_eq!(workbook.model().defined_names, defined_names);
+        let xml = saved(workbook, &[(0, "A1", 10.0), (1, "A1", 4.0), (1, "C1", 4.0)]);
+        assert!(xml.contains(&wrapped), "{xml}");
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        let filter = reopened.model().sheets[1].auto_filter.as_ref().unwrap();
+        assert_eq!(filter.range, range);
+    }
 }
 
 #[test]

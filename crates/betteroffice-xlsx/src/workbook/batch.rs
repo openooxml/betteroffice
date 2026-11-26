@@ -1602,12 +1602,20 @@ impl Workbook {
         Ok(Ok(application))
     }
 
-    fn recalculate_edit_preview(
+    pub(super) fn recalculate_edit_preview(
         &self,
         model: &mut xlsx_model::Workbook,
         seeds: &[(SheetId, CellRef)],
         now_serial: Option<f64>,
     ) -> (DepGraph, RecalcResult) {
+        if self.is_collaborative() && self.has_alternate_content() {
+            return xlsx_calc::rebuild_and_recalc_all_after(
+                model,
+                self.graph.as_ref(),
+                now_serial,
+                self.rand_seed,
+            );
+        }
         let mut graph = DepGraph::build(model);
         // the staged values were computed before the batch, so a batch that
         // changes the currency evidence recalculates every formula

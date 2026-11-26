@@ -237,23 +237,33 @@ impl PackageSlot {
         let sources = alternate_validation
             .get_or_init(|| {
                 let facts = PackageFactsView::from_facts(facts);
-                let mut omitted = HashSet::new();
-                let mut included = Vec::new();
-                for index in 0..facts.source_sheet_count() {
-                    if let Some(path) = facts.source_sheet_part(index) {
-                        if self.sheet_has_alternate_content(index) {
-                            included.push((index, path));
-                        } else if facts.source_sheet_is_worksheet(index) {
-                            omitted.insert(path.trim_start_matches('/').to_ascii_lowercase());
-                        }
-                    }
-                }
-                let parts = ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |path| {
-                    !omitted.contains(&path.trim_start_matches('/').to_ascii_lowercase())
-                })?;
-                AlternateContentSources::from_parts(&parts, &included)
-                    .map(Box::new)
-                    .map_err(|error| error.to_string())
+                let included = (0..facts.source_sheet_count())
+                    .filter(|&index| self.sheet_has_alternate_content(index))
+                    .filter_map(|index| {
+                        facts.source_sheet_part(index).map(|path| (index, path))
+                    })
+                    .collect::<Vec<_>>();
+                let mut loaded = HashSet::new();
+                let mut remaining = ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES;
+                AlternateContentSources::from_source(&included, |paths| {
+                    let paths = paths
+                        .into_iter()
+                        .map(|path| path.trim_start_matches('/').to_owned())
+                        .filter(|path| loaded.insert(path.clone()))
+                        .collect::<HashSet<_>>();
+                    let parts =
+                        ooxml_opc::unzip_parts_where(source.as_bytes(), remaining, |path| {
+                            paths.contains(path.trim_start_matches('/'))
+                        })
+                        .map_err(xlsx_parse::ParseError::Malformed)?;
+                    remaining -= parts
+                        .iter()
+                        .map(|(_, bytes)| bytes.len() as u64)
+                        .sum::<u64>();
+                    Ok(parts)
+                })
+                .map(Box::new)
+                .map_err(|error| error.to_string())
             })
             .as_ref()
             .map_err(|error| Error::Package(error.clone()))?;
