@@ -79,6 +79,8 @@ export interface DocxCommentSaveBaseline {
 }
 export interface DocxSaveOptions extends RepackOptions {
     /** @internal */
+    useLocalProvenance?: boolean;
+    /** @internal */
     commentIdentities?: ReadonlyMap<string, DocxCommentSaveIdentity>;
     /** @internal */
     commentBaseline?: DocxCommentSaveBaseline;
