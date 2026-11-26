@@ -1382,8 +1382,10 @@ fn editing_text_before_a_nested_field_preserves_its_cached_result_on_reopen() {
     let saved = document.save().unwrap();
     let reopened = Document::open(&saved).unwrap();
     let paragraph = reopened.paragraph("55555555").unwrap();
-    let [Inline(InlineNode::Run(run)), Inline(InlineNode::ComplexField(owner))] =
-        paragraph.content.as_slice()
+    let [
+        Inline(InlineNode::Run(run)),
+        Inline(InlineNode::ComplexField(owner)),
+    ] = paragraph.content.as_slice()
     else {
         panic!("expected a run followed by the owner field");
     };
@@ -1422,18 +1424,19 @@ fn editing_text_before_a_nested_field_preserves_its_cached_result_on_reopen() {
 
     let seeded = betteroffice_docx::EditingDoc::new(1);
     docx_edit::seed_from_docx(&seeded, &saved).unwrap();
-    let label = seeded
-        .story_segments("body")
-        .unwrap()
-        .into_iter()
-        .find_map(|segment| match segment.content {
-            docx_edit::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
-                let instruction = serde_json::to_value(&payload["instruction"]).unwrap();
-                (instruction == "QUOTE")
-                    .then(|| serde_json::to_value(&payload["displayText"]).unwrap())
-            }
-            _ => None,
-        });
+    let label =
+        seeded
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                docx_edit::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    let instruction = serde_json::to_value(&payload["instruction"]).unwrap();
+                    (instruction == "QUOTE")
+                        .then(|| serde_json::to_value(&payload["displayText"]).unwrap())
+                }
+                _ => None,
+            });
     assert_eq!(label, Some(serde_json::json!("First Second")));
 }
 
