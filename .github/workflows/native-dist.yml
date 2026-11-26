@@ -80,8 +80,28 @@ jobs:
             format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: mlugg/setup-zig@v2
+      - name: Set up Zig
+        id: setup-zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         if: matrix.platform.zig
+        timeout-minutes: 8
+        continue-on-error: true
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check the installed Zig
+        id: zig-installed
+        if: matrix.platform.zig && steps.setup-zig.outcome != 'success'
+        shell: bash
+        run: |
+          if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Zig a second time
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'
+        timeout-minutes: 8
         with:
           version: ${{ env.ZIG_VERSION }}
 
