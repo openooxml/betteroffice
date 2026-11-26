@@ -18,8 +18,6 @@ use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
 use crate::lexer::SheetSpan;
-#[cfg(test)]
-use crate::parser::parse_formula;
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_with_sheet_span};
 use crate::reference::table_rect;
 
@@ -211,8 +209,7 @@ pub struct EvalContext<'a> {
     pub(crate) spill_index: Option<&'a DepGraph>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
-    /// defined-name definitions parsed while `parse_cache` is `None`, keyed
-    /// by sheet and text and shared with every context derived from this one.
+    /// defined-name ASTs shared by derived contexts when `parse_cache` is `None`.
     parsed_definitions: Rc<RefCell<ParsedDefinitions>>,
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
@@ -750,47 +747,48 @@ impl<'a> EvalContext<'a> {
         value
     }
 
-    /// a definition parsed once per context however often its name is read.
-    /// a failed parse is not kept, so each read records its gap again.
     fn parsed_definition(&self, owner: SheetId, formula: &str) -> Option<Arc<Expr>> {
         if self.parse_cache.is_some() {
             return self.parse_formula(owner, formula);
         }
-        if let Some(expression) = self
-            .parsed_definitions
-            .borrow()
-            .get(&owner)
-            .and_then(|formulas| formulas.get(formula))
         {
-            return Some(Arc::clone(expression));
+            let definitions = self.parsed_definitions.borrow();
+            let lookup = |sheet| definitions.get(&sheet).and_then(|formulas| formulas.get(formula));
+            if let Some(expression) = lookup(None).or_else(|| lookup(Some(owner))) {
+                return Some(Arc::clone(expression));
+            }
         }
         #[cfg(test)]
         DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
-        let expression = self.parse_formula(owner, formula)?;
+        let (expression, contextual) = parse_with_span_tracking(formula, &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })?;
         self.parsed_definitions
             .borrow_mut()
-            .entry(owner)
+            .entry(contextual.then_some(owner))
             .or_default()
             .insert(formula.to_owned(), Arc::clone(&expression));
         Some(expression)
     }
 
     pub(crate) fn parse_formula(&self, owner: SheetId, formula: &str) -> Option<Arc<Expr>> {
-        let is_span = |first: &str, last: &str| {
-            self.provider.sheet_id(first).is_some()
-                && self.provider.sheet_id(last).is_some()
-                && match self.name_index {
-                    Some(graph) => graph.defined_name(owner, first),
-                    None => self.provider.defined_name(owner, first),
-                }
-                .is_none()
-        };
+        let is_span = |first: &str, last: &str| self.is_sheet_span(owner, first, last);
         match self.parse_cache {
             Some(cache) => parse_cached(cache, formula, &is_span),
             None => parse_with_sheet_span(formula, Some(&is_span))
                 .ok()
                 .map(Arc::new),
         }
+    }
+
+    fn is_sheet_span(&self, owner: SheetId, first: &str, last: &str) -> bool {
+        self.provider.sheet_id(first).is_some()
+            && self.provider.sheet_id(last).is_some()
+            && match self.name_index {
+                Some(graph) => graph.defined_name(owner, first),
+                None => self.provider.defined_name(owner, first),
+            }
+            .is_none()
     }
 }
 
@@ -804,7 +802,7 @@ fn next_random_stream() -> u64 {
 
 /// Sheet-independent ASTs shared by graph build and recalculation.
 pub(crate) type ParseCache = Mutex<HashMap<String, Arc<Expr>>>;
-type ParsedDefinitions = HashMap<SheetId, HashMap<String, Arc<Expr>>>;
+type ParsedDefinitions = HashMap<Option<SheetId>, HashMap<String, Arc<Expr>>>;
 
 pub(crate) fn parse_cached(
     cache: &ParseCache,
@@ -814,22 +812,27 @@ pub(crate) fn parse_cached(
     if let Some(expr) = cache.lock().expect("parse cache poisoned").get(src) {
         return Some(Arc::clone(expr));
     }
-    let contextual = Cell::new(false);
-    let parsed = parse_with_sheet_span(
-        src,
-        Some(&|first, last| {
-            contextual.set(true);
-            is_span(first, last)
-        }),
-    );
-    let expr = Arc::new(parsed.ok()?);
-    if !contextual.get() {
+    let (expr, contextual) = parse_with_span_tracking(src, is_span)?;
+    if !contextual {
         cache
             .lock()
             .expect("parse cache poisoned")
             .insert(src.to_string(), Arc::clone(&expr));
     }
     Some(expr)
+}
+
+fn parse_with_span_tracking(src: &str, is_span: &SheetSpan<'_>) -> Option<(Arc<Expr>, bool)> {
+    let contextual = Cell::new(false);
+    let expr = parse_with_sheet_span(
+        src,
+        Some(&|first, last| {
+            contextual.set(true);
+            is_span(first, last)
+        }),
+    )
+    .ok()?;
+    Some((Arc::new(expr), contextual.get()))
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
