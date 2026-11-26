@@ -1060,6 +1060,7 @@ fn clones_only_shared_blocks_on_a_revision_site_path() {
     let mut walker = SiteWalker::new(
         &session,
         None,
+        &NO_VIEWS,
         &found.blocks_with_sites,
         &found.body_blocks_with_sites,
         found.site_count,
