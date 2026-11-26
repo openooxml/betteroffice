@@ -155,6 +155,7 @@ impl EditingDoc {
         entropy: u64,
     ) -> Result<PeerBootstrapSource, PeerMetadataError> {
         self.require_empty_peer()?;
+        self.clear_edit_provenance();
         let PeerMetadata {
             mut source,
             index,
