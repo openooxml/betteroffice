@@ -285,11 +285,18 @@ mod tests {
             "A1B : Data!B5",
             "A1B : 'Data Set'!B5:C6",
             "A1B : Data!$A:$B",
-            "A1B : Data!1:3",
         ] {
             assert_eq!(parse_formula(source).unwrap().to_formula(), source);
             round_trips(source);
         }
+        let source = "A1B : Data!1:3";
+        assert_eq!(
+            crate::parser::parse_formula_for_rewrite(source)
+                .unwrap()
+                .to_formula(),
+            source
+        );
+        assert!(parse_formula(source).is_err());
     }
 
     #[test]

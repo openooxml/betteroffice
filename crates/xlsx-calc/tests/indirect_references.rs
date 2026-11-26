@@ -82,6 +82,101 @@ fn lowercase_a1_and_case_insensitive_sheets_recalculate() {
 }
 
 #[test]
+fn indirect_a1_new_structured_references_keep_cached_values() {
+    for formula in [
+        r#"INDIRECT("Table1[@[Unit Price]]")"#,
+        r#"INDIRECT("Table1['#n]")"#,
+    ] {
+        let mut wb = workbook();
+        let at = CellRef::parse_a1("D4").unwrap();
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(formula.into()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(wb.value(SheetId(0), at), n(42.0), "{formula}");
+        assert_eq!(
+            graph.unevaluated_cells(),
+            vec![xlsx_calc::UnevaluatedCell {
+                sheet: SheetId(0),
+                cell: at,
+                functions: vec![],
+            }],
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn spaced_a1_cell_ranges_recalculate_to_release_errors() {
+    let mut wb = workbook();
+    let mut data = Sheet::new("Sheet1");
+    set(&mut data, "A1", n(10.0));
+    set(&mut data, "B2", n(20.0));
+    wb.sheets.push(data);
+    set(&mut wb.sheets[0], "A1", n(10.0));
+    let cases = [
+        ("D4", "SUM(Sheet1!A1 : B2)"),
+        ("D5", r#"INDIRECT("A1 : B2")"#),
+    ];
+    for (address, formula) in cases {
+        wb.sheets[0].set_cell(
+            CellRef::parse_a1(address).unwrap(),
+            Cell {
+                formula: Some(formula.into()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+    }
+    let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+    for (address, formula) in cases {
+        assert_eq!(
+            wb.value(SheetId(0), CellRef::parse_a1(address).unwrap()),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            "{formula}"
+        );
+    }
+    assert!(graph.unevaluated_cells().is_empty());
+}
+
+#[test]
+fn indirect_a1_bracketed_workbook_path_non_references_recalculate_to_ref() {
+    let path = "D:/Books/[Data.xlsx]Sheet1";
+    for target in ["#REF!", "A1+1"] {
+        let mut wb = workbook();
+        let mut path_named_sheet = Sheet::new(path);
+        set(&mut path_named_sheet, "A1", n(73.0));
+        wb.sheets.push(path_named_sheet);
+        let at = CellRef::parse_a1("D4").unwrap();
+        let formula = format!(r#"INDIRECT("'{path}'!{target}")"#);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(formula.clone()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(
+            wb.value(SheetId(0), at),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            "{formula}"
+        );
+        assert!(graph.unevaluated_cells().is_empty(), "{formula}");
+    }
+}
+
+#[test]
 fn indirect_r1c1_absolute_and_relative_recalculate() {
     check(&[
         ("INDIRECT(Calculation_HIDE!S8,FALSE)", n(31.0)),

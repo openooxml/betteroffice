@@ -1045,7 +1045,11 @@ mod tests {
     #[test]
     fn spaced_cell_ranges_inherit_the_sheet_qualifier() {
         let qualified = parse("Sheet1!A1:B2");
-        assert_eq!(parse("Sheet1!A1 : B2"), qualified);
+        assert_eq!(
+            parse_formula_for_rewrite("Sheet1!A1 : B2").unwrap(),
+            qualified
+        );
+        assert!(matches!(parse("Sheet1!A1 : B2"), Expr::RangeJoin { .. }));
         for source in ["Sheet1 ! A1 : B2", "'Sheet1' ! A1 : B2"] {
             assert_eq!(parse_formula_for_rewrite(source).unwrap(), qualified);
             assert!(parse_formula(source).is_err(), "{source}");

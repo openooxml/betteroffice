@@ -520,9 +520,17 @@ fn defined_name_range_joins_recalculate_to_the_release_value() {
             r#"<row r="1"><c r="A1"><v>10</v></c><c r="C1"><f>{formula}</f><v>999</v></c></row><row r="2"><c r="B2"><v>20</v></c></row>"#,
         );
         let shapes = [
-            (format!("ROWS(Start_1:{qualifier}!B2:C3)"), 3.0),
-            (format!("COLUMNS(Start_1:{qualifier}!$A:$B)"), 2.0),
-            (format!("ROWS(Start_1:{qualifier}!1:3)"), 3.0),
+            (format!("ROWS(Start_1:{qualifier}!B2:C3)"), number(3.0)),
+            (format!("COLUMNS(Start_1:{qualifier}!$A:$B)"), number(2.0)),
+            (format!("ROWS(Start_1:{qualifier}!1:3)"), number(999.0)),
+            (format!("SUM(A1:{qualifier}!1:3)"), number(999.0)),
+            (format!("IFERROR(SUM(A1:{qualifier}!1:3),0)"), number(999.0)),
+            (
+                "Target_1".to_owned(),
+                CellValue::Error {
+                    value: ErrorValue::Name,
+                },
+            ),
         ];
         for (row, (formula, _)) in (4..).zip(&shapes) {
             sheet_data.push_str(&format!(
@@ -530,7 +538,7 @@ fn defined_name_range_joins_recalculate_to_the_release_value() {
             ));
         }
         let workbook_tail = format!(
-            r#"<definedNames><definedName name="Start_1">{qualifier}!$A$1</definedName></definedNames><calcPr fullCalcOnLoad="1"/>"#,
+            r#"<definedNames><definedName name="Start_1">{qualifier}!$A$1</definedName><definedName name="Target_1">ROWS(A1:{qualifier}!1:3)</definedName></definedNames><calcPr fullCalcOnLoad="1"/>"#,
         );
         let source = package_on_sheet(sheet, &sheet_data, &workbook_tail);
         let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
@@ -541,7 +549,7 @@ fn defined_name_range_joins_recalculate_to_the_release_value() {
         for (row, (formula, expected)) in (4..).zip(shapes) {
             assert_eq!(
                 stored(&workbook, &format!("D{row}")),
-                (Some(formula), number(expected))
+                (Some(formula), expected)
             );
         }
         workbook

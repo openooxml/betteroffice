@@ -1525,6 +1525,7 @@ mod tests {
 
     #[test]
     fn lexer_modes_share_token_spans_and_kinds() {
+        let spaced_ranges = "Sheet1!A1 : B2+Sheet1:Sheet2!A1 : B2";
         for source in [
             "SUM(Sales:Q2!#REF!)",
             "SUM(Sheet1:Sheet2!A1,Sheet1:Sheet2!#REF!,R2C3x:Sheet2!#REF!)",
@@ -1571,7 +1572,7 @@ mod tests {
             "A1:Sheet2!B2+$A$1:Sheet2!B2:C3+LOG10:Sheet2!B2",
             "B2!A1:B2!C3+A1:B2[Col]",
             "A1:LOG10(1)+Sheet1!LOG10(1)+Sheet1:Sheet2!LOG10(1)",
-            "Sheet1!A1 : B2+Sheet1:Sheet2!A1 : B2",
+            spaced_ranges,
             r#"INDIRECT("R1C1",FALSE)+INDIRECT("R[-1]C[2]:R[1]C[4]",FALSE)"#,
             "R1C1+A1B+XFD1048577+'R1C1'!A1+R1C1:Other!A1",
             "R1C1:R2C2+R[-1]C[2]",
@@ -1580,21 +1581,35 @@ mod tests {
             let expected = lex(source).unwrap_or_else(|error| panic!("{source}: {error}"));
             assert_eq!(lex_for_rewrite(source).unwrap(), expected, "{source}");
             let mut evaluation_error = None;
-            assert_eq!(
-                Lexer {
-                    input: source,
-                    pos: 0,
-                    table_refs: Some(Vec::new()),
-                    is_range_name: &is_formula_parameter,
-                    is_sheet_span: None,
-                    evaluation_error: Some(&mut evaluation_error),
-                    release_grammar: false,
-                }
-                .run()
-                .unwrap(),
-                expected,
-                "{source}"
-            );
+            let evaluation = Lexer {
+                input: source,
+                pos: 0,
+                table_refs: Some(Vec::new()),
+                is_range_name: &is_formula_parameter,
+                is_sheet_span: None,
+                evaluation_error: Some(&mut evaluation_error),
+                release_grammar: false,
+            }
+            .run()
+            .unwrap();
+            if source == spaced_ranges {
+                let range = lex_released_definition("Sheet1!A1 : B2").unwrap();
+                assert_eq!(&evaluation[..range.len()], range.as_slice(), "{source}");
+                let [plus, span, colon, end] = &evaluation[range.len()..] else {
+                    panic!("expected a sheet span followed by a range join: {source}");
+                };
+                assert_eq!(plus, &expected[1]);
+                assert!(matches!(
+                    &span.kind,
+                    TokKind::ThreeDRef { target, .. } if matches!(target.as_ref(), TokKind::Ref { .. })
+                ));
+                assert_eq!(&source[span.start..span.end], "Sheet1:Sheet2!A1");
+                assert_eq!(colon.kind, TokKind::Colon);
+                assert!(matches!(end.kind, TokKind::Ref { sheet: None, .. }));
+                assert_eq!(&source[end.start..end.end], "B2");
+            } else {
+                assert_eq!(evaluation, expected, "{source}");
+            }
         }
     }
 
