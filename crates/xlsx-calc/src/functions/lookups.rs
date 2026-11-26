@@ -4,7 +4,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use xlsx_model::sheet_qualifier::{is_path_qualifier, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::deps::{is_indexed_workbook_reference, names_other_workbook};
@@ -414,22 +413,14 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         let (sheet, reference) = match text.rsplit_once('!') {
             Some((prefix, reference)) => {
                 let source = format!("{prefix}!A1");
-                let qualifier = crate::parse_formula(&source)
-                    .or_else(|error| {
-                        if prefix.contains('[') && is_path_qualifier(prefix) {
-                            parse_released_definition(&source)
-                        } else {
-                            Err(error)
-                        }
-                    })
-                    .map_err(|_| {
-                        if r1c1_rect(reference, ctx.cell).is_some()
-                            && is_indexed_workbook_reference(&source)
-                        {
-                            ctx.record_other_workbook();
-                        }
-                        ErrorValue::Ref
-                    })?;
+                let qualifier = parse_released_definition(&source).map_err(|_| {
+                    if r1c1_rect(reference, ctx.cell).is_some()
+                        && is_indexed_workbook_reference(&source)
+                    {
+                        ctx.record_other_workbook();
+                    }
+                    ErrorValue::Ref
+                })?;
                 let Expr::Ref {
                     sheet: Some(sheet), ..
                 } = qualifier
@@ -443,19 +434,7 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         let range = r1c1_rect(reference, ctx.cell).ok_or(ErrorValue::Ref)?;
         return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
     }
-    let parsed = match crate::parse_formula(&text) {
-        Ok(Expr::TableRef { .. }) => parse_released_definition(&text),
-        Err(error)
-            if text.as_bytes().get(error.pos) == Some(&b'\'')
-                && parse_sheet_token(&text, error.pos).is_some_and(|token| {
-                    token.name.contains('[') && is_path_qualifier(&token.name)
-                }) =>
-        {
-            parse_released_definition(&text)
-        }
-        parsed => parsed,
-    };
-    let expr = parsed.map_err(|_| {
+    let expr = parse_released_definition(&text).map_err(|_| {
         if is_indexed_workbook_reference(&text) {
             ctx.record_other_workbook();
         } else if text.contains('[') {
