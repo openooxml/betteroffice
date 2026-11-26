@@ -1284,10 +1284,11 @@ impl Lexer<'_> {
                     })
                 });
             if let Ok(kind) = kind {
-                if ends_address {
+                let released_range = adjacent_colon || !matches!(kind, TokKind::Range { .. });
+                if ends_address && (released_range || self.evaluation_error.is_none()) {
                     return Some(kind);
                 }
-                if adjacent_colon || !matches!(kind, TokKind::Range { .. }) {
+                if !ends_address && released_range {
                     self.reject_for_evaluation(save, "range endpoint is unsupported");
                 }
             }

@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
-use xlsx_model::sheet_qualifier::is_path_qualifier;
+use xlsx_model::sheet_qualifier::{is_path_qualifier, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::deps::{is_indexed_workbook_reference, names_other_workbook};
@@ -443,7 +443,19 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         let range = r1c1_rect(reference, ctx.cell).ok_or(ErrorValue::Ref)?;
         return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
     }
-    let expr = crate::parse_formula(&text).map_err(|_| {
+    let parsed = match crate::parse_formula(&text) {
+        Ok(Expr::TableRef { .. }) => parse_released_definition(&text),
+        Err(error)
+            if text.as_bytes().get(error.pos) == Some(&b'\'')
+                && parse_sheet_token(&text, error.pos).is_some_and(|token| {
+                    token.name.contains('[') && is_path_qualifier(&token.name)
+                }) =>
+        {
+            parse_released_definition(&text)
+        }
+        parsed => parsed,
+    };
+    let expr = parsed.map_err(|_| {
         if is_indexed_workbook_reference(&text) {
             ctx.record_other_workbook();
         } else if text.contains('[') {

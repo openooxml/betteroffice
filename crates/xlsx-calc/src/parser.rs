@@ -155,13 +155,13 @@ pub(crate) fn parse_with_sheet_span(
     parse_source(
         src,
         &lex_for_evaluation(src, is_sheet_span)?,
-        ParseMode::Current,
+        ParseMode::Evaluation,
     )
 }
 
 #[doc(hidden)]
 pub fn parse_formula_for_rewrite(src: &str) -> Result<Expr, ParseError> {
-    parse_source(src, &lex_for_rewrite(src)?, ParseMode::Current)
+    parse_source(src, &lex_for_rewrite(src)?, ParseMode::Rewrite)
 }
 
 #[doc(hidden)]
@@ -173,15 +173,15 @@ pub(crate) fn parse_released_definition(src: &str) -> Result<Expr, ParseError> {
     parse_source(
         src,
         &lex_released_definition(src)?,
-        ParseMode::ReleasedDefinition,
+        ParseMode::Evaluation,
     )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParseMode {
-    Current,
+    Evaluation,
+    Rewrite,
     FormulaSource,
-    ReleasedDefinition,
 }
 
 fn parse_source(src: &str, tokens: &[Token], mode: ParseMode) -> Result<Expr, ParseError> {
@@ -590,7 +590,7 @@ fn reference_operand(expr: &Expr, mode: ParseMode) -> bool {
         return !address_shaped(name);
     }
     if matches!(expr, Expr::RowRange { sheet: Some(_), .. }) {
-        return mode != ParseMode::ReleasedDefinition;
+        return mode != ParseMode::Evaluation;
     }
     matches!(
         expr,
