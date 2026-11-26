@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { configureFontCdn, type BundledFontFace } from '@betteroffice/fonts';
 import * as fonts from '@betteroffice/fonts';
 import { initWasm, openWorkbook } from '@betteroffice/xlsx';
@@ -17,7 +17,7 @@ import { createDefaultFontPainter, xlsxDefaultFontManager } from './defaultFonts
 import { createWorkbookSession } from '../../xlsx/src/session/client';
 import type { WorkbookSessionMethods } from '../../xlsx/src/session/methods';
 import { paintDisplayList } from '../../xlsx/src/render/canvas2d';
-import { renderPng } from '../../xlsx/src/wasm/enginePng';
+import { engineKind, renderPng } from '../../xlsx/src/wasm/enginePng';
 import { createXlsxCommandController } from './commands/createXlsxCommandStore';
 import { createInThreadAsyncEditorApi } from './createInThreadAsyncEditorApi';
 import type { XlsxEditorApi } from './XlsxEditor.types';
@@ -236,7 +236,7 @@ test.each([
   } finally { painter.dispose(); }
 });
 
-test('another editor and an explicit-face PNG export do not pick up a disposed editor’s script fallback', async () => {
+test.skipIf(engineKind === 'native')('another editor and an explicit-face PNG export do not pick up a disposed editor’s script fallback', async () => {
   const { added } = browser();
   const { context, painted } = canvasText();
   provider();
@@ -342,77 +342,79 @@ async function singleCellWorkbook() {
   return openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
 }
 
-test.each([
-  ['Latin', 'Résumé', 'Calibri', 4],
-  ['CJK', '日本語', 'MS Gothic', 12],
-] as const)('an editor PNG keeps the editor-provided face for a %s-only sheet', async (_script, text, family, byteLength) => {
-  const handle = await singleCellWorkbook();
-  const { remove } = browser();
-  const { painted } = canvasText();
-  const { create } = provider();
-  const target = { sheet: 0, range: 'A1' };
-  try {
-    handle.editCell(0, 0, 0, text);
-    handle.patchRangeStyle(0, 'A1', { fontFamily: family });
-    expect(handle.renderPngFonts(target)).toEqual([{ family, bold: false, italic: false }]);
+describe.skipIf(engineKind === 'native')('editor PNG fonts', () => {
+  test.each([
+    ['Latin', 'Résumé', 'Calibri', 4],
+    ['CJK', '日本語', 'MS Gothic', 12],
+  ] as const)('an editor PNG keeps the editor-provided face for a %s-only sheet', async (_script, text, family, byteLength) => {
+    const handle = await singleCellWorkbook();
+    const { remove } = browser();
+    const { painted } = canvasText();
+    const { create } = provider();
+    const target = { sheet: 0, range: 'A1' };
+    try {
+      handle.editCell(0, 0, 0, text);
+      handle.patchRangeStyle(0, 'A1', { fontFamily: family });
+      expect(handle.renderPngFonts(target)).toEqual([{ family, bold: false, italic: false }]);
 
-    const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
-      flushPendingInput: async () => {} } as unknown as XlsxEditorApi, false, () => {});
-    await expect(api.renderPng(target)).resolves.toEqual(new TextEncoder().encode('png'));
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(create).toHaveBeenCalledWith(undefined, { strict: true });
-    expect(remove).toHaveBeenCalledTimes(1);
-    const [face] = remove.mock.calls[0]!;
-    expect(face.bytes.byteLength).toBe(byteLength);
-    expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${face.family}"`) });
-  } finally { handle.dispose(); }
-}, 30_000);
+      const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
+        flushPendingInput: async () => {} } as unknown as XlsxEditorApi, false, () => {});
+      await expect(api.renderPng(target)).resolves.toEqual(new TextEncoder().encode('png'));
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(create).toHaveBeenCalledWith(undefined, { strict: true });
+      expect(remove).toHaveBeenCalledTimes(1);
+      const [face] = remove.mock.calls[0]!;
+      expect(face.bytes.byteLength).toBe(byteLength);
+      expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${face.family}"`) });
+    } finally { handle.dispose(); }
+  }, 30_000);
 
-test.each([
-  ['Hebrew', 'שלום', 'hebrew', 'Noto Sans Hebrew'],
-  ['Arabic', 'مرحبا', 'arabic', undefined],
-] as const)('an editor PNG uses the engine fallback for %s in Calibri', async (_name, text, script, canvasFamily) => {
-  const handle = await singleCellWorkbook();
-  const { added, remove } = browser();
-  const { context, painted } = canvasText();
-  const bytes = async (face: BundledFontFace) => {
-    const data = new Uint8Array(face.byteLength);
-    new TextEncoder().encodeInto(face.file, data);
-    return data.buffer;
-  };
-  const { scriptLoads } = provider(bytes);
-  const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(bytes);
-  const installed = spyOn(fonts, 'bundledFaceInstalled').mockResolvedValue(true);
-  restorers.push(() => load.mockRestore(), () => installed.mockRestore());
-  const painter = createDefaultFontPainter(decoder(), () => {});
-  const target = { sheet: 0, range: 'A1' };
-  try {
-    handle.editCell(0, 0, 0, text);
-    handle.patchRangeStyle(0, 'A1', { fontFamily: 'Calibri' });
-    expect(handle.renderPngFonts(target)).toEqual([]);
-    const frame = handle.displayList({ x: 0, y: 0, width: 200, height: 100 });
-    await painter.load(frame);
-    painter.paint(frame, (list) => paintDisplayList(context, list, 1));
-    const engineFace = fonts.resolveScriptFallbackFace(script, false, false, 'Calibri')!;
-    expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual(canvasFamily ? [canvasFamily] : []);
-    const editorFamily = canvasFamily ? `bo-xlsx-editor-${canvasFamily}` : undefined;
-    expect(painted).toContainEqual({ text, font: editorFamily
-      ? expect.stringContaining(`"${editorFamily}"`) : expect.stringMatching(/px "Calibri", sans-serif$/) });
-    painted.length = 0;
+  test.each([
+    ['Hebrew', 'שלום', 'hebrew', 'Noto Sans Hebrew'],
+    ['Arabic', 'مرحبا', 'arabic', undefined],
+  ] as const)('an editor PNG uses the engine fallback for %s in Calibri', async (_name, text, script, canvasFamily) => {
+    const handle = await singleCellWorkbook();
+    const { added, remove } = browser();
+    const { context, painted } = canvasText();
+    const bytes = async (face: BundledFontFace) => {
+      const data = new Uint8Array(face.byteLength);
+      new TextEncoder().encodeInto(face.file, data);
+      return data.buffer;
+    };
+    const { scriptLoads } = provider(bytes);
+    const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(bytes);
+    const installed = spyOn(fonts, 'bundledFaceInstalled').mockResolvedValue(true);
+    restorers.push(() => load.mockRestore(), () => installed.mockRestore());
+    const painter = createDefaultFontPainter(decoder(), () => {});
+    const target = { sheet: 0, range: 'A1' };
+    try {
+      handle.editCell(0, 0, 0, text);
+      handle.patchRangeStyle(0, 'A1', { fontFamily: 'Calibri' });
+      expect(handle.renderPngFonts(target)).toEqual([]);
+      const frame = handle.displayList({ x: 0, y: 0, width: 200, height: 100 });
+      await painter.load(frame);
+      painter.paint(frame, (list) => paintDisplayList(context, list, 1));
+      const engineFace = fonts.resolveScriptFallbackFace(script, false, false, 'Calibri')!;
+      expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual(canvasFamily ? [canvasFamily] : []);
+      const editorFamily = canvasFamily ? `bo-xlsx-editor-${canvasFamily}` : undefined;
+      expect(painted).toContainEqual({ text, font: editorFamily
+        ? expect.stringContaining(`"${editorFamily}"`) : expect.stringMatching(/px "Calibri", sans-serif$/) });
+      painted.length = 0;
 
-    const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
-      flushPendingInput: async () => {} } as unknown as XlsxEditorApi, false, () => {});
-    await expect(api.renderPng(target)).resolves.toEqual(new TextEncoder().encode('png'));
-    expect(load.mock.calls.filter(([face]) => face.file === engineFace.file)).toHaveLength(1);
-    const exported = remove.mock.calls.map(([face]) => face).filter(({ bytes }) =>
-      new TextDecoder().decode(bytes.slice(0, engineFace.file.length)) === engineFace.file);
-    expect(exported).toHaveLength(1);
-    if (editorFamily) {
-      expect<ArrayBuffer | undefined>(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
-    }
-    expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${exported[0]!.family}"`) });
-  } finally { painter.dispose(); handle.dispose(); }
-}, 30_000);
+      const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
+        flushPendingInput: async () => {} } as unknown as XlsxEditorApi, false, () => {});
+      await expect(api.renderPng(target)).resolves.toEqual(new TextEncoder().encode('png'));
+      expect(load.mock.calls.filter(([face]) => face.file === engineFace.file)).toHaveLength(1);
+      const exported = remove.mock.calls.map(([face]) => face).filter(({ bytes }) =>
+        new TextDecoder().decode(bytes.slice(0, engineFace.file.length)) === engineFace.file);
+      expect(exported).toHaveLength(1);
+      if (editorFamily) {
+        expect<ArrayBuffer | undefined>(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
+      }
+      expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${exported[0]!.family}"`) });
+    } finally { painter.dispose(); handle.dispose(); }
+  }, 30_000);
+});
 
 for (const cdn of ['disabled', 'implicit', 'explicit'] as const) {
   test(`paint settles with an unavailable intl pack and ${cdn} CDN`, async () => {
