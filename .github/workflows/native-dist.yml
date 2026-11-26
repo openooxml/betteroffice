@@ -94,7 +94,7 @@ jobs:
         if: matrix.platform.zig && steps.setup-zig.outcome != 'success'
         shell: bash
         run: |
-          if [ "$(zig version 2>/dev/null)" = "$ZIG_VERSION" ]; then
+          if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then
             echo "usable=true" >> "$GITHUB_OUTPUT"
           fi
 

@@ -676,7 +676,7 @@ describe('native package release wiring', () => {
       id: 'zig-installed',
       if: "matrix.platform.zig && steps.setup-zig.outcome != 'success'",
       shell: 'bash',
-      run: 'if [ "$(zig version 2>/dev/null)" = "$ZIG_VERSION" ]; then\n  echo "usable=true" >> "$GITHUB_OUTPUT"\nfi\n'
+      run: 'if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then\n  echo "usable=true" >> "$GITHUB_OUTPUT"\nfi\n'
     });
     expect(second.if).toBe(
       "matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'"
