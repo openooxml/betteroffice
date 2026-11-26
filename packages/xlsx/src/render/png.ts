@@ -1,6 +1,7 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { fontUnavailable, installPngFaces, pngFontKey, pngFontSet, type PngFontFace, type PngRunFont } from '../../../../shared/office-session/pngFonts';
 import { textScripts } from '../../../../shared/office-session/textScripts';
+import { textWithNumberFormatParts } from '../../../../shared/office-session/xlsxTextRuns';
 import type { DisplayList, TextCmd } from '../display-list/types';
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngResolve';
 import { paintDisplayList } from './canvas2d';
@@ -99,7 +100,7 @@ function runFont(cmd: TextCmd): PngRunFont | undefined {
 
 /** The command's own text and font, then each of its run pieces with theirs. */
 function textFonts(cmd: TextCmd): { text: string; font: PngRunFont | undefined }[] {
-  return [{ text: cmd.text, font: runFont(cmd) }, ...(runPieces(cmd) ?? []).map((piece) => ({ text: piece.text, font: runFont(piece.cmd) }))];
+  return [{ text: textWithNumberFormatParts(cmd), font: runFont(cmd) }, ...(runPieces(cmd) ?? []).map((piece) => ({ text: piece.text, font: runFont(piece.cmd) }))];
 }
 
 /** A font the sheet's text asks for, with the script buckets of one text in it. */

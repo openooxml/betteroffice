@@ -50,7 +50,8 @@ export interface BundledFontsResolverProps {
 /** Loads bundled face descriptors with the prepared session worker's decoder, then renders the editor with byte faces. */
 export function BundledFontsResolver({ file, fonts, fallback, session, onReady, onError, children }: BundledFontsResolverProps) {
   const stable = useStableDescriptors(fonts);
-  const identity = useMemo(() => ({}), [file, stable]);
+  const { defaultFonts, experimentalSlicedFonts } = session;
+  const identity = useMemo(() => ({}), [file, stable, defaultFonts, experimentalSlicedFonts]);
   const bytes = useMemo(() => stable.filter((font): font is PptxFontFace => !('face' in font)), [stable]);
   const pending = !!file && bytes.length !== stable.length;
   const warnFonts = useFontWarning(identity);
@@ -73,7 +74,7 @@ export function BundledFontsResolver({ file, fonts, fallback, session, onReady, 
       try {
         const { loadBundledFonts } = await import('./bundledFontsLoad');
         if (!current()) return;
-        const { defaultFonts, initialSlide, experimentalSlicedFonts } = options.current;
+        const { initialSlide } = options.current;
         const loading = loadBundledFonts(file, stable, () => { if (current()) warnFonts(); }, { defaultFonts,
           slicedFonts: experimentalSlicedFonts,
           activeSlideIndex: Number.isInteger(initialSlide) ? Math.max(0, initialSlide! - 1) : 0 });
@@ -86,7 +87,7 @@ export function BundledFontsResolver({ file, fonts, fallback, session, onReady, 
       }
     })();
     return () => { active = false; releasePrepared(); };
-  }, [file, pending, stable, identity, bytes, warnFonts]);
+  }, [file, pending, stable, identity, bytes, warnFonts, defaultFonts, experimentalSlicedFonts]);
 
   const ready = useCallback((api: never) => { release(); return onReady?.(api); }, [onReady, release]);
   const failed = useCallback((error: Error) => { release(); onError?.(error); }, [onError, release]);

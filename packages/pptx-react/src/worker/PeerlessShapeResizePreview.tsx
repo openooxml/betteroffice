@@ -61,7 +61,7 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
             if (!isCurrent(job)) continue;
             const images = run.images.pin({ displayList: frame, frame: { media: [] } });
             try {
-              await Promise.all([images.ready, run.ensureWholeFonts?.()]);
+              await images.ready;
               if (!isCurrent(job)) continue;
               const target = canvas.current;
               if (!target) continue;
@@ -71,7 +71,7 @@ export function PeerlessShapeResizePreview({ run, preview, scale }: {
               const dpr = target.ownerDocument.defaultView?.devicePixelRatio ?? 1;
               sizeCanvasForSlide(buffer, frame as SlideDisplayList, dpr, job.scale);
               await peerlessShapeResizePreviewPaint.paint(context, frame as SlideDisplayList, dpr, job.scale,
-                { resolveImage: images.resolve });
+                { resolveImage: images.resolve, fontCoverage: run.fontCoverage });
               if (!isCurrent(job) || !canvas.current) continue;
               sizeCanvasForSlide(canvas.current, frame as SlideDisplayList, dpr, job.scale);
               const visible = canvas.current.getContext('2d');

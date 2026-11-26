@@ -13,11 +13,11 @@ categories = ["parser-implementations", "rendering"]
 
 [features]
 default = ["raster", "fonts", "fonts-latin", "fonts-intl", "fonts-cjk"]
-fonts = ["betteroffice-fonts/manager", "docx-layout/font-registration", "dep:ooxml-text", "dep:serde_json"]
+fonts = ["betteroffice-fonts/manager", "docx-layout/font-registration", "dep:ooxml-text"]
 fonts-latin = ["fonts", "betteroffice-fonts/fonts-latin"]
 fonts-intl = ["fonts", "betteroffice-fonts/fonts-intl"]
 fonts-cjk = ["fonts", "betteroffice-fonts/fonts-cjk"]
-raster = ["dep:docx-raster", "dep:ooxml-text", "dep:serde_json", "docx-edit/base-latin", "docx-layout/base-latin"]
+raster = ["dep:docx-raster", "dep:ooxml-text", "docx-edit/base-latin", "docx-layout/base-latin"]
 render-path-counter = ["raster"]
 
 [dependencies]
@@ -26,12 +26,11 @@ docx-edit.workspace = true
 docx-layout.workspace = true
 docx-parse.workspace = true
 docx-raster = { workspace = true, optional = true }
+ooxml-opc.workspace = true
 ooxml-text = { workspace = true, optional = true }
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
 ooxml-fidelity = { package = "betteroffice-ooxml-fidelity", path = "../ooxml-fidelity" }
-ooxml-opc.workspace = true
 png = "0.18"
-serde_json = "1"
