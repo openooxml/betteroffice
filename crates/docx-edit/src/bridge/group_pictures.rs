@@ -70,7 +70,11 @@ pub(crate) fn source_shapes_with_media(
         .filter(|(_, (path, _))| path.to_ascii_lowercase().starts_with("word/diagrams/"))
         .filter_map(|(index, (path, _))| Some((path.to_owned(), package.read(index).ok()?)))
         .collect();
-    if !smart_art.parts.values().any(|bytes| has_connector_preset(bytes)) {
+    if !smart_art
+        .parts
+        .values()
+        .any(|bytes| has_connector_preset(bytes))
+    {
         smart_art.parts.clear();
     }
     let mut by_part: BTreeMap<&str, Vec<_>> = BTreeMap::new();
@@ -94,8 +98,8 @@ pub(crate) fn source_shapes_with_media(
         let has = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
         let picture_group = (has(b":pic") || has(b"<pic") || has(b"txbx"))
             && (has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"));
-        let connectors = has_connector_preset(&bytes)
-            || (!smart_art.parts.is_empty() && has(b"relIds"));
+        let connectors =
+            has_connector_preset(&bytes) || (!smart_art.parts.is_empty() && has(b"relIds"));
         if !(include_pictures && picture_group || connectors) {
             continue;
         }

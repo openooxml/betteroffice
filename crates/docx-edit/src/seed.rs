@@ -7893,7 +7893,11 @@ fn build_source_index(
         });
     };
     for (story_id, source) in source_story_roots(roots, document_path, relationships) {
-        add(&source.part_uri, source.kind, Some((story_id, source.item_id)));
+        add(
+            &source.part_uri,
+            source.kind,
+            Some((story_id, source.item_id)),
+        );
     }
     add(FOOTNOTES_PART, SourceStoryKind::Footnote, None);
     add(ENDNOTES_PART, SourceStoryKind::Endnote, None);

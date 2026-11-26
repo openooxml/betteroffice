@@ -1099,8 +1099,8 @@ fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<
 }
 
 fn render_connector_path(shape: &mut Shape, source: &XmlElement) {
-    if let Some(path) = direct_child(Some(source), "spPr")
-        .and_then(crate::drawingml::connector_path_for_rendering)
+    if let Some(path) =
+        direct_child(Some(source), "spPr").and_then(crate::drawingml::connector_path_for_rendering)
     {
         shape.geometry_path = Some(path);
     }

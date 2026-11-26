@@ -301,12 +301,8 @@ impl EditSessionCore {
         let host_envelope = thin_docx_envelope(&envelope);
         let whole_body =
             !budget_stopped && envelope.document.package.document.content.len() < blocks;
-        let fonts = crate::seed::seed_preview_envelope(
-            self.engine.doc(),
-            envelope,
-            media,
-            &document_path,
-        )?;
+        let fonts =
+            crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media, &document_path)?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);

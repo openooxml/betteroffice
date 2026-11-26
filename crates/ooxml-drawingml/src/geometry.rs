@@ -1123,7 +1123,11 @@ fn orient(direction: &str, x: f64, y: f64) -> (f64, f64) {
 pub fn is_corrected_connector_preset(shape_type: &str) -> bool {
     matches!(
         shape_type,
-        "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5" | "curvedConnector2"
+        "bentConnector2"
+            | "bentConnector3"
+            | "bentConnector4"
+            | "bentConnector5"
+            | "curvedConnector2"
     )
 }
 

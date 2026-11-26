@@ -994,8 +994,14 @@ fn shape_contains_point(shape: &ShapePrimitive, x: f64, y: f64) -> bool {
         .as_ref()
         .and_then(|group| group.clip.as_ref())
     {
-        let (left, top) = (clip.x.as_ref().map_or(0.0, px), clip.y.as_ref().map_or(0.0, px));
-        let (width, height) = (clip.w.as_ref().map_or(0.0, px), clip.h.as_ref().map_or(0.0, px));
+        let (left, top) = (
+            clip.x.as_ref().map_or(0.0, px),
+            clip.y.as_ref().map_or(0.0, px),
+        );
+        let (width, height) = (
+            clip.w.as_ref().map_or(0.0, px),
+            clip.h.as_ref().map_or(0.0, px),
+        );
         if x < left || x > left + width || y < top || y > top + height {
             return false;
         }
