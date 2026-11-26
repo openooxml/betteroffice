@@ -138,7 +138,7 @@ test('the default stamp returns the plain writer output with opaque ZIP members'
     expect(warning).toContain(`"${CORE}"`);
     expect(warning).not.toContain('"__proto__"');
     expect(warning).not.toContain('"length"');
-    expect(saved.warnings).toEqual([...plain.warnings, warning]);
+    expect(saved.warnings).toEqual([...plain.warnings, warning!]);
   } finally {
     setSystemTime();
   }
@@ -282,7 +282,7 @@ test('the completed write survives a warnings iterator detaching the source', as
   expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
   expect(saved.warnings).toEqual([
     ...plain.warnings,
-    modelPartsRewrittenWarning(plainDocument.originalBuffer!, plain.buffer),
+    modelPartsRewrittenWarning(plainDocument.originalBuffer!, plain.buffer)!,
   ]);
 });
 
@@ -453,7 +453,7 @@ function toZip64(bytes: Uint8Array): Uint8Array {
 test('a ZIP64 source names the edited member in the warning', async () => {
   const { bytes } = oneSavePackage();
   const source = toZip64(bytes);
-  expect(new Uint8Array(await repackDocx(await parse(source), WITHOUT_STAMP))).toEqual(source);
+  expect(new Uint8Array(await repackDocx(await parse(source), WITHOUT_STAMP))).toEqual(new Uint8Array(source));
   const document = await parse(source);
   editableRun(document).textNode.text = 'Edited ZIP64 model';
   const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
