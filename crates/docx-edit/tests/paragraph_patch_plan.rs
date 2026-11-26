@@ -632,6 +632,25 @@ fn font_session(bytes: &[u8]) -> EditSessionCore {
     session
 }
 
+fn set_live_east_asian_font_hint(session: &EditSessionCore, len: u32, mut fonts: serde_json::Value) {
+    fonts["hint"] = json!("eastAsia");
+    session
+        .format_range(
+            "body",
+            "00000001",
+            0,
+            "00000001",
+            len,
+            &json!({"other": {"fontFamily": fonts}}).to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+    let segments: serde_json::Value =
+        serde_json::from_str(&session.story_segments("body").unwrap()).unwrap();
+    assert_eq!(segments[0]["attributes"]["fontFamily"]["hint"], "eastAsia");
+}
+
 fn save_font_pick(bytes: &[u8], ordinal: usize, from: u32, to: u32, delta: &str) -> Vec<u8> {
     let session = font_session(bytes);
     let paragraphs: serde_json::Value =
@@ -817,6 +836,16 @@ fn batch_clear_all_then_font_pick_resets_direct_font_slots() {
             r#"<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="SimSun" w:eastAsiaTheme="minorEastAsia" w:cs="Arial" w:hint="eastAsia"/></w:rPr><w:t>{text}</w:t></w:r>"#
         ));
         let session = font_session(&bytes);
+        set_live_east_asian_font_hint(
+            &session,
+            text.encode_utf16().count() as u32,
+            json!({
+                "ascii": "Calibri",
+                "eastAsia": "SimSun",
+                "eastAsiaTheme": "minorEastAsia",
+                "cs": "Arial"
+            }),
+        );
         let request = json!({
             "expectVersion": session.version(),
             "steps": [{
@@ -994,6 +1023,13 @@ fn marked_insertion_uses_inherited_font_slot_flags() {
     ] {
         let bytes = package(&font_run("x", "Calibri", hint));
         let session = font_session(&bytes);
+        if !hint.is_empty() {
+            set_live_east_asian_font_hint(
+                &session,
+                1,
+                json!({"ascii": "Calibri", "hAnsi": "Calibri", "eastAsia": "SimSun"}),
+            );
+        }
         let request = json!({
             "expectVersion": session.version(),
             "steps": [{
