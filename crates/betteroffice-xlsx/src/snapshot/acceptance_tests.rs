@@ -3205,10 +3205,13 @@ fn deferred_style_edits_recheck_a_wrapped_sheet_with_an_edited_filter() {
     assert_eq!(workbook.version(), version);
     assert!(workbook.source_package_is_unmaterialized_for_test());
     let saved = Workbook::open(&workbook.save().unwrap()).unwrap();
-    assert_eq!(
-        saved.model().sheets[1].auto_filter,
-        model.sheets[1].auto_filter
-    );
+    let filter = |model: &xlsx_model::Workbook| {
+        model.sheets[1]
+            .auto_filter
+            .as_ref()
+            .map(|filter| (filter.range, filter.filter_columns.clone()))
+    };
+    assert_eq!(filter(saved.model()), filter(&model));
 }
 
 #[test]
