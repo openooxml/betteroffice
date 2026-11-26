@@ -8,7 +8,6 @@ use std::ops::Range;
 use ooxml_drawingml::{
     ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
 };
-use ooxml_text::paragraph_scripts_with_han_fallback;
 
 use crate::PptxError;
 use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
@@ -3506,9 +3505,7 @@ fn segment_properties(
         .and_then(|latin| latin.attribute("typeface"));
     if let Some(family) = segment.properties.font_family.as_deref()
         && source_family != Some(family)
-        && paragraph_scripts_with_han_fallback([segment.text], false)
-            .iter()
-            .any(|script| script.starts_with("cjk-"))
+        && segment.text.chars().any(is_east_asian_character)
     {
         apply_font_typeface(
             &mut properties,
@@ -3519,6 +3516,24 @@ fn segment_properties(
         );
     }
     Some(properties)
+}
+
+fn is_east_asian_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x11ff
+            | 0x3000..=0x30ff
+            | 0x3130..=0x318f
+            | 0x31f0..=0x31ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xa960..=0xa97f
+            | 0xac00..=0xd7ff
+            | 0xf900..=0xfaff
+            | 0xfe30..=0xfe4f
+            | 0xff00..=0xffdc
+            | 0x20000..=0x3ffff
+    )
 }
 
 fn segment_element(
