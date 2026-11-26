@@ -122,6 +122,47 @@ fn a_mutably_borrowed_unchanged_model_saves_the_original_bytes() {
 }
 
 #[test]
+fn a_single_quoted_hyperlink_relationship_uses_the_writer_output() {
+    let mut entries = parts(&synthetic_package());
+    entries.insert(
+        "word/document.xml".to_owned(),
+        concat!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+            r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">"#,
+            r#"<w:body><w:p><w:hyperlink r:id="rId5"><w:r><w:t>Link</w:t></w:r></w:hyperlink>"#,
+            "</w:p></w:body></w:document>",
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    entries.insert(
+        "word/_rels/document.xml.rels".to_owned(),
+        concat!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            "<Relationship Id='rId5' Type='http://schemas.openxmlformats.org/",
+            "officeDocument/2006/relationships/hyperlink' Target='https://example.test/' ",
+            "TargetMode='External'/></Relationships>",
+        )
+        .as_bytes()
+        .to_vec(),
+    );
+    let source = rezip_parts(&entries.into_iter().collect::<Vec<_>>()).unwrap();
+    let mut document = Document::open(&source).unwrap();
+    document.model_mut();
+    let saved = assert_whole_model_write(&source, &document, SaveOptions::default());
+
+    let written = Document::open(&saved.bytes).unwrap();
+    let BlockContent::Paragraph(paragraph) = &written.model().body.content[0] else {
+        panic!("expected a paragraph");
+    };
+    let ParagraphContent::Inline(InlineNode::Hyperlink(link)) = &paragraph.content[0] else {
+        panic!("expected a hyperlink");
+    };
+    assert_eq!(link.relationship_id.as_deref(), Some("rId1"));
+    assert_eq!(link.href.as_deref(), Some("https://example.test/"));
+}
+
+#[test]
 fn stamping_an_unchanged_model_uses_the_writer_output_when_core_changes() {
     let source = synthetic_package();
     let mut document = Document::open(&source).unwrap();

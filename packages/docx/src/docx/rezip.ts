@@ -14,7 +14,7 @@ import type { RawDocxContent } from './unzip';
 import {
   modelMatchesSource,
   modelPartsRewrittenWarning,
-  sameModelSaveCore,
+  sameModelSavePackageMetadata,
 } from './modelSave';
 import { preloadParseWasm } from './parseWasm';
 import { writeDocumentWithRust, type RustSaveDeterminism } from './rustSaveFacade';
@@ -106,7 +106,7 @@ async function repackModel(
   if (!sourceCopy) return { buffer, warnings };
 
   try {
-    if (matches && sameModelSaveCore(sourceCopy, buffer)) {
+    if (matches && sameModelSavePackageMetadata(sourceCopy, buffer)) {
       return { buffer: sourceCopy, warnings };
     }
     if (includeWarnings) {

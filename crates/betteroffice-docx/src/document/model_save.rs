@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism};
 use docx_parse::{
     S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report,
@@ -8,6 +10,11 @@ use super::{body_from_wire, save_report};
 use crate::{Document, Result, SaveOptions, SaveReport};
 
 const CORE_PROPERTIES: &str = "docProps/core.xml";
+const CONTENT_TYPES: &str = "[Content_Types].xml";
+
+fn is_package_metadata(path: &str) -> bool {
+    matches!(path, CORE_PROPERTIES | CONTENT_TYPES) || path.ends_with(".rels")
+}
 
 impl Document {
     pub(super) fn save_model_report(&self, options: SaveOptions) -> Result<SaveReport> {
@@ -26,7 +33,7 @@ impl Document {
         super::session_save_tests::count_package_write();
         let (bytes, report) =
             write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        if matches && self.core_properties_match(&bytes) {
+        if matches && self.package_metadata_matches(&bytes) {
             return Ok(SaveReport {
                 bytes: self.source.clone(),
                 kept_unchanged: None,
@@ -75,18 +82,22 @@ impl Document {
         }
     }
 
-    fn core_properties_match(&self, written: &[u8]) -> bool {
-        let Ok(written_parts) = unzip_parts_where(written, MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
-            path == CORE_PROPERTIES
-        }) else {
+    fn package_metadata_matches(&self, written: &[u8]) -> bool {
+        let Ok(written_parts) =
+            unzip_parts_where(written, MAX_TOTAL_UNCOMPRESSED_BYTES, is_package_metadata)
+        else {
             return false;
         };
-        let source_core = self
+        let source_parts: BTreeMap<_, _> = self
             .original_parts
             .iter()
-            .find(|(path, _)| path == CORE_PROPERTIES)
-            .map(|(_, bytes)| bytes.as_slice());
-        let written_core = written_parts.first().map(|(_, bytes)| bytes.as_slice());
-        source_core == written_core
+            .filter(|(path, _)| is_package_metadata(path))
+            .map(|(path, bytes)| (path, bytes))
+            .collect();
+        let written_parts: BTreeMap<_, _> = written_parts
+            .iter()
+            .map(|(path, bytes)| (path, bytes))
+            .collect();
+        source_parts == written_parts
     }
 }

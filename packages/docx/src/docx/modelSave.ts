@@ -7,6 +7,7 @@ import { unzipContainer } from './wasm';
 
 const MODEL_PARTS_REWRITTEN = 'DOCX_MODEL_PARTS_REWRITTEN';
 const CORE_PROPERTIES = 'docProps/core.xml';
+const CONTENT_TYPES = '[Content_Types].xml';
 const ZIP_FOOTER_SIZE = 22;
 const ZIP_ENTRY_SIZE = 46;
 const ZIP_LOCAL_HEADER_SIZE = 30;
@@ -361,22 +362,25 @@ function unpackZipPayload(member: ZipMember, payload: Uint8Array): Uint8Array | 
   return bytes?.byteLength === member.uncompressedSize ? bytes : undefined;
 }
 
-function readModelSaveCore(buffer: ArrayBuffer): Uint8Array | null | undefined {
-  const members = readModelSaveDirectory(buffer);
-  if (!members) return null;
-  const member = members.get(CORE_PROPERTIES);
-  if (!member) return undefined;
-  if (member.duplicate) return null;
-  const payload = readZipPayload(new DataView(buffer), member);
-  return (payload && unpackZipPayload(member, payload)) ?? null;
-}
-
-export function sameModelSaveCore(original: ArrayBuffer, written: ArrayBuffer): boolean {
+export function sameModelSavePackageMetadata(original: ArrayBuffer, written: ArrayBuffer): boolean {
   try {
-    const before = readModelSaveCore(original);
-    const after = readModelSaveCore(written);
-    if (before === undefined && after === undefined) return true;
-    return !!before && !!after && sameBytes(before, after);
+    const before = readModelSaveDirectory(original);
+    const after = readModelSaveDirectory(written);
+    if (!before || !after) return false;
+    const originalView = new DataView(original);
+    const writtenView = new DataView(written);
+    for (const path of new Set([...before.keys(), ...after.keys()])) {
+      if (path !== CORE_PROPERTIES && path !== CONTENT_TYPES && !path.endsWith('.rels')) continue;
+      const old = before.get(path);
+      const current = after.get(path);
+      if (!old || !current || old.duplicate || current.duplicate) return false;
+      const oldPayload = readZipPayload(originalView, old);
+      const currentPayload = readZipPayload(writtenView, current);
+      const oldBytes = oldPayload && unpackZipPayload(old, oldPayload);
+      const currentBytes = currentPayload && unpackZipPayload(current, currentPayload);
+      if (!oldBytes || !currentBytes || !sameBytes(oldBytes, currentBytes)) return false;
+    }
+    return true;
   } catch {
     return false;
   }

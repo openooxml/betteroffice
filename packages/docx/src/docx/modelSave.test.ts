@@ -81,41 +81,77 @@ test('an unchanged save reads the source once and copies its bytes', async () =>
   expect(new Uint8Array(saved)).toEqual(Uint8Array.from(bytes));
 });
 
-test('saving an unchanged model still applies the writer’s relationship ID updates', async () => {
+const OFFICE_RELATIONSHIPS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const HYPERLINK_TARGET = 'https://example.test/';
+const DOCUMENT_RELS = 'word/_rels/document.xml.rels';
+
+function bodyHyperlinkPackage(id: string, linkRelationships: string): ArrayBuffer {
   const word = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const relationships = 'http://schemas.openxmlformats.org/package/2006/relationships';
-  const office = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-  const href = 'https://example.test/';
-  const source = rezipPartsToArrayBuffer(new Map([
+  return rezipPartsToArrayBuffer(new Map([
     ['[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
       '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
       '</Types>'
     )],
     ['_rels/.rels', toBytes(
-      `<Relationships xmlns="${relationships}"><Relationship Id="doc" Type="${office}/officeDocument" Target="word/document.xml"/></Relationships>`
+      `<Relationships xmlns="${relationships}"><Relationship Id="doc" Type="${OFFICE_RELATIONSHIPS}/officeDocument" Target="word/document.xml"/></Relationships>`
     )],
     ['word/document.xml', toBytes(
-      `<w:document xmlns:w="${word}" xmlns:r="${office}"><w:body><w:p>` +
-      '<w:hyperlink r:id="second"><w:r><w:t>Link</w:t></w:r></w:hyperlink>' +
+      `<w:document xmlns:w="${word}" xmlns:r="${OFFICE_RELATIONSHIPS}"><w:body><w:p>` +
+      `<w:hyperlink r:id="${id}"><w:r><w:t>Link</w:t></w:r></w:hyperlink>` +
       '</w:p></w:body></w:document>'
     )],
-    ['word/_rels/document.xml.rels', toBytes(
-      `<Relationships xmlns="${relationships}">` +
-      `<Relationship Id="first" Type="${office}/hyperlink" Target="${href}" TargetMode="External"/>` +
-      `<Relationship Id="second" Type="${office}/hyperlink" Target="${href}" TargetMode="External"/>` +
-      '</Relationships>'
+    [DOCUMENT_RELS, toBytes(
+      `<Relationships xmlns="${relationships}">${linkRelationships}</Relationships>`
     )],
   ]));
-  const document = await parseDocx(source, { preloadFonts: false });
+}
+
+function bodyHyperlink(document: Document) {
   const paragraph = document.package.document.content[0];
   const link = paragraph?.type === 'paragraph' ? paragraph.content[0] : undefined;
   if (link?.type !== 'hyperlink') throw new Error('Missing the external hyperlink');
+  return link;
+}
+
+test('saving an unchanged model still applies the writer’s relationship ID updates', async () => {
+  const source = bodyHyperlinkPackage('second',
+    `<Relationship Id="first" Type="${OFFICE_RELATIONSHIPS}/hyperlink" Target="${HYPERLINK_TARGET}" TargetMode="External"/>` +
+    `<Relationship Id="second" Type="${OFFICE_RELATIONSHIPS}/hyperlink" Target="${HYPERLINK_TARGET}" TargetMode="External"/>`
+  );
+  const document = await parseDocx(source, { preloadFonts: false });
+  const link = bodyHyperlink(document);
 
   expect(link.rId).toBe('second');
   const saved = await repackDocx(document, WITHOUT_STAMP);
   expect(new Uint8Array(saved)).toEqual(new Uint8Array(source));
   expect(link.rId).toBe('first');
+});
+
+test('an unchanged hyperlink with single-quoted relationship attributes saves the writer output', async () => {
+  const source = bodyHyperlinkPackage('rId5',
+    `<Relationship Id='rId5' Type='${OFFICE_RELATIONSHIPS}/hyperlink' Target='${HYPERLINK_TARGET}' TargetMode='External'/>`
+  );
+  const document = await parseDocx(source, { preloadFonts: false });
+  const link = bodyHyperlink(document);
+  expect(link.rId).toBe('rId5');
+  expect(link.href).toBe(HYPERLINK_TARGET);
+
+  setSystemTime(new Date(NOW));
+  try {
+    const plain = await writeDocumentWithRust(await parse(new Uint8Array(source)), source, WITHOUT_STAMP);
+    const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+    expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
+    expect(link.rId).toBe('rId1');
+    const written = await parse(new Uint8Array(saved.buffer));
+    expect(written.package.relationships?.get(link.rId!)?.target).toBe(HYPERLINK_TARGET);
+    const warning = modelPartsRewrittenWarning(source, plain.buffer);
+    expect(warning).toContain(`"${DOCUMENT_RELS}"`);
+    expect(saved.warnings).toEqual([...plain.warnings, warning!]);
+  } finally {
+    setSystemTime();
+  }
 });
 
 test('the default stamp returns the plain writer output with opaque ZIP members', async () => {
