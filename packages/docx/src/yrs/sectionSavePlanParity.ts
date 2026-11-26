@@ -2,7 +2,6 @@ import { afterAll, expect } from 'bun:test';
 import { appendFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import type { RustParagraphIds } from '../docx/rustSaveFacade';
-import { withSessionRevisionIds } from '../docx/sessionRevisionIds';
 import type { BlockContent, Document, DocumentBody } from '../types/document';
 import { engineKind } from '../wasm/engineEdit';
 import type { YrsSession } from './index';
@@ -74,57 +73,51 @@ function sessionKeys(blocks: readonly BlockContent[]): Array<string | null> {
   return keys;
 }
 
-type Path = Array<string | number>;
-type BlockFragment = { parent: number; path: Path; json: string };
+type BlockSlot = { block: number; cell?: [number, number] };
+type BlockFragment = { parent: number; slot: BlockSlot; json: string };
 
-function isBlockList(key: string, owner: unknown, path: Path, root: boolean): boolean {
-  const bodyEntry = root && path.length === 2;
-  if (key === 'content') {
-    return (root && path.length === 0) || (bodyEntry && path[0] === 'sections')
-      || owner === 'tableCell' || owner === 'blockSdt';
-  }
-  if (key === 'blockContent') return bodyEntry && path[0] === 'comments';
-  return key === 'blocks' && (
-    path.at(-1) === 'structuredCode' || path.at(-1) === 'structuredResult'
-    || (path.includes('fieldTree') && (path.at(-1) === 'code' || path.at(-1) === 'result'))
-  );
-}
-
-function splitBody(document: DocumentBody): { document: string; blocks: BlockFragment[] } {
-  type Container = Record<string | number, unknown>;
+function splitBody(document: DocumentBody) {
   const fragments: BlockFragment[] = [];
-  const lists: Array<{ parent: number; path: Path; content: BlockContent[] }> = [];
-  const serialize = (value: DocumentBody | BlockContent[], parent: number): string => {
-    const copy = (value: object) => (Array.isArray(value) ? value.slice() : { ...value }) as Container;
-    const root = copy(value);
-    const pending = [{ copy: root, path: [] as Path }];
-    while (pending.length > 0) {
-      const { copy: current, path } = pending.pop()!;
-      if (current.type === 'run') continue;
-      for (const [key, entry] of Object.entries(current)) {
-        if (Array.isArray(entry) && isBlockList(key, current.type, path, parent === 0)) {
-          lists.push({ parent, path: [...path, key], content: entry as BlockContent[] });
-          current[key] = [];
-        } else if (Array.isArray(entry) || (typeof entry === 'object' && entry !== null && Object.getPrototypeOf(entry) === Object.prototype)) {
-          const child = copy(entry);
-          current[key] = child;
-          pending.push({ copy: child, path: [...path, Array.isArray(current) ? Number(key) : key] });
-        }
+  const lists: Array<{ parent: number; slot: BlockSlot; content: BlockContent[] }> = [];
+  const serialize = (blocks: BlockContent[], parent: number): string => {
+    const shallow: BlockContent[] = [];
+    for (const block of blocks) {
+      const index = shallow.length;
+      switch (block.type) {
+        case 'paragraph':
+          shallow.push({
+            type: block.type, sourceOrdinal: block.sourceOrdinal,
+            sectionProperties: block.sectionProperties, content: [],
+          });
+          break;
+        case 'table':
+          shallow.push({
+            type: block.type,
+            rows: block.rows.map((row, r) => ({
+              type: row.type,
+              cells: row.cells.map((cell, c) => {
+                lists.push({ parent, slot: { block: index, cell: [r, c] }, content: cell.content });
+                return { type: cell.type, content: [] };
+              }),
+            })),
+          });
+          break;
+        case 'blockSdt':
+          lists.push({ parent, slot: { block: index }, content: block.content });
+          shallow.push({ type: block.type, properties: { sdtType: 'unknown' }, content: [] });
+          break;
+        case 'rawXml':
+          break;
       }
     }
-    return JSON.stringify(root);
+    return JSON.stringify(shallow);
   };
-  const root = serialize(document, 0);
+  const content = serialize(document.content, 0);
   while (lists.length > 0) {
-    const { parent, path, content } = lists.pop()!;
-    fragments.push({ parent, path, json: serialize(content, fragments.length + 1) });
+    const { parent, slot, content } = lists.pop()!;
+    fragments.push({ parent, slot, json: serialize(content, fragments.length + 1) });
   }
-  return { document: root, blocks: fragments };
-}
-
-function s13Body(document: Readonly<Document>) {
-  const request = { document: document.package.document };
-  return withSessionRevisionIds(request, () => splitBody(request.document));
+  return { content, finalSectionProperties: document.finalSectionProperties, blocks: fragments };
 }
 
 async function referenceResult(
@@ -165,8 +158,8 @@ async function compareSectionPlans(
       if (!raw) throw new Error('Section parity requires an opened WASM session');
       const { metadata } = sectionSavePlanTestSeam.reference!;
       native = JSON.parse(raw.section_save_plan_json(JSON.stringify({
-        source: source && s13Body(source),
-        output: s13Body(output),
+        source: source && splitBody(source.package.document),
+        output: splitBody(output.package.document),
         outputSessionKeys: sessionKeys(output.package.document.content),
         metadataUnchanged: source !== null && metadata(source) === metadata(output),
         sourcePart: sourcePart === undefined ? null : Array.from(sourcePart),

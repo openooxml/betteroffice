@@ -1,9 +1,11 @@
 import { afterAll, expect, test as bunTest } from 'bun:test';
 import JSZip from 'jszip';
+import { parseDocx } from '../docx';
 import type { SectionProperties } from '../types/document';
 import { engineKind } from '../wasm/engineEdit';
 import { FLAVOURS, syntheticDocx } from './__fixtures__/previewChain';
-import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
+import { saveEditorDocument } from './editorSave';
+import { createYrsSession, documentToYrs, saveYrsDocx, yrsToDocument, type YrsSession } from './index';
 import { partMetadata } from './residentParts';
 import { finalSectionStartMetadata } from './sectionBreak';
 import {
@@ -12,6 +14,7 @@ import {
 } from './sectionSavePlanParity';
 import { DocxSectionError } from './sections';
 import { sectionPackage } from './sectionTestPackage';
+import { sessionMaterializedSource } from './sessionInternals';
 
 const test = bunTest.skipIf(engineKind === 'native');
 
@@ -27,7 +30,9 @@ if (engineKind !== 'native') {
 
 const MAIN = 'word/document.xml';
 
-async function open(boundary = false, rewrite?: (xml: string) => string): Promise<YrsSession> {
+async function open(
+  boundary = false, rewrite?: (xml: string) => string, seed: 'docx' | 'model' = 'docx'
+): Promise<YrsSession> {
   let bytes = await sectionPackage(boundary);
   if (rewrite) {
     const zip = await JSZip.loadAsync(bytes);
@@ -35,7 +40,12 @@ async function open(boundary = false, rewrite?: (xml: string) => string): Promis
     bytes = await zip.generateAsync({ type: 'uint8array' });
   }
   const session = await createYrsSession();
-  session.seedFromDocx(bytes);
+  if (seed === 'model') {
+    session.openDocx(bytes, false);
+    documentToYrs(session, session.materializeDocx()!);
+  } else {
+    session.seedFromDocx(bytes);
+  }
   return session;
 }
 
@@ -123,6 +133,51 @@ test('plans no section change with tables nested 260 deep', async () => {
   }
 }, 60_000);
 
+test('plans a section change with 22 nested tables in a paragraph text box', async () => {
+  const depth = 22;
+  const tables = '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>'.repeat(depth)
+    + '<w:p><w:r><w:t>Boxed</w:t></w:r></w:p>'
+    + '</w:tc></w:tr></w:tbl>'.repeat(depth);
+  const drawing = '<w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+    + ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    + ' xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+    + '<wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Text Box"/>'
+    + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+    + '<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/></wps:spPr>'
+    + `<wps:txbx><w:txbxContent>${tables}</w:txbxContent></wps:txbx><wps:bodyPr/>`
+    + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>';
+  const session = await open(false, xml => xml.replace('<w:t>First</w:t>', `<w:t>First</w:t>${drawing}`), 'model');
+  try {
+    const first = session.materializeDocx()!.package.document.content[0];
+    expect(JSON.stringify(first).match(/"type":"table"/g)).toHaveLength(depth);
+    session.setSectionProperties('final', { margins: { left: 1800 } });
+    expect(await checkProjectedSectionPlan(session)).toMatchObject({
+      plan: { edits: [{ paragraph: null, donor: null, properties: { marginLeft: 1800 } }] },
+      lossy: false,
+      strict: false,
+    });
+  } finally { session.destroy(); }
+});
+
+test('an editor save of a model-seeded session plans no section edits without a source', async () => {
+  const host = await parseDocx(await sectionPackage(), { preloadFonts: false });
+  const session = await createYrsSession();
+  try {
+    documentToYrs(session, host);
+    expect(sessionMaterializedSource(session)).toBeNull();
+    const { paraId } = session.paragraphs('body')[0]!;
+    session.insertText({ story: 'body', paraId, offset: 0 }, 'Edited ');
+    const projected = yrsToDocument(session, host);
+    expect(projected.originalBuffer).toBeDefined();
+    const { saveHook, undefined: noPlan } = sectionSavePlanParityStats();
+    const saved = await saveEditorDocument(session, projected, []);
+    expect(sectionSavePlanParityStats().saveHook).toBe(saveHook + 1);
+    expect(sectionSavePlanParityStats().undefined).toBe(noPlan + 1);
+    const zip = await JSZip.loadAsync(saved);
+    expect(await zip.file(MAIN)!.async('string')).toContain('Edited ');
+  } finally { session.destroy(); }
+});
+
 const withPageBorder = (xml: string) => xml.replace(
   '</w:sectPr>',
   '<w:pgBorders><w:top w:val="single" w:color="ABCDEF"/></w:pgBorders></w:sectPr>'
@@ -178,6 +233,16 @@ test('the TypeScript planner falls back for a margin change with an empty page b
     const options = changeFinalProperties(session, properties => {
       properties.marginLeft = 1800;
       properties.pageBorders!.top!.color!.transforms = [];
+    });
+    expect(await referenceProjectedSectionPlan(session, options)).toEqual({ lossy: false, strict: false });
+  } finally { session.destroy(); }
+});
+
+test('the TypeScript planner falls back for a margin change with a null column count', async () => {
+  const session = await open();
+  try {
+    const options = changeFinalProperties(session, properties => {
+      Object.assign(properties, { marginLeft: 1800, columnCount: null });
     });
     expect(await referenceProjectedSectionPlan(session, options)).toEqual({ lossy: false, strict: false });
   } finally { session.destroy(); }

@@ -34,204 +34,71 @@ pub(crate) struct SectionPlanError(pub(crate) &'static str);
 pub(crate) mod transport {
     use std::sync::Arc;
 
-    use docx_parse::inline::{InlineNode, StructuredFieldContent, StructuredFieldTree};
-    use docx_parse::paragraph::ParagraphContent;
     use serde::Deserialize;
 
-    use super::{BlockContent, DocumentBody, Paragraph};
+    use super::{BlockContent, DocumentBody, SectionProperties};
 
     #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub(crate) struct BodyFragments {
-        document: String,
+        content: String,
+        final_section_properties: Option<SectionProperties>,
         blocks: Vec<BlockFragment>,
     }
 
     #[derive(Deserialize)]
     struct BlockFragment {
         parent: usize,
-        path: Vec<PathSegment>,
+        slot: BlockSlot,
         json: String,
     }
 
     #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum PathSegment {
-        Field(String),
-        Index(usize),
+    struct BlockSlot {
+        block: usize,
+        cell: Option<[usize; 2]>,
     }
 
-    struct Path<'a>(&'a [PathSegment]);
-
-    impl<'a> Path<'a> {
-        fn field(&mut self) -> Option<&'a str> {
-            let (PathSegment::Field(field), rest) = self.0.split_first()? else {
-                return None;
-            };
-            self.0 = rest;
-            Some(field)
-        }
-
-        fn index(&mut self) -> Option<usize> {
-            let (PathSegment::Index(index), rest) = self.0.split_first()? else {
-                return None;
-            };
-            self.0 = rest;
-            Some(*index)
-        }
-
-        fn end(&self) -> Option<()> {
-            self.0.is_empty().then_some(())
+    fn block_slot(blocks: &mut [BlockContent], slot: BlockSlot) -> Option<&mut Vec<BlockContent>> {
+        match (blocks.get_mut(slot.block)?, slot.cell) {
+            (BlockContent::Table(table), Some([row, cell])) => {
+                let row = Arc::get_mut(table)?.rows.get_mut(row)?;
+                Some(&mut row.cells.get_mut(cell)?.content)
+            }
+            (BlockContent::BlockSdt(sdt), None) => Some(&mut Arc::get_mut(sdt)?.content),
+            _ => None,
         }
     }
 
-    fn paragraph_slot<'a>(
-        paragraph: &'a mut Paragraph,
-        mut path: Path<'_>,
-    ) -> Option<&'a mut Vec<BlockContent>> {
-        enum Site<'a> {
-            Inline(&'a mut InlineNode),
-            Inlines(&'a mut Vec<InlineNode>),
-            Tree(&'a mut StructuredFieldTree),
-            Field(&'a mut StructuredFieldContent),
-        }
+    type Children = Vec<(BlockSlot, Vec<BlockContent>)>;
 
-        if path.field()? != "content" {
-            return None;
+    fn rebuild_blocks(json: &str, children: Children) -> Result<Vec<BlockContent>, String> {
+        let mut blocks: Vec<BlockContent> =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
+        for (slot, content) in children {
+            *block_slot(&mut blocks, slot).ok_or("Invalid block fragment slot")? = content;
         }
-        let mut site = match paragraph.content.get_mut(path.index()?)? {
-            ParagraphContent::Inline(node) => Site::Inline(node),
-            ParagraphContent::Tracked(change) => Site::Inlines(&mut change.content),
-            _ => return None,
-        };
-        loop {
-            site = match (site, path.field()?) {
-                (Site::Inlines(nodes), "content") => Site::Inline(nodes.get_mut(path.index()?)?),
-                (Site::Inline(InlineNode::Tracked(change)), "content") => {
-                    Site::Inline(change.content.get_mut(path.index()?)?)
-                }
-                (Site::Inline(InlineNode::InlineSdt(sdt)), "content") => {
-                    Site::Inline(sdt.content.get_mut(path.index()?)?)
-                }
-                (Site::Inline(InlineNode::Hyperlink(link)), "children") => {
-                    Site::Inline(link.children.get_mut(path.index()?)?)
-                }
-                (Site::Inline(InlineNode::Hyperlink(link)), "structuredChildren") => {
-                    Site::Inline(link.structured_children.as_mut()?.get_mut(path.index()?)?)
-                }
-                (Site::Inline(InlineNode::SimpleField(field)), "structuredResult") => {
-                    Site::Field(field.structured_result.as_mut()?)
-                }
-                (Site::Inline(InlineNode::SimpleField(field)), "fieldTree") => {
-                    Site::Tree(field.field_tree.as_mut()?)
-                }
-                (Site::Inline(InlineNode::ComplexField(field)), "structuredCode") => {
-                    Site::Field(field.structured_code.as_mut()?)
-                }
-                (Site::Inline(InlineNode::ComplexField(field)), "structuredResult") => {
-                    Site::Field(field.structured_result.as_mut()?)
-                }
-                (Site::Inline(InlineNode::ComplexField(field)), "fieldTree") => {
-                    Site::Tree(field.field_tree.as_mut()?)
-                }
-                (Site::Tree(tree), "children") => {
-                    Site::Tree(tree.children.as_mut()?.get_mut(path.index()?)?)
-                }
-                (Site::Tree(tree), "code") => Site::Field(tree.code.as_mut()?),
-                (Site::Tree(tree), "result") => Site::Field(tree.result.as_mut()?),
-                (Site::Field(field), "inline") => {
-                    Site::Inline(field.inline.as_mut()?.get_mut(path.index()?)?)
-                }
-                (Site::Field(field), "blocks") => {
-                    path.end()?;
-                    return field.blocks.as_mut();
-                }
-                _ => return None,
-            };
-        }
-    }
-
-    fn block_slot<'a>(
-        blocks: &'a mut [BlockContent],
-        mut path: Path<'_>,
-    ) -> Option<&'a mut Vec<BlockContent>> {
-        let slot = match blocks.get_mut(path.index()?)? {
-            BlockContent::Table(table) => {
-                if path.field()? != "rows" {
-                    return None;
-                }
-                let row = Arc::get_mut(table)?.rows.get_mut(path.index()?)?;
-                if path.field()? != "cells" {
-                    return None;
-                }
-                &mut row.cells.get_mut(path.index()?)?.content
-            }
-            BlockContent::BlockSdt(sdt) => &mut Arc::get_mut(sdt)?.content,
-            BlockContent::Paragraph(paragraph) => {
-                return paragraph_slot(Arc::get_mut(paragraph)?, path);
-            }
-            BlockContent::RawXml(_) => return None,
-        };
-        if path.field()? != "content" {
-            return None;
-        }
-        path.end()?;
-        Some(slot)
-    }
-
-    fn document_slot<'a>(
-        document: &'a mut DocumentBody,
-        mut path: Path<'_>,
-    ) -> Option<&'a mut Vec<BlockContent>> {
-        let slot = match path.field()? {
-            "content" => &mut document.content,
-            "sections" => {
-                let section = document.sections.as_mut()?.get_mut(path.index()?)?;
-                if path.field()? != "content" {
-                    return None;
-                }
-                &mut section.content
-            }
-            "comments" => {
-                let comment = document.comments.as_mut()?.get_mut(path.index()?)?;
-                match path.field()? {
-                    "blockContent" => &mut comment.block_content,
-                    "content" => {
-                        return paragraph_slot(comment.content.get_mut(path.index()?)?, path);
-                    }
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        path.end()?;
-        Some(slot)
+        Ok(blocks)
     }
 
     impl BodyFragments {
         pub(crate) fn rebuild(self) -> Result<DocumentBody, String> {
-            type Children = Vec<(Vec<PathSegment>, Vec<BlockContent>)>;
-
             let slots = self.blocks.len() + 1;
             let mut children: Vec<Children> = (0..slots).map(|_| Vec::new()).collect();
             for fragment in self.blocks.into_iter().rev() {
-                let mut blocks: Vec<BlockContent> =
-                    serde_json::from_str(&fragment.json).map_err(|error| error.to_string())?;
-                for (path, content) in children.pop().expect("one slot per fragment") {
-                    *block_slot(&mut blocks, Path(&path)).ok_or("Invalid block fragment path")? =
-                        content;
-                }
+                let nested = children.pop().expect("one slot per fragment");
+                let blocks = rebuild_blocks(&fragment.json, nested)?;
                 children
                     .get_mut(fragment.parent)
                     .ok_or("Invalid block fragment parent")?
-                    .push((fragment.path, blocks));
+                    .push((fragment.slot, blocks));
             }
-            let mut document =
-                serde_json::from_str(&self.document).map_err(|error| error.to_string())?;
-            for (path, content) in children.pop().expect("a slot for the body") {
-                *document_slot(&mut document, Path(&path)).ok_or("Invalid body fragment path")? =
-                    content;
-            }
-            Ok(document)
+            let nested = children.pop().expect("a slot for the body");
+            Ok(DocumentBody {
+                content: rebuild_blocks(&self.content, nested)?,
+                final_section_properties: self.final_section_properties,
+                ..DocumentBody::default()
+            })
         }
     }
 
@@ -247,18 +114,22 @@ pub(crate) mod transport {
             let table = json!([{"type": "table", "rows": [{
                 "type": "tableRow", "cells": [{"type": "tableCell", "content": []}]
             }]}]);
-            let leaf = json!([{"type": "paragraph", "content": [], "paraId": "00000001"}]);
+            let leaf = json!([{"type": "paragraph", "content": [], "sourceOrdinal": 1}]);
+            let depth = 260;
             let fragments = BodyFragments {
-                document: body.to_string(),
-                blocks: (0..=260)
+                content: table.to_string(),
+                final_section_properties: Some(SectionProperties {
+                    margin_left: Some(1440.0),
+                    ..SectionProperties::default()
+                }),
+                blocks: (0..depth)
                     .map(|parent| {
-                        let value = if parent == 260 { &leaf } else { &table };
+                        let value = if parent + 1 == depth { &leaf } else { &table };
                         BlockFragment {
                             parent,
-                            path: if parent == 0 {
-                                vec![PathSegment::Field("content".to_owned())]
-                            } else {
-                                serde_json::from_str(r#"[0,"rows",0,"cells",0,"content"]"#).unwrap()
+                            slot: BlockSlot {
+                                block: 0,
+                                cell: Some([0, 0]),
                             },
                             json: value.to_string(),
                         }
@@ -268,7 +139,7 @@ pub(crate) mod transport {
             let mut rebuilt = fragments.rebuild().unwrap();
             let mut blocks = std::mem::take(&mut rebuilt.content);
             assert_eq!(serde_json::to_value(&rebuilt).unwrap(), body);
-            for _ in 0..260 {
+            for _ in 0..depth {
                 let BlockContent::Table(table_block) = &mut blocks[0] else {
                     panic!("expected a table");
                 };
@@ -467,16 +338,13 @@ pub(crate) mod transport {
 
         pub(crate) fn plan_json(json: &str) -> Result<String, String> {
             let input: Input = serde_json::from_str(json).map_err(|error| error.to_string())?;
-            let Some(source) = input.source else {
-                return Ok("null".to_owned());
-            };
-            let source = source.rebuild()?;
+            let source = input.source.map(BodyFragments::rebuild).transpose()?;
             let output = input.output.rebuild()?;
             let identities = ParagraphIdentities::try_from(input.identities)?;
             let plan = input.plan.into();
             let result = section_save_plan(
                 SectionPlanInput {
-                    source: Some(&source),
+                    source: source.as_ref(),
                     output: &output,
                     output_session_keys: &input.output_session_keys,
                     metadata_unchanged: input.metadata_unchanged,
@@ -905,6 +773,19 @@ mod tests {
 
     #[test]
     fn empty_page_border_transforms_allow_a_margin_only_patch() {
+        assert_margin_only_patch_matches_whole_write(|authored| {
+            authored["pageBorders"]["top"]["color"]["transforms"] = json!([]);
+        });
+    }
+
+    #[test]
+    fn null_column_count_allows_a_margin_only_patch() {
+        assert_margin_only_patch_matches_whole_write(|authored| {
+            authored["columnCount"] = Value::Null;
+        });
+    }
+
+    fn assert_margin_only_patch_matches_whole_write(edit_authored: impl FnOnce(&mut Value)) {
         let original = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
     <w:body>
         <w:p/>
@@ -931,7 +812,7 @@ mod tests {
         let source: DocumentBody = serde_json::from_value(model.clone()).unwrap();
         let authored = &mut model["finalSectionProperties"];
         authored["marginLeft"] = json!(1800);
-        authored["pageBorders"]["top"]["color"]["transforms"] = json!([]);
+        edit_authored(authored);
         let sections = [SectionInfo {
             closing_paragraph_id: "final".to_owned(),
             first_paragraph: 1,
