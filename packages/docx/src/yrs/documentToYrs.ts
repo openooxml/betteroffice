@@ -620,88 +620,108 @@ function flatFieldResult(field: SimpleField | ComplexField): readonly (Run | Hyp
 
 function fieldResultFormatting(
   field: SimpleField | ComplexField,
-  runs: readonly ParagraphContent[] = flatFieldResult(field)
+  runs: readonly ParagraphContent[]
 ): TextFormatting | undefined {
+  return firstFieldRunFormatting(runs) ?? (field.type === 'complexField' ? field.formatting : undefined);
+}
+
+function firstFieldRunFormatting(runs: readonly ParagraphContent[]): TextFormatting | undefined {
   if (Array.isArray(runs)) {
     for (const child of runs) {
       if (child?.type === 'run' && child.formatting) return child.formatting;
     }
   }
-  return field.type === 'complexField' ? field.formatting : undefined;
 }
 
-interface CachedResultFragment {
-  text: string;
-  hidden: boolean;
-  sourceIndex: number;
+function cachedRunTexts(run: Run): string[] {
+  if (!Array.isArray(run.content)) return [];
+  return run.content.flatMap((content) =>
+    content?.type === 'text' && typeof content.text === 'string' ? [content.text] : []
+  );
 }
 
-function cachedResultFragments(field: SimpleField | ComplexField): CachedResultFragment[] {
-  const fragments: CachedResultFragment[] = [];
-  const pending: { node: ParagraphContent; hidden: boolean; sourceIndex: number }[] = [];
-  const push = (
-    children: readonly ParagraphContent[],
-    hidden: boolean,
-    sourceIndex?: number,
-    runsOnly = false
-  ) => {
+function nestedFieldHidden(field: ComplexField, styleResolver: StyleResolver | null): boolean {
+  const formatting = field.formatting;
+  const style = styleResolver?.getRunStyleOwnProperties(formatting?.styleId);
+  const effective = mergeTextFormatting(mergeStyleRunFormatting(undefined, style), formatting);
+  // The parser can adopt a result run's formatting when the field has none.
+  return effective?.hidden === true
+    && stableStringify(formatting) !== stableStringify(firstFieldRunFormatting(flatFieldResult(field)));
+}
+
+function cachedResultFragments(
+  field: SimpleField | ComplexField,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  projectedResultIndexes?: ReadonlySet<number>
+): string[] | undefined {
+  const inline = field.structuredResult?.inline;
+  if (!Array.isArray(inline)) return undefined;
+  const fragments: string[] = [];
+  let hasNestedResult = false;
+  const pending: { node: ParagraphContent; nestedHidden?: boolean }[] = [];
+  const push = (children: readonly ParagraphContent[], nestedHidden?: boolean, runsOnly = false) => {
     if (!Array.isArray(children)) return;
     for (let index = children.length - 1; index >= 0; index--) {
       const node = children[index];
       if (node && (!runsOnly || node.type === 'run')) {
-        pending.push({ node, hidden, sourceIndex: sourceIndex ?? index });
+        pending.push({ node, nestedHidden });
       }
     }
   };
-  const pushResult = (value: SimpleField | ComplexField, hidden: boolean, sourceIndex?: number) => {
-    const inline = value.structuredResult?.inline;
-    if (Array.isArray(inline)) push(inline, hidden, sourceIndex);
-    else push(flatFieldResult(value), hidden, sourceIndex, true);
-  };
-  pushResult(field, false);
+  push(inline.filter((_, index) => !projectedResultIndexes?.has(index)));
   while (pending.length > 0) {
-    const { node, hidden, sourceIndex } = pending.pop()!;
+    const { node, nestedHidden } = pending.pop()!;
     switch (node.type) {
       case 'run': {
-        if (!Array.isArray(node.content)) break;
-        const runHidden = hidden || node.formatting?.hidden === true;
-        for (const content of node.content) {
-          if (content?.type === 'text' && typeof content.text === 'string') {
-            fragments.push({ text: content.text, hidden: runHidden, sourceIndex });
-          }
+        if (nestedHidden !== undefined) {
+          const style = styleResolver?.getRunStyleOwnProperties(node.formatting?.styleId);
+          const effective = mergeTextFormatting(
+            mergeStyleRunFormatting(styleFormatting, style),
+            node.formatting
+          );
+          const hidden = effective?.hidden;
+          if (typeof hidden === 'boolean' ? hidden : nestedHidden) break;
         }
+        for (const text of cachedRunTexts(node)) fragments.push(text);
         break;
       }
       case 'complexField':
-      case 'simpleField':
-        pushResult(node, hidden || fieldResultFormatting(node)?.hidden === true, sourceIndex);
+      case 'simpleField': {
+        hasNestedResult = true;
+        const hidden = nestedHidden === true
+          || (node.type === 'complexField' && nestedFieldHidden(node, styleResolver));
+        const result = node.structuredResult?.inline;
+        if (Array.isArray(result)) push(result, hidden);
+        else push(flatFieldResult(node), hidden, true);
         break;
+      }
       case 'inlineSdt':
-        push(node.content, hidden, sourceIndex);
+        push(node.content, nestedHidden);
         break;
       case 'hyperlink':
-        push(node.structuredChildren ?? node.children, hidden, sourceIndex);
+        push(node.structuredChildren ?? node.children, nestedHidden);
         break;
     }
   }
-  return fragments;
+  return hasNestedResult ? fragments : undefined;
 }
 
 function fieldPayload(
   field: SimpleField | ComplexField,
-  styleFormatting?: TextFormatting,
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
   projectedResultIndexes?: ReadonlySet<number>
 ): {
   payload: Attrs;
   marks: MarkDescriptor[];
 } {
-  const displayText = cachedResultFragments(field)
-    .filter(({ hidden, sourceIndex }) => !hidden && !projectedResultIndexes?.has(sourceIndex))
-    .map(({ text }) => text)
-    .join('');
-  const formatting = projectedResultIndexes
-    ? fieldResultFormatting(field, field.structuredResult?.inline ?? [])
-    : fieldResultFormatting(field);
+  const runs = projectedResultIndexes ? field.structuredResult?.inline ?? [] : flatFieldResult(field);
+  const fragments = cachedResultFragments(field, styleFormatting, styleResolver, projectedResultIndexes);
+  const displayText = (fragments ?? (Array.isArray(runs)
+    ? runs.flatMap((child) => child?.type === 'run' ? cachedRunTexts(child) : [])
+    : [])).join('');
+  const formatting = fieldResultFormatting(field, runs);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
   return {
     payload: {
@@ -852,7 +872,7 @@ function fieldToUnits(
 ): InlineUnit[] {
   if (value.type !== 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(value));
-    const field = fieldPayload(value, styleFormatting);
+    const field = fieldPayload(value, styleFormatting, styleResolver);
     return [embedUnit('field', field.payload, field.marks)];
   }
   const result = value.structuredResult?.inline ?? [];
@@ -869,7 +889,7 @@ function fieldToUnits(
     opaqueSequences.push(
       ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
     );
-    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting, styleResolver) : null;
     const projected = child.type === 'hyperlink'
       ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
@@ -880,10 +900,14 @@ function fieldToUnits(
     for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
     units.push(...projected);
   });
-  opaqueSequences.push(...nestedSequenceNames(value));
+  const sequenceSource = children.length > 0 && sequenceName(value.instruction ?? '') === undefined
+    ? { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') }
+    : value;
+  opaqueSequences.push(...nestedSequenceNames(sequenceSource));
   const field = fieldPayload(
     value,
     styleFormatting,
+    styleResolver,
     children.length > 0 ? projectedResultIndexes : undefined
   );
   if (children.length > 0) field.payload.resultProjection = { id: projectionId, children };
@@ -1050,7 +1074,7 @@ function hyperlinkToUnits(
       for (const content of child.content) units.push(...replayedRunContentToUnits(child, content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, styleResolver);
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
       units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
@@ -1130,7 +1154,7 @@ function inlineContainerUnits(
   }
   if (child.type === 'simpleField' || child.type === 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(child));
-    const field = fieldPayload(child, styleFormatting);
+    const field = fieldPayload(child, styleFormatting, styleResolver);
     return [embedUnit('field', field.payload, field.marks)];
   }
   if (child.type === 'inlineSdt') {
@@ -1181,7 +1205,7 @@ function sdtPayload(
       hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, styleResolver);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
       append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));

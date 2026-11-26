@@ -2889,64 +2889,82 @@ pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
 }
 
 fn field_formatting_from_runs<'a>(field_value: &'a Value, runs: &'a [Value]) -> Option<&'a Value> {
+    first_field_run_formatting(runs).or_else(|| {
+        (string(field(Some(field_value), "type")) == Some("complexField"))
+            .then(|| field(Some(field_value), "formatting"))
+            .flatten()
+    })
+}
+
+fn first_field_run_formatting(runs: &[Value]) -> Option<&Value> {
     runs.iter()
         .filter(|child| string(field(Some(child), "type")) == Some("run"))
-        .find_map(|child| field(Some(child), "formatting").filter(|value| !value.is_null()))
-        .or_else(|| {
-            (string(field(Some(field_value), "type")) == Some("complexField"))
-                .then(|| field(Some(field_value), "formatting"))
-                .flatten()
-        })
+        .find_map(|child| field(Some(child), "formatting"))
 }
 
-struct CachedResultFragment<'a> {
-    text: &'a str,
-    hidden: bool,
-    source_index: usize,
+fn cached_run_texts(run: &Value) -> impl Iterator<Item = &str> {
+    array(field(Some(run), "content"))
+        .iter()
+        .filter(|content| string(field(Some(content), "type")) == Some("text"))
+        .filter_map(|content| string(field(Some(content), "text")))
 }
 
-fn cached_result_children(field_value: &Value) -> impl DoubleEndedIterator<Item = (usize, &Value)> {
+fn cached_result_children(field_value: &Value) -> impl DoubleEndedIterator<Item = &Value> {
     let structured = structured_field_result(field_value);
     structured
         .unwrap_or_else(|| flat_field_result(field_value))
         .iter()
-        .enumerate()
-        .filter(move |(_, child)| {
+        .filter(move |child| {
             structured.is_some() || string(field(Some(child), "type")) == Some("run")
         })
 }
 
-fn cached_result_fragments(field_value: &Value) -> Vec<CachedResultFragment<'_>> {
+fn nested_field_hidden(node: &Value, styles: &StyleResolver) -> bool {
+    let formatting = field(Some(node), "formatting");
+    let effective = styles.run_formatting(None, formatting);
+    // The parser can adopt a result run's formatting when the field has none.
+    boolean(field(effective.as_ref(), "hidden")) == Some(true)
+        && formatting != first_field_run_formatting(flat_field_result(node))
+}
+
+fn cached_result_fragments<'a>(
+    field_value: &'a Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    projected_result_indexes: Option<&HashSet<usize>>,
+) -> Option<Vec<&'a str>> {
     let mut fragments = Vec::new();
-    let mut pending: Vec<_> = cached_result_children(field_value)
+    let mut has_nested_result = false;
+    let mut pending: Vec<_> = structured_field_result(field_value)?
+        .iter()
+        .enumerate()
         .rev()
-        .map(|(index, child)| (child, false, index))
+        .filter(|(index, _)| {
+            projected_result_indexes.is_none_or(|indexes| !indexes.contains(index))
+        })
+        .map(|(_, child)| (child, None))
         .collect();
-    while let Some((node, hidden, source_index)) = pending.pop() {
+    while let Some((node, nested_hidden)) = pending.pop() {
         let children = match string(field(Some(node), "type")) {
             Some("run") => {
-                let hidden = hidden
-                    || boolean(field(field(Some(node), "formatting"), "hidden")) == Some(true);
-                for content in array(field(Some(node), "content")) {
-                    if string(field(Some(content), "type")) == Some("text")
-                        && let Some(text) = string(field(Some(content), "text"))
-                    {
-                        fragments.push(CachedResultFragment {
-                            text,
-                            hidden,
-                            source_index,
-                        });
-                    }
+                let hidden = nested_hidden.is_some_and(|fallback| {
+                    let formatting =
+                        styles.run_formatting(style_formatting, field(Some(node), "formatting"));
+                    boolean(field(formatting.as_ref(), "hidden")).unwrap_or(fallback)
+                });
+                if !hidden {
+                    fragments.extend(cached_run_texts(node));
                 }
                 continue;
             }
-            Some("complexField" | "simpleField") => {
-                let hidden =
-                    hidden || boolean(field(field_result_formatting(node), "hidden")) == Some(true);
+            Some(kind @ ("complexField" | "simpleField")) => {
+                has_nested_result = true;
+                let hidden = nested_hidden.unwrap_or(false)
+                    || (kind == "complexField" && nested_field_hidden(node, styles));
                 pending.extend(
                     cached_result_children(node)
                         .rev()
-                        .map(|(_, child)| (child, hidden, source_index)),
+                        .map(|child| (child, Some(hidden))),
                 );
                 continue;
             }
@@ -2960,44 +2978,48 @@ fn cached_result_fragments(field_value: &Value) -> Vec<CachedResultFragment<'_>>
             array(children)
                 .iter()
                 .rev()
-                .map(|child| (child, hidden, source_index)),
+                .map(|child| (child, nested_hidden)),
         );
     }
-    fragments
+    has_nested_result.then_some(fragments)
 }
 
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
+    styles: &StyleResolver,
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
-    field_payload_with_projection(field_value, style_formatting, source, None)
+    field_payload_with_projection(field_value, style_formatting, styles, source, None)
 }
 
 fn field_payload_with_projection(
     field_value: &Value,
     style_formatting: Option<&Value>,
+    styles: &StyleResolver,
     source: &BTreeMap<String, String>,
     projected_result_indexes: Option<&HashSet<usize>>,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
-    let display_text: String = cached_result_fragments(field_value)
-        .into_iter()
-        .filter(|fragment| {
-            !fragment.hidden
-                && projected_result_indexes
-                    .is_none_or(|indexes| !indexes.contains(&fragment.source_index))
-        })
-        .map(|fragment| fragment.text)
-        .collect();
-    let formatting = if projected_result_indexes.is_some() {
-        field_formatting_from_runs(
-            field_value,
-            structured_field_result(field_value).unwrap_or(&[]),
-        )
+    let runs = if projected_result_indexes.is_some() {
+        structured_field_result(field_value).unwrap_or(&[])
     } else {
-        field_result_formatting(field_value)
+        flat_field_result(field_value)
     };
+    let display_text: String = match cached_result_fragments(
+        field_value,
+        style_formatting,
+        styles,
+        projected_result_indexes,
+    ) {
+        Some(fragments) => fragments.into_iter().collect(),
+        None => runs
+            .iter()
+            .filter(|child| string(field(Some(child), "type")) == Some("run"))
+            .flat_map(cached_run_texts)
+            .collect(),
+    };
+    let formatting = field_formatting_from_runs(field_value, runs);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
@@ -3511,7 +3533,7 @@ fn hyperlink_to_units(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 let marks: Vec<Mark> = marks
                     .into_iter()
                     .chain(extra_marks.iter().cloned())
@@ -3563,7 +3585,7 @@ fn field_to_units(
         || string(field(Some(value), "type")) != Some("complexField")
     {
         opaque_sequences.extend(nested_sequence_names(value));
-        let (payload, marks) = field_payload(value, style_formatting, source);
+        let (payload, marks) = field_payload(value, style_formatting, styles, source);
         return vec![embed_unit("field", payload, &marks, 1)];
     }
     let result = structured_field_result(value).unwrap_or(&[]);
@@ -3596,7 +3618,7 @@ fn field_to_units(
             }
             Some("simpleField") => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 vec![embed_unit("field", payload, &marks, 1)]
             }
             _ => continue,
@@ -3617,10 +3639,26 @@ fn field_to_units(
         }
         units.extend(projected);
     }
-    opaque_sequences.extend(nested_sequence_names(value));
+    let sequence_owner = string(field(Some(value), "instruction"))
+        .and_then(docx_layout::sequence_fields::sequence_name)
+        .is_some();
+    if children.is_empty() || sequence_owner {
+        opaque_sequences.extend(nested_sequence_names(value));
+    } else {
+        let mut visible = value.clone();
+        visible["fieldResult"] = Value::Array(
+            result
+                .iter()
+                .filter(|child| string(field(Some(child), "type")) == Some("run"))
+                .cloned()
+                .collect(),
+        );
+        opaque_sequences.extend(nested_sequence_names(&visible));
+    }
     let (mut payload, marks) = field_payload_with_projection(
         value,
         style_formatting,
+        styles,
         source,
         (!children.is_empty()).then_some(&projected_result_indexes),
     );
@@ -3752,7 +3790,7 @@ fn inline_container_units(
         }
         "simpleField" | "complexField" => {
             opaque_sequences.extend(nested_sequence_names(child));
-            let (payload, marks) = field_payload(child, style_formatting, source);
+            let (payload, marks) = field_payload(child, style_formatting, styles, source);
             vec![embed_unit("field", payload, &marks, 1)]
         }
         "inlineSdt" => vec![embed_unit(
@@ -3858,7 +3896,7 @@ fn sdt_payload(
             }
             "simpleField" | "complexField" => {
                 opaque_sequences.extend(nested_sequence_names(child));
-                let (payload, marks) = field_payload(child, style_formatting, source);
+                let (payload, marks) = field_payload(child, style_formatting, styles, source);
                 append(&mut content, embed_unit("field", payload, &marks, 1));
             }
             "inlineSdt" => append(
@@ -9576,7 +9614,8 @@ mod tests {
             let outer = json!({"type":"complexField", "instruction":instruction,
                 "fieldCode":[run("OUTER CODE")], "fieldResult":[],
                 "structuredResult":{"inline":[run("Before "),inner,run(" After")]}});
-            let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+            let styles = StyleResolver::new(None);
+            let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
             assert_eq!(payload["displayText"], json!("Before Sincerely, After"));
             assert_eq!(payload["hasCachedResult"], json!(true));
 
@@ -9588,7 +9627,6 @@ mod tests {
                     json!({"type":"hyperlink", "anchor":"top", "children":[run("Link")]}),
                     json!({"type":"simpleField", "instruction":"QUOTE", "content":[run("Simple")]}),
                 ]);
-            let styles = StyleResolver::new(None);
             let units =
                 paragraph_units(&json!({"content":[mixed]}), &styles, None, &BTreeMap::new()).units;
             assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Link"));
@@ -9647,7 +9685,8 @@ mod tests {
         let mut inner = quote_field(json!([hidden]));
         inner["fieldResult"] = json!([hidden]);
         let outer = quote_field(json!([inner]));
-        let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+        let styles = StyleResolver::new(None);
+        let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
         assert_eq!(payload["displayText"], json!(""));
         assert_eq!(payload["hasCachedResult"], json!(false));
     }
@@ -9659,7 +9698,8 @@ mod tests {
         let mut hidden = quote_field(json!([quote_field(json!([run("Hidden ")]))]));
         hidden["formatting"] = json!({"hidden":true});
         let outer = quote_field(json!([run("A "), middle, hidden, run("E")]));
-        let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+        let styles = StyleResolver::new(None);
+        let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
         assert_eq!(payload["displayText"], json!("A B C D E"));
     }
 

@@ -5,4 +5,4 @@
 '@betteroffice/rust-crates': patch
 ---
 
-Displays cached text inside nested DOCX fields without exposing field instructions.
+Displays cached values from nested DOCX fields in document text.
