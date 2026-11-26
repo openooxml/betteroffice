@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use ooxml_drawingml::{
     ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
+    resolve_theme_font_ref,
 };
 
 use crate::PptxError;
@@ -3505,6 +3506,9 @@ fn segment_properties(
         .and_then(|latin| latin.attribute("typeface"));
     if let Some(family) = segment.properties.font_family.as_deref()
         && source_family != Some(family)
+        && !source_family.is_some_and(|source| {
+            source.starts_with('+') && resolve_theme_font_ref(theme, source) == family
+        })
         && ooxml_text::font_slot_characters(segment.text, false, false).any(|(_, slot)| slot == 2)
     {
         apply_font_typeface(
@@ -4866,6 +4870,14 @@ mod tests {
     const FIELD_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t> of </a:t></a:r><a:fld id="{B}" type="datetime1"><a:rPr lang="en-US"/><a:t>2024</a:t></a:fld></a:p>"#;
 
     fn rebuilt_paragraph(xml: &[u8], runs: &[(&str, RunProperties)]) -> String {
+        rebuilt_paragraph_with_theme(xml, runs, None)
+    }
+
+    fn rebuilt_paragraph_with_theme(
+        xml: &[u8],
+        runs: &[(&str, RunProperties)],
+        theme: Option<&Theme>,
+    ) -> String {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
@@ -4887,8 +4899,51 @@ mod tests {
                 })
                 .collect(),
         };
-        let paragraph = build_paragraph(&write, Some(root), None, &prefixes);
+        let paragraph = build_paragraph(&write, Some(root), theme, &prefixes);
         String::from_utf8(serialize_xml(&paragraph)).unwrap()
+    }
+
+    #[test]
+    fn typing_with_a_resolved_theme_font_keeps_the_source_east_asian_typeface() {
+        let mut theme = Theme::default();
+        theme.font_scheme.minor_font.latin = "Aptos".to_owned();
+        theme.font_scheme.major_font.ea = "Yu Gothic".to_owned();
+        for (token, resolved) in [("+mn-lt", "Aptos"), ("+mj-ea", "Yu Gothic")] {
+            let source = format!(
+                r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr><a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t></a:r></a:p>"#
+            );
+            for (family, east_asia) in [
+                (resolved, "SimSun"),
+                ("Microsoft YaHei", "Microsoft YaHei"),
+            ] {
+                let xml = rebuilt_paragraph_with_theme(
+                    source.as_bytes(),
+                    &[
+                        (
+                            "x",
+                            RunProperties {
+                                font_family: Some(token.to_owned()),
+                                ..RunProperties::default()
+                            },
+                        ),
+                        (
+                            "中",
+                            RunProperties {
+                                font_family: Some(family.to_owned()),
+                                ..RunProperties::default()
+                            },
+                        ),
+                    ],
+                    Some(&theme),
+                );
+                let original =
+                    format!(r#"<a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t>"#);
+                let appended =
+                    format!(r#"<a:latin typeface="{family}"/><a:ea typeface="{east_asia}"/></a:rPr><a:t>中</a:t>"#);
+                assert!(xml.contains(&original), "{xml}");
+                assert!(xml.contains(&appended), "{xml}");
+            }
+        }
     }
 
     #[test]
