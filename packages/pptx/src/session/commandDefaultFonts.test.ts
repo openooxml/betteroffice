@@ -7,8 +7,8 @@ import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
-import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
-import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
+import type { FontCdnDiagnostic, FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
+import type { DefaultFontFace, DefaultFontLanding } from '../../../../shared/pptxDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
@@ -291,7 +291,7 @@ test.each(['primary', 'last-resort'] as const)('a transient CDN failure retries 
     expect(load).toHaveBeenCalledTimes(1);
     advance(1);
     expect(manager.hasPending()).toBe(true);
-    const landing = kind === 'primary' ? regular : { ...regular, family: 'Carlito', kind: 'coverage' };
+    const landing: DefaultFontLanding = kind === 'primary' ? regular : { ...regular, family: 'Carlito', kind: 'coverage' };
     expect(await manager.load()).toEqual([landing]);
     expect(load).toHaveBeenCalledTimes(2);
     expect(register).toHaveBeenLastCalledWith({ ...landing, bytes });
@@ -328,10 +328,14 @@ test.each([403, 404, 410])('an HTTP %s retry keeps the installed substitute with
   const load = mock(async () => bytes.slice(0));
   const create = spyOn(fonts, 'createFontProvider').mockImplementation((_options, runtime) => ({
     resolve: () => async () => {
+      const hooks = runtime as (NonNullable<typeof runtime> & {
+        reportCdnFailure?: FontCdnReporter;
+        onSubstitute?: (bytes: ArrayBuffer, error: unknown) => void;
+      }) | undefined;
       const substitute = await load();
       const error = implicitFontFailure('intl', cause);
-      runtime?.reportCdnFailure?.(error);
-      runtime?.onSubstitute?.(substitute, error);
+      hooks?.reportCdnFailure?.(error);
+      hooks?.onSubstitute?.(substitute, error);
       return substitute;
     },
     resolveFamily: () => undefined,
@@ -502,7 +506,10 @@ test('an implicit HTTP 403 settles other faces in the same pack after the CDN co
   const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const diagnostics = packDiagnostics();
-  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const runtime = fontRuntimeWithoutPacks();
+  const decoder: fonts.FontDecoder = (data, options) => decodeFontFace(data, options);
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation((options, loadOptions) =>
+    runtime.createFontProvider(options, { ...loadOptions, decoder }));
   const collect = (slide?: string) => [{ ...regular, scripts: [slide === 'next' ? 'devanagari' : 'thai'] }];
   const manager = createCommandDefaultFonts([regular], collect, () => {}, () => {}, undefined, undefined,
     () => commandFontProvider.load(cdn));
@@ -510,6 +517,7 @@ test('an implicit HTTP 403 settles other faces in the same pack after the CDN co
     () => commandFontProvider.load(cdn));
   try {
     expect(await manager.load()).toEqual([]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([expect.stringContaining('/NotoSansThai-Regular.ttf.zst')]);
     advance(60_001);
     expect(await manager.load('next')).toEqual([]);
     expect(manager.hasPending('next')).toBe(false);
@@ -518,7 +526,9 @@ test('an implicit HTTP 403 settles other faces in the same pack after the CDN co
     expect(diagnostics).toHaveLength(1);
 
     expect(await nextSession.load('next')).toEqual([]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining('/NotoSansThai-Regular.ttf.zst'), expect.stringContaining('/NotoSansDevanagari-Regular.ttf.zst'),
+    ]);
     expect(warning).toHaveBeenCalledTimes(2);
     expect(diagnostics).toHaveLength(2);
   } finally {
@@ -778,8 +788,8 @@ test('Arabic requests keep family and traits and install the shared regular face
   } finally { fonts.dispose(); }
 });
 
-const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMap<[string, boolean, boolean]>((family) =>
-  [[true, false], [false, true], [true, true]].map(([bold, italic]) => [family, bold, italic]));
+const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMap((family) =>
+  [[true, false], [false, true], [true, true]].map(([bold, italic]): [string, boolean, boolean] => [family, bold, italic]));
 
 test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s, italic: %s)', async (family, bold, italic) => {
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
