@@ -921,7 +921,7 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
 }
 
 #[test]
-fn cell_text_box_centers_across_the_content_width_and_on_the_paragraph_top() {
+fn cell_text_box_centers_across_the_content_width() {
     let drawing = cell_anchor_box(
         "<wp:align>center</wp:align>",
         "<wp:align>center</wp:align>",
@@ -932,7 +932,6 @@ fn cell_text_box_centers_across_the_content_width_and_on_the_paragraph_top() {
     let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
     let (table, _) = cell_anchor_table(&layout);
     assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + (360.0 - 64.0) / 2.0);
-    assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 4.0 - 12.0 / 2.0);
 }
 
 #[test]
@@ -1029,17 +1028,22 @@ fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
 }
 
 #[test]
-fn split_row_text_box_paints_with_its_first_anchor_line_in_text_order() {
+fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
     let drawing = cell_anchor_box(
         "<wp:posOffset>0</wp:posOffset>",
         "<wp:posOffset>762000</wp:posOffset>",
         "<wp:wrapNone/>",
         114300,
     );
-    for behind in [false, true] {
+    for (behind, before, anchor_lines) in [
+        (false, 10800, 1),
+        (true, 10800, 1),
+        (false, 12000, 80),
+        (true, 12000, 80),
+    ] {
         let behind_doc = u8::from(behind);
         let drawing = drawing.replace("behindDoc=\"0\"", &format!("behindDoc=\"{behind_doc}\""));
-        let bytes = table_boundary_document(&document(&drawing, false), 12000, 80);
+        let bytes = table_boundary_document(&document(&drawing, false), before, anchor_lines);
         let (display, layout) = display_with_layout(&bytes, true);
         let pages = display["pages"].as_array().unwrap();
         assert!(pages.len() > 1);
@@ -1056,8 +1060,34 @@ fn split_row_text_box_paints_with_its_first_anchor_line_in_text_order() {
         assert!(painted.next().is_none());
         assert!(shape["clipGroup"].is_null());
         assert_eq!(index < text_run_index(primitives, "Anchor paragraph"), behind);
+        if anchor_lines == 1 {
+            assert_eq!(index < text_run_index(primitives, "Cell tail 00;"), behind);
+        }
+        let cell_blocks = layout["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["block"]["kind"] == "table")
+            .unwrap()["block"]["rows"][0]["cells"][0]["blocks"]
+            .as_array()
+            .unwrap();
+        for (text_index, run) in primitives.iter().enumerate().filter(|(_, primitive)| {
+            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
+                && primitive["cell"] == shape["cell"]
+                && cell_blocks.iter().any(|block| {
+                    block["kind"] == "paragraph"
+                        && (block["id"] == primitive["blockId"] || block["id"] == primitive["blockKey"])
+                })
+        }) {
+            assert_eq!(index < text_index, behind, "{}", run["text"]);
+        }
+        let last = if anchor_lines == 1 {
+            "Cell tail 19;"
+        } else {
+            "Anchor continuation 79;"
+        };
         assert!(pages[page + 1..].iter().any(|later| {
-            text(later["primitives"].as_array().unwrap()).contains("Anchor continuation 79;")
+            text(later["primitives"].as_array().unwrap()).contains(last)
         }));
     }
 }

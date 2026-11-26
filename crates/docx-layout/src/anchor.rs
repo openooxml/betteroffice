@@ -20,16 +20,6 @@ pub(crate) fn resolve_position(
     height: f64,
     frame: &AnchorFrame,
 ) -> (f64, f64) {
-    resolve_in_frame(position, width, height, frame, false)
-}
-
-fn resolve_in_frame(
-    position: Option<&ImageRunPosition>,
-    width: f64,
-    height: f64,
-    frame: &AnchorFrame,
-    cell: bool,
-) -> (f64, f64) {
     if let Some(position) = position
         && position.use_simple_pos.unwrap_or(false)
         && let Some(simple) = position
@@ -55,9 +45,7 @@ fn resolve_in_frame(
             .and_then(|axis| axis.relative_to.as_deref())
             .unwrap_or(if horizontal { "column" } else { "paragraph" });
         let odd = frame.odd_page;
-        let (start, end) = if cell && horizontal {
-            (frame.flow_x, frame.flow_x + frame.flow_width)
-        } else if horizontal {
+        let (start, end) = if horizontal {
             match relative_to {
                 "page" => (0.0, frame.page_width),
                 "margin" => (frame.margin_left, frame.page_width - frame.margin_right),
@@ -98,17 +86,26 @@ fn resolve_in_frame(
     )
 }
 
-pub(crate) fn is_cell_shape_anchor(position: Option<&ImageRunPosition>, wrap: Option<&str>) -> bool {
+pub(crate) fn is_cell_shape_anchor(
+    position: Option<&ImageRunPosition>,
+    wrap: Option<&str>,
+    rotated: bool,
+) -> bool {
+    if rotated || wrap == Some("inline") {
+        return false;
+    }
     let Some(position) = position else {
-        return wrap.is_some_and(|wrap| wrap != "inline");
+        return wrap.is_some();
     };
     !position.use_simple_pos.unwrap_or(false)
-        && position.horizontal.as_ref().is_none_or(|axis| axis.relative_to.as_deref() != Some("page"))
-        && position.vertical.as_ref().is_none_or(|axis| {
-            !matches!(
+        && position.horizontal.as_ref().is_none_or(|axis| {
+            matches!(
                 axis.relative_to.as_deref(),
-                Some("page" | "margin" | "topMargin" | "bottomMargin")
+                None | Some("column" | "character" | "margin")
             )
+        })
+        && position.vertical.as_ref().is_none_or(|axis| {
+            matches!(axis.relative_to.as_deref(), None | Some("paragraph" | "line"))
         })
 }
 
@@ -119,9 +116,9 @@ pub(crate) fn cell_shape_rect(
     (shape_width, shape_height): (f64, f64),
 ) -> (f64, f64, f64, f64) {
     let frame = AnchorFrame {
-        page_width: 0.0,
+        page_width: x + width,
         page_height: 0.0,
-        margin_left: 0.0,
+        margin_left: x,
         margin_right: 0.0,
         margin_top: 0.0,
         margin_bottom: 0.0,
@@ -131,6 +128,6 @@ pub(crate) fn cell_shape_rect(
         flow_height: 0.0,
         odd_page: true,
     };
-    let (x, y) = resolve_in_frame(position, shape_width, shape_height, &frame, true);
+    let (x, y) = resolve_position(position, shape_width, shape_height, &frame);
     (x, y, shape_width, shape_height)
 }

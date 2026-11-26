@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::anchor::cell_shape_rect;
+use crate::anchor::{cell_shape_rect, is_cell_shape_anchor};
 use crate::cell_layout::{
-    cell_shape_anchor, cell_shape_wraps, nested_table_float_offset, nested_table_horizontal_offset,
+    cell_shape_anchor, nested_table_float_offset, nested_table_horizontal_offset, shape_wraps_text,
     stacks_cell_shape,
 };
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
@@ -3144,12 +3144,7 @@ fn extract_shape_zone(
     let Some(position) = shape.position.as_ref() else {
         return;
     };
-    if !matches!(
-        shape.wrap_type.as_deref(),
-        Some("square" | "tight" | "through" | "topAndBottom")
-    ) || shape.width <= 0.0
-        || shape.height <= 0.0
-    {
+    if !shape_wraps_text(shape.wrap_type.as_deref()) {
         return;
     }
     let margin_left = geometry.map_or(0.0, |g| g.margin_left);
@@ -3203,6 +3198,9 @@ fn shape_wrap_zone(
     (x, y, width, height): (f64, f64, f64, f64),
     content_width: f64,
 ) -> Option<FloatingZone> {
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
     let distances = shape.wrap_distances.as_ref();
     let left = x - distances.map_or(0.0, |d| d.left);
     let right = x + width + distances.map_or(0.0, |d| d.right);
@@ -3726,36 +3724,30 @@ fn measure_shape(
     })
 }
 
-fn wrapping_cell_shape(block: &LayoutBlock) -> Option<&ShapeBlock> {
-    let LayoutBlock::Shape(shape) = block else { return None };
-    cell_shape_wraps(shape.position.as_ref(), shape.wrap_type.as_deref(), shape.behind_doc)
-        .then_some(shape)
-}
-
 fn measure_cell_blocks(
     blocks: &mut [LayoutBlock],
     content_width: f64,
-    anchor_width: f64,
+    rotated: bool,
     config: &MeasurementConfig,
 ) -> Result<(Vec<BlockExtent>, f64), String> {
+    let anchor_width = content_width.max(0.0);
+    let content_width = content_width.max(1.0);
     let mut has_table_floats = false;
-    let mut shape_zones = BTreeMap::<_, Vec<_>>::new();
+    let mut anchored_shapes = BTreeMap::<_, Vec<_>>::new();
     for (index, block) in blocks.iter().enumerate() {
-        let Some(shape) = wrapping_cell_shape(block) else {
-            has_table_floats |= matches!(block, LayoutBlock::Table(table)
-                if nested_table_float_offset(table.floating.as_ref()).is_some());
-            continue;
-        };
-        let anchor = cell_shape_anchor(index, blocks.len(), |i| {
-            matches!(blocks[i], LayoutBlock::Paragraph(_))
-        });
-        let rect = cell_shape_rect(
-            shape.position.as_ref(), (0.0, anchor_width), 0.0, (shape.width, shape.height),
-        );
-        let zone = shape_wrap_zone(shape, rect, content_width);
-        shape_zones.entry(anchor).or_default().push((rect.1 + rect.3, zone));
+        if let LayoutBlock::Shape(shape) = block {
+            let wrap = shape.wrap_type.as_deref();
+            if shape_wraps_text(wrap) && is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated) {
+                let anchor = cell_shape_anchor(index, blocks.len(), |i| {
+                    matches!(blocks[i], LayoutBlock::Paragraph(_))
+                });
+                anchored_shapes.entry(anchor).or_default().push(index);
+            }
+        } else if let LayoutBlock::Table(table) = block {
+            has_table_floats |= nested_table_float_offset(table.floating.as_ref()).is_some();
+        }
     }
-    let has_wrapping_shapes = !shape_zones.is_empty();
+    let has_wrapping_shapes = !anchored_shapes.is_empty();
     if !has_wrapping_shapes && !has_table_floats {
         return Ok((measure_blocks(blocks, content_width, config)?, 0.0));
     }
@@ -3764,8 +3756,8 @@ fn measure_cell_blocks(
     let mut shape_bottom = 0.0_f64;
     let mut y = 0.0_f64;
     let mut previous_after = 0.0_f64;
-    for (index, block) in blocks.iter_mut().enumerate() {
-        let spacing = match &*block {
+    for index in 0..blocks.len() {
+        let spacing = match &blocks[index] {
             LayoutBlock::Paragraph(paragraph) => paragraph
                 .attrs
                 .as_ref()
@@ -3774,22 +3766,30 @@ fn measure_cell_blocks(
         };
         let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
         let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
-        if let Some(anchored) = shape_zones.remove(&index) {
-            let top = if matches!(block, LayoutBlock::Paragraph(_)) {
+        if let Some(anchored) = anchored_shapes.remove(&index) {
+            let top = if matches!(blocks[index], LayoutBlock::Paragraph(_)) {
                 y + previous_after.max(before)
             } else {
                 y
             };
-            for (bottom, zone) in anchored {
-                shape_bottom = shape_bottom.max(top + bottom);
-                if let Some(mut zone) = zone {
-                    zone.top_y += top;
-                    zone.bottom_y += top;
+            for shape_index in anchored {
+                let LayoutBlock::Shape(shape) = &blocks[shape_index] else {
+                    unreachable!()
+                };
+                let rect = cell_shape_rect(
+                    shape.position.as_ref(),
+                    (0.0, anchor_width),
+                    top,
+                    (shape.width, shape.height),
+                );
+                shape_bottom = shape_bottom.max(rect.1 + rect.3);
+                if let Some(zone) = shape_wrap_zone(shape, rect, content_width) {
                     zones.push(zone);
                 }
             }
         }
-        if has_wrapping_shapes && matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape)) {
+        let block = &mut blocks[index];
+        if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape, rotated)) {
             measured.push(measure_block(block, content_width, config)?);
             continue;
         }
@@ -3829,9 +3829,10 @@ fn measure_cell_blocks(
             zone.bottom_y += y;
             zones.push(zone);
         } else if has_wrapping_shapes && let BlockExtent::Paragraph(paragraph) = &extent {
-            y += before + paragraph.lines.iter()
-                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-                .sum::<f64>();
+            y += before
+                + paragraph.lines.iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum::<f64>();
         } else {
             y += extent_height(&extent) - after;
         }
@@ -4162,16 +4163,17 @@ fn measure_table_cells(
                 .as_ref()
                 .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
             let rotated = is_rotated(cell);
-            let (measure_width, anchor_width) = if rotated {
-                let (top, bottom) = cell.padding.as_ref().map_or((0.0, 0.0), |p| (p.top, p.bottom));
-                (row.height.unwrap_or(content_width) - (top + bottom), cell_width - top - bottom)
+            let measure_width = if rotated {
+                let padding = cell
+                    .padding
+                    .as_ref()
+                    .map_or(0.0, |padding| padding.top + padding.bottom);
+                row.height.unwrap_or(content_width) - padding
             } else {
-                let width = cell_width - left - right;
-                (width, width)
+                cell_width - left - right
             };
-            let (mut measures, shape_bottom) = measure_cell_blocks(
-                &mut cell.blocks, measure_width.max(1.0), anchor_width.max(0.0), config,
-            )?;
+            let (mut measures, shape_bottom) =
+                measure_cell_blocks(&mut cell.blocks, measure_width, rotated, config)?;
             if rotated
                 && (config.font_chains.values().all(Vec::is_empty)
                     || config
@@ -4547,6 +4549,7 @@ fn measure_table_with_compat_shift(
         let mut max_border_height = 0.0_f64;
         for (cell_index, measured_cell) in measured_row.cells.iter_mut().enumerate() {
             let source_cell = &source_row.cells[cell_index];
+            let rotated = is_rotated(source_cell);
             let has_table_floats = source_cell.blocks.iter().any(|block| {
                 matches!(block, LayoutBlock::Table(table)
                     if nested_table_float_offset(table.floating.as_ref()).is_some())
@@ -4563,7 +4566,7 @@ fn measure_table_with_compat_shift(
                     previous_after = 0.0;
                     continue;
                 }
-                if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape)) {
+                if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape, rotated)) {
                     continue;
                 }
                 let visual = if has_table_floats {
@@ -4583,7 +4586,7 @@ fn measure_table_with_compat_shift(
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
             }
-            if is_rotated(source_cell) {
+            if rotated {
                 content_height = longest_line_width(&measured_cell.blocks);
                 previous_after = 0.0;
             }
@@ -4664,11 +4667,9 @@ fn measure_table_with_compat_shift(
                 .map_or(0.0, |padding| padding.top + padding.bottom);
             let length = (spanned - padding).max(1.0);
             let measured = &mut rows[row_index].cells[cell_index];
-            let (blocks, shape_bottom) = measure_cell_blocks(
-                &mut cell.blocks, length, (measured.width - padding).max(0.0), config,
-            )?;
+            let (blocks, _) = measure_cell_blocks(&mut cell.blocks, length, true, config)?;
             measured.blocks = blocks;
-            measured.height = longest_line_width(&measured.blocks).max(shape_bottom) + padding;
+            measured.height = longest_line_width(&measured.blocks) + padding;
             let deficit = measured.height + cell_border_height(cell) - spanned;
             let mut target = last;
             while target > row_index && exact[target] {
@@ -4795,6 +4796,7 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     spacing.and_then(|value| value.before).unwrap_or(0.0)
         + image_height
         + added
+        + extent.lines[0].float_skip_before.unwrap_or(0.0)
         + spacing.and_then(|value| value.after).unwrap_or(0.0)
 }
 
@@ -5877,7 +5879,7 @@ mod tests {
                 {"kind": "paragraph", "id": "text", "runs": [{"kind": "text", "text": "short line"}]}
             ]))
             .unwrap();
-            let (measures, _) = measure_cell_blocks(&mut blocks, 600.0, 600.0, &config).unwrap();
+            let (measures, _) = measure_cell_blocks(&mut blocks, 600.0, false, &config).unwrap();
             let BlockExtent::Paragraph(paragraph) = &measures[1] else {
                 panic!()
             };
@@ -6773,6 +6775,53 @@ mod tests {
         assert_eq!(height(cell_blocks(Some(anchor("inFront")))), plain);
         assert_eq!(height(cell_blocks(Some(anchor("behind")))), plain);
         assert_eq!(height(cell_blocks(Some(anchor("square")))), 36.0 + 40.0);
+    }
+
+    #[test]
+    fn a_cell_wrap_band_pushes_an_inline_image_and_grows_the_row() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
+            ..Default::default()
+        };
+        let measure = |direction, behind, before, offset, width, height| {
+            let mut block = serde_json::from_value(json!({
+                "kind":"table", "id":"table", "columnWidths":[220],
+                "rows":[{"id":"row", "cells":[{"id":"cell", "textDirection":direction,
+                    "padding":{"top":0,"right":0,"bottom":0,"left":0}, "blocks":[
+                        {"kind":"shape", "id":"shape", "shapeType":"rect", "geometryPath":[],
+                         "children":[], "width":width, "height":height, "wrapType":"topAndBottom",
+                         "behindDoc":behind,
+                         "position":{"horizontal":{"relativeTo":"column"},
+                                     "vertical":{"relativeTo":"paragraph","posOffset":offset}}},
+                        {"kind":"paragraph", "id":"anchor", "attrs":{"spacing":{"before":before}},
+                         "runs":[{"kind":"image", "src":"inline", "width":50, "height":50}]}
+                    ]}]}]
+            }))
+            .unwrap();
+            let BlockExtent::Table(table) = measure_block(&mut block, 220.0, &config).unwrap() else {
+                panic!()
+            };
+            let row = &table.rows[0];
+            let BlockExtent::Paragraph(paragraph) = &row.cells[0].blocks[1] else { panic!() };
+            (row.height, paragraph.lines[0].float_skip_before.unwrap_or(0.0))
+        };
+        for behind in [false, true] {
+            let (height, skip) = measure("lrTb", behind, 0, 0, 80, 60);
+            assert!(height >= 110.0, "row height {height}");
+            assert_eq!(skip, 60.0);
+        }
+        assert!(measure("lrTb", false, 30, -24, 80, 12).1 > 0.0);
+        for (width, height) in [(0, 60), (80, 0)] {
+            assert_eq!(measure("lrTb", false, 0, 0, width, height).1, 0.0);
+        }
+        for direction in ["btLr", "tbRl"] {
+            assert_eq!(measure(direction, false, 0, 0, 80, 60).1, 0.0);
+        }
     }
 
     /// A wrap-only anchor must not slide the frame out from under a band

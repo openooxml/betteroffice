@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::anchor::{cell_shape_rect, is_cell_shape_anchor};
-use crate::types::{BlockExtent, FloatingTablePosition, ImageRunPosition, LayoutBlock, ShapeBlock};
+use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock, ShapeBlock};
 
 pub(crate) fn is_floating_image(wrap_type: Option<&str>, display_mode: Option<&str>) -> bool {
     matches!(
@@ -32,35 +32,16 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
 
 /// Whether a cell anchor only paints, reserving no row height.
 pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) -> bool {
-    positioned
-        && !matches!(
-            wrap_type,
-            Some("square" | "tight" | "through" | "topAndBottom")
-        )
+    positioned && !shape_wraps_text(wrap_type)
 }
 
-pub(crate) fn cell_shape_behind(
-    position: Option<&ImageRunPosition>,
-    wrap: Option<&str>,
-    behind_doc: Option<bool>,
-) -> bool {
-    behind_doc.or_else(|| position.and_then(|position| position.behind_doc)) == Some(true)
-        || wrap == Some("behind")
+pub(crate) fn shape_wraps_text(wrap: Option<&str>) -> bool {
+    matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom"))
 }
 
-pub(crate) fn cell_shape_wraps(
-    position: Option<&ImageRunPosition>,
-    wrap: Option<&str>,
-    behind_doc: Option<bool>,
-) -> bool {
-    !cell_overlay_drawing(true, wrap)
-        && is_cell_shape_anchor(position, wrap)
-        && !cell_shape_behind(position, wrap, behind_doc)
-}
-
-pub(crate) fn stacks_cell_shape(shape: &ShapeBlock) -> bool {
+pub(crate) fn stacks_cell_shape(shape: &ShapeBlock, rotated: bool) -> bool {
     let wrap = shape.wrap_type.as_deref();
-    !is_cell_shape_anchor(shape.position.as_ref(), wrap)
+    !is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated)
         && !cell_overlay_drawing(shape.position.is_some(), wrap)
 }
 
@@ -187,6 +168,15 @@ pub fn layout_cell_content(
     block_measures: Option<&[BlockExtent]>,
     start_y: f64,
 ) -> CellContentLayout {
+    layout_cell_content_with_rotation(blocks, block_measures, start_y, false)
+}
+
+pub(crate) fn layout_cell_content_with_rotation(
+    blocks: Option<&[LayoutBlock]>,
+    block_measures: Option<&[BlockExtent]>,
+    start_y: f64,
+    rotated: bool,
+) -> CellContentLayout {
     let mut line_tops: Vec<Vec<f64>> = Vec::new();
     let mut flat_bottoms: Vec<f64> = Vec::new();
     let mut y = start_y;
@@ -224,14 +214,17 @@ pub fn layout_cell_content(
             flat_bottoms.push(bottom);
             prev_after = 0.0;
         } else if let Some(LayoutBlock::Shape(shape)) = block
-            && !stacks_cell_shape(shape)
+            && !stacks_cell_shape(shape, rotated)
         {
-            if cell_shape_wraps(shape.position.as_ref(), shape.wrap_type.as_deref(), shape.behind_doc) {
+            if shape_wraps_text(shape.wrap_type.as_deref()) {
                 let anchor = cell_shape_anchor(i, n, |index| {
                     matches!(blocks.and_then(|b| b.get(index)), Some(LayoutBlock::Paragraph(_)))
                 });
                 let (_, top, _, height) = cell_shape_rect(
-                    shape.position.as_ref(), (0.0, 0.0), 0.0, (shape.width, shape.height),
+                    shape.position.as_ref(),
+                    (0.0, 0.0),
+                    0.0,
+                    (shape.width, shape.height),
                 );
                 shape_bottoms.push((anchor, y, top + height));
             }
@@ -249,7 +242,9 @@ pub fn layout_cell_content(
     }
     for (anchor, fallback, bottom) in shape_bottoms {
         let top = match &block_measures.unwrap()[anchor] {
-            BlockExtent::Paragraph(paragraph) => line_tops[anchor].first().zip(paragraph.lines.first())
+            BlockExtent::Paragraph(paragraph) => line_tops[anchor]
+                .first()
+                .zip(paragraph.lines.first())
                 .map_or(fallback, |(top, line)| top - line.float_skip_before.unwrap_or(0.0)),
             _ => fallback,
         };

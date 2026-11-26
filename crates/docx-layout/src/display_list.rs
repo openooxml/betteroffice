@@ -2672,6 +2672,12 @@ pub(crate) struct ShapeBlockIn {
     pub(crate) wrap_type: Option<String>,
 }
 
+impl ShapeBlockIn {
+    fn has_cell_anchor(&self, rotated: bool) -> bool {
+        crate::anchor::is_cell_shape_anchor(self.position.as_ref(), self.wrap_type.as_deref(), rotated)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChartBlockIn {
@@ -3538,6 +3544,13 @@ pub(crate) struct TableFragmentIn {
     pub(crate) carried_from_prev: Option<bool>,
     #[serde(default)]
     pub(crate) carried_to_next: Option<bool>,
+}
+
+impl TableFragmentIn {
+    fn cell_window(&self, g: &GridCell) -> Option<&crate::types::CellClip> {
+        self.cell_clips.as_ref()?.iter()
+            .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+    }
 }
 
 #[derive(Deserialize)]
@@ -12013,11 +12026,7 @@ impl TablePaintPlan {
         paint: &CellPaint,
     ) -> (f64, f64, f64) {
         let cy = frag.y + paint.cell_y;
-        if let Some(clip) = frag.cell_clips.as_ref().and_then(|clips| {
-            clips
-                .iter()
-                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
-        }) {
+        if let Some(clip) = frag.cell_window(g) {
             (
                 cy - clip.top,
                 cy.max(self.cell_clip_top(g)),
@@ -12490,11 +12499,7 @@ pub(crate) fn emit_table_fragment(
         }
 
         let content_stamp_from = prims.len();
-        let cell_window = frag.cell_clips.as_ref().and_then(|clips| {
-            clips
-                .iter()
-                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
-        });
+        let cell_window = frag.cell_window(g);
         let windowed_lines = cell_window.is_some();
         let (content_y, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
@@ -12742,10 +12747,13 @@ impl CellContentFrame {
         let anchor = crate::cell_layout::cell_shape_anchor(index, cell.blocks.len(), |i| {
             matches!(cell.blocks[i], BlockIn::Paragraph(_))
         });
-        self.shows_anchor_at(measure, anchor)
+        self.shows_anchor_at(measure, anchor, true)
     }
 
-    fn shows_anchor_at(&self, measure: &TableCellExtentIn, anchor: usize) -> bool {
+    fn shows_anchor_at(&self, measure: &TableCellExtentIn, anchor: usize, check_window: bool) -> bool {
+        if !check_window {
+            return true;
+        }
         let y = self.content_top + self.block_tops[anchor];
         match measure.blocks.get(anchor) {
             Some(MeasureIn::Paragraph(paragraph)) => {
@@ -12866,9 +12874,7 @@ fn cell_content_frame<'m>(
                 stack_cursor += text_box.height;
                 prev_after = 0.0;
             }
-            (BlockIn::Shape(sb), Some(MeasureIn::Shape(sm)))
-                if crate::anchor::is_cell_shape_anchor(sb.position.as_ref(), sb.wrap_type.as_deref()) =>
-            {
+            (BlockIn::Shape(sb), Some(MeasureIn::Shape(sm))) if sb.has_cell_anchor(rotated) => {
                 let anchor = crate::cell_layout::cell_shape_anchor(i, cell.blocks.len(), |index| {
                     matches!(cell.blocks[index], BlockIn::Paragraph(_))
                 });
@@ -12899,25 +12905,25 @@ fn cell_content_frame<'m>(
         .map(|(anchor, index, shape, extent)| {
             let position = shape.position.as_ref();
             let wrap = shape.wrap_type.as_deref();
-            let wraps = crate::cell_layout::cell_shape_wraps(position, wrap, shape.behind_doc);
-            let width = if rotated && wraps {
-                (p.width - top - bottom).max(0.0)
-            } else {
-                content_width
-            };
             let mut fragment = cell_shape_fragment(shape, extent, true);
             let (x, y, _, height) = crate::anchor::cell_shape_rect(
                 position,
-                (content_x, width),
+                (content_x, content_width),
                 block_tops[anchor],
                 (fragment.width, fragment.height),
             );
             (fragment.x, fragment.y) = (x, y);
-            if wraps {
+            if crate::cell_layout::shape_wraps_text(wrap) {
                 float_bottom = float_bottom.max(y + height);
             }
-            let behind = crate::cell_layout::cell_shape_behind(position, wrap, shape.behind_doc);
-            CellShape { anchor, index, fragment, behind }
+            let behind = shape.behind_doc.or_else(|| position.and_then(|p| p.behind_doc))
+                == Some(true) || wrap == Some("behind");
+            CellShape {
+                anchor,
+                index,
+                fragment,
+                behind,
+            }
         })
         .collect();
     // a trailing spacing.after becomes the content box's padding-bottom
@@ -12994,11 +13000,30 @@ fn emit_cell_content(
         .map_or(0, |reserved| reserved.borrow().len());
     let mut shape_ranges = Vec::new();
     let visible_shapes = frame.floating_shapes.iter().filter(|shape| {
-        !(split_row || windowed_lines) || frame.shows_anchor_at(cell_measure, shape.anchor)
+        frame.shows_anchor_at(cell_measure, shape.anchor, split_row || windowed_lines)
     });
-    let mut front_shapes = visible_shapes.clone().filter(|shape| !shape.behind).peekable();
+
+    let mut paint_shapes = |prims: &mut Vec<Primitive>, behind| {
+        let start = prims.len();
+        for placement in visible_shapes.clone().filter(|shape| shape.behind == behind) {
+            let BlockIn::Shape(shape) = &cell.blocks[placement.index] else { unreachable!() };
+            let mut frag = placement.fragment.clone();
+            frag.y += content_top;
+            emit_shape_fragment(prims, &frag, shape, ctx);
+        }
+        for primitive in &mut prims[start..] {
+            if !selectable {
+                strip_doc_positions(primitive);
+            }
+            set_cell_ref(primitive, cell_ref);
+        }
+        if start < prims.len() {
+            shape_ranges.push(start..prims.len());
+        }
+    };
 
     // Behind-document floats paint below cell content.
+    paint_shapes(prims, true);
     emit_cell_floating_images(
         prims,
         cell,
@@ -13010,34 +13035,17 @@ fn emit_cell_content(
         selectable,
         true,
     );
-    let mut paint_shape = |prims: &mut Vec<Primitive>, placement: &CellShape| {
-        let BlockIn::Shape(shape) = &cell.blocks[placement.index] else { unreachable!() };
-        let mut frag = placement.fragment.clone();
-        frag.y += content_top;
-        let start = prims.len();
-        emit_shape_fragment(prims, &frag, shape, ctx);
-        for primitive in &mut prims[start..] {
-            if !selectable {
-                strip_doc_positions(primitive);
-            }
-            set_cell_ref(primitive, cell_ref);
-        }
-        if start < prims.len() {
-            shape_ranges.push(start..prims.len());
-        }
-    };
-    for shape in visible_shapes.filter(|shape| shape.behind) {
-        paint_shape(prims, shape);
-    }
 
     for (i, cell_block) in cell.blocks.iter().enumerate() {
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
-        let floating_shape = matches!(cell_block, BlockIn::Shape(shape)
-            if crate::anchor::is_cell_shape_anchor(shape.position.as_ref(), shape.wrap_type.as_deref()));
-        if !floating_shape
-            && let BlockIn::Shape(shape) = cell_block
+        if matches!((cell_block, m), (BlockIn::Shape(shape), MeasureIn::Shape(_))
+            if shape.has_cell_anchor(rotated))
+        {
+            continue;
+        }
+        if let BlockIn::Shape(shape) = cell_block
             && crate::cell_layout::cell_overlay_drawing(
                 shape.position.is_some(),
                 shape.wrap_type.as_deref(),
@@ -13046,7 +13054,7 @@ fn emit_cell_content(
         {
             continue;
         }
-        if windowed_lines && !floating_shape && !matches!(cell_block, BlockIn::Paragraph(_)) {
+        if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
             let height = match m {
                 MeasureIn::Table(table) => table.total_height,
                 MeasureIn::Image(image) => image.height,
@@ -13217,9 +13225,7 @@ fn emit_cell_content(
                 selectable,
                 Some(cell_ref),
             );
-        } else if !floating_shape
-            && let (BlockIn::Shape(sb), MeasureIn::Shape(sm)) = (cell_block, m)
-        {
+        } else if let (BlockIn::Shape(sb), MeasureIn::Shape(sm)) = (cell_block, m) {
             let mut synthetic = cell_shape_fragment(sb, sm, selectable);
             synthetic.x = content_x;
             synthetic.y = content_top + block_tops[i];
@@ -13263,9 +13269,6 @@ fn emit_cell_content(
                 Some(cell_ref),
             );
         }
-        while let Some(shape) = front_shapes.next_if(|shape| shape.anchor == i) {
-            paint_shape(prims, shape);
-        }
     }
 
     // Front cell floats paint above cell content.
@@ -13280,6 +13283,7 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    paint_shapes(prims, false);
     if windowed_lines {
         let mut index = stamp_from;
         let mut removed = 0;
@@ -13625,9 +13629,15 @@ fn emit_cell_floating_images(
     for (i, blk) in cell.blocks.iter().enumerate() {
         let BlockIn::Paragraph(pb) = blk else {
             // Nested tables advance the anchor cursor by their measured height.
-            match cell_measure.blocks.get(i) {
-                Some(MeasureIn::Table(tm)) => paragraph_y += tm.total_height,
-                Some(MeasureIn::Shape(sm)) | Some(MeasureIn::Chart(sm)) => paragraph_y += sm.height,
+            match (blk, cell_measure.blocks.get(i)) {
+                (BlockIn::Shape(shape), Some(MeasureIn::Shape(_)))
+                    if shape.has_cell_anchor(frame.rotation != 0.0)
+                        || crate::cell_layout::cell_overlay_drawing(
+                            shape.position.is_some(),
+                            shape.wrap_type.as_deref(),
+                        ) => {}
+                (_, Some(MeasureIn::Table(tm))) => paragraph_y += tm.total_height,
+                (_, Some(MeasureIn::Shape(sm) | MeasureIn::Chart(sm))) => paragraph_y += sm.height,
                 _ => {}
             }
             continue;
@@ -13886,10 +13896,11 @@ fn visit_table_fragment(
                     continue;
                 }
                 (BlockIn::Shape(shape), MeasureIn::Shape(_))
-                    if crate::anchor::is_cell_shape_anchor(shape.position.as_ref(), shape.wrap_type.as_deref()) =>
+                    if shape.has_cell_anchor(frame.rotation != 0.0) =>
                 {
-                    let cuts = frame.content_cuts(frag, g);
-                    frame.shows_anchor(cell, cell_measure, index, cuts.0 || cuts.1)
+                    let (cut_top, cut_bottom) = frame.content_cuts(frag, g);
+                    let windowed_lines = frag.cell_window(g).is_some();
+                    frame.shows_anchor(cell, cell_measure, index, cut_top || cut_bottom || windowed_lines)
                         .then_some(ShownPart::Whole)
                 }
                 (_, extent) => {
