@@ -1085,10 +1085,10 @@ impl Workbook {
                 xlsx_model::progress::pulse();
             }
             retain_array_formulas(&model, &mut projected);
-            for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
-                target.hidden_row_heights = source.hidden_row_heights.clone();
-                if client_id.is_none() {
+            if client_id.is_none() {
+                for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
                     target.hidden_col_widths = source.hidden_col_widths.clone();
+                    target.hidden_row_heights = source.hidden_row_heights.clone();
                 }
             }
             validate_model(&projected)?;
@@ -1412,7 +1412,6 @@ impl Workbook {
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
         retain_array_formulas(&self.model, &mut model);
-        retain_hidden_row_heights(&self.model, &mut model);
         let dormant = candidate
             .dormant_defined_names(&structure.sheet_keys)
             .map_err(authority_error)?;
@@ -1694,7 +1693,6 @@ impl Workbook {
         let commit_update = staged.commit_update;
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
-        retain_hidden_row_heights(&self.model, &mut model);
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all_after(
             &mut model,
@@ -1809,7 +1807,7 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                let parts = xlsx_parse::serialize_workbook_with_package_and_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
@@ -1820,6 +1818,7 @@ impl Workbook {
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
+                    self.is_collaborative(),
                 )?;
                 if parts
                     .iter()
@@ -3455,7 +3454,6 @@ impl Workbook {
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
-        retain_hidden_row_heights(&self.model, &mut restored);
         let staged_calculation = if let Some(candidate) = candidate {
             let (graph, recalc) = rebuild_and_recalc_all_after(
                 &mut restored,
@@ -4618,7 +4616,7 @@ impl Workbook {
                 .flatten()
                 .any(|&origin| package.sheet_has_alternate_content(origin))
         {
-            package.validate_alternate_content(model, origins, axes)?;
+            package.validate_alternate_content(model, origins, axes, self.is_collaborative())?;
         }
         Ok(())
     }
@@ -4693,7 +4691,6 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            retain_hidden_row_heights(&self.model, &mut model);
             self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
@@ -5608,16 +5605,6 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
             .collect();
         for (at, range) in anchors {
             sheet.set_array_formula(at, range);
-        }
-    }
-}
-
-fn retain_hidden_row_heights(current: &WorkbookModel, projected: &mut WorkbookModel) {
-    for (before, after) in current.sheets.iter().zip(&mut projected.sheets) {
-        for (&row, &height) in &before.hidden_row_heights {
-            if after.row_heights.get(&row) == Some(&0.0) {
-                after.hidden_row_heights.entry(row).or_insert(height);
-            }
         }
     }
 }

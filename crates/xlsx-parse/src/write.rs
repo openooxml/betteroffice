@@ -500,6 +500,30 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<SerializedParts<'p>, ParseError> {
+    serialize_workbook_with_package_and_axes(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        sheet_axes,
+        edits,
+        active_sheet,
+        false,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn serialize_workbook_with_package_and_axes<'p>(
+    wb: &Workbook,
+    package: &'p PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    sheet_axes: &[Option<SheetAxes>],
+    edits: SaveEdits,
+    active_sheet: SheetId,
+    use_source_hidden_sizes: bool,
+) -> Result<SerializedParts<'p>, ParseError> {
     validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
@@ -686,7 +710,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             .source_cell_facts(origin)
             .is_some_and(SourceCellFacts::has_sheet_data_alternates)
     }) {
-        validate_alternate_content(wb, package, &claimed, sheet_axes)?;
+        validate_alternate_content(wb, package, &claimed, sheet_axes, use_source_hidden_sizes)?;
     }
     let edits = sheet_edits(wb, &package.original_workbook.sheets, &claimed);
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
@@ -742,6 +766,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                     &style_match,
                     index,
                     &cf_plan,
+                    use_source_hidden_sizes,
                 )?
             }
             Some(_) => continue,
@@ -3194,12 +3219,20 @@ impl AlternateContentSources {
         workbook: &Workbook,
         origins: &[Option<usize>],
         axes: &[Option<SheetAxes>],
+        use_source_hidden_sizes: bool,
     ) -> Result<(), ParseError> {
-        validate_alternate_content_against(workbook, &self.workbook, origins, axes, |origin| {
-            self.sheets
-                .get(&origin)
-                .map(|(facts, bytes)| (facts, bytes.as_slice()))
-        })
+        validate_alternate_content_against(
+            workbook,
+            &self.workbook,
+            origins,
+            axes,
+            use_source_hidden_sizes,
+            |origin| {
+                self.sheets
+                    .get(&origin)
+                    .map(|(facts, bytes)| (facts, bytes.as_slice()))
+            },
+        )
     }
 }
 
@@ -3209,12 +3242,14 @@ pub fn validate_alternate_content(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     axes: &[Option<SheetAxes>],
+    use_source_hidden_sizes: bool,
 ) -> Result<(), ParseError> {
     validate_alternate_content_against(
         workbook,
         &package.original_workbook,
         origins,
         axes,
+        use_source_hidden_sizes,
         |origin| {
             let source = package.sheets.get(origin)?;
             let facts = &source.cell_facts.source;
@@ -3231,6 +3266,7 @@ fn validate_alternate_content_against<'a>(
     source_workbook: &Workbook,
     origins: &[Option<usize>],
     axes: &[Option<SheetAxes>],
+    use_source_hidden_sizes: bool,
     source_grid: impl Fn(usize) -> Option<(&'a SourceCellFacts, &'a [u8])>,
 ) -> Result<(), ParseError> {
     let styles = StyleMatch::new(&source_workbook.styles, &workbook.styles);
@@ -3264,7 +3300,14 @@ fn validate_alternate_content_against<'a>(
             continue;
         };
         let sheet_axes = axes.get(index).and_then(Option::as_ref);
-        validate_alternate_cells(sheet, original, facts, sheet_axes, &styles)?;
+        validate_alternate_cells(
+            sheet,
+            original,
+            facts,
+            sheet_axes,
+            &styles,
+            use_source_hidden_sizes,
+        )?;
         if !facts.non_inert_alternate {
             continue;
         }
@@ -3284,8 +3327,9 @@ fn validate_alternate_content_against<'a>(
             return Err(alternate_content_error(sheet));
         }
         if shared_strings_stable
-            && sheet.hidden_row_heights == original.hidden_row_heights
-            && sheet.hidden_col_widths == original.hidden_col_widths
+            && (use_source_hidden_sizes
+                || (sheet.hidden_row_heights == original.hidden_row_heights
+                    && sheet.hidden_col_widths == original.hidden_col_widths))
             && sheet_body_matches(
                 sheet,
                 original,
@@ -3299,7 +3343,14 @@ fn validate_alternate_content_against<'a>(
         {
             continue;
         }
-        if !filter_only_change(sheet, workbook, original, source_workbook, sheet_axes) {
+        if !filter_only_change(
+            sheet,
+            workbook,
+            original,
+            source_workbook,
+            sheet_axes,
+            use_source_hidden_sizes,
+        ) {
             return Err(alternate_content_error(sheet));
         }
     }
@@ -3312,6 +3363,7 @@ fn validate_alternate_cells(
     facts: &SourceCellFacts,
     axes: Option<&SheetAxes>,
     styles: &StyleMatch<'_>,
+    use_source_hidden_sizes: bool,
 ) -> Result<(), ParseError> {
     if facts.non_inert_alternate {
         return Ok(());
@@ -3345,10 +3397,11 @@ fn validate_alternate_cells(
                 .row_heights
                 .range(span.rows.clone())
                 .eq(sheet.row_heights.range(span.rows.clone()))
-                && original
-                    .hidden_row_heights
-                    .range(span.rows.clone())
-                    .eq(sheet.hidden_row_heights.range(span.rows.clone()))
+                && (use_source_hidden_sizes
+                    || original
+                        .hidden_row_heights
+                        .range(span.rows.clone())
+                        .eq(sheet.hidden_row_heights.range(span.rows.clone())))
                 && original
                     .row_styles
                     .range(span.rows.clone())
@@ -3375,6 +3428,7 @@ fn filter_only_change(
     original: &Sheet,
     source: &Workbook,
     axes: Option<&SheetAxes>,
+    use_source_hidden_sizes: bool,
 ) -> bool {
     if original.auto_filter == sheet.auto_filter
         || !axes.is_none_or(SheetAxes::is_identity)
@@ -3386,6 +3440,10 @@ fn filter_only_change(
     let mut retained = original.clone();
     retained.name.clone_from(&sheet.name);
     retained.auto_filter.clone_from(&sheet.auto_filter);
+    if use_source_hidden_sizes {
+        retained.hidden_col_widths.clear();
+        retained.hidden_row_heights.clear();
+    }
     retained == *sheet
 }
 
@@ -3493,11 +3551,20 @@ fn worksheet_xml_with_template(
     styles: &StyleMatch<'_>,
     sheet_index: usize,
     cf_plan: &CfPlan,
+    use_source_hidden_sizes: bool,
 ) -> Result<WorksheetOutput, ParseError> {
     let defined = DefinedFunctionNames::new(&wb.defined_names);
     let names = defined.visible_from(Some(SheetId(sheet_index as u32)));
+    let facts = &source.cell_facts.source;
     if original.is_some_and(|original| {
-        filter_only_change(sheet, wb, original, &package.original_workbook, sheet_axes)
+        filter_only_change(
+            sheet,
+            wb,
+            original,
+            &package.original_workbook,
+            sheet_axes,
+            use_source_hidden_sizes && facts.non_inert_alternate,
+        )
     }) {
         let replacements = vec![("autoFilter", auto_filter_bytes(sheet)?)];
         return Ok(WorksheetOutput {
@@ -3505,7 +3572,6 @@ fn worksheet_xml_with_template(
             relationships: None,
         });
     }
-    let facts = &source.cell_facts.source;
     if facts.non_inert_alternate {
         return Err(alternate_content_error(sheet));
     }

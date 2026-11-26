@@ -77,7 +77,7 @@ pub use styles::source_style_xml_markers;
 #[doc(hidden)]
 pub use write::{
     AlternateContentSources, FragmentFailure, FragmentFailureReason, FragmentKind,
-    PreservedFragmentFailure, validate_alternate_content,
+    PreservedFragmentFailure, serialize_workbook_with_package_and_axes, validate_alternate_content,
 };
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,

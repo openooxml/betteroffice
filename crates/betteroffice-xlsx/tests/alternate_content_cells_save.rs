@@ -614,11 +614,9 @@ fn collaborative_history_refuses_recalculation_that_dirties_a_wrapper() {
     let mut workbook = Workbook::open_collaborative(&bytes, 1).unwrap();
     let unchanged_cache = CalculationOptions {
         now_serial: Some(42.0),
-        ..Default::default()
     };
     let changed_cache = CalculationOptions {
         now_serial: Some(43.0),
-        ..Default::default()
     };
     for input in ["4", "6"] {
         assert!(
@@ -654,7 +652,9 @@ fn collaborative_edit_preserves_hidden_wrapped_row_height() {
         r#"<sheetData>{wrapped}<row r="2"><c r="A2"><v>2</v></c><c r="B2"><f>A2*2</f><v>4</v></c></row></sheetData>"#,
     );
     let mut workbook = Workbook::open_collaborative(&package_with_sheet2(&body), 1).unwrap();
+    assert!(workbook.model().sheets[1].hidden_row_heights.is_empty());
     edit(&mut workbook, 1, "A2", "5");
+    assert!(workbook.model().sheets[1].hidden_row_heights.is_empty());
     let xml = saved(&workbook, &[(1, "A2", 5.0), (1, "B2", 10.0)]);
     assert!(xml.contains(&wrapped), "{xml}");
 }

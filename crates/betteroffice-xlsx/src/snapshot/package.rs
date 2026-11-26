@@ -214,10 +214,15 @@ impl PackageSlot {
         workbook: &WorkbookModel,
         origins: &[Option<usize>],
         axes: &[Option<SheetAxes>],
+        use_source_hidden_sizes: bool,
     ) -> Result<()> {
         if let Some(package) = self.materialized() {
             return Ok(xlsx_parse::validate_alternate_content(
-                workbook, package, origins, axes,
+                workbook,
+                package,
+                origins,
+                axes,
+                use_source_hidden_sizes,
             )?);
         }
         let Self::Deferred {
@@ -252,7 +257,7 @@ impl PackageSlot {
             })
             .as_ref()
             .map_err(|error| Error::Package(error.clone()))?;
-        Ok(sources.validate(workbook, origins, axes)?)
+        Ok(sources.validate(workbook, origins, axes, use_source_hidden_sizes)?)
     }
 
     /// The parsed package, without parsing a deferred one.
