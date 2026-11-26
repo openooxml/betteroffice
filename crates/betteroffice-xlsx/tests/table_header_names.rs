@@ -1381,6 +1381,29 @@ fn qualified_row_references_recalculate_after_a_rename() {
 }
 
 #[test]
+fn nested_table_row_selector_matches_excel() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    edit(&mut workbook, "B3", "=Table1[@[Rev]]");
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        workbook.model().value(SHEET1, at("B3")),
+        CellValue::Number { value: 2.0 }
+    );
+}
+
+#[test]
+fn escaped_table_caption_sum_matches_excel() {
+    let mut workbook = Workbook::open(&book()).unwrap();
+    edit(&mut workbook, "C1", "#n");
+    edit(&mut workbook, "H1", "=SUM(Table1['#n])");
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        workbook.model().value(SHEET1, at("H1")),
+        CellValue::Number { value: 6.0 }
+    );
+}
+
+#[test]
 fn a_rewrite_over_the_formula_character_limit_refuses_the_rename() {
     let limit = xlsx_calc::lexer::MAX_FORMULA_CHARS;
     let mut formula = "COUNTA(Table1[Status])".to_owned();

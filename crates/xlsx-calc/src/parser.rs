@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
-use crate::lexer::{ParseError, TokKind, Token, lex};
+use crate::lexer::{ParseError, TokKind, Token, lex, lex_for_evaluation, lex_for_rewrite};
 use crate::{ColumnRange, RowRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -117,21 +117,29 @@ pub enum BinaryOp {
 
 /// public entry point: parse a formula body (no leading `=`) into an ast.
 pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
-    parse_source(src, false)
+    parse_source(src, &lex_for_evaluation(src)?, false)
+}
+
+#[doc(hidden)]
+pub fn parse_formula_for_rewrite(src: &str) -> Result<Expr, ParseError> {
+    parse_source(src, &lex_for_rewrite(src)?, false)
 }
 
 #[doc(hidden)]
 pub fn is_formula_source(src: &str) -> bool {
-    parse_source(src, true).is_ok()
+    lex(src).is_ok_and(|tokens| parse_source(src, &tokens, true).is_ok())
 }
 
-fn parse_source(src: &str, accept_indexed_external: bool) -> Result<Expr, ParseError> {
-    let tokens = lex(src)?;
+fn parse_source(
+    src: &str,
+    tokens: &[Token],
+    accept_indexed_external: bool,
+) -> Result<Expr, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
     let mut p = Parser {
-        tokens: &tokens,
+        tokens,
         pos: 0,
         source: src,
         accept_indexed_external,
@@ -871,7 +879,15 @@ mod tests {
             "'https://example.com/book.xlsx'!MyName",
             "'https://example.com:8443/book.xlsx'!A1",
         ] {
-            assert_eq!(parse(source).to_formula(), source);
+            assert_eq!(
+                parse_formula_for_rewrite(source).unwrap().to_formula(),
+                source
+            );
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(0, "workbook path qualifiers are unsupported")),
+                "{source}"
+            );
         }
         assert_eq!(
             crate::lexer::rewrite_table_column(
@@ -948,27 +964,34 @@ mod tests {
 
     #[test]
     fn cell_shaped_calls_are_not_range_endpoints() {
-        let Expr::RangeJoin { end, .. } = parse_formula("A1:LOG10(1)").unwrap() else {
-            panic!("expected a range join");
-        };
-        assert!(matches!(*end, Expr::FuncCall { name, .. } if name == "LOG10"));
+        for source in [
+            "A1:LOG10(1)",
+            "Sheet1!A1:LOG10(1)",
+            "A1:'Sheet1'!LOG10(1)",
+            "Sheet1:Sheet2!LOG10(1)",
+        ] {
+            let Expr::RangeJoin { end, .. } = parse_formula_for_rewrite(source).unwrap() else {
+                panic!("expected a range join: {source}");
+            };
+            assert!(matches!(*end, Expr::FuncCall { .. }), "{source}");
+            assert!(parse_formula(source).is_err(), "{source}");
+        }
         assert!(matches!(
-            parse_formula("Sheet1!LOG10(1)").unwrap(),
-            Expr::FuncCall { name, .. } if name == "Sheet1!LOG10"
+            parse("LOG10(1)"),
+            Expr::FuncCall { name, .. } if name == "LOG10"
         ));
-        assert!(matches!(
-            parse_formula("Sheet1:Sheet2!LOG10(1)").unwrap(),
-            Expr::RangeJoin { .. }
-        ));
+        for source in ["A1:INDEX(A1:A10,5)", "A1: LOG10(1)", "A1:B2:LOG10(1)"] {
+            assert!(matches!(parse(source), Expr::RangeJoin { .. }), "{source}");
+        }
     }
 
     #[test]
     fn spaced_cell_ranges_inherit_the_sheet_qualifier() {
-        for source in ["Sheet1!A1 : B2", "Sheet1 ! A1 : B2", "'Sheet1' ! A1 : B2"] {
-            assert_eq!(
-                parse_formula(source).unwrap(),
-                parse_formula("Sheet1!A1:B2").unwrap()
-            );
+        let qualified = parse("Sheet1!A1:B2");
+        assert_eq!(parse("Sheet1!A1 : B2"), qualified);
+        for source in ["Sheet1 ! A1 : B2", "'Sheet1' ! A1 : B2"] {
+            assert_eq!(parse_formula_for_rewrite(source).unwrap(), qualified);
+            assert!(parse_formula(source).is_err(), "{source}");
         }
     }
 
@@ -982,8 +1005,8 @@ mod tests {
             );
         }
         assert!(matches!(
-            parse(r"'C:\x\[Book.xlsx]Sheet1'!A1"),
-            Expr::Ref { sheet: Some(sheet), .. } if sheet == r"C:\x\[Book.xlsx]Sheet1"
+            parse("'[1]Sheet1'!A1"),
+            Expr::Ref { sheet: Some(sheet), .. } if sheet == "[1]Sheet1"
         ));
         assert_eq!(parse("'[1]Rates'!#REF!"), Expr::Error(ErrorValue::Ref));
     }

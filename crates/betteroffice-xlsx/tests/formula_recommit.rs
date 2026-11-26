@@ -11,6 +11,10 @@ const DECLARATION: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="ye
 const STYLES: &str = r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>"#;
 
 fn package(sheet_data: &str, calc_pr: &str) -> Vec<u8> {
+    package_on_sheet("Sheet1", sheet_data, calc_pr)
+}
+
+fn package_on_sheet(sheet_name: &str, sheet_data: &str, calc_pr: &str) -> Vec<u8> {
     let parts = [
         (
             "[Content_Types].xml",
@@ -22,7 +26,7 @@ fn package(sheet_data: &str, calc_pr: &str) -> Vec<u8> {
         ),
         (
             "xl/workbook.xml",
-            format!(r#"<workbook xmlns="{MAIN}" xmlns:r="{RELS}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#),
+            format!(r#"<workbook xmlns="{MAIN}" xmlns:r="{RELS}"><sheets><sheet name="{sheet_name}" sheetId="1" r:id="rId1"/></sheets>{calc_pr}</workbook>"#),
         ),
         (
             "xl/_rels/workbook.xml.rels",
@@ -417,6 +421,83 @@ fn external_references_keep_their_cached_values_through_a_full_calculation() {
             (Some((*formula).to_owned()), number(*cached))
         );
     }
+}
+
+fn assert_calculation_keeps_formula_caches(sheet_name: &str, formulas: &[&str]) {
+    let mut sheet_data = String::from(
+        r#"<row r="1"><c r="A1"><v>7</v></c><c r="E1"><f>A1*2</f><v>-1</v></c></row>"#,
+    );
+    let cases = formulas
+        .iter()
+        .zip(4..)
+        .map(|(&formula, row)| (formula, row, row * 10));
+    for (formula, row, cached) in cases.clone() {
+        sheet_data.push_str(&format!(
+            r#"<row r="{row}"><c r="D{row}"><f>{formula}</f><v>{cached}</v></c></row>"#,
+        ));
+    }
+    let assert_cached = |workbook: &Workbook| {
+        assert_eq!(stored(workbook, "E1").1, number(14.0));
+        for (formula, row, cached) in cases.clone() {
+            assert_eq!(
+                stored(workbook, &format!("D{row}")),
+                (Some(formula.to_owned()), number(f64::from(cached))),
+                "{formula}"
+            );
+        }
+    };
+    let source = package_on_sheet(sheet_name, &sheet_data, r#"<calcPr fullCalcOnLoad="1"/>"#);
+    let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    assert_cached(&workbook);
+    workbook.recalculate_all(options());
+    assert_cached(&workbook);
+}
+
+#[test]
+fn spaced_sheet_qualifiers_preserve_cached_formula_results() {
+    assert_calculation_keeps_formula_caches(
+        "Sheet1",
+        &[
+            "Sheet1 !A1",
+            "Sheet1! A1",
+            "Sheet1! #REF!",
+            "'[1]Sheet1'! #REF!",
+        ],
+    );
+    assert_calculation_keeps_formula_caches("My Sheet", &["'My Sheet' !A1", "'My Sheet'! A1"]);
+}
+
+#[test]
+fn swallowed_range_endpoints_preserve_cached_formula_results() {
+    assert_calculation_keeps_formula_caches(
+        "B2",
+        &["SUM(B2!A1:B2!C3)", "IFERROR(SUM(A1:B2[Col]),0)"],
+    );
+}
+
+#[test]
+fn range_to_cell_shaped_calls_preserve_cached_formula_results() {
+    assert_calculation_keeps_formula_caches(
+        "Sheet1",
+        &[
+            "A1:LOG10(1)",
+            "Sheet1!A1:LOG10(1)",
+            "A1:'Sheet1'!LOG10(1)",
+        ],
+    );
+}
+
+#[test]
+fn workbook_path_qualifiers_preserve_cached_formula_results() {
+    assert_calculation_keeps_formula_caches(
+        "Sheet1",
+        &[
+            r"IFERROR('C:\Books\Data.xlsx'!A1,0)",
+            "IFERROR('https://example.com/book.xlsx'!LocalRate,0)",
+            "IFERROR('D:/Books/[Data.xlsx]Sheet1'!A1,0)",
+            r"IFERROR('\\server\Books\Data.xlsx'!A1,0)",
+        ],
+    );
 }
 
 const LEADING_EQUALS: &str = concat!(

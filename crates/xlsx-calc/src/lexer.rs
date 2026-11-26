@@ -181,8 +181,22 @@ pub fn lex_with_range_names(
         pos: 0,
         table_refs: None,
         is_range_name: &is_range_name,
+        evaluation_error: None,
     }
     .run()
+}
+
+pub(crate) fn lex_for_evaluation(input: &str) -> Result<Vec<Token>, ParseError> {
+    let mut error = None;
+    let tokens = Lexer {
+        input,
+        pos: 0,
+        table_refs: None,
+        is_range_name: &is_formula_parameter,
+        evaluation_error: Some(&mut error),
+    }
+    .run()?;
+    error.map_or(Ok(tokens), Err)
 }
 
 fn is_formula_parameter(name: &str) -> bool {
@@ -401,6 +415,7 @@ pub fn rewrite_table_columns<'a>(
         pos: 0,
         table_refs: Some(Vec::new()),
         is_range_name: &is_formula_parameter,
+        evaluation_error: None,
     };
     let tokens = lexer.run()?;
     let table_refs = lexer.table_refs.take().unwrap();
@@ -541,6 +556,7 @@ struct Lexer<'a> {
     pos: usize,
     table_refs: Option<Vec<TableRefRewrite>>,
     is_range_name: &'a dyn Fn(&str) -> bool,
+    evaluation_error: Option<&'a mut Option<ParseError>>,
 }
 
 struct TableRefRewrite {
@@ -669,10 +685,21 @@ impl Lexer<'_> {
         if !self.after_ws().starts_with('!') {
             return false;
         }
+        let qualifier_end = self.pos;
         self.skip_ws();
+        let bang = self.pos;
         self.bump();
         self.skip_ws();
+        if bang != qualifier_end || self.pos != bang + 1 {
+            self.reject_for_evaluation(bang, "whitespace around a sheet qualifier is unsupported");
+        }
         true
+    }
+
+    fn reject_for_evaluation(&mut self, pos: usize, message: &'static str) {
+        if let Some(error) = &mut self.evaluation_error {
+            error.get_or_insert_with(|| ParseError::new(pos, message));
+        }
     }
 
     /// read a maximal name/reference run.
@@ -869,6 +896,9 @@ impl Lexer<'_> {
         let kind = self
             .try_sheet_reference(&sheet, true, start)?
             .ok_or_else(|| ParseError::new(self.pos, "expected a sheet qualifier"))?;
+        if sheet.contains(['/', '\\']) {
+            self.reject_for_evaluation(start, "workbook path qualifiers are unsupported");
+        }
         if (workbook_scope(&sheet).is_some() || is_quoted_workbook_path(&sheet))
             && !(matches!(kind, TokKind::Name { .. }) && self.after_ws().starts_with('('))
         {
@@ -1120,6 +1150,12 @@ impl Lexer<'_> {
         if self.peek() == Some('[') {
             return self.lex_table_ref(sheet, word, start);
         }
+        if self.evaluation_error.is_some()
+            && self.peek() == Some('(')
+            && CellRef::parse_a1(&word.to_ascii_uppercase()).is_ok()
+        {
+            self.reject_for_evaluation(start, "qualified cell-shaped calls are unsupported");
+        }
         Ok(self.try_address(&sheet, &word).unwrap_or(TokKind::Name {
             scope: sheet,
             name: word,
@@ -1152,29 +1188,35 @@ impl Lexer<'_> {
         self.skip_ws();
         self.bump();
         self.skip_ws();
+        let adjacent_colon = self.pos == save + 1;
         let end = self.read_word();
-        if self.ends_address() {
-            if let (Ok(first), Ok(last)) = (
-                CellRef::parse_a1(&word.to_ascii_uppercase()),
-                CellRef::parse_a1(&end.to_ascii_uppercase()),
-            ) {
-                return Some(TokKind::Range {
-                    sheet: sheet.clone(),
-                    range: CellRange::new(first, last),
-                });
-            }
+        let ends_address = self.ends_address();
+        if ends_address || self.evaluation_error.is_some() {
             let source = format!("{word}:{end}");
-            if let Ok(range) = ColumnRange::parse_a1(&source) {
-                return Some(TokKind::ColumnRange {
+            let kind = CellRange::parse_a1(&source.to_ascii_uppercase())
+                .map(|range| TokKind::Range {
                     sheet: sheet.clone(),
                     range,
+                })
+                .or_else(|_| {
+                    ColumnRange::parse_a1(&source).map(|range| TokKind::ColumnRange {
+                        sheet: sheet.clone(),
+                        range,
+                    })
+                })
+                .or_else(|_| {
+                    RowRange::parse_a1(&source).map(|range| TokKind::RowRange {
+                        sheet: sheet.clone(),
+                        range,
+                    })
                 });
-            }
-            if let Ok(range) = RowRange::parse_a1(&source) {
-                return Some(TokKind::RowRange {
-                    sheet: sheet.clone(),
-                    range,
-                });
+            if let Ok(kind) = kind {
+                if ends_address {
+                    return Some(kind);
+                }
+                if adjacent_colon || !matches!(kind, TokKind::Range { .. }) {
+                    self.reject_for_evaluation(save, "range endpoint is unsupported");
+                }
             }
         }
         self.pos = save;
@@ -1415,6 +1457,7 @@ mod tests {
             "'https://example.com:8443/book.xlsx'!A1+T[Old]",
             "'It''s'!A1+'a!b'!A1+'It''s':'Other'!A1+'It''s:Other'!A1",
             "A1:Sheet2!B2+$A$1:Sheet2!B2:C3+LOG10:Sheet2!B2",
+            "B2!A1:B2!C3+A1:B2[Col]",
             "A1:LOG10(1)+Sheet1!LOG10(1)+Sheet1:Sheet2!LOG10(1)",
             "Sheet1!A1 : B2+Sheet1:Sheet2!A1 : B2",
             r#"INDIRECT("R1C1",FALSE)+INDIRECT("R[-1]C[2]:R[1]C[4]",FALSE)"#,
@@ -1424,12 +1467,14 @@ mod tests {
         ] {
             let expected = lex(source).unwrap_or_else(|error| panic!("{source}: {error}"));
             assert_eq!(lex_for_rewrite(source).unwrap(), expected, "{source}");
+            let mut evaluation_error = None;
             assert_eq!(
                 Lexer {
                     input: source,
                     pos: 0,
                     table_refs: Some(Vec::new()),
                     is_range_name: &is_formula_parameter,
+                    evaluation_error: Some(&mut evaluation_error),
                 }
                 .run()
                 .unwrap(),

@@ -9,10 +9,8 @@ use xlsx_calc::lexer::{
     MAX_FORMULA_BYTES, ensure_unambiguous_spaced_calls, ensure_unambiguous_spaced_references,
     lex_with_range_names,
 };
-use xlsx_calc::parser::Expr;
-use xlsx_calc::{
-    ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite, parse_formula,
-};
+use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
+use xlsx_calc::{ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
     Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token, qualified_target,
@@ -113,7 +111,7 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
                 Rc::clone(expr)
             } else {
                 let expr = Rc::new(
-                    parse_formula(src.as_str())
+                    parse_formula_for_rewrite(src.as_str())
                         .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?,
                 );
                 if parsed.len() >= PARSE_MEMO_CAP
@@ -132,7 +130,7 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
                 let formula = new_expr.to_formula();
-                parse_formula(&formula)
+                parse_formula_for_rewrite(&formula)
                     .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
                 restores.push(Op::SetCell {
                     sheet: owner,
@@ -212,7 +210,7 @@ impl<'a> ProposalSheets<'a> {
         if has_unrewritable_binding(source, &index) {
             return None;
         }
-        let expr = parse_formula(source).ok()?;
+        let expr = parse_formula_for_rewrite(source).ok()?;
         if contains_table_reference(&expr) {
             return None;
         }
@@ -223,7 +221,7 @@ impl<'a> ProposalSheets<'a> {
             return Some(source.to_string());
         }
         let formula = rewritten.to_formula();
-        parse_formula(&formula).ok()?;
+        parse_formula_for_rewrite(&formula).ok()?;
         Some(formula)
     }
 }
@@ -882,7 +880,7 @@ fn rewrite_defined_name(
             continue;
         }
         // Whole-column names still need the token rewriter's ambiguity checks.
-        let Some(expr) = parse_formula(component).ok().filter(|expr| {
+        let Some(expr) = parse_formula_for_rewrite(component).ok().filter(|expr| {
             !contains_column_range(expr)
                 && !contains_table_reference(expr)
                 && !contains_range_join(expr)
@@ -915,7 +913,7 @@ fn rewrite_defined_name(
             rewritten.push(component.to_owned());
             continue;
         }
-        if parse_formula(&formula).is_err() {
+        if parse_formula_for_rewrite(&formula).is_err() {
             return DefinedNameRewrite::AffectedUnsupported;
         }
         changed = true;
@@ -2405,11 +2403,11 @@ fn rewrite_conditional_format_xml(
 
 /// Splits a hyperlink location into its reference and any trailing `#` fragment.
 fn split_location_reference(source: &str) -> Option<(Expr, &str)> {
-    if let Ok(expr) = parse_formula(source) {
+    if let Ok(expr) = parse_formula_for_rewrite(source) {
         return Some((expr, ""));
     }
     let (reference, _) = source.rsplit_once('#')?;
-    let expr = parse_formula(reference).ok()?;
+    let expr = parse_formula_for_rewrite(reference).ok()?;
     Some((expr, &source[reference.len()..]))
 }
 
@@ -3990,6 +3988,29 @@ mod tests {
                 Some(expected),
                 "{source}"
             );
+        }
+    }
+
+    #[test]
+    fn row_insertion_rewrites_formulas_unsupported_for_evaluation() {
+        let mut workbook = wb(&["B2", "Report"]);
+        let owner = SheetId(1);
+        let cases = [
+            ("A1", "B2 !A1", "'B2'!A2"),
+            ("A2", "SUM(B2!A1:B2!C3)", "SUM('B2'!A2:'B2'!C4)"),
+            ("A3", "B2!A1:LOG10(1)", "'B2'!A2:LOG10(1)"),
+            (
+                "A4",
+                r"'C:\Books\Data.xlsx'!A1+B2!A1",
+                r"'C:\Books\Data.xlsx'!A1+'B2'!A2",
+            ),
+        ];
+        for (address, source, _) in cases {
+            set_formula(&mut workbook, owner, address, source);
+        }
+        remap_formulas(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
+        for (address, _, expected) in cases {
+            assert_eq!(formula(&workbook, owner, address).as_deref(), Some(expected));
         }
     }
 

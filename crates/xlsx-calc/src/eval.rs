@@ -2311,6 +2311,33 @@ mod tests {
     }
 
     #[test]
+    fn workbook_path_qualifiers_cannot_resolve_to_a_local_sheet() {
+        let scope = r"C:\Books\Data.xlsx";
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new(scope);
+        sheet.set_cell(CellRef::new(0, 0), number(7.0));
+        workbook.sheets.push(sheet);
+        workbook
+            .defined_names
+            .push(defined_name("PathTarget", &format!("'{scope}'!A1")));
+        assert_eq!(workbook.sheet_id(scope), Some(SheetId(0)));
+
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&parse_formula("A1").unwrap(), &context), num(7.0));
+        for (source, expected) in [
+            (format!(r#"INDIRECT("'{scope}'!A1")"#), ErrorValue::Ref),
+            (format!(r#"INDIRECT("'{scope}'!R1C1",FALSE)"#), ErrorValue::Ref),
+            ("PathTarget".into(), ErrorValue::Name),
+        ] {
+            assert_eq!(
+                evaluate(&parse_formula(&source).unwrap(), &context),
+                err(expected),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn deep_acyclic_name_chains_resolve_to_the_terminal_value() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));

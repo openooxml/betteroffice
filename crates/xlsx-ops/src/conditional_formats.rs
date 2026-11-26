@@ -1,4 +1,4 @@
-use xlsx_calc::{parse_formula, parser::Expr};
+use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
@@ -119,7 +119,7 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 } else if let Some(ranges) = &ranges {
                     (owner == edit.sheet() && ranges.iter().any(|range| edit.affects(*range, true)))
                         || rule.formulas.iter().any(|formula| {
-                            parse_formula(formula).map_or(true, |expr| {
+                            parse_formula_for_rewrite(formula).map_or(true, |expr| {
                                 formula_affected(&expr, owner, &target.name, ranges, edit)
                             })
                         })

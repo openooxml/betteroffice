@@ -1184,7 +1184,7 @@ pub fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
     {
         return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
     }
-    xlsx_calc::parse_formula(source)
+    xlsx_calc::parser::parse_formula_for_rewrite(source)
         .map(|_| ())
         .map_err(|error| {
             OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
