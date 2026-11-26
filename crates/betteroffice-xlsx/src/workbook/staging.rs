@@ -1,8 +1,8 @@
 //! The prepared commit every staged mutation shares: the model change and the authority change
 //! are both staged off the live state, and only then is either adopted.
 
-use xlsx_model::Workbook as WorkbookModel;
-use xlsx_ops::Op;
+use xlsx_model::{CellRef, SheetId, Workbook as WorkbookModel};
+use xlsx_ops::{Op, OpError};
 
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
@@ -40,6 +40,30 @@ enum PreparedAuthority {
 }
 
 impl PreparedCommit {
+    pub(super) fn table_references_rewritten(&self) -> bool {
+        self.inverse.iter().any(|op| {
+            matches!(
+                op,
+                Op::RestoreTableColumn {
+                    formulas,
+                    defined_names,
+                    ..
+                } if !formulas.is_empty() || !defined_names.is_empty()
+            )
+        })
+    }
+
+    pub(super) fn rewritten_table_cells(&self) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
+        self.inverse
+            .iter()
+            .filter_map(|op| match op {
+                Op::RestoreTableColumn { formulas, .. } => Some(formulas),
+                _ => None,
+            })
+            .flatten()
+            .map(|(sheet, at, _)| (*sheet, *at))
+    }
+
     pub(super) fn update(&self) -> Option<&[u8]> {
         match &self.authority {
             PreparedAuthority::Staged(authority) => Some(&authority.update),
@@ -58,6 +82,29 @@ impl Workbook {
         history: CommitHistory,
         baseline: Option<&[u8]>,
     ) -> Result<PreparedCommit> {
+        if !self.model.tables.is_empty()
+            && staged.inverse.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::RestoreTableColumn { defined_names, .. } if !defined_names.is_empty()
+                )
+            })
+            && staged.model.defined_names != self.model.defined_names
+            && !ops.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::MoveSheet { .. }
+                )
+            })
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(
+                &staged.model,
+                package.materialize()?,
+                &self.preserved.origins,
+            )
+            .map_err(|error| OpError::TableHeaderUnsupported(error.to_string()))?;
+        }
         if baseline.is_none() && self.defers_staging() {
             return Ok(PreparedCommit {
                 ops,
@@ -234,15 +281,66 @@ mod tests {
     use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId, Workbook as WorkbookModel};
     use xlsx_ops::{CellState, Op, StylePatch};
 
-    use super::super::{StagedApply, Workbook};
+    use super::super::{StagedApply, Workbook, edit_tests::workbook_bytes};
     use super::{CommitHistory, PreparedAuthority};
     use crate::authority::SyncOrigin;
-    use crate::{CalculationOptions, ProposalEditInput, ProposalRequest};
+    use crate::{CalculationOptions, Error, ProposalEditInput, ProposalRequest};
 
     fn model() -> WorkbookModel {
         let mut model = WorkbookModel::default();
         model.sheets.push(Sheet::new("Data"));
         model
+    }
+
+    #[test]
+    fn ordinary_cell_and_name_ops_do_not_revalidate_the_source_in_prepare_commit() {
+        let mut parts = ooxml_opc::unzip_parts(&workbook_bytes()).unwrap();
+        let (_, xml) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "xl/workbook.xml")
+            .unwrap();
+        *xml = std::str::from_utf8(xml)
+            .unwrap()
+            .replace("</workbook>", "<definedNames/><definedNames/></workbook>")
+            .into_bytes();
+        let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        assert!(workbook.model().tables.is_empty());
+        let ops = vec![
+            Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(0, 0),
+                cell: CellState {
+                    value: CellValue::Number { value: 9.0 },
+                    ..CellState::default()
+                },
+            },
+            Op::SetDefinedName {
+                name: "Amount".into(),
+                refers_to: "Sheet1!$A$1".into(),
+                scope: None,
+                hidden: None,
+            },
+        ];
+        let error = workbook
+            .apply_ops(ops.clone(), CalculationOptions::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(reason))
+                if reason.contains("ambiguous defined name source layout")
+        ));
+
+        let mut preview = workbook.model().clone();
+        let inverse = xlsx_ops::apply_ops(&mut preview, &ops).unwrap();
+        workbook
+            .prepare_commit(
+                ops,
+                StagedApply::new(preview, inverse),
+                SyncOrigin::User,
+                CommitHistory::Separate,
+                None,
+            )
+            .unwrap();
     }
 
     #[test]

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, SheetId};
 
 use crate::TableSpec;
@@ -16,7 +17,8 @@ use crate::deps::{mentions_workbook_index, names_other_workbook, reads_other_wor
 use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
-use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
+use crate::lexer::SheetSpan;
+use crate::parser::{BinaryOp, Expr, UnaryOp, parse_released_definition, parse_with_sheet_span};
 use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
@@ -206,9 +208,8 @@ pub struct EvalContext<'a> {
     pub(crate) spill_index: Option<&'a DepGraph>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
-    /// defined-name definitions parsed while `parse_cache` is `None`, keyed
-    /// by their text and shared with every context derived from this one.
-    parsed_definitions: Rc<RefCell<HashMap<String, Arc<Expr>>>>,
+    /// defined-name ASTs shared by derived contexts when `parse_cache` is `None`.
+    parsed_definitions: Rc<RefCell<ParsedDefinitions>>,
     /// a graph whose names match the provider's, looked up instead of
     /// scanning them; `None` reads names through the provider.
     pub(crate) name_index: Option<&'a DepGraph>,
@@ -733,17 +734,55 @@ impl<'a> EvalContext<'a> {
         value
     }
 
-    /// a definition parsed once per context however often its name is read.
-    /// a failed parse is not kept, so each read records its gap again.
-    fn parsed_definition(&self, formula: &str) -> Option<Arc<Expr>> {
-        if let Some(expression) = self.parsed_definitions.borrow().get(formula) {
-            return Some(Arc::clone(expression));
+    fn parsed_definition(&self, owner: SheetId, formula: &str) -> Option<Arc<Expr>> {
+        if let Some(cache) = self.parse_cache {
+            return parse_definition_cached(cache, formula, &|first, last| {
+                self.is_sheet_span(owner, first, last)
+            });
         }
-        let expression = parse_definition(formula)?;
+        {
+            let definitions = self.parsed_definitions.borrow();
+            let lookup = |sheet| {
+                definitions
+                    .get(&sheet)
+                    .and_then(|formulas| formulas.get(formula))
+            };
+            if let Some(expression) = lookup(None).or_else(|| lookup(Some(owner))) {
+                return Some(Arc::clone(expression));
+            }
+        }
+        #[cfg(test)]
+        DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
+        let (expression, contextual) = parse_with_span_tracking(formula, &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        });
+        let expression = expression.or_else(|| released_definition(formula))?;
         self.parsed_definitions
             .borrow_mut()
+            .entry(contextual.then_some(owner))
+            .or_default()
             .insert(formula.to_owned(), Arc::clone(&expression));
         Some(expression)
+    }
+
+    pub(crate) fn parse_formula(&self, owner: SheetId, formula: &str) -> Option<Arc<Expr>> {
+        let is_span = |first: &str, last: &str| self.is_sheet_span(owner, first, last);
+        match self.parse_cache {
+            Some(cache) => parse_cached(cache, formula, &is_span),
+            None => parse_with_sheet_span(formula, Some(&is_span))
+                .ok()
+                .map(Arc::new),
+        }
+    }
+
+    fn is_sheet_span(&self, owner: SheetId, first: &str, last: &str) -> bool {
+        self.provider.sheet_id(first).is_some()
+            && self.provider.sheet_id(last).is_some()
+            && match self.name_index {
+                Some(graph) => graph.defined_name(owner, first),
+                None => self.provider.defined_name(owner, first),
+            }
+            .is_none()
     }
 }
 
@@ -755,28 +794,53 @@ fn next_random_stream() -> u64 {
     NEXT_STREAM.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed)
 }
 
-/// parsed-formula memo shared by graph build and every recalc. `parse_formula`
-/// is pure over the source text, so entries never invalidate — a changed
-/// formula is simply a different key.
+/// Sheet-independent ASTs shared by graph build and recalculation.
 pub(crate) type ParseCache = Mutex<HashMap<String, Arc<Expr>>>;
+type ParsedDefinitions = HashMap<Option<SheetId>, HashMap<String, Arc<Expr>>>;
 
-/// parse `src` once per unique text instead of once per cell that stores it.
-pub(crate) fn parse_cached(cache: &ParseCache, src: &str) -> Option<Arc<Expr>> {
+pub(crate) fn parse_cached(
+    cache: &ParseCache,
+    src: &str,
+    is_span: &SheetSpan<'_>,
+) -> Option<Arc<Expr>> {
     if let Some(expr) = cache.lock().expect("parse cache poisoned").get(src) {
         return Some(Arc::clone(expr));
     }
-    let expr = Arc::new(parse_formula(src).ok()?);
-    cache
-        .lock()
-        .expect("parse cache poisoned")
-        .insert(src.to_string(), Arc::clone(&expr));
+    let (expr, contextual) = parse_with_span_tracking(src, is_span);
+    let expr = expr?;
+    if !contextual {
+        cache
+            .lock()
+            .expect("parse cache poisoned")
+            .insert(src.to_string(), Arc::clone(&expr));
+    }
     Some(expr)
 }
 
-fn parse_definition(formula: &str) -> Option<Arc<Expr>> {
-    #[cfg(test)]
-    DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
-    parse_formula(formula).ok().map(Arc::new)
+pub(crate) fn parse_definition_cached(
+    cache: &ParseCache,
+    source: &str,
+    is_span: &SheetSpan<'_>,
+) -> Option<Arc<Expr>> {
+    parse_cached(cache, source, is_span).or_else(|| released_definition(source))
+}
+
+fn released_definition(source: &str) -> Option<Arc<Expr>> {
+    parse_released_definition(source).ok().map(Arc::new)
+}
+
+fn parse_with_span_tracking(src: &str, is_span: &SheetSpan<'_>) -> (Option<Arc<Expr>>, bool) {
+    let contextual = Cell::new(false);
+    let expr = parse_with_sheet_span(
+        src,
+        Some(&|first, last| {
+            contextual.set(true);
+            is_span(first, last)
+        }),
+    )
+    .ok()
+    .map(Arc::new);
+    (expr, contextual.get())
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
@@ -1013,11 +1077,8 @@ fn bind_defined_name(
         .formula
         .strip_prefix('=')
         .unwrap_or(&defined.formula);
-    let expression = match ctx.parse_cache {
-        Some(cache) => parse_cached(cache, formula),
-        None => ctx.parsed_definition(formula),
-    }
-    .ok_or_else(|| {
+    let sheet = defined.local_sheet.unwrap_or(key.0);
+    let expression = ctx.parsed_definition(sheet, formula).ok_or_else(|| {
         if mentions_workbook_index(formula) {
             ctx.record_other_workbook();
         } else if formula.contains('[') {
@@ -1028,7 +1089,6 @@ fn bind_defined_name(
     if reads_other_workbook(&expression) {
         ctx.record_other_workbook();
     }
-    let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
     Ok(DefinedNameBinding {
@@ -1070,6 +1130,7 @@ pub(crate) fn resolve_ref(
 /// context sheet). returns `None` only when a named sheet does not exist.
 pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Option<SheetId> {
     match sheet {
+        Some(name) if is_path_qualifier(name) => missing_sheet(name, ctx),
         Some(name) => ctx
             .provider
             .sheet_id(name)
@@ -2239,6 +2300,105 @@ mod tests {
         let after = EvalContext::new(&workbook, SheetId(0));
         assert_eq!(evaluate(&formula, &after), num(19.0));
         assert_eq!(evaluate(&formula, &after), num(19.0));
+    }
+
+    #[test]
+    fn let_bound_names_join_to_qualified_cells() {
+        let mut workbook = Workbook::default();
+        for name in ["Data", "Data Set"] {
+            let mut sheet = Sheet::new(name);
+            sheet.set_cell(CellRef::new(0, 0), number(2.0));
+            sheet.set_cell(CellRef::new(1, 0), number(3.0));
+            workbook.sheets.push(sheet);
+        }
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for sheet in ["Data", "'Data Set'"] {
+            let source = format!("_xlfn.LET(_xlpm.c,{sheet}!A1,SUM(_xlpm.c:{sheet}!A2))");
+            assert_eq!(
+                evaluate(&parse_formula(&source).unwrap(), &context),
+                num(5.0)
+            );
+        }
+    }
+
+    #[test]
+    fn sheet_names_with_r1c1_prefixes_remain_qualified_references() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("RCost");
+        sheet.set_cell(CellRef::new(0, 0), number(7.0));
+        workbook.sheets.push(sheet);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for source in ["RCost!A1", r#"INDIRECT("RCost!R1C1",FALSE)"#] {
+            assert_eq!(
+                evaluate(&parse_formula(source).unwrap(), &context),
+                num(7.0),
+            );
+        }
+        for (source, printed) in [
+            ("R2C3x!A1", "'R2C3x'!A1"),
+            ("RCPT!A1:B5", "'RCPT'!A1:B5"),
+            ("RC_Data!Total", "'RC_Data'!Total"),
+            ("RC!A1", "'RC'!A1"),
+            ("R2C3!A1", "'R2C3'!A1"),
+        ] {
+            let ast = parse_formula(source).unwrap();
+            assert_eq!(ast.to_formula(), printed);
+            assert_eq!(parse_formula(printed).unwrap(), ast);
+        }
+        assert!(crate::parser::is_formula_source("[1]RCost!A1"));
+        assert!(parse_formula("_xlpm.c:RCost!A2").is_ok());
+    }
+
+    #[test]
+    fn direct_evaluation_keeps_quoted_external_reference_errors_and_lazy_branches() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        workbook
+            .defined_names
+            .push(defined_name("Rates", "'[Book.xlsx]Data'!$A$1"));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for (source, expected) in [
+            ("IF(TRUE,42,'[1]Data'!A1)", num(42.0)),
+            ("'[1]Data'!#REF!", err(ErrorValue::Ref)),
+            ("'[x]Data'!A1", err(ErrorValue::Ref)),
+            ("Rates", err(ErrorValue::Ref)),
+        ] {
+            assert_eq!(
+                evaluate(&parse_formula(source).unwrap(), &context),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn workbook_path_qualifiers_cannot_resolve_to_a_local_sheet() {
+        let scope = r"C:\Books\Data.xlsx";
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new(scope);
+        sheet.set_cell(CellRef::new(0, 0), number(7.0));
+        workbook.sheets.push(sheet);
+        workbook
+            .defined_names
+            .push(defined_name("PathTarget", &format!("'{scope}'!A1")));
+        assert_eq!(workbook.sheet_id(scope), Some(SheetId(0)));
+
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(evaluate(&parse_formula("A1").unwrap(), &context), num(7.0));
+        for (source, expected) in [
+            (format!(r#"INDIRECT("'{scope}'!A1")"#), ErrorValue::Ref),
+            (
+                format!(r#"INDIRECT("'{scope}'!R1C1",FALSE)"#),
+                ErrorValue::Ref,
+            ),
+            ("PathTarget".into(), ErrorValue::Ref),
+        ] {
+            assert_eq!(
+                evaluate(&parse_formula(&source).unwrap(), &context),
+                err(expected),
+                "{source}"
+            );
+        }
     }
 
     #[test]

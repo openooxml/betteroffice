@@ -4,6 +4,8 @@ use std::collections::HashSet;
 
 use xlsx_model::{CellRange, CellRef};
 
+#[cfg(test)]
+use crate::lexer::{TokKind, lex_for_evaluation};
 use crate::parser::{Expr, UnaryOp};
 use crate::reference::offset_rect;
 
@@ -48,8 +50,19 @@ pub(crate) fn names_other_workbook(qualifier: &str) -> bool {
         .is_some_and(|rest| workbook_index_len(rest).is_some())
 }
 
-/// whether formula text holds a workbook index (`[1]`) anywhere, for a
-/// definition the parser cannot read, such as `[1]Sheet1!$A$1`.
+/// Whether the text is a single reference qualified by a workbook index.
+#[cfg(test)]
+pub(crate) fn is_indexed_workbook_reference(source: &str) -> bool {
+    lex_for_evaluation(source, None).is_ok_and(|tokens| {
+        let [token] = tokens.as_slice() else {
+            return false;
+        };
+        matches!(token.kind, TokKind::ExternalRef(_))
+            && names_other_workbook(source[token.start..].trim_start_matches('\''))
+    })
+}
+
+/// Whether an unreadable defined name may refer to another workbook.
 pub(crate) fn mentions_workbook_index(source: &str) -> bool {
     source
         .split('[')
@@ -369,6 +382,18 @@ mod tests {
         ] {
             assert!(!reads_other_workbook(&parse_formula(src).unwrap()), "{src}");
         }
+    }
+
+    #[test]
+    fn quoted_external_ranges_keep_their_coordinates_in_dependency_walks() {
+        assert_eq!(
+            refs("A1+SUM('[1]Other sheet'!$B$2:$C$3)"),
+            ["A1", "[1]Other sheet!B2:C3"]
+        );
+        assert!(is_indexed_workbook_reference("[1]Source!A1"));
+        assert!(!is_indexed_workbook_reference("SUM([1]Source!A1)"));
+        assert!(!is_indexed_workbook_reference(r#""[1]Source!A1""#));
+        assert!(!is_indexed_workbook_reference("T[2024]"));
     }
 
     #[test]

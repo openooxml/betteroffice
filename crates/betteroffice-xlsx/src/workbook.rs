@@ -1407,6 +1407,7 @@ impl Workbook {
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
         retain_array_formulas(&self.model, &mut model);
+        self.ensure_shared_table_headers_unchanged(&model)?;
         let dormant = candidate
             .dormant_defined_names(&structure.sheet_keys)
             .map_err(authority_error)?;
@@ -1467,9 +1468,21 @@ impl Workbook {
         if !frozen.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
         }
+        self.ensure_shared_table_headers_unchanged(&staged.model)?;
         self.gate_incoming(&staged.model, &staged.dormant_names)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         Ok(staged)
+    }
+
+    fn ensure_shared_table_headers_unchanged(&self, staged: &WorkbookModel) -> Result<()> {
+        if !self
+            .authority()?
+            .keeps_table_headers(staged)
+            .map_err(Error::CollaborativeState)?
+        {
+            return Err(shared_table_header_edit());
+        }
+        Ok(())
     }
 
     /// Everything a model arriving from outside must satisfy before this
@@ -1529,7 +1542,11 @@ impl Workbook {
                 .iter()
                 .all(|original| original.formula != name.formula)
             {
-                xlsx_ops::validate_defined_name_formula(&name.formula)?;
+                xlsx_ops::validate_defined_name_formula_in(
+                    staged,
+                    name.local_sheet,
+                    &name.formula,
+                )?;
             }
         }
         if let Some(package) = &self.source_package {
@@ -2497,10 +2514,9 @@ impl Workbook {
         let (mut state, format) =
             edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         state.formula = entered_formula(&self.model, sheet, cell, state.formula)?;
-        validate_cell_state(&state)?;
-        if format.is_none()
-            && cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state)
-        {
+        let header = xlsx_ops::table_header_at(&self.model.tables, sheet, cell).is_some();
+        validate_cell_input_state(&state, header)?;
+        if format.is_none() && cell_write_is_unchanged(&self.model, sheet, cell, &state)? {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -2513,20 +2529,30 @@ impl Workbook {
             cell: state,
         }];
         ops.extend(format);
-        let update = self.commit_user(&ops)?;
-        self.graph.as_mut().expect("graph initialized").set_formula(
-            sheet,
-            cell,
-            formula.as_deref(),
-        );
+        let (update, tables_changed) = if header {
+            self.ensure_table_header_write(&self.model, &self.preserved.origins, &ops[0])?;
+            let mut preview = self.model.clone();
+            let inverse = xlsx_ops::apply_in_place(&mut preview, &ops[0])?.0;
+            let prepared = self.prepare_commit(
+                ops,
+                StagedApply::new(preview, inverse),
+                SyncOrigin::User,
+                CommitHistory::Separate,
+                None,
+            )?;
+            let tables_changed = self.model.tables != prepared.model.tables;
+            let update = self.commit_prepared_cell_inputs(prepared)?;
+            (update, tables_changed)
+        } else {
+            (self.commit_user(&ops)?, false)
+        };
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
+        let result = self.recalculate_cell_inputs(
+            &[(sheet, cell, formula)],
             &seeds,
-            options.now_serial,
-            self.rand_seed,
+            tables_changed,
+            options,
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
@@ -2618,9 +2644,9 @@ impl Workbook {
             if !copied.get(index).copied().unwrap_or(false) {
                 state.formula = entered_formula(&preview, sheet, edit.cell, state.formula)?;
             }
-            validate_cell_state(&state)?;
-            let old = current_cell_state(&preview, sheet, edit.cell);
-            if format.is_none() && cell_states_semantically_equal(&old, &state) {
+            let header = xlsx_ops::table_header_at(&preview.tables, sheet, edit.cell).is_some();
+            validate_cell_input_state(&state, header)?;
+            if format.is_none() && cell_write_is_unchanged(&preview, sheet, edit.cell, &state)? {
                 continue;
             }
             touched.push((sheet, edit.cell, state.formula.clone()));
@@ -2629,7 +2655,9 @@ impl Workbook {
                 at: edit.cell,
                 cell: state,
             };
-            per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+            self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
+            let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
+            per_op.push(inverse);
             ops.push(op);
             if let Some(format) = format {
                 per_op.push(xlsx_ops::apply_in_place(&mut preview, &format)?.0);
@@ -2652,25 +2680,14 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let tables_changed =
+            prepared.table_references_rewritten() || self.model.tables != prepared.model.tables;
         let update = self.commit_prepared_cell_inputs(prepared)?;
-        for (sheet, cell, formula) in &touched {
-            self.graph.as_mut().expect("graph initialized").set_formula(
-                *sheet,
-                *cell,
-                formula.as_deref(),
-            );
-        }
         let seeds: Vec<_> = touched
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
-            &seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let result = self.recalculate_cell_inputs(&touched, &seeds, tables_changed, options);
         let result = self.mutation_result(true, result, &seeds);
         self.calculated_now = options.now_serial;
         self.publish(update);
@@ -2883,6 +2900,7 @@ impl Workbook {
         let mut origins = self.preserved.origins.clone();
         let mut axes = self.preserved.axes.clone();
         let mut drawings_move = false;
+        let mut rewrote_table_names = false;
         let mut names = self.sheet_names();
         let defined = DefinedFunctionNames::new(&preview.defined_names);
         let mut batch = xlsx_ops::InPlaceBatch::new(&mut preview);
@@ -2890,6 +2908,7 @@ impl Workbook {
             keep_stored_formula(&mut batch, &defined, op);
             if entry == FormulaEntry::Introduced
                 && let Op::SetCell { sheet, at, cell } = op
+                && cell.formula.as_deref() != stored_formula(batch.workbook(), *sheet, *at)
             {
                 cell.formula = entered_formula(batch.workbook(), *sheet, *at, cell.formula.take())?;
             }
@@ -2901,9 +2920,19 @@ impl Workbook {
             drawings_move |= self.ensure_drawings_follow(&origins, &axes, op)?;
 
             self.ensure_move_keeps_inline_text(&origins, op)?;
+            self.ensure_table_header_write(staged, &origins, op)?;
             validate_op(staged, op)?;
             validate_insert_capacity(staged, op)?;
-            batch.apply(op)?;
+            batch.apply_with_inverse(op, |inverse| {
+                rewrote_table_names |= matches!(op, Op::SetCell { .. })
+                    && inverse.iter().any(|op| {
+                        matches!(
+                            op,
+                            Op::RestoreTableColumn { defined_names, .. }
+                                if !defined_names.is_empty()
+                        )
+                    });
+            })?;
             match *op {
                 Op::AddSheet { index, .. } => {
                     origins.insert(index, None);
@@ -2955,7 +2984,15 @@ impl Workbook {
         if preview.defined_names != self.model.defined_names
             && let Some(package) = &self.source_package
         {
-            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+            let validation =
+                xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins);
+            if let Err(error) = validation {
+                return Err(if rewrote_table_names {
+                    xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()).into()
+                } else {
+                    error.into()
+                });
+            }
         }
         let proposals_changed = self
             .rebased_proposals(&ops)
@@ -3069,12 +3106,17 @@ impl Workbook {
         let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        self.ensure_table_header_history(
+            &ops,
+            self.preserved_undo.last().map(|entry| &entry.before),
+        )?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let update = if self.defers_staging() {
+        let deferred = self.defers_staging();
+        let update = if deferred {
             self.defer_apply(&ops, SyncOrigin::Undo)?;
             None
         } else {
@@ -3088,7 +3130,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
-        self.apply_model_history(|undo, model| undo.undo(model))?;
+        self.apply_model_history(deferred, |undo, model| undo.undo(model))?;
         self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
@@ -3133,12 +3175,17 @@ impl Workbook {
         let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
             return Ok(MutationResult::default());
         };
+        self.ensure_table_header_history(
+            &ops,
+            self.preserved_redo.last().map(|entry| &entry.after),
+        )?;
         let active_sheet = self.active_sheet_after_ops(&ops);
         let scope = CalculationScope::of(&self.model, &ops);
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
-        let update = if self.defers_staging() {
+        let deferred = self.defers_staging();
+        let update = if deferred {
             self.defer_apply(&ops, SyncOrigin::Redo)?;
             None
         } else {
@@ -3152,7 +3199,7 @@ impl Workbook {
         let prior_styles = self.pre_edit_cell_styles(&ops);
         let delta = self.geometry_delta(&ops);
         let rebased = self.rebased_proposals(&ops);
-        self.apply_model_history(|undo, model| undo.redo(model))?;
+        self.apply_model_history(deferred, |undo, model| undo.redo(model))?;
         self.rebase_answers(&names_before, &ops);
         self.bump_model_epoch();
         self.queue_geometry_delta(delta);
@@ -3289,17 +3336,19 @@ impl Workbook {
                 options.now_serial,
             );
             state.formula = entered_formula(&preview, edit.sheet, edit.cell, state.formula)?;
-            validate_cell_state(&state)?;
+            let header =
+                xlsx_ops::table_header_at(&preview.tables, edit.sheet, edit.cell).is_some();
+            validate_cell_input_state(&state, header)?;
             if format.is_some()
-                || !cell_states_semantically_equal(
-                    &current_cell_state(&preview, edit.sheet, edit.cell),
-                    &state,
-                )
+                || !cell_write_is_unchanged(&preview, edit.sheet, edit.cell, &state)?
             {
-                preview
-                    .sheet_mut(edit.sheet)
-                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                    .set_cell(edit.cell, state.into());
+                let op = Op::SetCell {
+                    sheet: edit.sheet,
+                    at: edit.cell,
+                    cell: state,
+                };
+                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
+                xlsx_ops::apply_in_place(&mut preview, &op)?;
             }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
@@ -3406,15 +3455,18 @@ impl Workbook {
                 options.now_serial,
             );
             state.formula = entered_formula(&preview, sheet, cell, state.formula)?;
-            validate_cell_state(&state)?;
-            if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
+            let header = xlsx_ops::table_header_at(&preview.tables, sheet, cell).is_some();
+            validate_cell_input_state(&state, header)?;
+            if !cell_write_is_unchanged(&preview, sheet, cell, &state)? {
                 touched.push((sheet, cell, state.formula.clone()));
                 let op = Op::SetCell {
                     sheet,
                     at: cell,
                     cell: state,
                 };
-                per_op.push(xlsx_ops::apply_in_place(&mut preview, &op)?.0);
+                self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
+                let inverse = xlsx_ops::apply_in_place(&mut preview, &op)?.0;
+                per_op.push(inverse);
                 ops.push(op);
             }
             if let Some(format) = format {
@@ -3476,25 +3528,14 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let tables_changed =
+            prepared.table_references_rewritten() || self.model.tables != prepared.model.tables;
         let update = self.commit_prepared(prepared)?;
-        for (sheet, cell, formula) in &touched {
-            self.graph.as_mut().expect("graph initialized").set_formula(
-                *sheet,
-                *cell,
-                formula.as_deref(),
-            );
-        }
         let seeds: Vec<_> = touched
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
-            &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
-            &seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let result = self.recalculate_cell_inputs(&touched, &seeds, tables_changed, options);
         let mutation = self.mutation_result(true, result, &seeds);
         self.calculated_now = options.now_serial;
         self.proposals.remove(id);
@@ -4352,6 +4393,185 @@ impl Workbook {
         Ok(())
     }
 
+    fn ensure_table_header_write(
+        &self,
+        model: &WorkbookModel,
+        origins: &[Option<usize>],
+        op: &Op,
+    ) -> Result<()> {
+        let (sheet, at, table, column, name) = match op {
+            Op::SetCell { sheet, at, cell } => {
+                if self.is_collaborative()
+                    && xlsx_ops::table_header_write_at(model, *sheet, *at, cell).is_some()
+                {
+                    return Err(shared_table_header_edit());
+                }
+                let Some((table, column, name)) =
+                    xlsx_ops::normalize_table_header(model, *sheet, *at, cell)?
+                else {
+                    return Ok(());
+                };
+                (*sheet, *at, table, column, Cow::Owned(name))
+            }
+            Op::RestoreTableColumn {
+                sheet,
+                at,
+                table,
+                caption,
+                ..
+            } => {
+                let Some((index, column)) = xlsx_ops::table_header_at(&model.tables, *sheet, *at)
+                    .filter(|(index, column)| {
+                        let found = &model.tables[*index];
+                        found.name == *table && *column < found.columns.len()
+                    })
+                else {
+                    return Ok(());
+                };
+                (*sheet, *at, index, column, Cow::Borrowed(caption.as_str()))
+            }
+            _ => return Ok(()),
+        };
+        let Some(package) = &self.source_package else {
+            return Ok(());
+        };
+        let unsupported = |error: xlsx_parse::ParseError| {
+            xlsx_ops::OpError::TableHeaderUnsupported(error.to_string())
+        };
+        let package = package
+            .materialize()
+            .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+        let origin = origins.get(sheet.0 as usize).copied().flatten();
+        if let Some(origin) = origin {
+            package
+                .validate_table_header_cell(origin, at)
+                .map_err(unsupported)?;
+        }
+        let table = &model.tables[table];
+        let old = &table.columns[column];
+        if old == name.as_ref() {
+            return Ok(());
+        }
+        package
+            .validate_table_column_rename(model, origins, table, column, &name)
+            .map_err(unsupported)?;
+        if old.to_lowercase() == name.to_lowercase() {
+            return Ok(());
+        }
+        let source_sheet = origin
+            .and_then(|index| package.source_sheet_name(index))
+            .unwrap_or(&model.sheets[sheet.0 as usize].name);
+        let source_range = package
+            .original_workbook()
+            .table(&table.name)
+            .map_or(table.range, |table| table.range);
+        let table_sheet = &model.sheets[sheet.0 as usize].name;
+        let references = |formula: &str, sheet_name: &str, local| {
+            xlsx_ops::references_table_column(formula, &table.name, sheet_name, local, old)
+        };
+        let location = package
+            .table_header_reference(
+                origin,
+                source_range,
+                |formula, local| references(formula, source_sheet, local),
+                |index| {
+                    let Some(current) = origins.iter().position(|origin| *origin == Some(index))
+                    else {
+                        return false;
+                    };
+                    let is_table_sheet = current == sheet.0 as usize;
+                    model.sheets[current].iter_cells().any(|(cell_ref, cell)| {
+                        let local = is_table_sheet && table.range.contains(cell_ref);
+                        !(is_table_sheet && cell_ref == at)
+                            && cell
+                                .formula
+                                .as_deref()
+                                .is_some_and(|formula| references(formula, table_sheet, local))
+                    })
+                },
+            )
+            .map_err(unsupported)?;
+        if let Some(location) = location {
+            return Err(xlsx_ops::OpError::TableHeaderUnsupported(format!(
+                "cannot rename table {} column {old}: a reference in {location} \
+                 cannot be safely rewritten",
+                table.name
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    fn ensure_table_header_history(
+        &self,
+        ops: &[Op],
+        target: Option<&PreservedSheetState>,
+    ) -> Result<()> {
+        if !ops
+            .iter()
+            .any(|op| matches!(op, Op::RestoreTableColumn { .. }))
+        {
+            return Ok(());
+        }
+        let mut restored_origins = Vec::new();
+        if let Some(target) = target
+            && ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+        {
+            let mut target_origins = target.origins.clone();
+            for op in ops.iter().rev() {
+                let len = target_origins.len();
+                match *op {
+                    Op::AddSheet { index, .. } if index < len => {
+                        restored_origins.push(target_origins.remove(index));
+                    }
+                    Op::RemoveSheet { index } if index <= len => {
+                        target_origins.insert(index, None);
+                    }
+                    Op::MoveSheet { from, to } if from < len && to < len => {
+                        let origin = target_origins.remove(to);
+                        target_origins.insert(from, origin);
+                    }
+                    Op::AddSheet { .. } | Op::RemoveSheet { .. } | Op::MoveSheet { .. } => {
+                        return Err(Error::InvalidOperation(
+                            "sheet history index out of range".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut preview = self.model.clone();
+        let mut origins = self.preserved.origins.clone();
+        let mut batch =
+            xlsx_ops::InPlaceBatch::without_inverse(&mut preview).with_cell_restoration(true);
+        for op in ops {
+            if matches!(op, Op::RestoreTableColumn { .. }) {
+                self.ensure_table_header_write(batch.workbook(), &origins, op)?;
+            }
+            batch.apply(op)?;
+            match *op {
+                Op::AddSheet { index, .. } => {
+                    origins.insert(index.min(origins.len()), restored_origins.pop().flatten());
+                }
+                Op::RemoveSheet { index } => {
+                    origins.remove(index);
+                }
+                Op::MoveSheet { from, to } => {
+                    let origin = origins.remove(from);
+                    origins.insert(to, origin);
+                }
+                _ => {}
+            }
+        }
+        if preview.defined_names != self.model.defined_names
+            && let Some(package) = &self.source_package
+        {
+            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)
+                .map_err(|error| xlsx_ops::OpError::TableHeaderUnsupported(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Commits a single-cell edit without staging a copy of the authority. Returns the update
     /// to publish once the caller has recalculated.
     fn commit_user(&mut self, ops: &[Op]) -> Result<Option<Vec<u8>>> {
@@ -4376,7 +4596,8 @@ impl Workbook {
             self.update_sheet_info_cache(ops, &prior_styles);
             Some(staged.update)
         } else {
-            let update = if self.defers_staging() {
+            let deferred = self.defers_staging();
+            let update = if deferred {
                 self.defer_apply(ops, SyncOrigin::User)?;
                 None
             } else {
@@ -4388,7 +4609,7 @@ impl Workbook {
                     .map_err(authority_error)?
             };
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
+            self.apply_model_history(deferred, |undo, model| undo.commit(model, &transaction))?;
             self.bump_model_epoch_keeping_results();
             self.queue_geometry_delta(delta);
             self.update_sheet_info_cache(ops, &prior_styles);
@@ -4410,19 +4631,32 @@ impl Workbook {
 
     fn apply_model_history<T>(
         &mut self,
+        deferred: bool,
         apply: impl FnOnce(
             &mut UndoStack,
             &mut WorkbookModel,
         ) -> std::result::Result<T, xlsx_ops::OpError>,
     ) -> std::result::Result<T, xlsx_ops::OpError> {
         #[cfg(test)]
-        if crate::authority::force_full_materialization() {
+        let result = if crate::authority::force_full_materialization() {
             let mut model = self.model.clone();
-            let result = apply(&mut self.undo, &mut model)?;
-            self.model = model;
-            return Ok(result);
+            let result = apply(&mut self.undo, &mut model);
+            if result.is_ok() {
+                self.model = model;
+            }
+            result
+        } else {
+            apply(&mut self.undo, &mut self.model)
+        };
+        #[cfg(not(test))]
+        let result = apply(&mut self.undo, &mut self.model);
+        if result.is_err()
+            && deferred
+            && let Some(deferred) = self.authority.deferred.as_deref_mut()
+        {
+            deferred.changes.pop();
         }
-        apply(&mut self.undo, &mut self.model)
+        result
     }
 
     /// Makes a committed change visible: advances [`Workbook::version`], then hands observers
@@ -4529,7 +4763,8 @@ impl Workbook {
                 | Op::RemoveSheet { .. }
                 | Op::MoveSheet { .. }
                 | Op::RenameSheet { .. }
-                | Op::RestoreSheet { .. } => {
+                | Op::RestoreSheet { .. }
+                | Op::RestoreTableColumn { .. } => {
                     *slot = None;
                     return;
                 }
@@ -4850,6 +5085,37 @@ impl Workbook {
             self.graph = Some(graph);
             self.mark_graph_current();
         }
+    }
+
+    fn recalculate_cell_inputs(
+        &mut self,
+        touched: &[(SheetId, CellRef, Option<String>)],
+        seeds: &[(SheetId, CellRef)],
+        tables_changed: bool,
+        options: CalculationOptions,
+    ) -> RecalcResult {
+        if tables_changed {
+            let (graph, result) = rebuild_and_recalc_all_after(
+                &mut self.model,
+                self.graph.as_ref(),
+                options.now_serial,
+                self.rand_seed,
+            );
+            self.graph = Some(graph);
+            self.mark_graph_current();
+            return result;
+        }
+        let graph = self.graph.as_mut().expect("graph initialized");
+        for (sheet, cell, formula) in touched {
+            graph.set_formula(*sheet, *cell, formula.as_deref());
+        }
+        recalc_after_with_seed(
+            &mut self.model,
+            graph,
+            seeds,
+            options.now_serial,
+            self.rand_seed,
+        )
     }
 
     fn mutation_result(
@@ -5624,6 +5890,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. }
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. } => None,
     }
@@ -5954,6 +6221,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RestoreSheet { .. }
         | Op::SetDefinedNames { .. }
         | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. }
         | Op::SetCharts { .. }
         | Op::SetConditionalFormats { .. }
         | Op::RestoreAutoFilter { .. }
@@ -6350,6 +6618,12 @@ pub(crate) fn entered_formula(
     at: CellRef,
     formula: Option<String>,
 ) -> Result<Option<String>> {
+    if formula.is_some() && xlsx_ops::table_header_at(&model.tables, sheet, at).is_some() {
+        return Err(xlsx_ops::OpError::TableHeaderUnsupported(
+            "formulas are not supported in Excel table headers".into(),
+        )
+        .into());
+    }
     match formula {
         Some(formula) if stored_formula(model, sheet, at) != Some(formula.as_str()) => {
             formula_entry::storable_formula(formula).map(Some)
@@ -6359,12 +6633,18 @@ pub(crate) fn entered_formula(
 }
 
 fn validate_cell_state(state: &CellState) -> Result<()> {
+    validate_cell_input_state(state, false)
+}
+
+fn validate_cell_input_state(state: &CellState, table_header: bool) -> Result<()> {
     if matches!(state.value, CellValue::Number { value } if !value.is_finite()) {
         return Err(Error::InvalidOperation(
             "cell number must be finite".to_string(),
         ));
     }
-    if matches!(&state.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
+    if !table_header
+        && let CellValue::Text { value } = &state.value
+        && value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS
     {
         return Err(Error::InvalidOperation(
             "cell text exceeds Excel's length limit".to_string(),
@@ -6411,6 +6691,24 @@ fn edit_cell_state(
     input: &str,
     now_serial: Option<f64>,
 ) -> (CellState, Option<Op>) {
+    if xlsx_ops::table_header_at(&workbook.tables, sheet, cell).is_some() {
+        let style = written_cell_style(workbook, sheet, cell, false);
+        let state = match input.strip_prefix('=') {
+            Some(formula) => CellState {
+                formula: Some(formula.to_owned()),
+                style,
+                ..CellState::default()
+            },
+            None => CellState {
+                value: CellValue::Text {
+                    value: input.strip_prefix('\'').unwrap_or(input).to_owned(),
+                },
+                formula: None,
+                style,
+            },
+        };
+        return (state, None);
+    }
     let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.effective_style(cell));
@@ -6429,7 +6727,26 @@ fn edit_cell_state(
             formula: Some(stored.to_owned()),
             ..CellState::default()
         },
-        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+        None => match parsed {
+            xlsx_ops::ParsedInput::Formula(text) => {
+                if xlsx_ops::is_formula_source(&text)
+                    || xlsx_calc::parser::parse_formula_for_cell(&text, workbook, sheet).is_ok()
+                {
+                    CellState {
+                        formula: Some(text),
+                        ..CellState::default()
+                    }
+                } else {
+                    CellState {
+                        value: CellValue::Text {
+                            value: input.to_owned(),
+                        },
+                        ..CellState::default()
+                    }
+                }
+            }
+            parsed => xlsx_ops::cell_state_from_parsed(input, parsed),
+        },
     };
     state.formula = state.formula.map(|typed| {
         committed_formula(
@@ -6541,10 +6858,47 @@ fn cell_states_semantically_equal(left: &CellState, right: &CellState) -> bool {
     }
 }
 
+fn shared_table_header_edit() -> Error {
+    xlsx_ops::OpError::TableHeaderUnsupported(
+        "table header edits are not supported in a shared session".into(),
+    )
+    .into()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CELL_WRITE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn cell_write_is_unchanged(
+    model: &WorkbookModel,
+    sheet: SheetId,
+    at: CellRef,
+    cell: &CellState,
+) -> Result<bool> {
+    #[cfg(test)]
+    CELL_WRITE_CHECKS.set(CELL_WRITE_CHECKS.get() + 1);
+    let old = current_cell_state(model, sheet, at);
+    if let Some((table, column, name)) = xlsx_ops::normalize_table_header(model, sheet, at, cell)? {
+        if model.tables[table].columns[column] != name {
+            return Ok(false);
+        }
+        let cell = CellState {
+            value: CellValue::Text { value: name },
+            formula: None,
+            style: cell.style,
+        };
+        return Ok(cell_states_semantically_equal(&old, &cell));
+    }
+    Ok(cell_states_semantically_equal(&old, cell))
+}
+
 fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> bool {
     if left.date_system != right.date_system
         || left.shared_strings != right.shared_strings
         || left.styles != right.styles
+        || left.defined_names != right.defined_names
+        || left.tables != right.tables
         || left.sheets.len() != right.sheets.len()
     {
         return false;
@@ -6806,7 +7160,9 @@ fn typed_formula_fails(
         .number_format;
     matches!(
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, None).0,
-        xlsx_ops::ParsedInput::Formula(source) if !xlsx_ops::is_formula_source(&source)
+        xlsx_ops::ParsedInput::Formula(source)
+            if !xlsx_ops::is_formula_source(&source)
+                && xlsx_calc::parser::parse_formula_for_cell(&source, workbook, sheet).is_err()
     )
 }
 
@@ -7230,6 +7586,7 @@ impl CalculationScope {
             | Op::RestoreRowDimension { .. } => Self::Full,
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. }
             | Op::AddSheet { .. }
@@ -7278,6 +7635,12 @@ fn reached_sheets(ops: &[Op]) -> BTreeSet<SheetId> {
                 sheets.insert(*sheet);
                 sheets.extend(formulas.iter().map(|(sheet, ..)| *sheet));
             }
+            Op::RestoreTableColumn {
+                sheet, formulas, ..
+            } => {
+                sheets.insert(*sheet);
+                sheets.extend(formulas.iter().map(|(sheet, ..)| *sheet));
+            }
             op => sheets.extend(worksheet_edit_target(op)),
         }
     }
@@ -7287,15 +7650,25 @@ fn reached_sheets(ops: &[Op]) -> BTreeSet<SheetId> {
 /// The formula cells whose text a batch's renames rewrote: its inverse
 /// restores each of them.
 fn rewritten_formulas(inverse: &[Op]) -> Vec<(SheetId, CellRef)> {
-    inverse
-        .iter()
-        .filter_map(|op| match op {
-            Op::RestoreSheet { formulas, .. } => Some(formulas),
-            _ => None,
-        })
-        .flatten()
-        .map(|(sheet, at, _)| (*sheet, *at))
-        .collect()
+    let mut rewritten = Vec::new();
+    for op in inverse {
+        match op {
+            Op::RestoreSheet { formulas, .. } => {
+                rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+            }
+            Op::RestoreTableColumn {
+                sheet,
+                at,
+                formulas,
+                ..
+            } => {
+                rewritten.push((*sheet, *at));
+                rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+            }
+            _ => {}
+        }
+    }
+    rewritten
 }
 
 /// What the engine reads that a batch can reach: the workbook-level inputs
@@ -7722,6 +8095,59 @@ mod tests {
             ),
         ]);
         parts
+    }
+
+    #[test]
+    fn a_header_rename_is_refused_when_table_part_paths_differ_only_in_case() {
+        let sheet = SheetId(0);
+        let at = CellRef::new(0, 0);
+        let mut model = WorkbookModel {
+            sheets: vec![xlsx_model::Sheet::new("Sheet1")],
+            ..WorkbookModel::default()
+        };
+        model.sheets[0].set_cell(
+            at,
+            xlsx_model::Cell {
+                value: CellValue::Text {
+                    value: "Old".into(),
+                },
+                ..xlsx_model::Cell::default()
+            },
+        );
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        append_xml(
+            &mut parts,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "</Relationships>",
+            r#"<Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>"#,
+        );
+        let table = br#"<table displayName="Table1" ref="A1:A2"><tableColumns count="1"><tableColumn name="Old"/></tableColumns></table>"#;
+        parts.extend([
+            ("xl/tables/table1.xml".into(), table.to_vec()),
+            ("xl/tables/Table1.xml".into(), table.to_vec()),
+        ]);
+        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts).unwrap();
+        let mut workbook = Workbook::from_source(
+            parsed.workbook,
+            Some(parsed.package),
+            parsed.active_sheet,
+            true,
+            None,
+            &parsed.legacy_dimensions,
+            (parsed.legacy_styles.as_ref(), &[]),
+        )
+        .unwrap();
+        let version = workbook.version();
+        let error = workbook
+            .edit_cell(sheet, at, "New", CalculationOptions::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(xlsx_ops::OpError::TableHeaderUnsupported(reason))
+                if reason.contains("multiple destinations")
+        ));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.model.tables[0].columns, ["Old"]);
     }
 
     #[test]
