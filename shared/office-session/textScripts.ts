@@ -57,6 +57,7 @@ export function textScripts(text: string): string[] {
   const intl: string[] = [];
   for (const character of text) {
     const point = character.codePointAt(0)!;
+    if (point < 0x0530) continue;
     if (within(HEBREW, point)) hebrew = true;
     else if (within(ARABIC, point)) arabic = true;
     else if (within(HANGUL, point)) hangul = true;

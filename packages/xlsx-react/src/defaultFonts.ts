@@ -4,9 +4,9 @@ import { importFonts } from '../../../shared/office-session/fontModules';
 import { nonCjkScriptUnicodeRange } from '../../../shared/office-session/textScripts';
 import {
   cellFontKey, cellScriptFamilies, cellScriptFontKey, cellScriptFontRequests,
-  type CellScriptCache, type EditorPngFont, type PngScriptFallbackFace, type ScriptFontDisplayList,
+  type CellScriptCache, type ScriptFontDisplayList,
 } from '../../../shared/office-session/xlsxScriptFonts';
-import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace } from '@betteroffice/xlsx';
+import { PngExportError, type DisplayList, type WorkbookSession, type XlsxFontFace, type XlsxPngFont } from '@betteroffice/xlsx';
 import type { BundledFontFace, BundledFontScript } from '@betteroffice/fonts';
 import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
 
@@ -99,9 +99,24 @@ async function loadRemoteFace(
 
 const PRELOAD_MAX_BYTES = 1.5 * 1024 * 1024;
 const SCRIPT_FACE_RETRY_MS = 60_000;
+const scriptFiles = new Map<string, Promise<ArrayBuffer> | number>();
 const registeredFaces = new Map<string, Promise<boolean>>();
 const pendingFaces = new Map<string, Set<symbol>>();
 let activeFontSet: FontFaceSet | undefined;
+
+function scriptFileCoolingDown(key: string): boolean {
+  const retryAfter = scriptFiles.get(key);
+  return typeof retryAfter === 'number' && Date.now() < retryAfter;
+}
+
+function loadScriptFile(key: string, load: () => Promise<ArrayBuffer>): Promise<ArrayBuffer> {
+  const current = scriptFiles.get(key);
+  if (current && typeof current !== 'number') return current;
+  const task = Promise.resolve().then(load);
+  scriptFiles.set(key, task);
+  void task.then(() => { scriptFiles.delete(key); }, () => { scriptFiles.set(key, Date.now() + SCRIPT_FACE_RETRY_MS); });
+  return task;
+}
 
 interface FrameFontRequest {
   fontFamily: string;
@@ -155,7 +170,6 @@ export function createDefaultFontPainter(
   const requested = new Map<string, Set<string>>();
   const attempted = new Map<string, Set<string>>();
   const scriptFamilies = new Map<string, string>();
-  const scriptRetryAfter = new Map<string, number>();
   let disposed = false;
   let changed = false;
   let unsettledPaint = false;
@@ -192,7 +206,8 @@ export function createDefaultFontPainter(
         return success;
       }
       if (face.byteLength > maxBytes) return false;
-      const cdn = fontCdnCacheKey();
+      const configuration = getFontCdnConfiguration();
+      const cdn = fontCdnCacheKey(configuration ?? null);
       if (source.faceUnavailableUntil && await source.faceUnavailableUntil(face) !== undefined) return false;
       if (disposed || !document.fonts || cdn !== fontCdnCacheKey()) return false;
       const fontSet = document.fonts;
@@ -203,17 +218,21 @@ export function createDefaultFontPainter(
       }
       const family = script ? `bo-xlsx-editor-${face.family}` : fontFamily;
       const unicodeRange = script ? nonCjkScriptUnicodeRange(script) : undefined;
+      const scriptFile = configuration?.baseUrl && !configuration.implicit
+        && (script || (face.script && nonCjkScriptUnicodeRange(face.script)))
+        ? JSON.stringify([configuration.baseUrl, face.file]) : undefined;
       const key = JSON.stringify([family.trim().toLowerCase(), face.weight, face.style, cdn, unicodeRange]);
       let registration = registeredFaces.get(key);
       const shared = registration !== undefined;
       owners = pendingFaces.get(key);
       if (!registration) {
+        if (scriptFile && scriptFileCoolingDown(scriptFile)) return false;
         const load = script ? source.resolveScriptFallback(script, bold, italic, fontFamily)
           : source.resolve(fontFamily, bold, italic) ?? source.resolveFamily(fontFamily, bold, italic);
         if (!load) return false;
         owners = new Set([owner]);
         pendingFaces.set(key, owners);
-        registration = registerFace(face, family, load, fontSet, owners, unicodeRange);
+        registration = registerFace(face, family, scriptFile ? () => loadScriptFile(scriptFile, load) : load, fontSet, owners, unicodeRange);
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;
@@ -227,7 +246,9 @@ export function createDefaultFontPainter(
         interests.add(owners);
       }
       const success = await registration;
-      if (success === false && shared && retryShared && !disposed) return await loadFace(request, text, onRemote, onPartial, false, maxBytes);
+      if (!success && shared && retryShared && !disposed && (!scriptFile || !scriptFileCoolingDown(scriptFile))) {
+        return await loadFace(request, text, onRemote, onPartial, false, maxBytes);
+      }
       if (success && script && !disposed) scriptFamilies.set(cellScriptFontKey({ script, fontFamily, bold, italic }), family);
       return success;
     } catch { return false; }
@@ -282,17 +303,10 @@ export function createDefaultFontPainter(
   }
 
   async function loadRequests(frame: FrameFontRequests): Promise<void> {
-    const cdn = getFontCdnConfiguration();
-    if (inactive() || frame.cdn !== fontCdnCacheKey(cdn ?? null)) return;
-    const explicitCdn = Boolean(cdn?.baseUrl && !cdn.implicit);
+    if (inactive() || frame.cdn !== fontCdnCacheKey()) return;
     const batch: Promise<boolean>[] = [];
     for (const [key, request] of frame.faces) {
       if (pending.has(key)) continue;
-      const retryAfter = scriptRetryAfter.get(key);
-      if (retryAfter !== undefined) {
-        if (Date.now() < retryAfter) continue;
-        scriptRetryAfter.delete(key);
-      }
       const { characters } = request;
       const ready = loaded.has(key);
       if (ready && !remote.has(key)) continue;
@@ -308,7 +322,6 @@ export function createDefaultFontPainter(
         }
         settled.add(key);
         if (success) loaded.add(key);
-        else if (request.script && explicitCdn && !disposed) scriptRetryAfter.set(key, Date.now() + SCRIPT_FACE_RETRY_MS);
         if (success || partial) changed = true;
         const current = !disposed && lastPainted?.cdn === fontCdnCacheKey() ? lastPainted : undefined;
         const latest = current && remote.has(key) ? current.faces.get(key) : undefined;
@@ -330,9 +343,9 @@ export function createDefaultFontPainter(
   }
 
   function withScriptFonts(displayList: DisplayList, frameScripts?: CellScriptCache): ScriptFontDisplayList {
-    return !inactive() && scriptFamilies.size ? {
-      ...displayList, cellScriptFamilies: (cmd) => cellScriptFamilies(cmd, scriptFamilies, frameScripts),
-    } : displayList;
+    if (inactive() || !scriptFamilies.size) return displayList;
+    const scripts: CellScriptCache = frameScripts ?? new Map();
+    return { ...displayList, cellScriptFamilies: (cmd) => cellScriptFamilies(cmd, scriptFamilies, scripts) };
   }
 
   return {
@@ -368,7 +381,7 @@ export function createDefaultFontPainter(
     },
     /** Paints the frame and reports whether its faces had settled before it was painted. */
     paint(displayList: DisplayList, paint: (list: DisplayList) => void): boolean {
-      const frameScripts: CellScriptCache | undefined = scriptFamilies.size ? new Map() : undefined;
+      const frameScripts: CellScriptCache = new Map();
       const frame = lastPainted = inactive() ? undefined : faceKeys(displayList, true, frameScripts);
       const ready = !frame || isSettled(frame);
       if (!ready) unsettledPaint = true;
@@ -384,7 +397,6 @@ export function createDefaultFontPainter(
       interests.clear();
       pending.clear();
       scriptFamilies.clear();
-      scriptRetryAfter.clear();
       lastPainted = undefined;
     },
   };
@@ -395,63 +407,33 @@ export function createDefaultFontPainter(
  * the bundled metric-compatible or same-family face, fetched as the editor fetches it.
  */
 export async function exportFaces(
-  fonts: readonly EditorPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
-  editorFontFiles?: Map<string, Uint8Array | null>,
+  fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
+  reported = new Set<Error>(),
 ): Promise<XlsxFontFace[]> {
   if (fonts.length === 0) return [];
   const bundled = await xlsxDefaultFontManager.load();
   const source = bundled.createFontProvider(undefined, { ...(decoder ? { decoder, retain: false } : {}), strict: true });
   const faces: XlsxFontFace[] = [];
-  const scriptFaces = new Map<string, PngScriptFallbackFace>();
-  const unavailableScriptFiles = new Set<string>();
-  const reported = new Set<Error>();
-
-  async function loadExportFace(
-    face: BundledFontFace, family: string, load: (() => Promise<ArrayBuffer>) | undefined, scriptFallback = false,
-  ): Promise<XlsxFontFace | undefined> {
-    if (!load) return undefined;
+  for (const font of fonts) {
+    const face = bundled.resolveMetricCompatFace(font.family, font.bold, font.italic)
+      ?? bundled.resolveBundledFamilyFace(font.family, font.bold, font.italic);
+    const load = face && (source.resolve(font.family, font.bold, font.italic) ?? source.resolveFamily(font.family, font.bold, font.italic));
+    if (!face || !load) continue;
     let bytes: ArrayBuffer;
     try { bytes = await load(); }
     catch (error) {
-      if (scriptFallback && !editorFontFiles?.has(face.file)) editorFontFiles?.set(face.file, null);
-      if (face.script && face.script !== 'arabic' && face.script !== 'hebrew' && bundled.isMissingFontAddon(error)) return undefined;
+      if (face.script && face.script !== 'arabic' && face.script !== 'hebrew' && bundled.isMissingFontAddon(error)) continue;
       if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
         if (!reported.has(error)) {
           reported.add(error);
           reportImplicitCdnFailure(error);
         }
-        return undefined;
+        continue;
       }
-      if (scriptFallback) return undefined;
-      throw new PngExportError('font-unavailable', `The font "${family}" could not load, so the sheet was not exported with a substitute.`);
+      throw new PngExportError('font-unavailable', `The font "${font.family}" could not load, so the sheet was not exported with a substitute.`);
     }
-    if (bytes.byteLength !== face.byteLength) return undefined;
-    const data = new Uint8Array(bytes);
-    editorFontFiles?.set(face.file, data);
-    return { family, bold: face.weight >= 600, italic: face.style === 'italic', bytes: data };
+    if (bytes.byteLength !== face.byteLength) continue;
+    faces.push({ family: font.family, bold: face.weight >= 600, italic: face.style === 'italic', bytes: new Uint8Array(bytes) });
   }
-
-  for (const { family, bold, italic, scripts } of fonts) {
-    const primary = family ? bundled.resolveMetricCompatFace(family, bold, italic) ?? bundled.resolveBundledFamilyFace(family, bold, italic) : undefined;
-    if (primary) {
-      const face = await loadExportFace(primary, family, source.resolve(family, bold, italic) ?? source.resolveFamily(family, bold, italic));
-      if (face) faces.push(face);
-    }
-    for (const script of scripts ?? []) {
-      const unicodeRange = nonCjkScriptUnicodeRange(script);
-      if (!unicodeRange) continue;
-      const fallback = bundled.resolveScriptFallbackFace(script, bold, italic, family);
-      if (!fallback || unavailableScriptFiles.has(fallback.file)) continue;
-      const key = `${script}\0${fallback.file}`;
-      const request = { script, fontFamily: family, bold, italic };
-      const known = scriptFaces.get(key);
-      if (known) known.scriptFallbacks.push(request);
-      else {
-        const face = await loadExportFace(fallback, fallback.family, source.resolveScriptFallback(script, bold, italic, family), true);
-        if (face) scriptFaces.set(key, { ...face, unicodeRange, scriptFallbacks: [request] });
-        else unavailableScriptFiles.add(fallback.file);
-      }
-    }
-  }
-  return [...faces, ...scriptFaces.values()];
+  return faces;
 }

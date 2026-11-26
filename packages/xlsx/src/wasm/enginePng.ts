@@ -1,10 +1,10 @@
-import type { EditorPngFaces } from '../../../../shared/office-session/xlsxScriptFonts';
 import { canvasPngAvailable, canvasUnavailable, displayListToPng, sheetFontRequests } from '../render/png';
 import { pngDisplayList, type ResolvedPngTarget } from './pngResolve';
 import type { XlsxPngOptions } from './pngTarget';
 
 /** What an engine needs to draw one PNG. The workbook handle builds it; each engine reads what it uses. */
 export interface XlsxPngEngine {
+  reportedFontCdnErrors?: Set<Error>;
   /** Runs `read` with `sheet` active and puts the previous sheet back. */
   onSheet<T>(sheet: number, read: () => T): T;
   /** The engine document: `pngDisplayListJson` and `rangePngDisplayListJson`. */
@@ -26,12 +26,10 @@ let defaultFaces: typeof import('./enginePngFonts') | undefined;
 export async function renderPng(engine: XlsxPngEngine, target: ResolvedPngTarget, options: XlsxPngOptions): Promise<Uint8Array> {
   if (!canvasPngAvailable()) throw canvasUnavailable();
   const { list, ...size } = pngDisplayList(engine, target, options);
-  const supplied = options.fonts as EditorPngFaces | undefined;
-  const editorFontFiles = supplied?.editorFontFiles;
-  if (supplied !== undefined && !editorFontFiles) return displayListToPng(list, { ...size, signal: options.signal, fonts: supplied });
+  if (options.fonts !== undefined) return displayListToPng(list, { ...size, signal: options.signal, fonts: options.fonts });
   defaultFaces ??= await import('./enginePngFonts');
-  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal, editorFontFiles);
-  return displayListToPng(list, { ...size, signal: options.signal, fonts: faces, fallbacks, editorFonts: supplied });
+  const { faces, fallbacks } = await defaultFaces.defaultSheetFaces(sheetFontRequests(list), options.signal, engine.reportedFontCdnErrors);
+  return displayListToPng(list, { ...size, signal: options.signal, fonts: faces, fallbacks });
 }
 
 export default renderPng;

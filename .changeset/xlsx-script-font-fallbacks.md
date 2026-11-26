@@ -3,4 +3,4 @@
 "@betteroffice/xlsx-react": patch
 ---
 
-Spreadsheet cells load bundled fallback fonts for scripts such as Arabic, Hebrew, Thai and Devanagari, so text stays readable when the device lacks those fonts. PNG exports from the editor use the same fonts.
+The spreadsheet editor paints Arabic, Hebrew, Thai, Devanagari and other scripts with bundled fallback fonts when the device lacks the requested glyphs.

@@ -1,10 +1,6 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { fontUnavailable, installPngFaces, pngFontKey, pngFontSet, type PngFontFace, type PngRunFont } from '../../../../shared/office-session/pngFonts';
 import { textScripts } from '../../../../shared/office-session/textScripts';
-import {
-  cellFontKey, cellScriptFamilies, cellScriptFontKey, cellScriptFontRequests,
-  type EditorPngFont, type PngScriptFallbackFace, type ScriptFontDisplayList,
-} from '../../../../shared/office-session/xlsxScriptFonts';
 import type { DisplayList, TextCmd } from '../display-list/types';
 import { MAX_PNG_PIXELS, MAX_PNG_SIDE } from '../wasm/pngResolve';
 import { paintDisplayList } from './canvas2d';
@@ -20,7 +16,6 @@ export interface DisplayListToPngOptions {
   signal?: AbortSignal;
   /** Faces to paint with, matched to the sheet's fonts by family and style. */
   fonts?: ReadonlyArray<PngFontFace>;
-  editorFonts?: ReadonlyArray<PngFontFace>;
   /** Faces that paint the characters a font's face lacks, in the order the native engine tries them. */
   fallbacks?: (font: PngRunFont) => ReadonlyArray<PngFontFace>;
 }
@@ -41,23 +36,8 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
     throw new PngExportError('canvas-too-large', `A ${width}x${height}px PNG is over the ${MAX_PNG_SIDE}px side or ${MAX_PNG_PIXELS} pixel limit; lower the scale or set maxWidth and maxHeight.`);
   }
   options.signal?.throwIfAborted();
-  const primaryFaces: PngFontFace[] = [];
-  const scriptFaces: PngScriptFallbackFace[] = [];
-  for (const face of options.editorFonts ?? options.fonts ?? []) {
-    if (isScriptFallback(face)) scriptFaces.push(face);
-    else primaryFaces.push(face);
-  }
-  const bundledFaces = options.editorFonts ? options.fonts ?? [] : [];
   const faces = await installPngFaces({
-    prefix: 'bo-xlsx-png', fonts: sheetFonts(list), faces: primaryFaces,
-    choose: (supplied, font) => sheetFace(supplied, font) ?? sheetFace(bundledFaces, font),
-    fallbacks: (font) => {
-      const chain = options.fallbacks?.(font) ?? [];
-      const supplied = sheetFace(primaryFaces, font);
-      const bundled = sheetFace(bundledFaces, font);
-      return supplied && bundled && supplied.bytes !== bundled.bytes ? [bundled, ...chain] : chain;
-    },
-    additionalFaces: scriptFaces, subject: 'sheet',
+    prefix: 'bo-xlsx-png', fonts: sheetFonts(list), faces: options.fonts ?? [], choose: sheetFace, fallbacks: options.fallbacks, subject: 'sheet',
     canvasFont: (font, family) => fontString({ op: 'text', x: 0, y: 0, text: '', color: '#000000', fontSize: 12, fontFamily: family, bold: font.bold, italic: font.italic }),
   });
   try {
@@ -66,32 +46,7 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d') as CanvasRenderingContext2D | null;
     if (!ctx) throw canvasUnavailable('PNG export needs a 2d canvas context.');
-    const aliases = new Map<string, string>();
-    const preferred = new Map<string, string[]>();
-    for (const face of scriptFaces) {
-      const alias = faces.alias(face);
-      if (!alias) continue;
-      for (const request of face.scriptFallbacks) {
-        aliases.set(cellScriptFontKey(request), alias);
-        if (!options.editorFonts || !request.fontFamily) continue;
-        const key = cellFontKey(request.fontFamily, request.bold, request.italic);
-        const names = preferred.get(key) ?? [];
-        if (!names.includes(alias)) names.push(alias);
-        preferred.set(key, names);
-      }
-    }
-    const paintable: ScriptFontDisplayList = {
-      ...withFaces(list, (font, chart) => {
-        const names = faces.families(font);
-        const scripts = !chart && preferred.get(cellFontKey(font.family, font.bold, font.italic));
-        if (!scripts) return names;
-        const before = sheetFace(primaryFaces, font) ? 1 : 0;
-        return [...names.slice(0, before), ...scripts, ...names.slice(before)];
-      }),
-      cellScriptFamilies: aliases.size ? (cmd) =>
-        options.editorFonts && runFont(cmd) ? undefined : cellScriptFamilies(cmd, aliases) : undefined,
-    };
-    paintDisplayList(ctx, paintable, dpr);
+    paintDisplayList(ctx, withFaces(list, faces.families), dpr);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'destination-over';
@@ -101,10 +56,6 @@ export async function displayListToPng(list: DisplayList, options: DisplayListTo
     options.signal?.throwIfAborted();
     return new Uint8Array(await (await encode(canvas)).arrayBuffer());
   } finally { faces.release(); }
-}
-
-function isScriptFallback(face: PngFontFace): face is PngScriptFallbackFace {
-  return 'scriptFallbacks' in face && Array.isArray(face.scriptFallbacks);
 }
 
 /** The error for a runtime without a canvas. */
@@ -176,19 +127,11 @@ export function sheetFontRequests(list: DisplayList): SheetFontRequest[] {
 }
 
 /** The families and styles the sheet's cell and chart text paints with. */
-export function sheetFonts(list: DisplayList, includeCellScripts = false): EditorPngFont[] {
-  const fonts = new Map<string, EditorPngFont>();
+export function sheetFonts(list: DisplayList): PngRunFont[] {
+  const fonts = new Map<string, PngRunFont>();
   for (const cmd of list.commands) {
     if (cmd.op !== 'text') continue;
-    for (const { font } of textFonts(cmd)) if (font) fonts.set(pngFontKey(font), font);
-  }
-  if (includeCellScripts) {
-    for (const { fontFamily: family, bold, italic, script } of cellScriptFontRequests(list)) {
-      const key = pngFontKey({ family, bold, italic });
-      let font = fonts.get(key);
-      if (!font) fonts.set(key, font = { family, bold, italic });
-      (font.scripts ??= []).push(script);
-    }
+    for (const { font } of textFonts(cmd)) if (font) fonts.set(JSON.stringify(font), font);
   }
   return [...fonts.values()];
 }
@@ -207,21 +150,18 @@ export function sheetFace(faces: ReadonlyArray<PngFontFace>, font: PngRunFont): 
   return undefined;
 }
 
-type SheetAliases = (font: PngRunFont, chart: boolean) => string[];
-
-function withFaces(list: DisplayList, families: SheetAliases): DisplayList {
+function withFaces(list: DisplayList, families: (font: PngRunFont) => string[]): DisplayList {
   let changed = false;
   const commands = list.commands.map((cmd) => {
-    if (cmd.op !== 'text') return cmd;
-    const font = runFont(cmd);
-    const aliases = font ? families(font, Boolean(cmd.chart)) : [];
-    const runs = runsWithFaces(cmd, families, aliases.length > 0);
-    if (!aliases.length && !runs) return cmd;
+    const font = cmd.op === 'text' ? runFont(cmd) : undefined;
+    const aliases = font ? families(font) : [];
+    const runs = cmd.op === 'text' ? runsWithFaces(cmd, families, aliases.length > 0) : undefined;
+    if ((!aliases.length && !runs) || cmd.op !== 'text') return cmd;
     changed = true;
     if (!aliases.length) return { ...cmd, runs };
     const head = aliases.map((alias) => `"${alias}"`).join(', ');
     return {
-      ...cmd, fontFamily: cmd.chart ? `"${aliases[0]}", ${cmd.fontFamily}` : cmd.fontFamily,
+      ...cmd, fontFamily: cmd.chart ? `"${aliases[0]}", ${cmd.fontFamily}` : aliases[0],
       cssFontFamily: `${head}, ${cmd.chart ? cmd.fontFamily : 'sans-serif'}`,
       ...(runs ? { runs } : {}),
     };
@@ -233,14 +173,14 @@ function withFaces(list: DisplayList, families: SheetAliases): DisplayList {
  * The command's runs with the faces their own fonts paint with, or `undefined` when it paints no runs. A run whose
  * font has no supplied face names its family, so it does not take the face supplied for the command's font.
  */
-function runsWithFaces(cmd: TextCmd, families: SheetAliases, commandFaced: boolean): PaintedTextRun[] | undefined {
+function runsWithFaces(cmd: TextCmd, families: (font: PngRunFont) => string[], commandFaced: boolean): PaintedTextRun[] | undefined {
   const family = primaryFamily(cmd);
   if (!cmd.runs || !runPieces(cmd)) return undefined;
   return cmd.runs.map((run) => {
     const own = run.fontFamily ?? family;
     if (own === undefined) return run;
-    const aliases = families({ family: own, bold: run.bold ?? cmd.bold === true, italic: run.italic ?? cmd.italic === true }, Boolean(cmd.chart));
-    if (aliases.length) return { ...run, fontFamily: own, cssFontFamily: `${aliases.map((alias) => `"${alias}"`).join(', ')}, sans-serif` };
+    const aliases = families({ family: own, bold: run.bold ?? cmd.bold === true, italic: run.italic ?? cmd.italic === true });
+    if (aliases.length) return { ...run, fontFamily: aliases[0], cssFontFamily: `${aliases.map((alias) => `"${alias}"`).join(', ')}, sans-serif` };
     return commandFaced ? { ...run, fontFamily: own } : run;
   });
 }

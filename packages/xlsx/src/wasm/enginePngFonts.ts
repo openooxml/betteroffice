@@ -86,29 +86,19 @@ export interface DefaultSheetFaces {
  * as natively. An abort rejects at once without waiting for loads other exports may share.
  */
 export async function defaultSheetFaces(
-  requests: readonly SheetFontRequest[], signal?: AbortSignal,
-  editorFontFiles?: ReadonlyMap<string, Uint8Array | null>,
+  requests: readonly SheetFontRequest[], signal?: AbortSignal, reported = new Set<Error>(),
 ): Promise<DefaultSheetFaces> {
   signal?.throwIfAborted();
   const loading = loadFonts().then(async (manager) => {
     const unavailable = new Set<string>();
-    const reported = new Set<Error>();
-    const installedFace: InstalledFace = async (face) => {
-      if (!face || unavailable.has(face.file)) return undefined;
-      if (editorFontFiles?.get(face.file)) return face;
-      return await manager.bundledFaceInstalled(face).catch(() => true) ? face : undefined;
-    };
+    const installedFace: InstalledFace = async (face) =>
+      face && !unavailable.has(face.file) && await manager.bundledFaceInstalled(face).catch(() => true) ? face : undefined;
     const loadFace = async (face: BundledFontFace, family: string): Promise<PngFontFace | undefined> => {
       try {
-        const bytes = editorFontFiles?.get(face.file)
-          ?? new Uint8Array(await manager.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
+        const bytes = new Uint8Array(await manager.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
         const own = { bold: face.weight === 700, italic: face.style === 'italic' };
         return { family: face.family, ...own, bytes, face: own };
       } catch (error) {
-        if (editorFontFiles?.get(face.file) === null) {
-          unavailable.add(face.file);
-          return undefined;
-        }
         if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
           unavailable.add(face.file);
           if (!reported.has(error)) {
