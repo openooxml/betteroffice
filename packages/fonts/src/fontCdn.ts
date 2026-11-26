@@ -2,6 +2,7 @@ import { version as latinVersion } from '../../fonts-latin/package.json';
 import { version as intlVersion } from '../../fonts-intl/package.json';
 import { version as cjkVersion } from '../../fonts-cjk/package.json';
 import type { FontCdnDiagnostic } from '../../../shared/fontCdnDiagnostics';
+import { HttpFontError } from './bytes';
 import {
   getFontCdnConfiguration, implicitFontCdnBases, JSDELIVR, setFontCdnConfiguration, STALL_MS,
   type FontCdnConfiguration, type ImplicitFontCdnBase,
@@ -14,7 +15,7 @@ type Pack = FontCdnDiagnostic['pack'];
 class ImplicitFontCdnError extends Error {
   readonly diagnostic: FontCdnDiagnostic;
 
-  constructor(pack: Pack, cause: unknown) {
+  constructor(pack: Pack, readonly cause: unknown, readonly retryAt: number) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     const detail = `Cannot load @betteroffice/fonts-${pack} from cdn.jsdelivr.net: ${reason}. To opt out, install @betteroffice/fonts-${pack} or call configureFontCdn({ baseUrl: false }).`;
     super(detail);
@@ -24,12 +25,6 @@ class ImplicitFontCdnError extends Error {
 }
 
 const COOLDOWN_MS = 60_000;
-
-class HttpFontError extends Error {
-  constructor(file: string, readonly status: number) {
-    super(`Failed to fetch bundled font ${file}: HTTP ${status}`);
-  }
-}
 
 type CheckFontAsset = <T>(check: () => T | Promise<T>) => Promise<T>;
 
@@ -42,10 +37,16 @@ interface ImplicitFontRequest {
 
 export type FontRequestPolicy = number | ImplicitFontRequest;
 
-export function implicitFontRequest(pack: Pack): ImplicitFontRequest {
+export function implicitFontRequest(pack: Pack, checkPack?: (pack: Pack) => void): ImplicitFontRequest {
   return {
-    check: checkImplicitUrlCooldown,
-    load: (file, url, decode, checkDependencies) => loadImplicitFontAsset(file, url, pack, decode, checkDependencies),
+    check: (url) => {
+      checkPack?.(pack);
+      checkImplicitUrlCooldown(url);
+    },
+    load: (file, url, decode, checkDependencies) => loadImplicitFontAsset(file, url, pack, decode, () => {
+      checkPack?.(pack);
+      checkDependencies?.();
+    }),
   };
 }
 
@@ -116,7 +117,7 @@ export async function loadImplicitFontAsset<T>(
   const fail = (cause: unknown, invalidBytes = false): ImplicitFontCdnError => {
     const now = Date.now();
     const until = now + COOLDOWN_MS;
-    const error = new ImplicitFontCdnError(pack, cause);
+    const error = new ImplicitFontCdnError(pack, cause, until);
     if (implicitBases.get(key) !== base) return error;
     if (failureScope(cause, invalidBytes) === 'base') base.unavailable = { error, until };
     else base.invalid.set(url.href, { error, until });
