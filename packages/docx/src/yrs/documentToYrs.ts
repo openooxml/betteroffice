@@ -699,13 +699,15 @@ function cachedResultFragments(
       case 'complexField':
       case 'simpleField': {
         hasNestedResult = true;
-        if (flattenedComplexResult && scope === 'owner' && node.type === 'simpleField') {
+        if (flattenedComplexResult && scope === 'owner' && node.type === 'simpleField' && Array.isArray(node.content)) {
           for (const run of node.content) {
-            if (run.type === 'run') takeOwnerRun(run);
+            if (run?.type === 'run') takeOwnerRun(run);
           }
         }
         const result = node.structuredResult?.inline;
-        push(Array.isArray(result) ? result : flatFieldResult(node).filter((child) => child.type === 'run'), 'nested');
+        const flat = flatFieldResult(node);
+        if (Array.isArray(result)) push(result, 'nested');
+        else if (Array.isArray(flat)) push(flat.filter((child) => child?.type === 'run'), 'nested');
         break;
       }
       case 'inlineSdt':
