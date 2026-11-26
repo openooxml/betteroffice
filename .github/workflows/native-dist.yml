@@ -73,7 +73,7 @@ jobs:
         run: |
           if [[ -e rust-toolchain.toml || -L rust-toolchain.toml ]]; then
             if ! toolchain=$(sed -n \
-              "/^[[:blank:]]*\[toolchain\][[:space:]]*$/,/^[[:blank:]]*\[/ s/^[[:blank:]]*channel[[:blank:]]*=[[:blank:]]*\(['\"]\)\([^'\"]*\)\1[[:space:]]*\(#.*\)\{0,1\}$/\2/p" \
+              "/^[[:blank:]]*\[toolchain\][[:blank:]]*\(#.*\)\{0,1\}[[:space:]]*$/,/^[[:blank:]]*\[/ s/^[[:blank:]]*channel[[:blank:]]*=[[:blank:]]*\(['\"]\)\([^'\"]*\)\1[[:space:]]*\(#.*\)\{0,1\}$/\2/p" \
               rust-toolchain.toml) || [[ ! "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::error::rust-toolchain.toml must pin channel to an exact MAJOR.MINOR.PATCH version"
               exit 1
