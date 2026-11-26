@@ -2090,7 +2090,11 @@ fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_ca
     });
     let reopened = EditingDoc::new(72);
     seed_from_docx(&reopened, &saved).unwrap();
-    assert!(reopened.paragraphs("body").unwrap()[0].text.contains("aXbc"));
+    assert!(
+        reopened.paragraphs("body").unwrap()[0]
+            .text
+            .contains("aXbc")
+    );
     let after = nested(&reopened);
     for key in ["instruction", "fieldResult", "structuredResult"] {
         assert_eq!(after[key], before[key]);
