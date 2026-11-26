@@ -8,7 +8,7 @@ use crate::sheet_json::{
     check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
     encode_charts, encode_hyperlinks,
 };
-use crate::workbook::hidden_sizes::{HiddenSizeSource, derive_hidden_sizes};
+use crate::workbook::hidden_sizes::{HiddenSizes, dimension_sheets};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
@@ -887,6 +887,7 @@ pub(crate) struct StagedUpdate {
 
 pub(crate) struct StagedLocalUpdate {
     pub(crate) model: WorkbookModel,
+    pub(crate) hidden_sizes: BTreeMap<usize, HiddenSizes>,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -899,6 +900,12 @@ struct CarriedState {
     base: Arc<WorkbookBase>,
     next_sheet_id: u64,
     sheet_order: Option<SheetOrderEntry>,
+}
+
+struct ReplicaOverlay<'a> {
+    model: &'a WorkbookModel,
+    keys: &'a [String],
+    hidden_sizes: &'a mut BTreeMap<usize, HiddenSizes>,
 }
 
 /// Which history an adopted local update enters.
@@ -1646,7 +1653,7 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         encode_update: bool,
         collaborative: bool,
-        replica: Option<(&WorkbookModel, &[String])>,
+        replica: Option<ReplicaOverlay<'_>>,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector =
             encode_update.then(|| (self.doc.transact().state_vector(), self.snapshot_revision()));
@@ -1684,13 +1691,22 @@ impl WorkbookAuthority {
         let (mut model, structure) = self
             .materialize_internal(false)
             .map_err(AuthorityError::InvalidState)?;
-        if let Some((replica, keys)) = replica {
-            derive_hidden_sizes(
-                &mut model,
-                &structure.sheet_keys,
-                None,
-                Some(HiddenSizeSource::Replica(replica, keys)),
-            );
+        let dimensions = replica.as_ref().map(|_| dimension_sheets(ops));
+        if let (Some(replica), Some(dimensions)) = (&replica, &dimensions) {
+            for &index in dimensions {
+                let Some(key) = structure.sheet_keys.get(index) else {
+                    continue;
+                };
+                let prior = if replica.keys.get(index) == Some(key) {
+                    Some(index)
+                } else {
+                    replica.keys.iter().position(|prior| prior == key)
+                };
+                if let Some(prior) = prior.and_then(|index| replica.model.sheets.get(index)) {
+                    model.sheets[index].hidden_row_heights = prior.hidden_row_heights.clone();
+                    model.sheets[index].hidden_col_widths = prior.hidden_col_widths.clone();
+                }
+            }
         }
         let plain_cell_baseline = if let [Op::SetCell { sheet, at, .. }] = ops {
             let was_plain = model
@@ -1752,6 +1768,13 @@ impl WorkbookAuthority {
             };
         self.sync_model(&model, ops, origin, &authored_styles, collaborative)
             .map_err(AuthorityError::InvalidState)?;
+        if let (Some(replica), Some(dimensions)) = (replica, dimensions) {
+            for index in dimensions {
+                replica
+                    .hidden_sizes
+                    .insert(index, HiddenSizes::take(&mut model.sheets[index]));
+            }
+        }
         if let [Op::SetCell { at, cell, .. }] = ops
             && at.row < MAX_ROWS
             && at.col < MAX_COLS
@@ -2551,6 +2574,12 @@ impl WorkbookAuthority {
             .store(projection_valid, Ordering::Relaxed);
         // `apply_ops` already encoded the same diff: the staged doc is the
         // hydrated baseline, so its pre-op state vector is this replica's own.
+        let mut hidden_sizes = BTreeMap::new();
+        let replica = replica.map(|(model, keys)| ReplicaOverlay {
+            model,
+            keys,
+            hidden_sizes: &mut hidden_sizes,
+        });
         let update = staged
             .apply_ops_with_merge_edits(ops, origin, styles, true, collaborative, replica)?
             .unwrap_or_else(|| Update::EMPTY_V1.to_vec());
@@ -2561,6 +2590,7 @@ impl WorkbookAuthority {
             .map_err(AuthorityError::InvalidState)?;
         Ok(StagedLocalUpdate {
             model,
+            hidden_sizes,
             state_bytes: state.len(),
             state_vector_entries,
             structure,

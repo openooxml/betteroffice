@@ -70,17 +70,29 @@ fn row_height(row: u32, height: f64) -> Op {
     }
 }
 
+fn col_visibility(hidden: bool) -> Op {
+    Op::SetColVisibility {
+        sheet: DATA,
+        col: 1,
+        hidden,
+    }
+}
+
+fn col_width(width: f64) -> Op {
+    Op::SetColWidth {
+        sheet: DATA,
+        col: 1,
+        width: Some(width),
+    }
+}
+
 fn unhide(workbook: &mut Workbook) {
     apply(
         workbook,
         vec![
             row_visibility(0, false),
             row_visibility(1, false),
-            Op::SetColVisibility {
-                sheet: DATA,
-                col: 1,
-                hidden: false,
-            },
+            col_visibility(false),
         ],
     );
 }
@@ -189,6 +201,27 @@ fn unhide_replicates_authored_sizes_and_undo_restores_hidden_state() {
 }
 
 #[test]
+fn undo_of_unhide_and_resize_restores_pre_step_hidden_sizes() {
+    let source = source();
+    let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
+    apply(
+        &mut workbook,
+        vec![row_visibility(0, false), row_height(0, 40.0)],
+    );
+    assert_eq!(
+        (sizes(&workbook).0, hidden_sizes(&workbook).0),
+        (Some(40.0), None),
+    );
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_saved_hidden(&workbook);
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_eq!(
+        (sizes(&workbook).0, hidden_sizes(&workbook).0),
+        (Some(40.0), None),
+    );
+}
+
+#[test]
 fn replicas_without_local_sizes_receive_authored_unhides_and_send_default_unhides() {
     let source = source();
     for new_peer_unhides in [true, false] {
@@ -214,35 +247,104 @@ fn replicas_without_local_sizes_receive_authored_unhides_and_send_default_unhide
 }
 
 #[test]
-fn concurrent_unhide_converges_with_resize_or_rehide() {
+fn released_unhide_then_undo_restores_remembered_hidden_sizes() {
     let source = source();
-    for rehide in [false, true] {
-        let mut left = Workbook::open_collaborative(&source, 7).unwrap();
-        let mut right = Workbook::open_collaborative(&source, 8).unwrap();
-        apply(&mut left, vec![row_visibility(0, false)]);
-        let unhidden = sizes(&left).0;
-        let other_intent = if rehide {
-            apply(&mut right, vec![row_visibility(0, false)]);
-            apply(&mut right, vec![row_visibility(0, true)]);
-            0.0
-        } else {
-            apply(&mut right, vec![row_height(0, 40.0)]);
-            40.0
-        };
-        let to_left = diff(&right, &left);
-        let to_right = diff(&left, &right);
-        receive(&mut left, &to_left);
-        receive(&mut right, &to_right);
-        let row_size = sizes(&left).0;
-        assert_eq!(
-            (
-                left.model(),
-                unhidden,
-                row_size == Some(25.0) || row_size == Some(other_intent),
-                left.sheet(DATA).unwrap().row_hidden(0),
-            ),
-            (right.model(), Some(25.0), true, row_size == Some(0.0)),
-        );
+    let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut released = Workbook::from_model_collaborative(stripped_model(&source), 8).unwrap();
+    unhide(&mut released);
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_eq!((sizes(&current), hidden_sizes(&current)), (DEFAULT, DEFAULT));
+    released.undo(CalculationOptions::default()).unwrap();
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_saved_hidden(&current);
+}
+
+#[test]
+fn visible_resize_supersedes_a_remembered_hidden_size() {
+    let source = source();
+    let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut released = Workbook::from_model_collaborative(stripped_model(&source), 8).unwrap();
+    for ops in [
+        vec![row_visibility(0, false), col_visibility(false)],
+        vec![row_height(0, 40.0), col_width(28.0)],
+        vec![
+            Op::SetRowHeight {
+                sheet: DATA,
+                row: 0,
+                height: None,
+            },
+            Op::SetColWidth {
+                sheet: DATA,
+                col: 1,
+                width: None,
+            },
+        ],
+        vec![row_visibility(0, true), col_visibility(true)],
+    ] {
+        apply(&mut released, ops);
+        let update = diff(&released, &current);
+        receive(&mut current, &update);
+    }
+    assert_eq!(hidden_sizes(&current), (Some(40.0), Some(30.0), Some(28.0)));
+}
+
+#[test]
+fn concurrent_unhide_converges_with_resize_or_rehide_on_both_axes() {
+    let source = source();
+    let reveal = || vec![row_visibility(0, false), col_visibility(false)];
+    for (left_id, right_id) in [(7, 8), (8, 7)] {
+        for rehide in [false, true] {
+            for left_first in [false, true] {
+                let mut left = Workbook::open_collaborative(&source, left_id).unwrap();
+                let mut right = Workbook::open_collaborative(&source, right_id).unwrap();
+                let other = |workbook: &mut Workbook| {
+                    if rehide {
+                        apply(workbook, reveal());
+                        apply(workbook, vec![row_visibility(0, true), col_visibility(true)]);
+                    } else {
+                        apply(workbook, vec![row_height(0, 40.0), col_width(28.0)]);
+                    }
+                };
+                if left_first {
+                    apply(&mut left, reveal());
+                    other(&mut right);
+                } else {
+                    other(&mut right);
+                    apply(&mut left, reveal());
+                }
+                assert_eq!(sizes(&left), (Some(25.0), Some(0.0), Some(18.0)));
+                let to_left = diff(&right, &left);
+                let to_right = diff(&left, &right);
+                if left_first {
+                    receive(&mut left, &to_left);
+                    receive(&mut right, &to_right);
+                } else {
+                    receive(&mut right, &to_right);
+                    receive(&mut left, &to_left);
+                }
+                let left = left.sheet(DATA).unwrap();
+                let right = right.sheet(DATA).unwrap();
+                assert_eq!(left.row_heights, right.row_heights);
+                assert_eq!(left.col_widths, right.col_widths);
+                let visible = |sheet: &Sheet| {
+                    (
+                        (!sheet.row_hidden(0)).then(|| sheet.row_heights[&0]),
+                        (!sheet.col_hidden(1)).then(|| sheet.col_widths[&1]),
+                    )
+                };
+                let (row, col) = visible(left);
+                assert_eq!((row, col), visible(right));
+                if rehide {
+                    assert!([None, Some(25.0)].contains(&row));
+                    assert!([None, Some(18.0)].contains(&col));
+                } else {
+                    assert!([Some(25.0), Some(40.0)].contains(&row));
+                    assert!([Some(18.0), Some(28.0)].contains(&col));
+                }
+            }
+        }
     }
 }
 
@@ -278,9 +380,10 @@ fn saving_rewrites_a_worksheet_when_only_its_hidden_sizes_differ() {
 }
 
 #[test]
-fn hidden_size_only_batch_creates_no_shared_update_or_history() {
+fn hidden_size_only_batch_commits_without_a_shared_update_and_keeps_the_resize() {
     let source = source();
     let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
+    let version = workbook.version();
     let before = workbook.encode_state_as_update_v1();
     let result = workbook
         .apply_ops(
@@ -295,8 +398,12 @@ fn hidden_size_only_batch_creates_no_shared_update_or_history() {
             workbook.encode_state_as_update_v1(),
             hidden_sizes(&workbook),
         ),
-        (false, false, before, AUTHORED),
+        (true, false, before, (Some(40.0), Some(30.0), Some(18.0))),
     );
+    assert_ne!(workbook.version(), version);
+    assert_eq!(hidden_sizes(&reopen(&workbook)).0, Some(40.0));
+    apply(&mut workbook, vec![row_visibility(0, false)]);
+    assert_eq!(sizes(&workbook).0, Some(40.0));
 }
 
 #[test]
@@ -331,4 +438,20 @@ fn collaborative_checkpoint_excludes_local_sizes_and_recovers_them_from_source()
         (stripped.recovery_checkpoint(1, None).unwrap(), AUTHORED),
     );
     assert_saved_hidden(&restored);
+}
+
+#[test]
+fn collaborative_checkpoint_recovers_a_hidden_size_from_the_visible_source_row() {
+    let mut source = Workbook::open(&source()).unwrap();
+    apply(&mut source, vec![row_height(2, 22.0)]);
+    let source = source.save().unwrap();
+    let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
+    apply(&mut workbook, vec![row_visibility(2, true)]);
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
+    for book in [&restored, &reopen(&restored)] {
+        let sheet = book.sheet(DATA).unwrap();
+        assert!(sheet.row_hidden(2));
+        assert_eq!(sheet.hidden_row_heights.get(&2), Some(&22.0));
+    }
 }

@@ -4,6 +4,7 @@
 use xlsx_model::Workbook as WorkbookModel;
 use xlsx_ops::Op;
 
+use super::hidden_sizes::HiddenSizeHistory;
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
     retain_array_formulas, retain_formula_caches, validate_collaboration_size,
@@ -107,11 +108,6 @@ impl Workbook {
                 let mut model = std::mem::take(&mut authority.model);
                 retain_formula_caches(&self.model, &mut model);
                 retain_array_formulas(&self.model, &mut model);
-                self.derive_replica_hidden_sizes(
-                    &mut model,
-                    &authority.structure,
-                    Some(&staged.model),
-                );
                 model
             }
             WorkbookMode::Standalone => staged.model,
@@ -149,9 +145,9 @@ impl Workbook {
     ) -> Result<Option<Vec<u8>>> {
         let PreparedCommit {
             ops,
-            model,
+            mut model,
             inverse,
-            authority,
+            mut authority,
             history,
         } = prepared;
         let collaborative = self.is_collaborative();
@@ -162,6 +158,11 @@ impl Workbook {
             _ => None,
         };
         let recorded = history == CommitHistory::Separate;
+        let undo_depth = (collaborative && recorded).then(|| self.built_authority().undo_depth());
+        let hidden_sizes = match &mut authority {
+            PreparedAuthority::Staged(authority) => std::mem::take(&mut authority.hidden_sizes),
+            _ => Default::default(),
+        };
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
         let rebased = self.rebased_proposals(&ops);
         let proposals_before = rebased.as_ref().map(|_| self.proposals.list().to_vec());
@@ -208,6 +209,24 @@ impl Workbook {
         };
         if self.authority.built.get().is_some() {
             self.authority.deferred = None;
+        }
+        if let Some(structure) = &new_structure {
+            let depth = self.built_authority().undo_depth();
+            let record = undo_depth.is_some_and(|before| before < depth);
+            let step = self.derive_replica_hidden_sizes(
+                &mut model,
+                structure,
+                hidden_sizes,
+                if record {
+                    HiddenSizeHistory::Record
+                } else {
+                    HiddenSizeHistory::None
+                },
+            );
+            self.truncate_hidden_size_history();
+            if record {
+                self.hidden_sizes.record(depth, step);
+            }
         }
         self.install_model_with_ops(model, &ops, cell_inputs && !collaborative)?;
         self.adopt_rebased_proposals(rebased);

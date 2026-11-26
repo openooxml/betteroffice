@@ -755,7 +755,7 @@ fn serialize_package<'p>(
                                 axes_changed,
                                 Some(&defined_names),
                                 &style_match,
-                                check_hidden_sizes,
+                                check_hidden_sizes && axes.is_some(),
                             )
                         })
                     })

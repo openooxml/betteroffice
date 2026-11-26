@@ -13414,7 +13414,7 @@ fn collaborative_hidden_sizes_never_write_shared_keys() {
     let mut expected = Workbook::from_model_collaborative(stripped, 887).unwrap();
     let mut workbook = Workbook::open_collaborative(&source, 887).unwrap();
     assert_no_shared_hidden_sizes(&workbook);
-    for ops in [
+    for (index, ops) in [
         vec![
             Op::SetColWidth {
                 sheet: SheetId(0),
@@ -13451,9 +13451,28 @@ fn collaborative_hidden_sizes_never_write_shared_keys() {
                 hidden: false,
             },
         ],
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected_ops = if index == 2 {
+            vec![
+                Op::SetColWidth {
+                    sheet: SheetId(0),
+                    col: 0,
+                    width: Some(25.0),
+                },
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(35.0),
+                },
+            ]
+        } else {
+            ops.clone()
+        };
         expected
-            .apply_ops(ops.clone(), CalculationOptions::default())
+            .apply_ops(expected_ops, CalculationOptions::default())
             .unwrap();
         workbook
             .apply_ops(ops, CalculationOptions::default())

@@ -427,12 +427,13 @@ impl RecoveryCalculation {
             },
         };
         let mut applied = state.apply(projection)?;
-        let matches = if collaborative {
-            equal_ignoring_hidden_sizes(model, &mut applied)
-        } else {
-            applied == *model
-        };
-        if !matches {
+        if collaborative {
+            for (sheet, applied) in model.sheets.iter().zip(&mut applied.sheets) {
+                applied.hidden_row_heights.clone_from(&sheet.hidden_row_heights);
+                applied.hidden_col_widths.clone_from(&sheet.hidden_col_widths);
+            }
+        }
+        if applied != *model {
             return Err(invalid(format!(
                 "Recovery projection cannot be reconstructed: {}",
                 first_difference(model, &applied, collaborative)
@@ -815,12 +816,9 @@ impl Workbook {
         }
         let structure = if checkpoint.collaborative {
             let structure = authority.structure().map_err(authority_error)?;
-            derive_hidden_sizes(
-                &mut model,
-                &structure.sheet_keys,
-                None,
-                source_model.map(HiddenSizeSource::Base),
-            );
+            if let Some(source_model) = source_model {
+                derive_source_hidden_sizes(&mut model, &structure.sheet_keys, source_model);
+            }
             Some(structure)
         } else {
             None

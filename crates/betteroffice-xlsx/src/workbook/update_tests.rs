@@ -8,6 +8,118 @@ fn model() -> WorkbookModel {
     model
 }
 
+fn hidden_sizes_source() -> Vec<u8> {
+    let mut model = model();
+    let sheet = &mut model.sheets[0];
+    sheet.row_heights.insert(0, 0.0);
+    sheet.hidden_row_heights.insert(0, 25.0);
+    sheet.col_widths.insert(0, 0.0);
+    sheet.hidden_col_widths.insert(0, 18.0);
+    ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+#[test]
+fn hidden_size_only_commit_matches_released_checkpoint_bytes() {
+    let source = hidden_sizes_source();
+    let options = CalculationOptions::default();
+    let sheet = SheetId(0);
+    let visibility = |hidden| Op::SetRowVisibility {
+        sheet,
+        row: 0,
+        hidden,
+    };
+    let resize = |height| Op::SetRowHeight {
+        sheet,
+        row: 0,
+        height: Some(height),
+    };
+    for (op, applied, height) in [
+        (visibility(false), false, 25.0),
+        (resize(40.0), true, 40.0),
+        (resize(25.0), true, 25.0),
+    ] {
+        let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+        let mut released = Workbook::open_collaborative(&source, 7).unwrap();
+        HiddenSizes::take(&mut released.model.sheets[0]);
+        released.adopt_peer_version(current.version().as_str()).unwrap();
+        let ops = vec![op, visibility(true)];
+        for book in [&mut current, &mut released] {
+            assert_eq!(book.apply_ops(ops.clone(), options).unwrap().applied, applied);
+        }
+        assert_eq!(current.history_state(), released.history_state());
+        assert_eq!(
+            current.model.sheets[0].hidden_row_heights.get(&0),
+            Some(&height),
+        );
+        assert_eq!(
+            current.recovery_checkpoint(1, None).unwrap(),
+            released.recovery_checkpoint(1, None).unwrap(),
+        );
+    }
+}
+
+#[test]
+fn authored_and_default_unhides_use_the_existing_dimension_update_bytes() {
+    let source = hidden_sizes_source();
+    let sheet = SheetId(0);
+    let unhide = [
+        Op::SetRowVisibility {
+            sheet,
+            row: 0,
+            hidden: false,
+        },
+        Op::SetColVisibility {
+            sheet,
+            col: 0,
+            hidden: false,
+        },
+    ];
+    let resize = [
+        Op::SetRowHeight {
+            sheet,
+            row: 0,
+            height: Some(25.0),
+        },
+        Op::SetColWidth {
+            sheet,
+            col: 0,
+            width: Some(18.0),
+        },
+    ];
+    let update = |book: &mut Workbook, op: Op| {
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&updates);
+        let _subscription = book
+            .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+            .unwrap();
+        book.apply_ops(vec![op], CalculationOptions::default())
+            .unwrap();
+        let mut updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        updates.pop().unwrap()
+    };
+    for (unhide, resize) in unhide.into_iter().zip(resize) {
+        let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+        let mut explicit = Workbook::open_collaborative(&source, 7).unwrap();
+        let mut cleared = Workbook::open_collaborative(&source, 7).unwrap();
+        HiddenSizes::take(&mut explicit.model.sheets[0]);
+        HiddenSizes::take(&mut cleared.model.sheets[0]);
+        let mut released = Workbook::from_model_collaborative(cleared.model.clone(), 7).unwrap();
+        assert_eq!(
+            current.encode_state_as_update_v1(),
+            released.encode_state_as_update_v1(),
+        );
+        assert_eq!(
+            update(&mut current, unhide.clone()),
+            update(&mut explicit, resize),
+        );
+        assert_eq!(
+            update(&mut cleared, unhide.clone()),
+            update(&mut released, unhide),
+        );
+    }
+}
+
 type HistoryPoint = (WorkbookModel, Vec<u8>, Vec<u8>, usize, usize);
 
 fn sync(left: &mut Workbook, right: &mut Workbook) {
