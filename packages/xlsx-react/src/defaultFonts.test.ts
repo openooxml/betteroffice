@@ -73,8 +73,10 @@ function provider(bytes: (face: BundledFontFace) => Promise<ArrayBuffer> = async
   const create = mock((_options?: unknown, runtime?: { decoder?: FontDecoder }) => {
     const load = (resolved: BundledFontFace | undefined, fetch: typeof bytes) => {
       return resolved ? async () => {
-        const decoded = await runtime!.decoder!(new Uint8Array([1]), { codec: 'zstd' });
-        expect(new Uint8Array(decoded.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+        if (runtime?.decoder) {
+          const decoded = await runtime.decoder(new Uint8Array([1]), { codec: 'zstd' });
+          expect(new Uint8Array(decoded.font)).toEqual(new Uint8Array([0, 1, 0, 0]));
+        }
         return fetch(resolved);
       } : undefined;
     };
@@ -309,7 +311,7 @@ test('an echo paint scans repeated text once even when it is too long to cache a
   } finally { painter.dispose(); detect.mockRestore(); }
 });
 
-test('an editor PNG paints Arabic in Calibri with the same Noto Sans Arabic file as the canvas', async () => {
+async function singleCellWorkbook() {
   await initWasm();
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
@@ -317,7 +319,37 @@ test('an editor PNG paints Arabic in Calibri with the same Noto Sans Arabic file
   zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>');
   zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
   zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>');
-  const handle = openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
+  return openWorkbook(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+test.each([
+  ['Latin', 'Résumé', 'Calibri', 4],
+  ['CJK', '日本語', 'MS Gothic', 12],
+] as const)('an editor PNG keeps the editor-provided face for a %s-only sheet', async (_script, text, family, byteLength) => {
+  const handle = await singleCellWorkbook();
+  const { remove } = browser();
+  const { painted } = canvasText();
+  const { create } = provider();
+  const target = { sheet: 0, range: 'A1' };
+  try {
+    handle.editCell(0, 0, 0, text);
+    handle.patchRangeStyle(0, 'A1', { fontFamily: family });
+    expect(handle.renderPngFonts(target)).toEqual([{ family, bold: false, italic: false }]);
+
+    const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
+      flushPendingInput: async () => {} } as unknown as XlsxEditorApi, false, () => {});
+    await expect(api.renderPng(target)).resolves.toEqual(new TextEncoder().encode('png'));
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledWith(undefined, { strict: true });
+    expect(remove).toHaveBeenCalledTimes(1);
+    const [face] = remove.mock.calls[0]!;
+    expect(face.bytes.byteLength).toBe(byteLength);
+    expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${face.family}"`) });
+  } finally { handle.dispose(); }
+}, 30_000);
+
+test('an editor PNG paints Arabic in Calibri with the same Noto Sans Arabic file as the canvas', async () => {
+  const handle = await singleCellWorkbook();
   const { added, remove } = browser();
   const { context, painted } = canvasText();
   const bytes = async (face: BundledFontFace) => {
@@ -1054,19 +1086,25 @@ test('repaints leave an uninstalled editor face settled until the CDN changes', 
   }
 });
 
-test('a blocked explicit CDN backs off script face requests across repaints', async () => {
+test.each([
+  ['a blocked explicit CDN backs off script face requests across repaints', 'http'],
+  ['an explicit CDN network failure backs off script face requests across repaints', 'network'],
+] as const)('%s', async (_name, failure) => {
   browser();
   const previous = getFontCdnConfiguration();
   const runtime = fontRuntimeWithoutPacks();
   const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
-  const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
+  const fetch = spyOnFontFetch(async () => {
+    if (failure === 'network') throw new TypeError('Offline');
+    return new Response(null, { status: 403 });
+  });
   const now = Date.now();
   const clock = spyOn(Date, 'now').mockReturnValue(now);
   const repaint = mock(() => {});
   const painter = createDefaultFontPainter(decoder(), repaint, { remoteFonts: 'off' });
   const frame = cells(cellText('ภาษาไทย', { fontFamily: 'Aptos' }));
   try {
-    configureFontCdn({ baseUrl: 'https://blocked-editor.example/' });
+    configureFontCdn({ baseUrl: `https://${failure}-blocked-editor.example/` });
     await painter.load(frame);
     const initialRequests = fetch.mock.calls.length;
     expect(initialRequests).toBeGreaterThan(0);
@@ -1082,14 +1120,58 @@ test('a blocked explicit CDN backs off script face requests across repaints', as
     await painter.load(frame);
     expect(fetch).toHaveBeenCalledTimes(initialRequests * 2);
 
-    configureFontCdn({ baseUrl: 'https://replacement-editor.example/' });
+    const baseUrl = `https://${failure}-replacement-editor.example/`;
+    configureFontCdn({ baseUrl });
     await painter.load(frame);
-    expect(fetch.mock.calls.some(([url]) => String(url).startsWith('https://replacement-editor.example/'))).toBe(true);
+    expect(fetch.mock.calls.some(([url]) => String(url).startsWith(baseUrl))).toBe(true);
   } finally {
     painter.dispose();
     clock.mockRestore();
     fetch.mockRestore();
     manager.mockRestore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('disposing a worker during script font decode leaves its face available to another editor', async () => {
+  const { added } = browser();
+  provider();
+  const previous = getFontCdnConfiguration();
+  const pair = createInProcessPair();
+  const decoding = deferred<void>();
+  const decoded = deferred<Awaited<ReturnType<FontDecoder>>>();
+  createSessionHost<Pick<WorkbookSessionMethods, 'open' | 'decodeFontFace'>, {}, undefined>(pair.host, {
+    context: undefined,
+    policies: { open: { lane: 'interactive' }, decodeFontFace: { lane: 'interactive' } },
+    handlers: {
+      open: () => ({ format: 'xlsx', stage: 'ready', version: 0, dirty: false, activeSheet: 0, sheets: [] }),
+      decodeFontFace() { decoding.resolve(); return decoded.promise; },
+    },
+  });
+  const session = await createWorkbookSession(new Uint8Array([80, 75]), {}, pair.client);
+  const first = createDefaultFontPainter(session.call.decodeFontFace, () => {}, { remoteFonts: 'off' });
+  const liveDecoder = decoder();
+  const repaint = mock(() => {});
+  const second = createDefaultFontPainter(liveDecoder, repaint, { remoteFonts: 'off' });
+  const frame = cells(cellText('ภาษาไทย', { fontFamily: 'Aptos' }));
+  try {
+    configureFontCdn({ baseUrl: 'https://disposed-editor.example/' });
+    const loading = first.load(frame);
+    await withinTestBudget(decoding.promise, 'the worker font decode');
+    first.dispose();
+    await session.dispose();
+    await loading;
+    expect(added).toHaveLength(0);
+
+    await second.load(frame);
+    expect(liveDecoder).toHaveBeenCalledTimes(1);
+    expect(added.map(({ family }) => family)).toEqual(['bo-xlsx-editor-Noto Sans Thai']);
+    expect(repaint).toHaveBeenCalledTimes(1);
+  } finally {
+    decoded.resolve({ font: new ArrayBuffer(0) });
+    first.dispose();
+    second.dispose();
+    await session.dispose();
     setFontCdnConfiguration(previous);
   }
 });
