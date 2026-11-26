@@ -1938,6 +1938,21 @@ impl StyleResolver {
         self.styles.get(style_id)
     }
 
+    fn style_chain_contains(&self, style_id: Option<&str>, ancestor_id: &str) -> bool {
+        let mut current = style_id;
+        let mut seen = HashSet::new();
+        while let Some(id) = current {
+            if id == ancestor_id {
+                return true;
+            }
+            if !seen.insert(id) {
+                break;
+            }
+            current = string(field(self.style(id), "basedOn"));
+        }
+        false
+    }
+
     /// The paragraph style a break at the end of a `style_id` paragraph starts (`w:next`): `None`
     /// when it names the same style or no known paragraph style. `None` means the default style.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -2943,14 +2958,13 @@ fn cached_result_text(
     styles: Option<&StyleResolver>,
     projected: bool,
     show_hidden_text: bool,
-) -> (String, bool) {
+) -> (String, Option<String>) {
     let owner_runs = runs
         .iter()
         .filter(|run| string(field(Some(run), "type")) == Some("run"));
     let cached_text: String = owner_runs.clone().flat_map(cached_run_texts).collect();
-    let has_cached_result = !cached_text.is_empty();
     let Some(inline) = structured_field_result(field_value) else {
-        return (cached_text, has_cached_result);
+        return (cached_text, None);
     };
     let default_character = styles.and_then(|styles| styles.default_style("character"));
     let default_character_id = string(field(default_character, "styleId"));
@@ -2986,7 +3000,11 @@ fn cached_result_text(
                     if !show_hidden_text {
                         let direct = field(Some(node), "formatting");
                         let style_id = string(field(direct, "styleId"));
-                        let inherited = if style_id.is_some() && style_id == default_character_id {
+                        let inherited = if let (Some(styles), Some(default_id)) =
+                            (styles, default_character_id)
+                            && boolean(field(styles.run_style_own(style_id), "hidden")).is_some()
+                            && styles.style_chain_contains(style_id, default_id)
+                        {
                             style_formatting
                         } else {
                             default_run.as_ref().or(style_formatting)
@@ -3062,29 +3080,43 @@ fn cached_result_text(
                 .map(|child| (child, child_scope)),
         );
     }
-    let display_text = if has_nested_result {
+    let nested_text = has_nested_result.then(|| {
         fragments.extend(owner_runs.flat_map(cached_run_texts));
         fragments.into_iter().collect()
-    } else {
-        cached_text
-    };
-    (display_text, has_cached_result)
+    });
+    (cached_text, nested_text)
 }
 
-pub(crate) fn field_display_text(
+pub(crate) fn nested_field_display_text(
     field_value: &Value,
-    show_hidden_text: bool,
     projected_children: bool,
-) -> String {
+) -> Option<String> {
     cached_result_text(
         field_value,
         field_result_runs(field_value, projected_children),
         None,
         None,
         projected_children,
-        show_hidden_text,
+        true,
     )
-    .0
+    .1
+}
+
+#[cfg(test)]
+fn field_display_text(
+    field_value: &Value,
+    show_hidden_text: bool,
+    projected_children: bool,
+) -> String {
+    let (cached_text, nested_text) = cached_result_text(
+        field_value,
+        field_result_runs(field_value, projected_children),
+        None,
+        None,
+        projected_children,
+        show_hidden_text,
+    );
+    nested_text.unwrap_or(cached_text)
 }
 
 fn field_payload(
@@ -3105,7 +3137,7 @@ fn field_payload_with_projection(
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
     let runs = field_result_runs(field_value, projected);
-    let (display_text, has_cached_result) = cached_result_text(
+    let (cached_text, nested_text) = cached_result_text(
         field_value,
         runs,
         style_formatting,
@@ -3113,6 +3145,8 @@ fn field_payload_with_projection(
         projected,
         false,
     );
+    let has_cached_result = !cached_text.is_empty();
+    let display_text = nested_text.unwrap_or(cached_text);
     let formatting = field_formatting_from_runs(field_value, runs);
     let merged = merge_text_formatting(style_formatting, formatting);
     (

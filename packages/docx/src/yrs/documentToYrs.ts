@@ -638,6 +638,20 @@ function cachedRunTexts(run: Run): string[] {
   return run.content.flatMap((content) => content?.type === 'text' ? [content.text] : []);
 }
 
+function styleChainContains(
+  styleResolver: StyleResolver,
+  styleId: string | undefined,
+  ancestorId: string
+): boolean {
+  const seen = new Set<string>();
+  while (styleId && !seen.has(styleId)) {
+    if (styleId === ancestorId) return true;
+    seen.add(styleId);
+    styleId = styleResolver.getStyle(styleId)?.basedOn;
+  }
+  return false;
+}
+
 type CachedResultScope = 'owner' | 'ownerHyperlink' | 'ownerSimpleField' | 'container' | 'nested';
 type CachedOwnerRun = { texts: string[]; text: string };
 
@@ -685,8 +699,12 @@ function cachedResultFragments(
           fragments.push(ownerRun.text);
         } else if (scope === 'nested' || scope === 'ownerSimpleField') {
           const styleId = node.formatting?.styleId;
-          const inherited = styleId && styleId === defaultCharacter?.styleId ? styleFormatting : defaultRun;
           const style = styleResolver?.getRunStyleOwnProperties(styleId);
+          const inherited = styleResolver && defaultCharacter
+            && typeof style?.hidden === 'boolean'
+            && styleChainContains(styleResolver, styleId, defaultCharacter.styleId)
+            ? styleFormatting
+            : defaultRun;
           const effective = mergeTextFormatting(
             mergeStyleRunFormatting(inherited, style),
             node.formatting

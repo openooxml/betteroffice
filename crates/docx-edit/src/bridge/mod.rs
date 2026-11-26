@@ -2030,11 +2030,7 @@ fn revealed_field_text(
         return None;
     }
     let value: Value = serde_json::from_str(&source()?).ok()?;
-    Some(crate::seed::field_display_text(
-        &value,
-        true,
-        projected_children,
-    ))
+    crate::seed::nested_field_display_text(&value, projected_children)
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
