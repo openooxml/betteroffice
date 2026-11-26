@@ -145,6 +145,14 @@ mod tests {
     }
 
     #[test]
+    fn control_character_rewrites_preserve_external_reference_spans() {
+        assert_eq!(
+            stored("CONCAT('[1]Data'!A1,[2]!#REF!,\"a\u{1}b\")"),
+            "CONCAT('[1]Data'!A1,[2]!#REF!,(\"a\"&CHAR(1)&\"b\"))"
+        );
+    }
+
+    #[test]
     fn characters_with_no_storable_form_are_refused() {
         assert!(
             refusal("\"a\u{0}\"")

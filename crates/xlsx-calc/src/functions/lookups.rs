@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
+use crate::deps::{is_indexed_workbook_reference, names_other_workbook};
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::graph::formula_source;
 use crate::parser::Expr;
@@ -411,8 +412,15 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     if !a1 {
         let (sheet, reference) = match text.rsplit_once('!') {
             Some((prefix, reference)) => {
-                let qualifier =
-                    crate::parse_formula(&format!("{prefix}!A1")).map_err(|_| ErrorValue::Ref)?;
+                let source = format!("{prefix}!A1");
+                let qualifier = crate::parse_formula(&source).map_err(|_| {
+                    if r1c1_rect(reference, ctx.cell).is_some()
+                        && is_indexed_workbook_reference(&source)
+                    {
+                        ctx.record_other_workbook();
+                    }
+                    ErrorValue::Ref
+                })?;
                 let Expr::Ref {
                     sheet: Some(sheet), ..
                 } = qualifier
@@ -427,7 +435,9 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
     }
     let expr = crate::parse_formula(&text).map_err(|_| {
-        if text.contains('[') {
+        if is_indexed_workbook_reference(&text) {
+            ctx.record_other_workbook();
+        } else if text.contains('[') {
             ctx.record_unsupported_function();
         }
         ErrorValue::Ref
@@ -438,10 +448,12 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     ) {
         if let Expr::Name {
             scope: Some(scope), ..
-        } = &expr
-            && scope.contains('[')
-        {
-            ctx.record_unsupported_function();
+        } = &expr {
+            if names_other_workbook(scope) {
+                ctx.record_other_workbook();
+            } else if scope.contains('[') {
+                ctx.record_unsupported_function();
+            }
         }
         return Err(ErrorValue::Ref);
     }

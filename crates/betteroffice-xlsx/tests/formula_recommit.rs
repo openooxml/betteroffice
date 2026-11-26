@@ -168,6 +168,21 @@ fn external_references_recommit_unchanged_through_batches() {
     assert_eq!(workbook.save().unwrap(), source);
 }
 
+#[test]
+fn batches_recommit_a_deleted_external_name_and_enter_it_without_a_value() {
+    let source = package(r#"<row r="1"><c r="A1"><f>[1]!#REF!+1</f><v>9</v></c></row>"#, "");
+    let mut workbook = Workbook::open(&source).unwrap();
+    let version = workbook.version();
+    apply(&mut workbook, json!([set_formula("A1", "[1]!#REF!+1")]));
+    apply(&mut workbook, json!([set_input("A1", "=[1]!#REF!+1")]));
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.save().unwrap(), source);
+
+    apply(&mut workbook, json!([set_input("B1", "=[1]!#REF!")]));
+    workbook.recalculate_all(options());
+    assert_eq!(stored(&workbook, "B1"), (Some("[1]!#REF!".into()), CellValue::Empty));
+}
+
 const QUOTED: &str = concat!(
     r#"<row r="1"><c r="A1"><f>[1]Sheet1!A1</f><v>5</v></c>"#,
     r#"<c r="B1"><f>'[1]Other sheet'!C3</f><v>7</v></c>"#,

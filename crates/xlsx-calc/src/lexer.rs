@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use xlsx_model::sheet_qualifier::parse_sheet_token;
+use xlsx_model::sheet_qualifier::{is_r1c1_reference, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
 use crate::reference::{MAX_TABLE_SPEC_ITEMS, r1c1_rect};
@@ -136,6 +136,7 @@ pub enum TokKind {
     ThreeDRef {
         first: String,
         last: String,
+        target: Box<TokKind>,
     },
     ExternalRef(Box<TokKind>),
     Intersection,
@@ -279,21 +280,13 @@ pub fn rewrite_table_columns<'a>(
         columns,
     } in table_refs
     {
-        let index = indices.find(|&index| tokens[index].start == start).unwrap();
+        let Some(index) = indices.find(|&index| tokens[index].start == start) else {
+            continue;
+        };
         let token = &tokens[index];
         let TokKind::TableRef { sheet, table, spec } = &token.kind else {
             continue;
         };
-        // Preserve bare selectors after an unresolved external sheet-scoped name.
-        if table.is_empty()
-            && spec.bands.is_empty()
-            && index >= 2
-            && tokens[index - 1].kind == TokKind::Intersection
-            && matches!(&tokens[index - 2].kind, TokKind::ExternalRef(reference)
-                if matches!(reference.as_ref(), TokKind::Name { scope: Some(_), .. }))
-        {
-            continue;
-        }
         for (column, span) in columns {
             if let Some(new) = caption(sheet.as_deref(), table, &column) {
                 let prefix = &input[selector_start + 1..span.start];
@@ -376,6 +369,7 @@ pub(crate) fn is_unquoted_sheet(word: &str) -> bool {
         && !word.eq_ignore_ascii_case("TRUE")
         && !word.eq_ignore_ascii_case("FALSE")
         && CellRef::parse_a1(&word.to_ascii_uppercase()).is_err()
+        && !is_r1c1_reference(word)
         && r1c1_rect(word, Some(CellRef::new(0, 0))).is_none()
 }
 
@@ -483,7 +477,7 @@ impl Lexer<'_> {
                     ));
                 }
             };
-            if whitespace < start
+            if self.input[whitespace..start].contains(' ')
                 && out
                     .last()
                     .is_some_and(|token: &Token| is_intersection(&token.kind, &kind))
@@ -633,7 +627,10 @@ impl Lexer<'_> {
             return Ok(kind);
         }
         let kind = self.lex_table_ref(None, String::new(), start)?;
-        if self.peek().is_some_and(is_word_char) {
+        if self
+            .peek()
+            .is_some_and(|ch| matches!(ch, '[' | '\'') || is_word_char(ch))
+        {
             return Err(ParseError::new(
                 self.pos,
                 "expected an operator after the selector",
@@ -651,12 +648,22 @@ impl Lexer<'_> {
         let Some(end) = book.find(['[', ']', '"', '\'']) else {
             return Ok(None);
         };
-        if end == 0 || !book[end..].starts_with(']') {
+        if end == 0
+            || !book[end..].starts_with(']')
+            || book[..end].contains(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '@' | ':' | '+' | '*' | '/' | '\\' | '<' | '>' | '=')
+            })
+        {
             return Ok(None);
         }
         let prefix_end = bracket + end + 2;
         self.pos = prefix_end;
-        let reference = if self.consume_bang() {
+        let reference = if self.peek() == Some('!') && self.consume_bang() {
+            if self.input[self.pos..].starts_with("#REF!") {
+                let error = self.lex_error_literal()?;
+                return Ok(Some(TokKind::ExternalRef(Box::new(error))));
+            }
+            let name_start = self.pos;
             let name = self.read_word();
             if name.is_empty() {
                 return Err(ParseError::new(
@@ -667,7 +674,9 @@ impl Lexer<'_> {
             let index = &book[..end];
             if bracket == start
                 && index.bytes().all(|byte| byte.is_ascii_digit())
-                && self.after_ws().starts_with('(')
+                && &input[prefix_end..name_start] == "!"
+                && !name.contains(['$', '\\'])
+                && self.peek() == Some('(')
             {
                 let prefix = &input[start..prefix_end];
                 return Ok(Some(TokKind::Ident(format!("{prefix}!{name}"))));
@@ -678,12 +687,12 @@ impl Lexer<'_> {
                 TokKind::Name { scope: None, name }
             }
         } else {
-            let quoted = self.peek() == Some('\'');
-            let Some(sheet) = self.read_sheet_endpoint() else {
+            let sheet = self.read_word();
+            if sheet.is_empty() {
                 self.pos = bracket;
                 return Ok(None);
-            };
-            let Some(kind) = self.try_sheet_reference(&sheet, quoted, start)? else {
+            }
+            let Some(kind) = self.try_sheet_reference(&sheet, false, start)? else {
                 self.pos = bracket;
                 return Ok(None);
             };
@@ -729,6 +738,9 @@ impl Lexer<'_> {
             if quoted
                 && let Some((first, last)) = workbook_scope(first).unwrap_or(first).split_once(':')
             {
+                if first.is_empty() || last.is_empty() || last.contains(':') {
+                    return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
+                }
                 return self.read_3d_target(first, last).map(Some).ok_or_else(|| {
                     ParseError::new(start, "expected an address after a 3-D qualifier")
                 });
@@ -744,13 +756,15 @@ impl Lexer<'_> {
         let save = self.pos;
         self.bump();
         let quoted_last = self.peek() == Some('\'');
+        if quoted_last && !quoted {
+            self.pos = save;
+            return Ok(None);
+        }
         if let Some(last) = self.read_sheet_endpoint()
             && self.consume_bang()
             && (quoted_last
-                || is_unquoted_sheet(&last)
-                || (self.input[self.pos..].starts_with("#REF!")
-                    && !last.contains('$')
-                    && CellRef::parse_a1(&last.to_ascii_uppercase()).is_ok()))
+                || (last.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+                    && !last.contains(['$', '\\'])))
             && let Some(kind) = self.read_3d_target(workbook_scope(first).unwrap_or(first), &last)
         {
             return Ok(Some(kind));
@@ -760,15 +774,16 @@ impl Lexer<'_> {
     }
 
     fn read_3d_target(&mut self, first: &str, last: &str) -> Option<TokKind> {
-        if self.input[self.pos..].starts_with("#REF!") {
-            self.pos += "#REF!".len();
+        let target = if self.input[self.pos..].starts_with("#REF!") {
+            self.lex_error_literal().ok()?
         } else {
             let word = self.read_word();
-            self.try_address(&None, &word)?;
-        }
+            self.try_address(&None, &word)?
+        };
         Some(TokKind::ThreeDRef {
             first: first.to_owned(),
             last: last.to_owned(),
+            target: Box::new(target),
         })
     }
 
@@ -795,7 +810,7 @@ impl Lexer<'_> {
         if self.peek() == Some('[') {
             return self.lex_table_ref(None, word, start);
         }
-        if self.peek() == Some('(') {
+        if self.is_call(&word) {
             return Ok(TokKind::Ident(word));
         }
         if word.eq_ignore_ascii_case("TRUE") {
@@ -949,7 +964,7 @@ impl Lexer<'_> {
         if let Some(range) = self.try_range_token(sheet, word) {
             return Some(range);
         }
-        if !self.ends_address() {
+        if !self.ends_address(word) {
             return None;
         }
         let cell = CellRef::parse_a1(&word.to_ascii_uppercase()).ok()?;
@@ -959,8 +974,13 @@ impl Lexer<'_> {
         })
     }
 
-    fn ends_address(&self) -> bool {
-        !matches!(self.peek(), Some('[' | '(')) && !self.after_ws().starts_with('!')
+    fn is_call(&self, word: &str) -> bool {
+        self.peek() == Some('(')
+            || (self.after_ws().starts_with('(') && crate::functions::resolve(word).is_some())
+    }
+
+    fn ends_address(&self, word: &str) -> bool {
+        self.peek() != Some('[') && !self.after_ws().starts_with('!') && !self.is_call(word)
     }
 
     fn try_range_token(&mut self, sheet: &Option<String>, word: &str) -> Option<TokKind> {
@@ -972,7 +992,7 @@ impl Lexer<'_> {
         self.bump();
         self.skip_ws();
         let end = self.read_word();
-        if self.ends_address() && !self.after_ws().starts_with('(') {
+        if self.ends_address(&end) && !self.after_ws().starts_with('(') {
             if let (Ok(first), Ok(last)) = (
                 CellRef::parse_a1(&word.to_ascii_uppercase()),
                 CellRef::parse_a1(&end.to_ascii_uppercase()),
@@ -1086,14 +1106,11 @@ mod tests {
             let tokens = lex_for_rewrite(source).unwrap();
             assert_eq!(tokens.len(), 1, "{source}");
             let (first, last) = scope.split_once(':').unwrap();
-            assert_eq!(
-                tokens[0].kind,
-                TokKind::ThreeDRef {
-                    first: first.into(),
-                    last: last.into(),
-                },
-                "{source}"
-            );
+            assert!(matches!(&tokens[0].kind,
+                TokKind::ThreeDRef { first: start, last: end, target }
+                    if start == first && end == last
+                        && matches!(target.as_ref(), TokKind::Ref { .. } | TokKind::Range { .. }
+                            | TokKind::ColumnRange { .. } | TokKind::RowRange { .. })), "{source}");
             assert_eq!((tokens[0].start, tokens[0].end), (0, source.len()));
         }
     }
@@ -1310,6 +1327,59 @@ mod tests {
                 rewrite_table_column(&source, "T", "Data", true, "Old", "New"),
                 Ok(Some(format!("SUM({reference} [@New])")))
             );
+        }
+    }
+
+    #[test]
+    fn a_bare_local_selector_after_an_external_name_follows_a_header_rename() {
+        let source = "SUM([1]Sheet1!ExternalName [Old])+[1]!T[Old]";
+        assert_eq!(
+            rewrite_table_column(source, "T", "Data", true, "Old", "New"),
+            Ok(Some("SUM([1]Sheet1!ExternalName [New])+[1]!T[Old]".into()))
+        );
+    }
+
+    #[test]
+    fn deleted_external_names_and_address_shaped_span_endpoints_keep_their_spans() {
+        for reference in ["[1]!#REF!", "Sales:Q2!A1", "Sales:R1C1!#REF!", "Sales:TRUE!#REF!"] {
+            let source = format!("SUM({reference})+T[Old]");
+            let tokens = lex(&source).unwrap();
+            let token = &tokens[2];
+            assert_eq!(&source[token.start..token.end], reference);
+            assert!(matches!(token.kind, TokKind::ExternalRef(_) | TokKind::ThreeDRef { .. }));
+            assert_eq!(lex_for_rewrite(&source).unwrap(), tokens);
+            assert_eq!(
+                rewrite_table_column(&source, "T", "Data", false, "Old", "New"),
+                Ok(Some(format!("SUM({reference})+T[New]")))
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_distinguishes_builtin_calls_from_reference_intersections() {
+        assert!(matches!(&kinds("LOG10 (1)")[0], TokKind::Ident(name) if name == "LOG10"));
+        assert_eq!(kinds("A1 (B1)")[1], TokKind::Intersection);
+        assert!(!kinds("A1\tB1").contains(&TokKind::Intersection));
+        assert!(lex("[Col][Col2]").is_err());
+    }
+
+    #[test]
+    fn bracketed_captions_are_not_mistaken_for_external_workbooks() {
+        for source in [
+            "[@Old]Sheet1!A1",
+            "[a + b]Sheet1!A1",
+            "[#This Row]!Name",
+            "[2024] !A1",
+            "[Book.xlsx]'Sheet 1'!A1",
+        ] {
+            assert!(lex(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn quoted_sheet_spans_require_two_nonempty_endpoints() {
+        for source in ["':Other'!A1", "'Other:'!A1", "'A:B:C'!A1"] {
+            assert!(lex(source).is_err(), "{source}");
         }
     }
 

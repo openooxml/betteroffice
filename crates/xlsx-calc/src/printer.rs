@@ -82,7 +82,11 @@ impl Expr {
             Expr::Percent(expr) => format!("{}%", expr.print(6)),
             // 7 > every other bp: `:` binds tighter than anything around it
             Expr::RangeJoin { start, end } => {
-                let separator = if matches!(start.as_ref(), Expr::Name { scope: None, name }
+                let mut last = start.as_ref();
+                while let Expr::RangeJoin { end, .. } = last {
+                    last = end;
+                }
+                let separator = if matches!(last, Expr::Name { scope: None, name }
                     if is_unquoted_sheet(name))
                     && matches!(
                         end.as_ref(),
@@ -95,7 +99,12 @@ impl Expr {
                 } else {
                     ":"
                 };
-                format!("{}{separator}{}", start.print(7), end.print(7))
+                let text = format!("{}{separator}{}", start.print(7), end.print(8));
+                if parent_bp > 7 {
+                    format!("({text})")
+                } else {
+                    text
+                }
             }
             Expr::Binary { op, lhs, rhs } => {
                 let bp = binary_bp(op);
@@ -271,6 +280,19 @@ mod tests {
             "A1B : Data!1:3",
         ] {
             assert_eq!(parse_formula(source).unwrap().to_formula(), source);
+            round_trips(source);
+        }
+    }
+
+    #[test]
+    fn nested_and_chained_range_joins_round_trip() {
+        for source in [
+            "A1:A1B : Data!B5",
+            "A1B : (Data!B5:INDEX(Data!A:A,2))",
+            "A1B:'Data Set'!B5",
+            "Table1:Data!B5",
+            "Start_1:Data!B5",
+        ] {
             round_trips(source);
         }
     }

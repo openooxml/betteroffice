@@ -111,7 +111,7 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 let affected = if rule
                     .formulas
                     .iter()
-                    .any(|formula| formula_has_sheet_span(formula))
+                    .any(|formula| formula_has_sheet_span(formula, wb))
                 {
                     true
                 } else if matches!(edit, Edit::Rename { .. }) {

@@ -2743,13 +2743,13 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         )
         .or(tables)
     };
-    crate::remap::ensure_table_references_rewritable(wb, index, &dropped_tables)?;
+    crate::remap::ensure_table_references_rewritable(wb, index, &dropped_tables, &order_before)?;
     let cell_edits = crate::remap::removed_sheet_cell_edits(wb, index, &lost)?;
     let formats = crate::remap::rewritten_conditional_formats(
         wb,
         Some(index),
         &|formula| {
-            if crate::remap::names_unrewritable_table(formula, &dropped_tables) {
+            if crate::remap::names_unrewritable_table(formula, &dropped_tables, &order_before) {
                 return Err(OpError::InvalidConditionalFormat(
                     "a conditional format names a table on the deleted sheet in a form that cannot be rewritten".into(),
                 ));

@@ -12,7 +12,7 @@ pub struct Qualifier {
     pub span: core::ops::Range<usize>,
     pub first: String,
     pub last: String,
-    /// preceded by `]`, so it names a sheet in another workbook.
+    /// qualified by another workbook.
     pub external: bool,
     /// followed by `!`, so it really qualifies a reference.
     pub bound: bool,
@@ -29,12 +29,20 @@ impl Qualifier {
 /// Every sheet qualifier in `source`, in order, skipping strings and the
 /// `[book]` prefixes of external references.
 pub fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
+    sheet_qualifiers_with_sheets(source, |_| true)
+}
+
+#[doc(hidden)]
+pub fn sheet_qualifiers_with_sheets(
+    source: &str,
+    has_sheet: impl Fn(&str) -> bool,
+) -> Vec<Qualifier> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut index = 0;
     let mut bracket_depth = 0_u32;
     while index < bytes.len() {
-        if bytes[index] == b'"' {
+        if bytes[index] == b'"' && bracket_depth == 0 {
             index = skip_string(source, index);
             continue;
         }
@@ -49,15 +57,32 @@ pub fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
             continue;
         }
         if bracket_depth != 0 {
+            if bytes[index] == b'\''
+                && matches!(bytes.get(index + 1), Some(b'[' | b']' | b'\'' | b'#' | b'@'))
+            {
+                index += 2;
+                continue;
+            }
             index += next_char_len(source, index);
+            continue;
+        }
+        if bytes[index] == b'@' {
+            index += 1;
             continue;
         }
         let Some(first) = parse_sheet_token(source, index) else {
             index += next_char_len(source, index);
             continue;
         };
-        let external = first.start > 0 && bytes[first.start - 1] == b']';
-        if bytes.get(first.end) == Some(&b'!') {
+        let quoted = bytes[first.start] == b'\'';
+        let external = (first.start > 0 && bytes[first.start - 1] == b']')
+            || (quoted
+                && first
+                    .name
+                    .split_once('[')
+                    .and_then(|(_, tail)| tail.split_once(']'))
+                    .is_some_and(|(book, _)| !book.is_empty()));
+        if let Some(target) = qualified_target(source, first.end) {
             let (start, end) = quoted_endpoints(&first.name);
             out.push(Qualifier {
                 span: first.start..first.end,
@@ -67,12 +92,15 @@ pub fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
                 bound: true,
                 call: false,
             });
-            index = first.end + 1;
+            index = target;
             continue;
         }
         if bytes.get(first.end) == Some(&b':')
+            && (quoted || external || (can_start_span(&first.name) && has_sheet(&first.name)))
+            && (quoted || bytes.get(first.end + 1) != Some(&b'\''))
             && let Some(second) = parse_sheet_token(source, first.end + 1)
-            && bytes.get(second.end) == Some(&b'!')
+            && let Some(target) = qualified_target(source, second.end)
+            && is_span_target(source, target)
         {
             out.push(Qualifier {
                 span: first.start..second.end,
@@ -82,7 +110,7 @@ pub fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
                 bound: true,
                 call: false,
             });
-            index = second.end + 1;
+            index = target;
             continue;
         }
         let call = is_function_call(source, &first);
@@ -97,6 +125,32 @@ pub fn sheet_qualifiers(source: &str) -> Vec<Qualifier> {
         });
     }
     out
+}
+
+fn can_start_span(name: &str) -> bool {
+    name.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+        && !name.contains(['$', '\\'])
+        && CellRef::parse_a1(&name.to_ascii_uppercase()).is_err()
+        && !name.eq_ignore_ascii_case("TRUE")
+        && !name.eq_ignore_ascii_case("FALSE")
+        && !is_r1c1_reference(name)
+}
+
+fn is_span_target(source: &str, target: usize) -> bool {
+    let address = &source[target..reference_end(source, target)];
+    address == "#REF!"
+        || (address_shape(address) == Some(AddressShape::Cell)
+            && !source[target + address.len()..].trim_start().starts_with(['!', '(']))
+        || address.split_once(':').is_some_and(|(first, last)| {
+            let first = address_shape(first.trim());
+            first.is_some() && first == address_shape(last.trim())
+        })
+}
+
+#[doc(hidden)]
+pub fn qualified_target(source: &str, qualifier_end: usize) -> Option<usize> {
+    let tail = source[qualifier_end..].trim_start().strip_prefix('!')?;
+    Some(source.len() - tail.trim_start().len())
 }
 
 /// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
@@ -280,6 +334,15 @@ pub fn is_r1c1_reference(name: &str) -> bool {
 /// look like sheet names are left alone. Also returns which entries of
 /// `renamed` were written, so a caller can check what it wrote.
 pub fn rename_sheets(source: &str, renamed: &[(String, String)]) -> (String, Vec<usize>) {
+    rename_sheets_with_sheets(source, renamed, |_| true)
+}
+
+#[doc(hidden)]
+pub fn rename_sheets_with_sheets(
+    source: &str,
+    renamed: &[(String, String)],
+    has_sheet: impl Fn(&str) -> bool,
+) -> (String, Vec<usize>) {
     let lookup = |name: &str| {
         renamed
             .iter()
@@ -287,7 +350,7 @@ pub fn rename_sheets(source: &str, renamed: &[(String, String)]) -> (String, Vec
     };
     let mut used = Vec::new();
     let mut replacements = Vec::new();
-    for qualifier in sheet_qualifiers(source) {
+    for qualifier in sheet_qualifiers_with_sheets(source, has_sheet) {
         if qualifier.external || !qualifier.bound {
             continue;
         }
@@ -405,18 +468,43 @@ fn reference_end(source: &str, start: usize) -> usize {
             .sum::<usize>()
     };
     let end = run(start);
-    if source[end..].starts_with(':') {
-        let further = run(end + 1);
+    if source.as_bytes().get(end) == Some(&b'[') {
+        return table_reference_end(source, end);
+    }
+    if let Some(tail) = source[end..].trim_start().strip_prefix(':') {
+        let far_start = source.len() - tail.trim_start().len();
+        let further = run(far_start);
         let next = source[further..].trim_start();
-        if further > end + 1
+        if further > far_start
             && address_shape(&source[start..end]).is_some()
-            && address_shape(&source[start..end]) == address_shape(&source[end + 1..further])
-            && !next.starts_with([':', '!', '('])
+            && address_shape(&source[start..end]) == address_shape(&source[far_start..further])
+            && !next.starts_with([':', '!', '(', '['])
         {
             return further;
         }
     }
     end
+}
+
+fn table_reference_end(source: &str, start: usize) -> usize {
+    let mut depth = 0;
+    let mut chars = source[start..].char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return start + offset + 1;
+                }
+            }
+            '\'' => {
+                chars.next_if(|&(_, next)| matches!(next, '[' | ']' | '\'' | '#' | '@'));
+            }
+            _ => {}
+        }
+    }
+    start
 }
 
 /// What a range endpoint is: a cell, a column (up to XFD) or a row. A `:`
@@ -472,11 +560,14 @@ pub fn remove_sheet_references_noting_spans(
 ) -> Option<(String, bool)> {
     let mut replacements: Vec<(core::ops::Range<usize>, String)> = Vec::new();
     let mut narrowed = false;
-    for qualifier in sheet_qualifiers(source) {
-        if !qualifier.bound || qualifier.external {
+    let has_sheet = |name: &str| order_before.iter().any(|sheet| sheet_names_equal(sheet, name));
+    for qualifier in sheet_qualifiers_with_sheets(source, has_sheet) {
+        let Some(start) = qualified_target(source, qualifier.span.end)
+            .filter(|_| qualifier.bound && !qualifier.external)
+        else {
             continue;
-        }
-        let whole = || qualifier.span.start..reference_end(source, qualifier.span.end + 1);
+        };
+        let whole = || qualifier.span.start..reference_end(source, start);
         if !qualifier.is_span() {
             if sheet_names_equal(&qualifier.first, removed_name) {
                 replacements.push((whole(), "#REF!".to_owned()));
@@ -506,6 +597,12 @@ pub fn remove_sheet_references_noting_spans(
             Some((last, text)) if span.start < last.end => {
                 last.end = last.end.max(span.end);
                 *text = "#REF!".to_owned();
+            }
+            Some((last, text))
+                if text.as_str() == "#REF!" && replacement == "#REF!"
+                    && source[last.end..span.start].trim() == ":" =>
+            {
+                last.end = span.end;
             }
             _ => merged.push((span, replacement)),
         }
@@ -603,5 +700,20 @@ mod removal_tests {
             remove_sheet_references("SUM(Jan:Jan!A1:B2)", "Jan", &alone).as_deref(),
             Some("SUM(#REF!)")
         );
+    }
+
+    #[test]
+    fn sheet_deletion_preserves_joins_external_spans_and_unrelated_selectors() {
+        let order = sheets(&["Tax", "Data"]);
+        for (source, expected) in [
+            ("Tax ! A1 : B2", Some("#REF!")),
+            ("SUM(Amt:Tax!Total)", Some("SUM(Amt:#REF!)")),
+            ("SUM(Amt:Tax!Table1[Old])", Some("SUM(Amt:#REF!)")),
+            ("SUM(Amounts:Tax!B5)", Some("SUM(Amounts:#REF!)")),
+            ("SUM(Tax!Amt:Fee[Old])", Some("SUM(#REF!:Fee[Old])")),
+            ("SUM('[Book.xlsx]Data:Tax'!A1)", None),
+        ] {
+            assert_eq!(remove_sheet_references(source, "Tax", &order).as_deref(), expected, "{source}");
+        }
     }
 }

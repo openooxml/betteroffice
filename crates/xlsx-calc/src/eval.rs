@@ -2242,6 +2242,38 @@ mod tests {
     }
 
     #[test]
+    fn let_bound_names_join_to_qualified_cells() {
+        let mut workbook = Workbook::default();
+        for name in ["Data", "Data Set"] {
+            let mut sheet = Sheet::new(name);
+            sheet.set_cell(CellRef::new(0, 0), number(2.0));
+            sheet.set_cell(CellRef::new(1, 0), number(3.0));
+            workbook.sheets.push(sheet);
+        }
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for sheet in ["Data", "'Data Set'"] {
+            let source = format!("_xlfn.LET(_xlpm.c,{sheet}!A1,SUM(_xlpm.c:{sheet}!A2))");
+            assert_eq!(evaluate(&parse_formula(&source).unwrap(), &context), num(5.0));
+        }
+    }
+
+    #[test]
+    fn direct_evaluation_keeps_quoted_external_reference_errors_and_lazy_branches() {
+        let mut workbook = Workbook::default();
+        workbook.sheets.push(Sheet::new("Data"));
+        workbook.defined_names.push(defined_name("Rates", "'[Book.xlsx]Data'!$A$1"));
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for (source, expected) in [
+            ("IF(TRUE,42,'[1]Data'!A1)", num(42.0)),
+            ("'[1]Data'!#REF!", err(ErrorValue::Ref)),
+            ("'[x]Data'!A1", err(ErrorValue::Ref)),
+            ("Rates", err(ErrorValue::Ref)),
+        ] {
+            assert_eq!(evaluate(&parse_formula(source).unwrap(), &context), expected, "{source}");
+        }
+    }
+
+    #[test]
     fn deep_acyclic_name_chains_resolve_to_the_terminal_value() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));

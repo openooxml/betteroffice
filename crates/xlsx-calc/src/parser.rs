@@ -2,8 +2,9 @@
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
+use xlsx_model::sheet_qualifier::parse_sheet_token;
 
-use crate::lexer::{ParseError, TokKind, Token, lex};
+use crate::lexer::{ParseError, TokKind, Token, is_unquoted_sheet, lex};
 use crate::{ColumnRange, RowRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -117,20 +118,93 @@ pub enum BinaryOp {
 
 /// public entry point: parse a formula body (no leading `=`) into an ast.
 pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
+    parse_source(src, &|_| false, false)
+}
+
+#[doc(hidden)]
+pub fn parse_formula_with_sheet_spans(
+    src: &str,
+    has_sheet: impl Fn(&str) -> bool,
+) -> Result<Expr, ParseError> {
+    parse_source(src, &has_sheet, false)
+}
+
+#[doc(hidden)]
+pub fn is_formula_source(src: &str) -> bool {
+    parse_source(src, &|_| false, true).is_ok()
+}
+
+fn parse_source(
+    src: &str,
+    has_sheet: &dyn Fn(&str) -> bool,
+    accept_indexed_external: bool,
+) -> Result<Expr, ParseError> {
     let tokens = lex(src)?;
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
+    let tokens = if tokens.iter().any(|token| is_name_range_join(token, src, has_sheet)) {
+        let mut joined = Vec::with_capacity(tokens.len() + 2);
+        for token in tokens {
+            if is_name_range_join(&token, src, has_sheet)
+                && let TokKind::ThreeDRef { first, last, target } = &token.kind
+            {
+                let colon = token.start + first.len();
+                joined.extend([
+                    Token {
+                        kind: TokKind::Ident(first.clone()),
+                        start: token.start,
+                        end: colon,
+                    },
+                    Token {
+                        kind: TokKind::Colon,
+                        start: colon,
+                        end: colon + 1,
+                    },
+                    Token {
+                        kind: qualify_reference(*target.clone(), last.clone()),
+                        start: colon + 1,
+                        end: token.end,
+                    },
+                ]);
+            } else {
+                joined.push(token);
+            }
+        }
+        joined
+    } else {
+        tokens
+    };
     let mut p = Parser {
         tokens: &tokens,
         pos: 0,
-        src_len: src.len(),
+        source: src,
+        has_sheet,
+        accept_indexed_external,
     };
     let expr = p.expr_bp(0, 0)?;
     if let Some(tok) = p.peek() {
         return Err(ParseError::new(tok.start, "unexpected trailing token"));
     }
     Ok(expr.expr)
+}
+
+fn is_name_range_join(token: &Token, source: &str, has_sheet: &dyn Fn(&str) -> bool) -> bool {
+    // A bare name can also be the left operand of a join to a qualified address.
+    matches!(&token.kind, TokKind::ThreeDRef { first, last, .. }
+        if !source[token.start..].starts_with('\'') && !address_shaped(first)
+            && is_unquoted_sheet(last) && !has_sheet(first))
+}
+
+fn qualify_reference(kind: TokKind, sheet: String) -> TokKind {
+    let sheet = Some(sheet);
+    match kind {
+        TokKind::Ref { cell, .. } => TokKind::Ref { sheet, cell },
+        TokKind::Range { range, .. } => TokKind::Range { sheet, range },
+        TokKind::ColumnRange { range, .. } => TokKind::ColumnRange { sheet, range },
+        TokKind::RowRange { range, .. } => TokKind::RowRange { sheet, range },
+        other => other,
+    }
 }
 
 struct ParsedExpr {
@@ -147,15 +221,17 @@ impl ParsedExpr {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
-    src_len: usize,
+    source: &'a str,
+    has_sheet: &'a dyn Fn(&str) -> bool,
+    accept_indexed_external: bool,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
     }
 
-    fn advance(&mut self) -> Option<&Token> {
+    fn advance(&mut self) -> Option<&'a Token> {
         let t = self.tokens.get(self.pos);
         if t.is_some() {
             self.pos += 1;
@@ -165,7 +241,7 @@ impl Parser<'_> {
 
     /// byte offset for error reporting at the current position (or end).
     fn here(&self) -> usize {
-        self.peek().map(|t| t.start).unwrap_or(self.src_len)
+        self.peek().map(|t| t.start).unwrap_or(self.source.len())
     }
 
     fn expect(&mut self, want: &TokKind, what: &str) -> Result<(), ParseError> {
@@ -286,7 +362,19 @@ impl Parser<'_> {
         let Some(tok) = self.advance() else {
             return Err(ParseError::new(pos, "unexpected end of formula"));
         };
-        match tok.kind.clone() {
+        let kind = match tok.kind.clone() {
+            TokKind::ThreeDRef { first, last, target }
+                if (self.has_sheet)(&first)
+                    || (self.source[pos..].starts_with('\'')
+                        && parse_sheet_token(self.source, pos)
+                            .is_some_and(|token| token.name.contains(':'))) =>
+            {
+                qualify_reference(*target, format!("{first}:{last}"))
+            }
+            TokKind::ExternalRef(reference) => self.external_reference(*reference, tok)?,
+            other => other,
+        };
+        match kind {
             TokKind::Num(n) => Ok(ParsedExpr::leaf(Expr::Number(n))),
             TokKind::Str(s) => Ok(ParsedExpr::leaf(Expr::Text(s))),
             TokKind::Bool(b) => Ok(ParsedExpr::leaf(Expr::Bool(b))),
@@ -314,9 +402,6 @@ impl Parser<'_> {
             )),
             TokKind::ThreeDRef { .. } => {
                 Err(ParseError::new(pos, "3-D references are unsupported"))
-            }
-            TokKind::ExternalRef(_) => {
-                Err(ParseError::new(pos, "external references are unsupported"))
             }
             TokKind::Intersection => Err(ParseError::new(
                 pos,
@@ -346,6 +431,39 @@ impl Parser<'_> {
             }
             TokKind::Name { scope, name } => Ok(ParsedExpr::leaf(Expr::Name { scope, name })),
             other => Err(ParseError::new(pos, format!("unexpected token {other:?}"))),
+        }
+    }
+
+    fn external_reference(&self, kind: TokKind, token: &Token) -> Result<TokKind, ParseError> {
+        let pos = token.start;
+        let err = || ParseError::new(pos, "external references are unsupported");
+        if self.source[pos..].starts_with('\'') {
+            return match kind {
+                TokKind::ThreeDRef { target, .. } => {
+                    let qualifier = parse_sheet_token(self.source, pos).ok_or_else(err)?;
+                    Ok(qualify_reference(*target, qualifier.name))
+                }
+                other => Ok(other),
+            };
+        }
+        if !self.accept_indexed_external || !crate::deps::names_other_workbook(&self.source[pos..]) {
+            return Err(err());
+        }
+        match kind {
+            TokKind::ThreeDRef { .. } => Err(err()),
+            TokKind::Name { scope: None, ref name }
+                if CellRef::parse_a1(&name.to_ascii_uppercase()).is_ok()
+                    || !name.starts_with(|ch: char| ch.is_alphabetic() || matches!(ch, '_' | '\\'))
+                    || self.source[token.end..].trim_start().starts_with(['!', ':', '(']) =>
+            {
+                Err(err())
+            }
+            TokKind::TableRef { table, spec, .. } => Ok(TokKind::TableRef {
+                sheet: None,
+                table,
+                spec,
+            }),
+            other => Ok(other),
         }
     }
 
@@ -491,6 +609,7 @@ fn reference_operand(expr: &Expr) -> bool {
         Expr::Ref { .. }
             | Expr::Range { .. }
             | Expr::ColumnRange { .. }
+            | Expr::RowRange { sheet: Some(_), .. }
             | Expr::TableRef { .. }
             | Expr::FuncCall { .. }
             | Expr::RangeJoin { .. }
@@ -802,7 +921,6 @@ mod tests {
             ("[1]Sheet1:Sheet2!#REF!", 0, "external references"),
             ("[1]Sheet1!A1", 0, "external references"),
             ("[1]!Name", 0, "external references"),
-            (r"'C:\x\[Book.xlsx]Sheet1'!A1", 0, "external references"),
             (
                 "Sheet1!Table1[Col]",
                 0,
@@ -830,10 +948,6 @@ mod tests {
         for source in ["A1!B2", "TRUE!A1", "Sheet1:B2!A1", "1:2!A1", "$1:$2!A1"] {
             assert!(parse_formula(source).is_err(), "{source}");
         }
-        assert!(matches!(
-            parse_formula("'A1:Sheet2'!B2"),
-            Err(ParseError { message, .. }) if message.contains("3-D")
-        ));
     }
 
     #[test]
@@ -859,6 +973,21 @@ mod tests {
                 parse_formula(source).unwrap(),
                 parse_formula("Sheet1!A1:B2").unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn quoted_spans_and_deleted_addresses_keep_their_reference_ast() {
+        for (source, expected) in [
+            ("'Jan:Mar'!A1", "Jan:Mar"),
+            ("'A1:Sheet2'!B2", "A1:Sheet2"),
+            (r"'C:\x\[Book.xlsx]Sheet1'!A1", r"C:\x\[Book.xlsx]Sheet1"),
+        ] {
+            assert!(matches!(parse_formula(source).unwrap(),
+                Expr::Ref { sheet: Some(sheet), .. } if sheet == expected), "{source}");
+        }
+        for source in ["'Jan:Mar'!#REF!", "'[1]Rates'!#REF!"] {
+            assert_eq!(parse_formula(source).unwrap(), Expr::Error(ErrorValue::Ref));
         }
     }
 

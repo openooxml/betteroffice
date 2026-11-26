@@ -10,7 +10,7 @@
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use xlsx_model::sheet_qualifier::{
-    remove_sheet_references_noting_spans, rename_sheets, sheet_names_equal,
+    remove_sheet_references_noting_spans, rename_sheets_with_sheets, sheet_names_equal,
 };
 
 use crate::package::XmlTemplate;
@@ -93,7 +93,9 @@ impl SheetEdits {
             }
             order.retain(|sheet| !sheet_names_equal(sheet, removed));
         }
-        Some(rename_sheets(&current, &self.renamed))
+        Some(rename_sheets_with_sheets(&current, &self.renamed, |name| {
+            self.source_order.is_empty() || order.iter().any(|sheet| sheet_names_equal(sheet, name))
+        }))
     }
 }
 
@@ -342,6 +344,19 @@ mod tests {
                 "SUM(Jan:Mar!A1)+Data!$A$1:$A$5",
                 "SUM(February:Mar!A1)+#REF!"
             )
+        );
+    }
+
+    #[test]
+    fn preserved_formulas_use_sheet_names_to_distinguish_joins_from_spans() {
+        let edits = SheetEdits {
+            source_order: ["Data", "Tax"].map(str::to_owned).to_vec(),
+            ..renamed(&[("Tax", "New Tax")])
+        };
+        let source = "SUM(A1B:Tax ! B2)+SUM(Data:Tax!A1)+'[Book.xlsx]Data:Tax'!A1";
+        assert_eq!(
+            edits.apply(source),
+            Some(("SUM(A1B:'New Tax' ! B2)+SUM('Data:New Tax'!A1)+'[Book.xlsx]Data:Tax'!A1".into(), vec![0]))
         );
     }
 

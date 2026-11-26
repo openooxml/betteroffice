@@ -2630,6 +2630,26 @@ mod tests {
     }
 
     #[test]
+    fn indirect_into_another_workbook_preserves_cached_and_blank_results() {
+        let (mut wb, s) = one_sheet();
+        for (address, source) in [
+            ("A1", r#"IFERROR(INDIRECT("'[1]Data'!A1"),0)"#),
+            ("A2", r#"INDIRECT("'[1]Data'!R1C1",FALSE)"#),
+            ("A3", r#"IFERROR(INDIRECT("'[1]Data'!Rate"),0)"#),
+            ("A4", r#"IFERROR(INDIRECT("[1]Data!A1"),0)"#),
+            ("A6", r#"IFERROR(INDIRECT("[1]Data!R1C1",FALSE),0)"#),
+        ] {
+            put_cached_formula(&mut wb, s, address, source, num(42.0));
+        }
+        put_formula(&mut wb, s, "A5", r#"INDIRECT("'[1]Data'!A1")"#);
+        rebuild_and_recalc_all(&mut wb, None);
+        for address in ["A1", "A2", "A3", "A4", "A6"] {
+            assert_eq!(value(&wb, s, address), num(42.0), "{address}");
+        }
+        assert_eq!(value(&wb, s, "A5"), CellValue::Empty);
+    }
+
+    #[test]
     fn a_range_in_a_scalar_formula_reads_the_cell_on_the_formulas_row_or_column() {
         let (mut wb, s) = one_sheet();
         wb.sheets.push(Sheet::new("Data"));
