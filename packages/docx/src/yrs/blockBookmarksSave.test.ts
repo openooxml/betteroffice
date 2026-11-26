@@ -5,6 +5,7 @@ import { parseDocx } from '../docx';
 import { assertBookmarkInvariant, collectBookmarkBoundaries } from '../docx/__testSupport__/bookmarkInvariant';
 import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { BlockContent, Document, Paragraph, Shape } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
@@ -139,7 +140,8 @@ for (const kind of ['choice', 'group', 'vml'] as const) {
 for (const container of ['footnote', 'endnote'] as const) {
   it(`keeps untouched ${container} bytes with block bookmarks, revision ids and field runs`, async () => {
     const initial = blockBookmarkFixture(container, bookmarkParagraph('00000002', 'Anchor'));
-    const baseline = await repackDocx(await parseDocx(initial.buffer, { preloadFonts: false }));
+    const parsed = await parseDocx(initial.buffer, { preloadFonts: false });
+    const baseline = (await writeDocumentWithRust(parsed, parsed.originalBuffer!)).buffer;
     const parts = new Map(Object.entries(unzipContainer(new Uint8Array(baseline))));
     const path = bookmarkPart(container);
     const note = `<w:${container} w:id="1">${bookmarkStart}<w:p w14:paraId="00000002" w:rsidR="00112233" w:rsidRDefault="44556677" w:rsidP="8899AABB"><w:r w:rsidR="00112233"><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.test/note" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Anchor</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>${bookmarkEnd}</w:${container}>`;
@@ -159,7 +161,12 @@ for (const container of ['footnote', 'endnote'] as const) {
           (base.package.document.content[0] as Paragraph).content.unshift({ type: 'run', content: [{ type: 'text', text: 'Edited ' }] });
           session.insertText({ story: 'body', paraId: '00000010', offset: 0 }, 'Edited ');
         }
-        const outputs = [new Uint8Array(await repackDocx(base)), new Uint8Array((await saveYrsDocx(session)).bytes)];
+        const outputs = [
+          new Uint8Array(edited
+            ? await repackDocx(base)
+            : (await writeDocumentWithRust(base, base.originalBuffer!)).buffer),
+          new Uint8Array((await saveYrsDocx(session)).bytes),
+        ];
         for (const saved of outputs) {
           assertBookmarkInvariant(source, saved);
           expect(unzipContainer(saved)[path]).toEqual(parts.get(path)!);
