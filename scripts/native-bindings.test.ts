@@ -646,6 +646,7 @@ describe('native package release wiring', () => {
     expect(zigbuild.if).toBe('matrix.platform.zig');
     const lastZig = steps.findLastIndex((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
     expect(steps.indexOf(zigbuild)).toBeGreaterThan(lastZig);
+    expect(steps.findIndex((step: any) => step.name === 'Build binding')).toBeGreaterThan(steps.indexOf(zigbuild));
     expect(zig.with.version).toBe('${{ env.ZIG_VERSION }}');
     expect(zigbuild.with.tool).toBe('cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}');
     const testing = steps.find((step: any) => step.name === 'Test binding');
