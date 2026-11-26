@@ -129,10 +129,14 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
     }
 
     let mut paths = Vec::new();
-    let actual_ids = assign_session_revision_ids_with_paths(&mut request, &case.session, &mut paths);
+    let actual_ids =
+        assign_session_revision_ids_with_paths(&mut request, &case.session, &mut paths);
     for index in 0..paths.len().max(case.sites.len()) {
         let native = paths.get(index).map(|(path, id)| (path.as_str(), *id));
-        let ts = case.sites.get(index).map(|site| (site.path.as_str(), site.placeholder));
+        let ts = case
+            .sites
+            .get(index)
+            .map(|site| (site.path.as_str(), site.placeholder));
         if native != ts {
             return Err(format!(
                 "first differing site at index {index}: TypeScript {ts:?}, Rust {native:?}"
@@ -265,7 +269,11 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
         session: BTreeSet::from([1]),
         sites: [body, header]
             .into_iter()
-            .map(|path| Site { path: path.to_owned(), placeholder: 1, id: 1 })
+            .map(|path| Site {
+                path: path.to_owned(),
+                placeholder: 1,
+                id: 1,
+            })
             .collect(),
         reservations: Vec::new(),
         used: BTreeSet::new(),
@@ -279,7 +287,9 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
     let error = check_case(&case, &mut census).unwrap_err();
     assert_eq!(
         error.to_string(),
-        format!("first differing site at index 0: TypeScript Some(({header:?}, 1)), Rust Some(({body:?}, 1))")
+        format!(
+            "first differing site at index 0: TypeScript Some(({header:?}, 1)), Rust Some(({body:?}, 1))"
+        )
     );
 
     case.sites.remove(0);

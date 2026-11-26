@@ -527,9 +527,14 @@ fn accepts_assigned_ids_that_equal_placeholders() {
     let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([1, 2])).unwrap();
     assert_eq!(ids, BTreeMap::from([(1, 2), (2, 1)]));
     let result = serde_json::to_value(&request).unwrap();
-    let content = result["document"]["content"][0]["content"].as_array().unwrap();
+    let content = result["document"]["content"][0]["content"]
+        .as_array()
+        .unwrap();
     assert_eq!(
-        content.iter().map(|site| site["info"]["id"].as_f64()).collect::<Vec<_>>(),
+        content
+            .iter()
+            .map(|site| site["info"]["id"].as_f64())
+            .collect::<Vec<_>>(),
         [Some(1.0), Some(2.0)]
     );
 }
@@ -551,25 +556,33 @@ fn clones_only_shared_blocks_on_a_revision_site_path() {
         assign_session_revision_ids(&mut actual, &session).unwrap(),
         BTreeMap::from([(FIRST, 1)])
     );
-    let [BlockContent::Paragraph(unchanged), BlockContent::Table(table)] =
-        original.document.content.as_slice()
+    let [
+        BlockContent::Paragraph(unchanged),
+        BlockContent::Table(table),
+    ] = original.document.content.as_slice()
     else {
         panic!("expected a paragraph and a table");
     };
-    let [BlockContent::Paragraph(actual_unchanged), BlockContent::Table(actual_table)] =
-        actual.document.content.as_slice()
+    let [
+        BlockContent::Paragraph(actual_unchanged),
+        BlockContent::Table(actual_table),
+    ] = actual.document.content.as_slice()
     else {
         panic!("expected a paragraph and a table");
     };
     assert!(Arc::ptr_eq(unchanged, actual_unchanged));
     assert!(!Arc::ptr_eq(table, actual_table));
-    let [BlockContent::Paragraph(cell_unchanged), BlockContent::Paragraph(cell_changed)] =
-        table.rows[0].cells[0].content.as_slice()
+    let [
+        BlockContent::Paragraph(cell_unchanged),
+        BlockContent::Paragraph(cell_changed),
+    ] = table.rows[0].cells[0].content.as_slice()
     else {
         panic!("expected two cell paragraphs");
     };
-    let [BlockContent::Paragraph(actual_cell_unchanged), BlockContent::Paragraph(actual_cell_changed)] =
-        actual_table.rows[0].cells[0].content.as_slice()
+    let [
+        BlockContent::Paragraph(actual_cell_unchanged),
+        BlockContent::Paragraph(actual_cell_changed),
+    ] = actual_table.rows[0].cells[0].content.as_slice()
     else {
         panic!("expected two cell paragraphs");
     };
@@ -615,7 +628,10 @@ fn bounds_visits_to_nested_shared_blocks() {
                     BTreeMap::from([(FIRST, 1)])
                 );
                 let visits = WORK.with_borrow(|work| work.collected_blocks + work.block_probes);
-                assert!(visits <= 3 * (2 * depth + 1), "{visits} visits at depth {depth}");
+                assert!(
+                    visits <= 3 * (2 * depth + 1),
+                    "{visits} visits at depth {depth}"
+                );
             }
         })
         .unwrap()
@@ -657,16 +673,29 @@ fn bounds_work_for_flat_revision_requests() {
         ("fields", small.fields, large.fields, 16),
         ("strings", small.strings, large.strings, 5),
         ("string bytes", small.string_bytes, large.string_bytes, 128),
-        ("reservations", small.reservation_inserts, large.reservation_inserts, 1),
+        (
+            "reservations",
+            small.reservation_inserts,
+            large.reservation_inserts,
+            1,
+        ),
         ("site inserts", small.site_inserts, large.site_inserts, 1),
-        ("collected blocks", small.collected_blocks, large.collected_blocks, 1),
+        (
+            "collected blocks",
+            small.collected_blocks,
+            large.collected_blocks,
+            1,
+        ),
         ("block inserts", small.block_inserts, large.block_inserts, 1),
         ("block probes", small.block_probes, large.block_probes, 1),
         ("make_mut", small.make_mut, large.make_mut, 1),
         ("id probes", small.id_probes, large.id_probes, 1),
         ("verified sites", small.verified, large.verified, 1),
     ] {
-        assert!(small > 0 && small <= bound * paragraphs + 128, "{name}: {small}");
+        assert!(
+            small > 0 && small <= bound * paragraphs + 128,
+            "{name}: {small}"
+        );
         assert!(large <= bound * 10 * paragraphs + 128, "{name}: {large}");
         assert!(large <= 10 * small + 32, "{name}: {small} -> {large}");
     }
@@ -707,7 +736,10 @@ fn inserts_each_nested_model_reservation_once() {
                 WORK.with_borrow_mut(|work| *work = Work::default());
                 let found = collect(&shape, &BTreeSet::from([FIRST])).unwrap();
                 assert_eq!(found.used, (1..=count).collect());
-                assert_eq!(WORK.with_borrow(|work| work.reservation_inserts), count as usize);
+                assert_eq!(
+                    WORK.with_borrow(|work| work.reservation_inserts),
+                    count as usize
+                );
             }
         })
         .unwrap()
@@ -739,7 +771,10 @@ fn assert_text_box_model_order(child: Value, placeholders: &[u64]) {
         let assigned = index as u32 + 1;
         assert_eq!(*id, placeholder, "{path}");
         assert_eq!(ids[&placeholder], assigned, "{path}");
-        assert_eq!(result.pointer(path).and_then(Value::as_u64), Some(u64::from(assigned)));
+        assert_eq!(
+            result.pointer(path).and_then(Value::as_u64),
+            Some(u64::from(assigned))
+        );
     }
     assert_eq!(paths.len(), placeholders.len());
 }

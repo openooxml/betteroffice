@@ -134,7 +134,12 @@ fn assign(
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut walker = SiteWalker::new(&session_ids, paths, &found.blocks_with_sites, found.site_count);
+    let mut walker = SiteWalker::new(
+        &session_ids,
+        paths,
+        &found.blocks_with_sites,
+        found.site_count,
+    );
     walker.request(request);
     walker.order_paths();
 
@@ -454,7 +459,10 @@ enum Kind {
 }
 
 #[cfg(test)]
-fn collect<T: Serialize>(value: &T, session: &BTreeSet<u64>) -> Result<Collected, RevisionIdsError> {
+fn collect<T: Serialize>(
+    value: &T,
+    session: &BTreeSet<u64>,
+) -> Result<Collected, RevisionIdsError> {
     collect_with::<false, _>(value, &SessionIds::new(session))
 }
 
@@ -819,7 +827,10 @@ impl<'a, const PATHS: bool> Serializer for Visitor<'a, PATHS> {
     );
 
     fn serialize_bool(self, value: bool) -> Result<Kind, Self::Error> {
-        if PATHS && self.key && let Some(pointer) = &mut self.found.pointer {
+        if PATHS
+            && self.key
+            && let Some(pointer) = &mut self.found.pointer
+        {
             write!(pointer, "/{value}").unwrap();
         }
         Ok(Kind::Other)
@@ -1098,7 +1109,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
 
     fn request(&mut self, request: &'a mut S13SaveRequest) {
         self.at("document", |walker| {
-            walker.at("content", |walker| walker.blocks(&mut request.document.content));
+            walker.at("content", |walker| {
+                walker.blocks(&mut request.document.content)
+            });
             walker.field_entries(
                 "sections",
                 request.document.sections.iter_mut().flatten(),
@@ -1111,7 +1124,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                 request.document.comments.iter_mut().flatten(),
                 |walker, comment| {
                     walker.field_entries("content", &mut comment.content, Self::paragraph);
-                    walker.at("blockContent", |walker| walker.blocks(&mut comment.block_content));
+                    walker.at("blockContent", |walker| {
+                        walker.blocks(&mut comment.block_content)
+                    });
                 },
             );
         });
@@ -1121,7 +1136,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         ] {
             self.field_entries(key, entries, |walker, (_, header_footer)| {
                 walker.at("1", |walker| {
-                    walker.at("content", |walker| walker.blocks(&mut header_footer.content));
+                    walker.at("content", |walker| {
+                        walker.blocks(&mut header_footer.content)
+                    });
                 });
             });
         }
@@ -1138,14 +1155,18 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         if let Some(plan) = &mut request.paragraph_ids {
             self.at("paragraphIds", |walker| {
                 walker.field_entries("splicedParts", &mut plan.spliced_parts, |walker, part| {
-                    walker.field_entries("tablePatches", &mut part.table_patches, |walker, table| {
-                        walker.at("before", |walker| {
-                            walker.model(&mut table.before, ModelKind::Any, false);
-                        });
-                        walker.at("after", |walker| {
-                            walker.model(&mut table.after, ModelKind::Any, false);
-                        });
-                    });
+                    walker.field_entries(
+                        "tablePatches",
+                        &mut part.table_patches,
+                        |walker, table| {
+                            walker.at("before", |walker| {
+                                walker.model(&mut table.before, ModelKind::Any, false);
+                            });
+                            walker.at("after", |walker| {
+                                walker.model(&mut table.after, ModelKind::Any, false);
+                            });
+                        },
+                    );
                 });
             });
         }
@@ -1253,7 +1274,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
             walker.field_entries("cells", &mut row.cells, |walker, cell| {
                 walker.at("content", |walker| walker.blocks(&mut cell.content));
                 if let Some(change) = &mut cell.structural_change {
-                    walker.at("structuralChange", |walker| walker.info(&mut change.info.id));
+                    walker.at("structuralChange", |walker| {
+                        walker.info(&mut change.info.id)
+                    });
                 }
                 walker.field_entries(
                     "propertyChanges",
@@ -1262,7 +1285,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                 );
             });
             if let Some(change) = &mut row.structural_change {
-                walker.at("structuralChange", |walker| walker.info(&mut change.info.id));
+                walker.at("structuralChange", |walker| {
+                    walker.info(&mut change.info.id)
+                });
             }
             walker.field_entries(
                 "propertyChanges",
@@ -1278,15 +1303,17 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     }
 
     fn paragraph(&mut self, paragraph: &'a mut Paragraph) {
-        self.field_entries("content", &mut paragraph.content, |walker, child| {
-            match child {
+        self.field_entries(
+            "content",
+            &mut paragraph.content,
+            |walker, child| match child {
                 ParagraphContent::Inline(node) => walker.inline(node),
                 ParagraphContent::Tracked(change) => walker.tracked(change),
                 ParagraphContent::RangeStart(_)
                 | ParagraphContent::RangeEnd(_)
                 | ParagraphContent::CommentRange(_) => {}
-            }
-        });
+            },
+        );
         if let Some(info) = &mut paragraph.p_pr_ins {
             self.at("pPrIns", |walker| walker.id(&mut info.id));
         }
@@ -1362,7 +1389,11 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         let [code_key, result_key, children_key] = FIELD_TREE_FIELDS;
         self.structured(code_key, tree.code.as_mut());
         self.structured(result_key, tree.result.as_mut());
-        self.field_entries(children_key, tree.children.iter_mut().flatten(), Self::field_tree);
+        self.field_entries(
+            children_key,
+            tree.children.iter_mut().flatten(),
+            Self::field_tree,
+        );
     }
 
     fn run(&mut self, run: &'a mut Run) {
@@ -1379,27 +1410,31 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     }
 
     fn run_changes(&mut self, changes: &'a mut Option<Vec<RunPropertyChange>>) {
-        self.field_entries("propertyChanges", changes.iter_mut().flatten(), |walker, change| {
-            walker.info(&mut change.info.id);
-        });
+        self.field_entries(
+            "propertyChanges",
+            changes.iter_mut().flatten(),
+            |walker, change| {
+                walker.info(&mut change.info.id);
+            },
+        );
     }
 
     fn run_content(&mut self, content: &'a mut [RunContent]) {
-        self.field_entries("content", content, |walker, child| {
-            match child {
-                RunContent::Shape { shape, .. } => walker.at("shape", |walker| walker.shape(shape)),
-                RunContent::OpaqueDrawing {
-                    text_box: Some(shape),
-                    ..
-                } => walker.at("textBox", |walker| walker.shape(shape)),
-                _ => {}
-            }
+        self.field_entries("content", content, |walker, child| match child {
+            RunContent::Shape { shape, .. } => walker.at("shape", |walker| walker.shape(shape)),
+            RunContent::OpaqueDrawing {
+                text_box: Some(shape),
+                ..
+            } => walker.at("textBox", |walker| walker.shape(shape)),
+            _ => {}
         });
     }
 
     fn shape(&mut self, shape: &'a mut Shape) {
         if let Some(model) = &mut shape.drawing_model {
-            self.at("drawingModel", |walker| walker.model(model, ModelKind::Any, false));
+            self.at("drawingModel", |walker| {
+                walker.model(model, ModelKind::Any, false)
+            });
         }
         if let Some(body) = &mut shape.text_body {
             self.at("textBody", |walker| {
@@ -1410,7 +1445,9 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         }
         self.field_entries("children", shape.children.iter_mut().flatten(), Self::shape);
         if let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) {
-            self.at("scene", |walker| walker.at("root", |walker| walker.scene(root)));
+            self.at("scene", |walker| {
+                walker.at("root", |walker| walker.scene(root))
+            });
         }
     }
 
@@ -1419,7 +1456,11 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         if let Some(shape) = &mut node.shape {
             self.at(shape_key, |walker| walker.shape(shape));
         }
-        self.field_entries(children_key, node.children.iter_mut().flatten(), Self::scene);
+        self.field_entries(
+            children_key,
+            node.children.iter_mut().flatten(),
+            Self::scene,
+        );
     }
 
     fn model(&mut self, model: &'a mut Value, kind: ModelKind, info: bool) {
@@ -1515,12 +1556,13 @@ impl ModelKind {
             Self::Cell => &["content", "structuralChange", "propertyChanges"],
             Self::Tracked => &["info", "content"],
             Self::Run => {
-                let drawing = record.get("content").and_then(Value::as_array).and_then(|content| {
-                    match content.as_slice() {
+                let drawing = record
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|content| match content.as_slice() {
                         [child] => child.get("type").and_then(Value::as_str),
                         _ => None,
-                    }
-                });
+                    });
                 if matches!(drawing, Some("shape" | "opaqueDrawing")) {
                     &["content", "propertyChanges"]
                 } else {
