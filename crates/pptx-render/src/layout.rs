@@ -12054,6 +12054,53 @@ mod tests {
     }
 
     #[test]
+    fn hit_testing_includes_the_miter_of_a_wide_bent_connector() {
+        let session = DeckSession::open(FIXTURE, 8_015).unwrap();
+        let slide_id = session.slide_ids().unwrap().remove(0);
+        let added = session
+            .add_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &pptx_edit::PresetShapeDraft {
+                    name: "Connector".to_owned(),
+                    geometry: "bentConnector4".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 952_500,
+                        y: 952_500,
+                        width: 952_500,
+                        height: 952_500,
+                    },
+                    fill: None,
+                },
+            )
+            .unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        let shapes = &mut snapshot.slides[0].shapes;
+        shapes.retain(|shape| shape.id == added.shape_id);
+        let shape = &mut shapes[0];
+        shape.adjust_values.insert("adj1".to_owned(), 0.25);
+        shape.outline = Some(red_outline(190_500.0));
+
+        let renderer = SlideRenderer::new();
+        let rendered = renderer
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(
+            rendered.hit_test(117.0, 158.0),
+            Some(HitTestResult::Shape {
+                shape_id: added.shape_id,
+            })
+        );
+        assert_eq!(rendered.hit_test(114.0, 158.0), None);
+
+        snapshot.slides[0].shapes[0].outline.as_mut().unwrap().join = Some("bevel".to_owned());
+        let beveled = renderer
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(beveled.hit_test(117.0, 158.0), None);
+    }
+
+    #[test]
     fn hit_testing_flipped_text_keeps_the_upright_caret() {
         let slide = |flip_h| RenderedSlide {
             display_list: SurfaceDisplayList {

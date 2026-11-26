@@ -446,6 +446,46 @@ fn a_long_custom_dash_is_charged_for_each_clipped_fragment() {
     assert!(allocated < 4 * MIB, "refusal allocated {allocated} bytes");
 }
 
+#[test]
+fn dense_spans_in_an_uneven_custom_dash_are_charged_from_each_clipped_phase() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let width = 1_024;
+    let period = 1_048_576;
+    let margin = (period - width) / 2;
+    let dense_dash_start = margin - 8;
+    let mut custom_dash = vec![1; 65_536];
+    custom_dash[1] = 2 * dense_dash_start - 1;
+    let trailing_gap = 2 * period - custom_dash.iter().sum::<i32>();
+    *custom_dash.last_mut().unwrap() += trailing_gap;
+
+    let mut path = vec![json!({"type": "move", "x": -margin, "y": 4})];
+    path.extend((1..=120).map(|step| {
+        let x = if step % 2 == 0 {
+            -margin
+        } else {
+            width + margin
+        };
+        json!({"type": "line", "x": x, "y": 4})
+    }));
+    let scene = list(
+        f64::from(width),
+        8.0,
+        vec![json!({
+            "kind": "shape", "x": 0, "y": 0, "w": width, "h": 8,
+            "geometryPath": path,
+            "strokePaint": {"color": "#000000", "width": 0.5, "customDash": custom_dash}
+        })],
+    );
+
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(allocated < 4 * MIB, "refusal allocated {allocated} bytes");
+}
+
 /// An image border dashes the frame's rectangle, whose perimeter is four more
 /// numbers off the display list.
 #[test]
