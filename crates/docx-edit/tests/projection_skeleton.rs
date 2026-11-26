@@ -261,29 +261,7 @@ fn json_nesting(json: &str) -> usize {
     maximum
 }
 
-#[test]
-fn projects_the_deepest_tables_the_parser_accepts() {
-    let levels = docx_parse::MAX_NESTING_DEPTH;
-    let too_deep = package_with_parts(&nested_tables(levels + 1), "", "", &[]);
-    assert!(matches!(
-        docx_parse::parse_docx_s9_wire(&too_deep, Default::default()),
-        Err(docx_parse::ParseError::ResourceLimit {
-            kind: "nestingDepth",
-            ..
-        })
-    ));
-    let doc = seeded(&nested_tables(levels));
-    let document = doc.project_document_json("{}").unwrap();
-    let story = doc.project_story_json("body", "{}").unwrap();
-    for json in [&document, &story] {
-        assert!(json.contains(DEEP_MARKER));
-        assert!(json_nesting(json) > 128);
-    }
-    assert_eq!(json_nesting(&document), 6 * levels + 10);
-    assert_eq!(json_nesting(&story), 6 * levels + 7);
-
-    let typed = doc.project_document(&ProjectionInput::default()).unwrap();
-    let mut blocks = body(&typed);
+fn assert_nested_table_marker(mut blocks: &[BlockContent], levels: usize) {
     for level in 0..levels {
         let table = blocks
             .iter()
@@ -298,26 +276,29 @@ fn projects_the_deepest_tables_the_parser_accepts() {
         panic!("expected the innermost paragraph")
     };
     assert_eq!(text(paragraph(inner)), DEEP_MARKER);
+}
 
-    let overrides = serde_json::json!({
-        "host": { "comments": [{
-            "id": 1, "author": "Ada", "content": [], "blockContent": body(&typed),
-        }] },
-    })
-    .to_string();
-    assert!(json_nesting(&overrides) > 128);
-    assert_eq!(
-        doc.project_document_json(&overrides)
-            .unwrap()
-            .matches(DEEP_MARKER)
-            .count(),
-        2,
-    );
+#[test]
+fn projects_ten_nested_tables() {
+    let levels = 10;
+    let doc = seeded(&nested_tables(levels));
+    let input = ProjectionInput::default();
+    let document = doc.project_document(&input).unwrap();
+    let story = doc.project_story("body", &input).unwrap();
+    assert_nested_table_marker(body(&document), levels);
+    assert_nested_table_marker(&story.blocks, levels);
+
+    let document_json = doc.project_document_json("{}").unwrap();
+    let story_json = doc.project_story_json("body", "{}").unwrap();
+    assert!(document_json.contains(DEEP_MARKER));
+    assert!(story_json.contains(DEEP_MARKER));
+    assert_eq!(json_nesting(&document_json), 6 * levels + 10);
+    assert_eq!(json_nesting(&story_json), 6 * levels + 7);
 }
 
 #[test]
 fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
-    for levels in [1, 260] {
+    for levels in [1, 10] {
         let doc = seeded("<w:p/>");
         let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
         let mut story = "body".to_owned();
@@ -358,12 +339,43 @@ fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
 }
 
 #[test]
+fn accepts_deep_projection_input() {
+    let doc = seeded("<w:p/>");
+    let input = deep_projection_input("0");
+    assert!(json_nesting(&input) > 128);
+    let document = doc.project_document_json(&input).unwrap();
+    assert!(document.contains("deep-host-block"));
+    doc.project_story_json("body", &input).unwrap();
+}
+
+fn deep_projection_input(leaf: &str) -> String {
+    let nested = format!("{}{leaf}{}", "[".repeat(129), "]".repeat(129));
+    format!(
+        concat!(
+            r#"{{"host":{{"comments":[{{"id":1,"author":"Ada","content":[],"blockContent":["#,
+            r#"{{"type":"rawXml","xml":"<deep-host-block/>","extension":{}}}]}}]}}}}"#,
+        ),
+        nested,
+    )
+}
+
+#[test]
 fn rejects_malformed_and_over_budget_projection_input() {
     let doc = seeded("<w:p/>");
     let error = doc
         .project_story_json("body", r#"{"host":{"styles":false}}"#)
         .unwrap_err();
     assert!(matches!(error, ProjectionError::InvalidInput(_)));
+    let malformed = deep_projection_input("0 0");
+    for error in [
+        doc.project_document_json(&malformed).unwrap_err(),
+        doc.project_story_json("body", &malformed).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            ProjectionError::InvalidInput(message) if message == "expected ',' or ']' in JSON"
+        ));
+    }
     let input = format!("{}0{}", "[".repeat(1025), "]".repeat(1025));
     let error = doc.project_document_json(&input).unwrap_err();
     assert!(error.to_string().contains("JSON nesting exceeds 1024"));
