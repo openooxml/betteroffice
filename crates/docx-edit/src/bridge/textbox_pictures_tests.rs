@@ -1042,7 +1042,10 @@ fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
             display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
         let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
         let (table, _) = cell_anchor_table(&layout);
-        assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
         assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
     }
 }
@@ -1069,7 +1072,10 @@ fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin(
             display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
         let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
         let (table, _) = cell_anchor_table(&layout);
-        assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
         assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
     }
 }
