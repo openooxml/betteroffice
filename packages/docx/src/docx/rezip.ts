@@ -10,7 +10,6 @@
 
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
-import { saveCurrentProjection } from '../yrs/saveProjection';
 import type { RawDocxContent } from './unzip';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
@@ -50,7 +49,7 @@ export interface RepackOptions {
   modifiedBy?: string;
 }
 
-/** Repack a document. A current live projection also saves session state such as new comments. */
+/** Repack a public Document through the Rust package writer. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
   return (await repackDocxWithWarnings(doc, options)).buffer;
 }
@@ -70,8 +69,7 @@ export async function repackDocxWithWarnings(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const result = await saveCurrentProjection(doc, options)
-    ?? await writeDocumentWithRust(doc, doc.originalBuffer, options);
+  const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
   return { buffer: result.buffer, warnings: result.warnings };
 }
 
@@ -80,10 +78,7 @@ export async function repackDocxFromRaw(
   rawContent: RawDocxContent,
   options: RepackOptions = {}
 ): Promise<ArrayBuffer> {
-  const source = rawContent.originalBuffer;
-  const written = await saveCurrentProjection(doc, options, source)
-    ?? await writeDocumentWithRust(doc, source, options);
-  return written.buffer;
+  return repackDocx({ ...doc, originalBuffer: rawContent.originalBuffer }, options);
 }
 
 function loadParts(originalBuffer: ArrayBuffer): PartsMap {
@@ -276,7 +271,7 @@ export async function createDocx(doc: Document): Promise<ArrayBuffer> {
   if (doc.originalBuffer) return repackDocx(doc);
   const originalBuffer = await createEmptyDocx();
   return (await writeDocumentWithRust({ ...doc, originalBuffer }, originalBuffer, {},
-    undefined, undefined, undefined, false, undefined, undefined, 'fresh')).buffer;
+    undefined, undefined, undefined, false, undefined, 'fresh')).buffer;
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

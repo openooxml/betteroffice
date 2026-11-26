@@ -7,15 +7,12 @@ import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
 import { serializeRun } from '../docx/serializer';
-import { sameSaveTree } from '../docx/rustSaveFacade';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
-import { markRevisionInfo, materializeSessionRevisionIds } from '../docx/sessionRevisionIds';
+import { markRevisionInfo } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
-import { rememberSaveProjection } from './saveProjection';
 import {
   crossingFallback,
   crossStoryComments,
-  crossingWrittenWhole,
   holdsCommentMark,
   noteWrittenWhole,
   type CommentMarkKind,
@@ -80,7 +77,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRawMark, YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
-import { carryGate, isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
+import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -4960,24 +4957,7 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  let projection = projectDocument(session, base, options);
-  if (options.storyIds === undefined && options.commentIds === undefined) {
-    const materialized = materializeSessionRevisionIds(projection, (source, clone) => {
-      const block = projectedBlocks.get(source as BlockContent);
-      if (block) projectedBlocks.set(clone as BlockContent, block);
-      const cells = projectedTableCells.get(source as Table);
-      if (cells) projectedTableCells.set(clone as Table, cells);
-      const alias = headerFooterAliasOf(source as HeaderFooter);
-      if (alias !== undefined) markHeaderFooterAlias(clone as HeaderFooter, alias);
-    });
-    if (materialized !== projection) {
-      carryGate(projection, materialized);
-      noteWrittenWhole(materialized, crossingWrittenWhole(projection));
-      projection = materialized;
-    }
-    rememberSaveProjection(session, base, projection);
-  }
-  return projection;
+  return projectDocument(session, base, options);
 }
 
 /**
@@ -5088,7 +5068,6 @@ function projectStories(
   const headers = projectHeaderFooters(base.package.headers);
   const footers = projectHeaderFooters(base.package.footers);
 
-  let keptNotes: Set<string> | undefined;
   const projectNotes = <T extends Footnote | Endnote>(
     notes: T[] | undefined,
     prefix: string
@@ -5099,17 +5078,13 @@ function projectStories(
     if (!shouldProjectNotes) return notes;
     return notes?.map((note) => {
       const storyId = `${prefix}${note.id}`;
-      if (!context.storyIds.has(storyId) || !shouldProject(storyId)) return note;
-      const content = restoreNoteMarks(context.storyToBlocks(storyId), note.content);
-      if (note.verbatimXml) {
-        if (sameSaveTree(content, note.content)) return note;
-        if (sessionSourcePackage(session)) {
-          keptNotes ??= new Set(session.paragraphSavePlan().patchedParts.map(({ part }) => part.toLowerCase()));
-          const part = prefix === 'fn:' ? 'word/footnotes.xml' : 'word/endnotes.xml';
-          if (keptNotes.has(part)) return note;
-        }
-      }
-      return { ...note, content, verbatimXml: undefined };
+      return context.storyIds.has(storyId) && shouldProject(storyId)
+        ? {
+            ...note,
+            content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
+            verbatimXml: undefined,
+          }
+        : note;
     });
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');

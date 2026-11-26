@@ -672,9 +672,14 @@ describe('a save that fails after the ids of created lists were given', () => {
       return new Uint8Array(await saveEditorDocument(created, projected, []));
     };
     const languages = created.styleLanguages;
-    created.styleLanguages = () => ({ Normal: { unsupported: 'value' } }) as unknown as ReturnType<YrsSession['styleLanguages']>;
+    const patch = created.patchStyleLanguagesXml;
+    created.styleLanguages = () => ({ Normal: {} }) as unknown as ReturnType<YrsSession['styleLanguages']>;
+    created.patchStyleLanguagesXml = () => {
+      throw new Error('language patch refused');
+    };
     const failed = await settled(over(other));
     created.styleLanguages = languages;
+    created.patchStyleLanguagesXml = patch;
     const s3 = await over(s1);
     expect(savedNumId(s3, 'Alpha')).toBe(k);
     expect(counts(s3)).toEqual(counts(s1));

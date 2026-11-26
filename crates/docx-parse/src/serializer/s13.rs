@@ -5,7 +5,7 @@
 //! paragraph remains authored exactly as it appeared in the source package.
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -185,24 +185,20 @@ pub fn write_docx_s13_parts_with_report(
 }
 
 pub(super) struct WriteSettings<'a> {
-    pub style_languages: Option<&'a serde_json::Value>,
     pub reuse_document_root: bool,
     pub empty_notes: [bool; 2],
     pub wire: Option<&'a mut Vec<String>>,
     pub legacy_diagnostics: bool,
-    pub localize_row_namespaces: bool,
     pub product_save: bool,
 }
 
 impl Default for WriteSettings<'_> {
     fn default() -> Self {
         Self {
-            style_languages: None,
             reuse_document_root: true,
             empty_notes: [false; 2],
             wire: None,
             legacy_diagnostics: true,
-            localize_row_namespaces: false,
             product_save: false,
         }
     }
@@ -215,12 +211,10 @@ pub(super) fn write_parts(
     settings: WriteSettings<'_>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     let WriteSettings {
-        style_languages,
         reuse_document_root,
         empty_notes,
         wire,
         legacy_diagnostics,
-        localize_row_namespaces,
         product_save,
     } = settings;
     request.determinism.validate()?;
@@ -233,15 +227,6 @@ pub(super) fn write_parts(
     };
     let mut package = Package::new(original_parts, document_path, product_save);
     let comments_path = package.plan_key(COMMENTS_PART).to_owned();
-    if let Some(languages) = style_languages {
-        let path = "word/styles.xml";
-        let styles = package
-            .text(path)
-            .ok_or_else(|| save_error("Language edits require a styles part"))?;
-        let xml =
-            super::patch_style_languages(&styles, &languages.to_string()).map_err(save_error)?;
-        package.set_text(path, xml);
-    }
     let mut removed_comments = match (
         package.original_bytes(COMMENTS_PART),
         request.document.comments.as_deref(),
@@ -560,12 +545,7 @@ pub(super) fn write_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    if let Some(bytes) = patched_parts.remove(&package.document_path) {
-        if !product_save {
-            std::str::from_utf8(&bytes).map_err(|error| save_error(error.to_string()))?;
-        }
-        package.set("word/document.xml", bytes);
-    } else {
+    if !product_save || !patched_parts.contains_key(&package.document_path) {
         if reuse_document_root {
             context.set_document_source(
                 package
@@ -579,6 +559,13 @@ pub(super) fn write_parts(
         context.set_group_drawings(group_drawings_in_part(
             &package.text(&package.document_path).unwrap_or_default(),
         ));
+    }
+    if let Some(bytes) = patched_parts.remove(&package.document_path) {
+        if !product_save {
+            std::str::from_utf8(&bytes).map_err(|error| save_error(error.to_string()))?;
+        }
+        package.set("word/document.xml", bytes);
+    } else {
         let document_xml = if let Some(selective) = request.selective.as_ref() {
             let original = package
                 .text("word/document.xml")
@@ -617,12 +604,6 @@ pub(super) fn write_parts(
                 .ok_or_else(|| save_error("section source XML unavailable"))?;
             super::section_patch::patch_sections(original, &document_xml, &sections.edits)
                 .ok_or_else(|| save_error("unsafe section XML patch"))?
-        } else {
-            document_xml
-        };
-        let spliced_document = spliced.contains_key(&package.document_path);
-        let document_xml = if localize_row_namespaces && spliced_document {
-            localize_table_row_namespaces(&document_xml).unwrap_or(document_xml)
         } else {
             document_xml
         };
@@ -784,92 +765,6 @@ pub(super) fn write_parts(
         wire.push(super::model_save::NO_BINDING_CHANGES.to_owned());
     }
     Ok((bytes, context.take_report(legacy_diagnostics)))
-}
-
-fn localize_table_row_namespaces(xml: &str) -> Option<String> {
-    use quick_xml::events::Event;
-
-    let table_has_bindings = xml.match_indices("<w:tbl").any(|(start, tag)| {
-        xml.as_bytes()
-            .get(start + tag.len())
-            .is_some_and(u8::is_ascii_whitespace)
-            && find_tag_end(xml.as_bytes(), start)
-                .is_some_and(|end| xml[start..end].contains("xmlns:"))
-    });
-    if !table_has_bindings {
-        return None;
-    }
-    let source = xml.strip_prefix('\u{feff}').unwrap_or(xml);
-    let bom = xml.len() - source.len();
-    let mut reader = quick_xml::Reader::from_str(source);
-    let mut scopes: Vec<Vec<(String, String, bool)>> = Vec::new();
-    let mut insertions = Vec::new();
-    loop {
-        let event = reader.read_event().ok()?;
-        let (tag, empty) = match event {
-            Event::Start(tag) => (tag, false),
-            Event::Empty(tag) => (tag, true),
-            Event::End(_) => {
-                scopes.pop()?;
-                continue;
-            }
-            Event::Eof => break,
-            _ => continue,
-        };
-        let table = tag.name().as_ref() == b"w:tbl";
-        let row = tag.name().as_ref() == b"w:tr";
-        let mut local = Vec::new();
-        let mut used = BTreeSet::new();
-        for attribute in tag.attributes() {
-            let attribute = attribute.ok()?;
-            let key = std::str::from_utf8(attribute.key.as_ref()).ok()?;
-            if let Some(prefix) = key.strip_prefix("xmlns:") {
-                let uri = attribute.decode_and_unescape_value(reader.decoder()).ok()?;
-                local.push((prefix.to_owned(), uri.into_owned(), table));
-            } else if row
-                && let Some((prefix, _)) = key.split_once(':')
-                && !matches!(prefix, "w" | "xml")
-            {
-                used.insert(prefix.to_owned());
-            }
-        }
-        if row && !used.is_empty() {
-            let mut binding_text = String::new();
-            for prefix in used {
-                if !local.iter().any(|(name, _, _)| name == &prefix)
-                    && let Some((_, uri, true)) = scopes
-                        .iter()
-                        .rev()
-                        .flatten()
-                        .find(|(name, _, _)| name == &prefix)
-                {
-                    binding_text.push_str(&format!(
-                        " xmlns:{prefix}=\"{}\"",
-                        super::xml_writer::escape_xml(uri)
-                    ));
-                }
-            }
-            if !binding_text.is_empty() {
-                let at = reader.buffer_position() as usize + bom - if empty { 2 } else { 1 };
-                insertions.push((at, binding_text));
-            }
-        }
-        if !empty {
-            scopes.push(local);
-        }
-    }
-    if insertions.is_empty() {
-        return None;
-    }
-    let mut result = String::with_capacity(xml.len());
-    let mut previous = 0;
-    for (at, text) in insertions {
-        result.push_str(&xml[previous..at]);
-        result.push_str(&text);
-        previous = at;
-    }
-    result.push_str(&xml[previous..]);
-    Some(result)
 }
 
 fn clean_deleted_comment_markers(
@@ -2523,7 +2418,7 @@ fn ensure_header_footer_parts(
         let mut changed = false;
         for (_, _, target, content_type) in &parts {
             let path = resolve_relative_path(&package.document_path, target)?;
-            let path = package.resolve_path(&path);
+            let path = package.plan_key(&path);
             if preserved.contains(path) {
                 continue;
             }
@@ -3670,7 +3565,7 @@ fn image_content_type(extension: &str) -> &'static str {
 
 fn owner_relationships_path(package: &Package, target: &str) -> Result<String, ParseError> {
     let path = resolve_relative_path(&package.document_path, target)?;
-    Ok(relationship_part_path(package.resolve_path(&path)))
+    Ok(relationship_part_path(package.plan_key(&path)))
 }
 
 fn process_new_watermark_images(

@@ -91,12 +91,12 @@ function headerFooterSaveEntries(
     : [];
 }
 
-export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-export function modelSaveFields(document: Document) {
+function modelSaveFields(document: Document) {
   const pkg = document.package;
   return {
     document: pkg.document,
@@ -112,11 +112,7 @@ export function modelSaveFields(document: Document) {
 }
 
 const NO_BINDING_CHANGES = 'DOCX_SAVE_BINDINGS 0';
-const projectedBodyRewrites = new WeakSet<Document>();
-
-export function markProjectedBodyRewrite(document: Document): void {
-  projectedBodyRewrites.add(document);
-}
+const WHOLE_MODEL_WARNING = 'DOCX_WHOLE_MODEL_WRITE ';
 
 const parsedModels = new WeakMap<Document, {
   body: string;
@@ -129,7 +125,7 @@ function bodySaveFields({ content, finalSectionProperties, customRootBindings }:
   return { content, finalSectionProperties, customRootBindings };
 }
 
-export function saveTreeFingerprint(value: unknown): string {
+function saveTreeFingerprint(value: unknown): string {
   const body = (value as { document?: unknown } | null | undefined)?.document;
   assertSafeSaveTree(value, 'save', undefined, body);
   const hash = new Uint32Array([0x811c9dc5, 0x243f6a88, 0xb7e15162, 0x9e3779b9]);
@@ -171,25 +167,6 @@ export function saveTreeFingerprint(value: unknown): string {
   return Array.from(hash, word => word.toString(16).padStart(8, '0')).join('');
 }
 
-export function sameSaveTree(left: unknown, right: unknown): boolean {
-  if (left === right) return true;
-  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-    for (let index = 0; index < left.length; index += 1) {
-      if (!sameSaveTree(left[index], right[index])) return false;
-    }
-    return true;
-  }
-  const a = left as Record<string, unknown>;
-  const b = right as Record<string, unknown>;
-  const keys = (value: Record<string, unknown>) =>
-    Object.keys(value).filter(key => key !== 'sourceOrdinal' && value[key] !== undefined);
-  const fields = keys(a);
-  return fields.length === keys(b).length &&
-    fields.every(key => Object.hasOwn(b, key) && sameSaveTree(a[key], b[key]));
-}
-
 export function rememberParsedModel(document: Document, sourceDigest: string, saveWarnings: readonly string[]): void {
   const fields = modelSaveFields(document);
   parsedModels.set(document, {
@@ -200,7 +177,7 @@ export function rememberParsedModel(document: Document, sourceDigest: string, sa
   });
 }
 
-export function parsedModelUnchanged(
+function parsedModelUnchanged(
   document: Document,
   fields = modelSaveFields(document)
 ): ReturnType<typeof parsedModels.get> {
@@ -218,7 +195,6 @@ export async function writeDocumentWithRust(
   paragraphIds?: RustParagraphIds,
   skipMutations = false,
   yieldSave?: () => Promise<void>,
-  styleLanguages?: Readonly<Record<string, unknown>>,
   modelMode?: 'fresh'
 ): Promise<RustSaveResult> {
   const guarded = modelMode !== 'fresh' && paragraphIds === undefined && selective === undefined;
@@ -237,9 +213,8 @@ export async function writeDocumentWithRust(
     ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),
   };
   const baseline = guarded ? parsedModelUnchanged(document) : undefined;
-  const now = determinism?.now ?? new Date().toISOString();
   if (baseline) {
-    const fixed = determinism ?? { seed: baseline.sourceDigest, now };
+    const fixed = determinism ?? { seed: baseline.sourceDigest, now: new Date().toISOString() };
     validateDeterminism(fixed);
     const request = {
       determinism: fixed,
@@ -264,7 +239,10 @@ export async function writeDocumentWithRust(
       if (String(error).replace(/^Error: /, '') !== 'DOCX_SOURCE_CHANGED') throw error;
     }
   }
-  const fixed = determinism ?? { seed: await sha256Hex(new Uint8Array(originalBuffer)), now };
+  const fixed = determinism ?? {
+    seed: await sha256Hex(new Uint8Array(originalBuffer)),
+    now: new Date().toISOString(),
+  };
   validateDeterminism(fixed);
   if (yieldSave) await yieldSave();
   const fields = modelSaveFields(document);
@@ -274,14 +252,16 @@ export async function writeDocumentWithRust(
   const request = {
     ...fields,
     ...(unchangedBody ? { unchangedBodySha256: fixed.seed } : {}),
-    ...(guarded && projectedBodyRewrites.has(document) ? { rewriteBody: true } : {}),
     ...(modelMode === 'fresh' ? { freshPackage: true } : {}),
-    reportBindings: true,
+    ...(guarded ? { reportBindings: true } : {}),
     determinism: fixed,
-    ...(styleLanguages === undefined ? {} : { styleLanguages }),
     ...(!guarded && {
       headerEntries: headerFooterSaveEntries(document.package.headers),
       footerEntries: headerFooterSaveEntries(document.package.footers),
+      footnotes: fields.footnotes ?? [],
+      endnotes: fields.endnotes ?? [],
+      footnoteSeparators: fields.footnoteSeparators ?? [],
+      endnoteSeparators: fields.endnoteSeparators ?? [],
     }),
     options: saveOptions,
     ...(selective === undefined
@@ -308,7 +288,8 @@ export async function writeDocumentWithRust(
   if (yieldSave) await yieldSave();
   const unchangedBindings = warnings.includes(NO_BINDING_CHANGES);
   if (!selective && !skipMutations && !unchangedBindings) {
-    applyRustSaveMutations(document, originalBuffer, buffer);
+    const guardedWrite = guarded && !warnings.some(warning => warning.startsWith(WHOLE_MODEL_WARNING));
+    applyRustSaveMutations(document, originalBuffer, buffer, guardedWrite || modelMode === 'fresh');
   }
   return {
     buffer,
@@ -321,26 +302,31 @@ export async function writeDocumentWithRust(
 function applyRustSaveMutations(
   document: Document,
   originalBuffer: ArrayBuffer,
-  savedBuffer: ArrayBuffer
+  savedBuffer: ArrayBuffer,
+  productSave: boolean
 ): void {
   const originalParts = unzipContainer(new Uint8Array(originalBuffer));
   const savedParts = unzipContainer(new Uint8Array(savedBuffer));
-  const foldedParts = (parts: typeof originalParts) => new Map(
-    Object.entries(parts).map(([path, bytes]) => [path.toLowerCase(), bytes])
-  );
-  const originalByPath = foldedParts(originalParts);
-  const savedByPath = foldedParts(savedParts);
+  const indexParts = (parts: typeof originalParts) => productSave
+    ? Object.fromEntries(Object.entries(parts).map(([path, bytes]) => [path.toLowerCase(), bytes]))
+    : parts;
+  const originalByPath = indexParts(originalParts);
+  const savedByPath = indexParts(savedParts);
+  const relPath = (path: string) => productSave ? path.toLowerCase() : path;
+  const readAttribute = productSave ? relationshipAttribute : legacyRelationshipAttribute;
+  const findRelationship = (xml: string, id: string | undefined): string | undefined =>
+    id ? relationshipTags(xml).find((tag) => readAttribute(tag, 'Id') === id) : undefined;
 
   for (const part of collectParts(document)) {
-    const path = part.relsPath.toLowerCase();
-    const originalRelationships = partText(originalByPath.get(path)) ?? '';
-    const savedRelationships = partText(savedByPath.get(path)) ?? '';
+    const path = relPath(part.relsPath);
+    const originalRelationships = partText(originalByPath[path]) ?? '';
+    const savedRelationships = partText(savedByPath[path]) ?? '';
     const originalIds = new Set(
-      relationshipTags(originalRelationships).map((tag) => relationshipAttribute(tag, 'Id'))
+      relationshipTags(originalRelationships).map((tag) => readAttribute(tag, 'Id'))
     );
     const newImageIds = relationshipTags(savedRelationships)
-      .filter((tag) => relationshipAttribute(tag, 'Type')?.endsWith('/image'))
-      .map((tag) => relationshipAttribute(tag, 'Id'))
+      .filter((tag) => readAttribute(tag, 'Type')?.endsWith('/image'))
+      .map((tag) => readAttribute(tag, 'Id'))
       .filter((id): id is string => !!id && !originalIds.has(id));
     const images = collectNewImages(part.blocks);
     if (images.length > newImageIds.length) {
@@ -355,18 +341,18 @@ function applyRustSaveMutations(
 
     const savedHyperlinks = relationshipTags(savedRelationships).filter(
       (tag) =>
-        relationshipAttribute(tag, 'Type')?.endsWith('/hyperlink') &&
-        relationshipAttribute(tag, 'TargetMode') === 'External'
+        readAttribute(tag, 'Type')?.endsWith('/hyperlink') &&
+        readAttribute(tag, 'TargetMode') === 'External'
     );
     for (const hyperlink of collectExternalHyperlinks(part.blocks)) {
       if (!hyperlink.href) {
-        if (!relationshipForId(savedRelationships, hyperlink.rId)) hyperlink.rId = undefined;
+        if (!findRelationship(savedRelationships, hyperlink.rId)) hyperlink.rId = undefined;
         continue;
       }
       const match = savedHyperlinks.find(
-        (tag) => decodeXmlEntities(relationshipAttribute(tag, 'Target') ?? '') === hyperlink.href
+        (tag) => decodeXmlEntities(readAttribute(tag, 'Target') ?? '') === hyperlink.href
       );
-      const id = match && relationshipAttribute(match, 'Id');
+      const id = match && readAttribute(match, 'Id');
       if (id) hyperlink.rId = id;
     }
   }
@@ -381,15 +367,15 @@ function applyRustSaveMutations(
     if (!owner?.target) continue;
     const filename = headerFooterFilename(owner.target).replace(/^word\//, '');
     const relsPath = `word/_rels/${filename}.rels`;
-    const savedRelationships = partText(savedByPath.get(relsPath.toLowerCase())) ?? '';
-    if (relationshipForId(savedRelationships, watermark.relId)) continue;
+    const savedRelationships = partText(savedByPath[relPath(relsPath)]) ?? '';
+    if (findRelationship(savedRelationships, watermark.relId)) continue;
     const mediaFilename = watermark.mediaPath?.split('/').pop();
     const match = relationshipTags(savedRelationships).find((tag) => {
-      if (!relationshipAttribute(tag, 'Type')?.endsWith('/image')) return false;
-      const target = relationshipAttribute(tag, 'Target')?.split('/').pop();
+      if (!readAttribute(tag, 'Type')?.endsWith('/image')) return false;
+      const target = readAttribute(tag, 'Target')?.split('/').pop();
       return mediaFilename ? target === mediaFilename : true;
     });
-    const id = match && relationshipAttribute(match, 'Id');
+    const id = match && readAttribute(match, 'Id');
     if (id) watermark.relId = id;
   }
 }
@@ -473,9 +459,8 @@ function relationshipAttribute(tag: string, name: string): string | undefined {
   return tag.match(new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`))?.[2];
 }
 
-function relationshipForId(xml: string, id: string | undefined): string | undefined {
-  if (!id) return undefined;
-  return relationshipTags(xml).find((tag) => relationshipAttribute(tag, 'Id') === id);
+function legacyRelationshipAttribute(tag: string, name: string): string | undefined {
+  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
 }
 
 function decodeXmlEntities(value: string): string {

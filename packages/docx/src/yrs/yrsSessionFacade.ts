@@ -1,4 +1,3 @@
-import { clearProjectionFormatEdits, rememberHostEnvelope, rememberProjectionFormatEdit } from './saveProjection';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
@@ -158,12 +157,8 @@ function peerMetadataFailure(error: unknown): unknown {
  * package `source` it opened. @internal
  */
 export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHost {
-  const host = decodeDocxHost(json, source);
-  rememberHostEnvelope(host.document, hostPackageDigests.get(host));
-  return host;
+  return decodeDocxHost(json, source);
 }
-
-const hostPackageDigests = new WeakMap<YrsDocxHost, string>();
 
 function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   const value: unknown = JSON.parse(json);
@@ -185,7 +180,7 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
     throw new TypeError('DOCX host unusedScriptFonts must be a string array');
   }
   const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
-  const host: YrsDocxHost = {
+  return {
     document: result.document,
     referencedFonts: wire.referencedFonts,
     unusedScriptFonts,
@@ -195,8 +190,6 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
       ? {}
       : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
   };
-  if (typeof wire.packageSha256 === 'string') hostPackageDigests.set(host, wire.packageSha256);
-  return host;
 }
 
 export function seedDocxCommentMetadata(session: EditSession, comments: DocumentBody['comments']): void {
@@ -282,7 +275,6 @@ export function wrapSession(
   let residentFontsRevision = 0;
   let residentFontsClearRevision = 0;
   let docxSource: Uint8Array | null = opened?.source ?? null;
-  let docxSourceDigest = opened && hostPackageDigests.get(opened.host);
   let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
     ? editorSaveKeys(opened.host.document)
     : null;
@@ -385,12 +377,6 @@ export function wrapSession(
       }
     }
   };
-
-  const publishParagraphIds = (saved: readonly (readonly [string, string])[]) =>
-    mutate(() => {
-      const stale = JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<[string, string]>;
-      return { stale, version: session.version() };
-    });
 
   const cloneSelection = (value: YrsSelection | null): YrsSelection | null =>
     value
@@ -499,7 +485,6 @@ export function wrapSession(
       } catch (error) {
         throw normalizeSeedError(error);
       }
-      clearProjectionFormatEdits(facade);
       forgetSavedListDefinitions(facade);
       proposals.reset();
       return opened;
@@ -510,8 +495,6 @@ export function wrapSession(
     }
     withHostMedia(host);
     docxSource = source;
-    docxSourceDigest = hostPackageDigests.get(host);
-    rememberHostEnvelope(host.document, docxSourceDigest);
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
     partialDocument = false;
@@ -854,21 +837,17 @@ export function wrapSession(
         } catch (error) {
           throw peerMetadataFailure(error);
         }
-        clearProjectionFormatEdits(facade);
         forgetSavedListDefinitions(facade);
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
         resetMedia();
-        docxSourceDigest = hostPackageDigests.get(workerHost) ?? (source === docxSource ? docxSourceDigest : undefined);
         docxSource = source;
         docxSourceKeys = keys;
         sourceClosing = sectionClosingParaIds(facade);
         partialDocument = false;
         proposals.reset();
       });
-      withHostMedia(host);
-      rememberHostEnvelope(host.document, docxSourceDigest);
-      return host;
+      return withHostMedia(host);
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
@@ -1015,19 +994,13 @@ export function wrapSession(
     undo: () =>
       mutate(() => {
         const applied = session.undo();
-        if (applied) {
-          clearProjectionFormatEdits(facade);
-          markDirty(session.history_stories());
-        }
+        if (applied) markDirty(session.history_stories());
         return applied;
       }),
     redo: () =>
       mutate(() => {
         const applied = session.redo();
-        if (applied) {
-          clearProjectionFormatEdits(facade);
-          markDirty(session.history_stories());
-        }
+        if (applied) markDirty(session.history_stories());
         return applied;
       }),
     canUndo: () => session.can_undo(),
@@ -1381,11 +1354,7 @@ export function wrapSession(
     },
     setParagraphAttrs: (range, attrs, suggesting) => {
       ensureUndo(range.story);
-      const direct = !suggesting && range.story === 'body' && docxSourceDigest
-        ? Object.entries({ indentLeft: attrs.indentLeft, indentRight: attrs.indentRight, spaceAfter: attrs.spaceAfter, spaceBefore: attrs.spaceBefore })
-          .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
-        : [];
-      mutate(() => {
+      mutate(() =>
         session.set_paragraph_attrs(
           range.story,
           range.start.paraId,
@@ -1395,15 +1364,8 @@ export function wrapSession(
           JSON.stringify(attrs),
           suggesting?.name,
           suggesting?.date
-        );
-        if (direct.length) {
-          rememberProjectionFormatEdit(facade, {
-            start: range.start.paraId,
-            end: range.end.paraId,
-            values: Object.fromEntries(direct),
-          });
-        }
-      });
+        )
+      );
     },
     insertImage: (at, image, suggesting) => {
       ensureUndo(at.story);
@@ -1657,7 +1619,13 @@ export function wrapSession(
       }
       return plan;
     },
-    recordSavedParagraphIds: saved => publishParagraphIds(saved).stale,
+    recordSavedParagraphIds: (saved) =>
+      mutate(
+        () =>
+          JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<
+            [string, string]
+          >
+      ),
     writtenParagraphIds: (bytes) =>
       JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
     runInheritance: (styles) => {
@@ -1844,10 +1812,8 @@ export function wrapSession(
       pngExporter?.dispose();
       invalidateReadCaches();
       residentFonts.length = 0;
-      clearProjectionFormatEdits(facade);
       forgetMaterializedSource(session);
       docxSource = null;
-      docxSourceDigest = undefined;
       docxSourceKeys = null;
       sourceClosing = null;
       resetMedia();
@@ -1871,8 +1837,6 @@ export function wrapSession(
     unavailableTablesFrom: (roots) => JSON.parse(session.unavailable_tables_from(JSON.stringify(roots))) as YrsTableLoc[] | null,
     mediaSources: () => session.media_sources_json(),
     materializedSource,
-    sourceDigest: () => docxSourceDigest,
-    publishParagraphIds,
     setHeaderFooterAliases: (json) => mutate(() => session.set_header_footer_aliases(json)),
     sourcePackage: () =>
       docxSource && docxSourceKeys
@@ -1895,13 +1859,11 @@ export function wrapSession(
       const json = mutate(() => {
         forgetMaterializedSource(session);
         const compared = session.compare_docx_json(original, revised, options);
-        clearProjectionFormatEdits(facade);
         forgetSavedListDefinitions(facade);
         proposals.reset();
         return compared;
       });
       docxSource = original.slice();
-      docxSourceDigest = undefined;
       docxSourceKeys = null;
       sourceClosing = null;
       return json;
@@ -1927,6 +1889,5 @@ export function wrapOpenedEditSession(
     openedSources.set(buffer, exact);
   }
   const host = decodeDocxHost(hostJson, exact);
-  rememberHostEnvelope(host.document, hostPackageDigests.get(host));
   return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

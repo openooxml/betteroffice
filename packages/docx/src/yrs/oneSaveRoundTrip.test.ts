@@ -8,10 +8,8 @@ import { rezipContainer, unzipContainer } from '../docx/wasm';
 import type { BlockContent } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import {
-  captureSessionSave,
   createYrsSession,
   saveYrsDocx,
-  writeSessionSave,
   yrsToDocument,
   type YrsSession,
 } from './index';
@@ -462,15 +460,6 @@ describeSave('seedFromDocx -> saveYrsDocx (unedited)', (bytes) =>
   }))
 );
 
-describeSave('seedFromDocx -> yrsToDocument -> repackDocx', (bytes) =>
-  withSession<Saved>(bytes, async (session) => {
-    const base = session.materializeDocx();
-    if (!base) throw new Error('expected a document from the DOCX session');
-    const document = yrsToDocument(session, base);
-    return { bytes: new Uint8Array(await repackDocx(document)), warnings: 'n/a' };
-  })
-);
-
 describeSave('parseDocx -> createDocx with originalBuffer', async (bytes) => {
   const document = await parseDocx(bytes, { preloadFonts: false });
   return { bytes: new Uint8Array(await createDocx(document)), warnings: 'n/a' };
@@ -548,35 +537,39 @@ it('preserves single-quoted relationship IDs and content type registrations', as
   expect(edited[TYPES]).toEqual(parts[TYPES]);
 });
 
-it('rejects conflicting edits through header aliases and accepts equivalent edits', async () => {
+it('uses the previous model write for conflicting aliases and accepts equivalent edits', async () => {
   const parts = { ...sourceParts };
   changedPart(parts, DOCUMENT_RELS, xml => xml.replace('</Relationships>',
-    `<Relationship Id="rIdAlias" Type="${NS.r}/header" Target="HEADER1.XML"/></Relationships>`));
-  parts[HEADER] = encodePart(`<w:hdr xmlns:w="${NS.w}" xmlns:w14="${NS.w14}"><w:p w14:paraId="10000001" w14:textId="invalid"><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>`);
+    `<Relationship Id="rIdAlias" Type="${NS.r}/header" Target="header1.xml"/></Relationships>`));
   const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
   const first = firstText(document.package.headers!.get('rIdHeader')!.content);
-  const alias = firstText(document.package.headers!.get('rIdAlias')!.content);
   first.text = 'First edit';
+  const { warnings: oneEdit } = await repackDocxWithWarnings(document, noStamp);
+  expect(oneEdit).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*conflicting header\/footer/));
+  const alias = firstText(document.package.headers!.get('rIdAlias')!.content);
   alias.text = 'Conflicting edit';
-  await expect(repackDocx(document, noStamp)).rejects.toThrow('conflicting header/footer edits to word/header1.xml');
+  const fallback = await repackDocxWithWarnings(document, noStamp);
+  expect(fallback.warnings).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*word\/header1\.xml/));
+  expect(decodePart(unzipContainer(new Uint8Array(fallback.buffer))[HEADER])).toContain('Conflicting edit');
   alias.text = first.text;
-  const saved = await repackDocx(document, noStamp);
+  const { buffer: saved, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_PART_REWRITTEN word\/header1\.xml /));
+  expect(warnings.some(warning => warning.startsWith('DOCX_WHOLE_MODEL_WRITE '))).toBe(false);
   const reopened = await parseDocx(saved, { preloadFonts: false });
   expect(firstText(reopened.package.headers!.get('rIdAlias')!.content).text).toBe('First edit');
   expect(partChanges(parts, unzipContainer(new Uint8Array(saved))).changed).toEqual([HEADER]);
 });
 
-it('keeps an edited header when a footer relationship also targets its part', async () => {
+it('reports the fallback when a footer aliases an edited header', async () => {
   const parts = { ...sourceParts };
   changedPart(parts, DOCUMENT_RELS, xml => xml.replace('</Relationships>',
     `<Relationship Id="rIdFooterAlias" Type="${NS.r}/footer" Target="header1.xml"/></Relationships>`));
   const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
   expect(document.package.footers?.get('rIdFooterAlias')).toBeDefined();
   firstText(document.package.headers!.get('rIdHeader')!.content).text = 'Header owns the edit';
-  const saved = await repackDocx(document, noStamp);
-  const reopened = await parseDocx(saved, { preloadFonts: false });
-  expect(firstText(reopened.package.headers!.get('rIdHeader')!.content).text).toBe('Header owns the edit');
-  expect(partChanges(parts, unzipContainer(new Uint8Array(saved))).changed).toEqual([HEADER]);
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*word\/header1\.xml/));
+  expect(decodePart(unzipContainer(new Uint8Array(buffer))[HEADER])).toContain('<w:ftr');
 });
 
 it('writes an edited header and note using their original archive spelling', async () => {
@@ -684,145 +677,22 @@ function editBody(session: YrsSession, text: string): void {
   expect(result).toMatchObject({ ok: true, applied: true });
 }
 
-it('saves an edited projection based on parseDocx with the session plan', () =>
+it('rewrites an edited projection from its model and leaves the session alone', () =>
   withSession(fixture.bytes, async (session) => {
     editBody(session, EDIT);
     const base = await parseDocx(fixture.bytes, { preloadFonts: false });
-    const projected = yrsToDocument(session, base);
-    const options = { updateModifiedDate: false };
-    const { buffer, warnings } = await repackDocxWithWarnings(projected, options);
-    expect(warnings.some(warning => warning.startsWith("DOCX_PART_REWRITTEN "))).toBe(false);
-    const bytes = new Uint8Array(buffer);
-    expect(unzipContainer(bytes)).toEqual(unzipContainer((await saveYrsDocx(session, options)).bytes));
-    expect(inspectSave('edited projection', sourceParts, { bytes, warnings: 'n/a' }, fixture.probes).editedText)
-      .toBe(`EDIT ME${EDIT}`);
-  })
-);
-
-it('saves an old projection without writing a later session edit', () =>
-  withSession(fixture.bytes, async (session) => {
-    editBody(session, EDIT);
-    const projected = yrsToDocument(session, session.materializeDocx()!);
+    const projection = yrsToDocument(session, base, { storyIds: new Set(['body']) });
     editBody(session, ' (later)');
-    const bytes = new Uint8Array(await repackDocx(projected));
-    expect(inspectSave('stale projection', sourceParts, { bytes, warnings: 'n/a' }, fixture.probes).editedText)
-      .toBe(`EDIT ME${EDIT}`);
-  })
-);
-
-it('saves an explicit spacing override followed by another paragraph edit', () => {
-  const parts = { ...sourceParts };
-  const secondId = '11223344';
-  parts[BODY] = encodePart(`<w:document xmlns:w="${NS.w}" xmlns:w14="${NS.w14}"><w:body><w:p w14:paraId="${EDIT_PARAGRAPH_ID}"><w:r><w:t>First</w:t></w:r></w:p><w:p w14:paraId="${secondId}"><w:r><w:t>Second</w:t></w:r></w:p></w:body></w:document>`);
-  parts[STYLES] = encodePart(`<w:styles xmlns:w="${NS.w}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="160"/></w:pPr></w:style></w:styles>`);
-  return withSession(rezipContainer(parts), async session => {
-    const at = { paraId: EDIT_PARAGRAPH_ID, offset: 0 };
-    session.setParagraphAttrs({ story: 'body', start: at, end: at }, { spaceAfter: 160 });
-    session.insertText({ story: 'body', paraId: secondId, offset: 6 }, ' updated');
-    const projected = yrsToDocument(session, session.materializeDocx()!);
-    const saved = await repackDocx(projected, noStamp);
-    const xml = decodePart(unzipContainer(new Uint8Array(saved))[BODY]);
-    expect(xml).toContain('w:after="160"');
-    expect(xml).toContain('updated');
-  });
-});
-
-it('writes an in-place edit to a current projection', () =>
-  withSession(fixture.bytes, async (session) => {
-    const projected = yrsToDocument(session, session.materializeDocx()!);
-    firstText(projected.package.document.content, EDIT_PARAGRAPH_ID).text = 'Edited projection';
-    const bytes = new Uint8Array(await repackDocx(projected));
-    expect(inspectSave('mutated projection', sourceParts, { bytes, warnings: 'n/a' }, fixture.probes).editedText)
-      .toBe('Edited projection');
-  })
-);
-
-
-it('keeps the same projection current after publishing paragraph IDs', () => {
-  const parts = { ...sourceParts };
-  parts[BODY] = encodePart(`<w:document xmlns:w="${NS.w}" xmlns:w14="${NS.w14}"><w:body><w:p w14:paraId="${EDIT_PARAGRAPH_ID}"><w:r><w:t>Start</w:t></w:r></w:p></w:body></w:document>`);
-  parts[STYLES] = encodePart(`<w:styles xmlns:w="${NS.w}"><w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`);
-  return withSession(rezipContainer(parts), async session => {
-    const result = session.applyEdits({
-      expectVersion: session.version(),
-      steps: [{ op: 'insertParagraphs', target: { story: 'body', paraId: EDIT_PARAGRAPH_ID },
-        at: 'end', paragraphs: [{ text: 'New paragraph' }] }],
-    });
-    expect(result).toMatchObject({ ok: true, applied: true });
-    expect(session.setStyleLanguage('Normal', { lang: 'fr-FR' })).toBe(true);
-    const range = { story: 'body', start: { paraId: EDIT_PARAGRAPH_ID, offset: 0 }, end: { paraId: EDIT_PARAGRAPH_ID, offset: 0 } };
-    const list = session.ensureListDefinition('body', EDIT_PARAGRAPH_ID, 'bullet');
-    session.setParagraphAttrs(range, list);
-    const projected = yrsToDocument(session, session.materializeDocx()!);
     const version = session.version();
-    const first = await repackDocxWithWarnings(projected, noStamp);
-    expect(session.version()).not.toBe(version);
-    const second = await repackDocxWithWarnings(projected, noStamp);
-    const saved = unzipContainer(new Uint8Array(first.buffer));
-    expect(decodePart(saved[BODY])).toContain('New paragraph');
-    expect(decodePart(saved[STYLES])).toContain('fr-FR');
-    expect(decodePart(saved['word/numbering.xml'])).toContain('betteroffice-list:');
-    expect(unzipContainer(new Uint8Array(second.buffer))).toEqual(saved);
-    expect(second.warnings.some(warning => warning.startsWith('DOCX_PART_REWRITTEN '))).toBe(false);
-  });
-});
-
-it('uses captured style language and lists when the session changes during the write', () => {
-  const parts = { ...sourceParts, [STYLES]: encodePart(
-    `<w:styles xmlns:w="${NS.w}"><w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`
-  ) };
-  return withSession(rezipContainer(parts), async session => {
-    expect(session.setStyleLanguage('Normal', { lang: 'fr-FR' })).toBe(true);
-    const range = { story: 'body', start: { paraId: EDIT_PARAGRAPH_ID, offset: 0 }, end: { paraId: EDIT_PARAGRAPH_ID, offset: 0 } };
-    const before = session.ensureListDefinition('body', EDIT_PARAGRAPH_ID, 'bullet');
-    session.setParagraphAttrs(range, before);
-    const [originalList] = session.createdListDefinitions();
-    expect(originalList).toBeDefined();
-    const document = yrsToDocument(session, session.materializeDocx()!);
-    const capture = captureSessionSave(session);
-    let newListKey: string | undefined;
-    const saved = await writeSessionSave(
-      session, document, capture, document.originalBuffer!, noStamp,
-      () => true, false, () => true, async () => {
-        if (newListKey !== undefined) return;
-        expect(session.setStyleLanguage('Normal', { lang: 'de-DE' })).toBe(true);
-        const later = session.ensureListDefinition('body', EDIT_PARAGRAPH_ID, 'numbered');
-        session.setParagraphAttrs(range, later);
-        newListKey = session.createdListDefinitions().find(definition => definition.key !== originalList!.key)?.key;
-        expect(newListKey).toBeDefined();
-      }
-    );
-    const written = unzipContainer(saved.bytes);
-    const styles = decodePart(written[STYLES]);
-    expect(styles).toContain('fr-FR');
-    expect(styles).not.toContain('de-DE');
-    const numbering = decodePart(written['word/numbering.xml']);
-    expect(numbering).toContain(`betteroffice-list:${originalList!.key}`);
-    expect(numbering).not.toContain(`betteroffice-list:${newListKey}`);
-  });
-});
-
-it('keeps bookmarked notes and valid revision IDs when saving a cloned projection from raw', () => {
-  const source = bookmarkedNotePackage();
-  return withSession(source, async session => {
-    const result = session.applyEdits({
-      expectVersion: session.version(),
-      steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: EDIT_PARAGRAPH_ID },
-        at: 'end', text: ' new revision', suggest: { author: 'Editor', date: '2026-01-02T03:04:05Z' } }],
-    });
-    expect(result).toMatchObject({ ok: true, applied: true });
-    const projected = yrsToDocument(session, await parseDocx(source, { preloadFonts: false }));
-    const clone = structuredClone(projected);
-    const raw = { originalBuffer: Uint8Array.from(source).buffer } as RawDocxContent;
-    const saved = await repackDocxFromRaw(clone, raw, noStamp);
-    const savedParts = unzipContainer(new Uint8Array(saved));
-    expect(savedParts[FOOTNOTES]).toEqual(unzipContainer(source)[FOOTNOTES]);
-    const revision = decodePart(savedParts[BODY]).match(/<w:ins\b[^>]*w:id="(\d+)"[^>]*w:author="Editor"/);
-    expect(revision).not.toBeNull();
-    expect(Number(revision![1])).toBeLessThan(2 ** 31);
-    expect(decodePart(savedParts[BODY])).toContain('new revision');
-  });
-});
+    const { buffer, warnings } = await repackDocxWithWarnings(projection, noStamp);
+    expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_PART_REWRITTEN word\/document\.xml /));
+    const saved = unzipContainer(new Uint8Array(buffer));
+    expect(decodePart(saved[BODY])).toContain(EDIT);
+    expect(decodePart(saved[BODY])).not.toContain('(later)');
+    expect(saved[HEADER]).toEqual(sourceParts[HEADER]);
+    expect(session.version()).toBe(version);
+  })
+);
 
 it('keeps the fresh create path when the model has unrelated relationship IDs', async () => {
   const document = await parseDocx(fixture.bytes, { preloadFonts: false });
@@ -844,6 +714,22 @@ it('keeps the original Windows-1252 body bytes when only a header changes', asyn
   firstText(document.package.headers!.get('rIdHeader')!.content).text = 'Header edit';
   const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
   expect(saved[BODY]).toEqual(parts[BODY]);
+});
+
+it('keeps an unchanged footer when parsing the body allocates text IDs', async () => {
+  const parts = { ...sourceParts };
+  const footer = 'word/footer1.xml';
+  const paragraph = `<w:p xmlns:w14="${NS.w14}" w14:textId="invalid"><w:r><w:t>Text ID</w:t></w:r></w:p>`;
+  for (const [path, root] of [[BODY, 'body'], [footer, 'ftr']]) {
+    changedPart(parts, path, xml => xml.replace(new RegExp(`<w:${root}\\b[^>]*>`), tag => tag + paragraph));
+  }
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  firstText(document.package.headers!.get('rIdHeader')!.content).text = 'Header edit';
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(warnings.filter(warning => warning.startsWith('DOCX_PART_REWRITTEN '))).toEqual([
+    expect.stringMatching(/^DOCX_PART_REWRITTEN word\/header1\.xml /),
+  ]);
+  expect(unzipContainer(new Uint8Array(buffer))[footer]).toEqual(parts[footer]);
 });
 
 it('keeps BOM-prefixed relationships and content types after a body edit', async () => {
@@ -912,7 +798,7 @@ it('cleans deleted comment markers from headers with mixed-case archive names', 
   expect(decodePart(saved['word/Header1.xml'])).not.toMatch(/<w:comment(?:RangeStart|RangeEnd|Reference)\b/);
 });
 
-it('saves a current projection of a thin host envelope with source numbering', async () => {
+it('falls back for a cloned projection with a thin numbering placeholder', async () => {
   const source = rezipContainer({
     ...sourceParts,
     'word/numbering.xml': encodePart(`<w:numbering xmlns:w="${NS.w}"><w:abstractNum w:abstractNumId="2"/><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>`),
@@ -921,36 +807,16 @@ it('saves a current projection of a thin host envelope with source numbering', a
   try {
     const host = session.seedFromDocx(source);
     editBody(session, EDIT);
-    const projection = yrsToDocument(session, host.document);
+    const projection = structuredClone(yrsToDocument(session, host.document));
     const { buffer, warnings } = await repackDocxWithWarnings(projection, noStamp);
     const saved = unzipContainer(new Uint8Array(buffer));
     expect(decodePart(saved[BODY])).toContain(EDIT);
     expect(saved['word/numbering.xml']).toEqual(unzipContainer(source)['word/numbering.xml']);
-    expect(warnings.some(w => /^DOCX_(?:KEPT_|STRUCTURE_DROPPED|MINIMAL_PATCH replace counts)/.test(w))).toBe(false);
+    expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*numbering differs/));
   } finally {
     session.destroy();
   }
 });
-
-it('keeps an explicitly changed revision ID on a public session projection', () =>
-  withSession(fixture.bytes, async session => {
-    const result = session.applyEdits({
-      expectVersion: session.version(),
-      steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: EDIT_PARAGRAPH_ID },
-        at: 'end', text: ' New revision', suggest: { author: 'Editor', date: '2026-01-02T03:04:05Z' } }],
-    });
-    expect(result.ok).toBe(true);
-    const projection = yrsToDocument(session, session.materializeDocx()!);
-    for (const block of projection.package.document.content) {
-      if (block.type !== 'paragraph') continue;
-      for (const inline of block.content) {
-        if (inline.type === 'insertion' && inline.info.author === 'Editor') inline.info.id = 12345;
-      }
-    }
-    const saved = unzipContainer(new Uint8Array(await repackDocx(projection, noStamp)));
-    expect(decodePart(saved[BODY])).toMatch(/<w:ins\b[^>]*w:id="12345"[^>]*w:author="Editor"/);
-  })
-);
 
 it('does not create a relationship part for a preserved header using the main relationships', async () => {
   const parts = { ...sourceParts };
@@ -976,16 +842,6 @@ it('does not report a rewrite when setting empty comments on a package without c
   expect(new Uint8Array(buffer)).toEqual(source);
   expect(warnings.some(warning => warning.startsWith('DOCX_PART_REWRITTEN '))).toBe(false);
 });
-
-it('uses the session save plan with a separate byte-identical raw buffer', () =>
-  withSession(fixture.bytes, async session => {
-    editBody(session, EDIT);
-    const projection = yrsToDocument(session, session.materializeDocx()!);
-    const raw = { originalBuffer: Uint8Array.from(fixture.bytes).buffer } as RawDocxContent;
-    const saved = await repackDocxFromRaw(projection, raw, noStamp);
-    expect(unzipContainer(new Uint8Array(saved))).toEqual(unzipContainer((await saveYrsDocx(session, noStamp)).bytes));
-  })
-);
 
 it('removes comment markers from a Windows-1252 main part without changing its text', async () => {
   const original = await parseDocx(fixture.bytes, { preloadFonts: false });
@@ -1025,12 +881,13 @@ for (const littleEndian of [true, false]) {
   });
 }
 
-it('reports a conflicting verbatim note edit with its note ID', async () => {
+it('falls back to writing a conflicting verbatim note', async () => {
   const document = await parseDocx(bookmarkedNotePackage(), { preloadFonts: false });
   const note = document.package.footnotes![0]!;
   note.verbatimXml = note.verbatimXml!.replace('Original note', 'Conflicting note');
-  await expect(repackDocx(document, noStamp))
-    .rejects.toThrow('footnote 73 in word/footnotes.xml has verbatimXml that conflicts with its content');
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*footnote 73/));
+  expect(decodePart(unzipContainer(new Uint8Array(buffer))[FOOTNOTES])).toContain('Conflicting note');
 });
 
 it('keeps a cleared verbatim note cleared when another note changes', async () => {
@@ -1077,14 +934,16 @@ it('returns dangling drawing warnings on an unchanged save', async () => {
   expect(unchanged.warnings).toContain('opaque drawing references relationship "rIdMissing" absent from word/_rels/document.xml.rels; keeping the markup verbatim');
 });
 
-it('rejects a replacement numbering definition before rewriting the body', async () => {
+it('keeps source numbering and reports the fallback when the model replaces it', async () => {
   const parts = {
     ...sourceParts,
     'word/numbering.xml': encodePart(`<w:numbering xmlns:w="${NS.w}"><w:abstractNum w:abstractNumId="2"/><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>`),
   };
   const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
   document.package.numbering!.nums[0]!.abstractNumId = 3;
-  await expect(repackDocx(document, noStamp)).rejects.toThrow('cannot replace existing numbering definitions');
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_WHOLE_MODEL_WRITE .*numbering differs/));
+  expect(unzipContainer(new Uint8Array(buffer))['word/numbering.xml']).toEqual(parts['word/numbering.xml']);
 });
 
 it('rejects cycles before comparing a parsed model with its save fingerprint', async () => {

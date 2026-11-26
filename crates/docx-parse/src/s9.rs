@@ -577,7 +577,11 @@ fn parse_s9_package_impl(
         crate::package_integrity::package_warnings(parts, media_table, limits)
     };
     let (mut body, budget_stopped) = match document_part {
-        Some(_) if matches!(purpose, ParsePurpose::SaveComparison { skip_body: true }) => {
+        Some((_, xml))
+            if matches!(purpose, ParsePurpose::SaveComparison { skip_body: true })
+                && std::str::from_utf8(xml)
+                    .is_ok_and(|xml| !xml.contains("textId") && !xml.contains('\0')) =>
+        {
             (DocumentBody::default(), false)
         }
         Some((path, xml)) => {

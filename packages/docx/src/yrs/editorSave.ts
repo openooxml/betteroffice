@@ -2,7 +2,6 @@
 
 import { engineProgress } from '../utils/engineProgress';
 import { createDocx, repackDocx } from '../docx/rezip';
-import { sameSaveTree } from '../docx/rustSaveFacade';
 import { injectReplyRangeMarkers, injectTCReplyRangeMarkers } from '../docx/injectReplyRangeMarkers';
 import type { Comment } from '../types/content';
 import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../types/document';
@@ -167,17 +166,7 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const sameSource = source !== null && sameBytes(original, source.buffer);
-    const keepNotes = (part: string, opened: Readonly<Document> | null): boolean => {
-      if (!sameSource) return false;
-      const kind = part === 'word/footnotes.xml' ? 'footnotes' : part === 'word/endnotes.xml' ? 'endnotes' : undefined;
-      const before = kind && opened?.package[kind];
-      if (!kind || !before || !before.some(note => note.verbatimXml !== undefined)) return false;
-      return sameSaveTree(before, document.package[kind]);
-    };
-    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(
-      session, document, capture, original, {}, keepNotes, false, () => false, yieldSave
-    );
+    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
     saves.keptUnchanged = keptUnchanged;
     saves.structureDropped = structureDropped;
     return bytes.buffer as ArrayBuffer;

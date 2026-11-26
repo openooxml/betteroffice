@@ -1,7 +1,6 @@
 import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { repackDocxWithWarnings } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
@@ -48,14 +47,6 @@ test('the editor save keeps a paragraph whose rewrite would drop a smart tag', a
   const projected = yrsToDocument(session, session.materializeDocx()!);
   const bytes = new Uint8Array(await saveEditorDocument(session, projected, projected.package.document.comments ?? []));
   expect(partOf(bytes)).toContain(TARGET);
-});
-
-test('repacking a live projection warns when formatting is skipped to keep a smart tag', async () => {
-  const session = await cleared();
-  const projected = yrsToDocument(session, session.materializeDocx()!);
-  const { buffer, warnings } = await repackDocxWithWarnings(projected, { updateModifiedDate: false });
-  expect(partOf(new Uint8Array(buffer))).toContain(TARGET);
-  expect(warnings).toContainEqual(expect.stringMatching(/^DOCX_KEPT_UNCHANGED Edits were skipped/));
 });
 
 test('a formatting change the writer can patch is saved and reports nothing kept', async () => {

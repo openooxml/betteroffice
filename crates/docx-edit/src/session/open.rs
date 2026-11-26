@@ -11,8 +11,6 @@ use crate::seed::checked_package_digest;
 #[serde(rename_all = "camelCase")]
 struct DocxHostWire {
     envelope: docx_parse::S9WireEnvelope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    package_sha256: Option<String>,
     referenced_fonts: Vec<String>,
     /// Empty unless the stories were seeded from the package (a preview's
     /// from its cut).
@@ -258,7 +256,6 @@ impl EditSessionCore {
         };
         let host = DocxHostWire {
             envelope: host_envelope,
-            package_sha256: Some(digest.clone()),
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
             whole_body: false,
@@ -311,7 +308,6 @@ impl EditSessionCore {
         self.engine.doc().rotate_version(self.host.entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
-            package_sha256: None,
             referenced_fonts: fonts.referenced,
             unused_script_fonts: fonts.unused_script,
             whole_body,

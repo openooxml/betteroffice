@@ -20,7 +20,8 @@ use crate::xml::{ParseBudget, ParseError, ParseLimits};
 
 use super::paragraph_ids::{S13ParagraphIds, S13PatchedPart};
 use super::s13::{
-    S13SaveOptions, S13SaveRequest, S13SelectiveSave, WriteSettings, save_core_only, write_parts,
+    S13SaveOptions, S13SaveRequest, S13SelectiveSave, WriteSettings, save_core_only,
+    write_docx_s13_parts_with_report, write_parts,
 };
 use super::{S13SaveReport, SerializerDeterminism};
 
@@ -64,13 +65,10 @@ struct SaveWire {
     options: S13SaveOptions,
     selective: Option<S13SelectiveSave>,
     paragraph_ids: Option<S13ParagraphIds>,
-    style_languages: Option<serde_json::Value>,
     #[serde(default)]
     fresh_package: bool,
     #[serde(default)]
     report_bindings: bool,
-    #[serde(default)]
-    rewrite_body: bool,
     unchanged_source_sha256: Option<String>,
     unchanged_body_sha256: Option<String>,
 }
@@ -91,10 +89,8 @@ pub(crate) fn write_json(
     if let Some(digest) = wire.unchanged_source_sha256 {
         if wire.document.is_some()
             || wire.fresh_package
-            || wire.style_languages.is_some()
             || wire.paragraph_ids.is_some()
             || wire.selective.is_some()
-            || wire.rewrite_body
         {
             return Err("unchangedSourceSha256 requires a metadata-only save request".to_owned());
         }
@@ -119,7 +115,7 @@ pub(crate) fn write_json(
     let coverage = Coverage {
         unchanged_body: source_digest.as_ref().is_some_and(|(matched, _)| *matched),
         source_ordinals: json.contains("\"sourceOrdinal\""),
-        rewrite_body: wire.rewrite_body,
+        rewrite_body: false,
         notes: [
             wire.footnotes.is_some(),
             wire.endnotes.is_some(),
@@ -144,21 +140,17 @@ pub(crate) fn write_json(
     };
     let parts = ooxml_opc::unzip_parts(original_docx)
         .map_err(|error| ParseError::Container(error).to_string())?;
-    if wire.style_languages.is_some()
-        && (request.paragraph_ids.is_none() || request.selective.is_some())
-    {
-        return Err("styleLanguages requires a session save plan".to_owned());
+    if request.paragraph_ids.is_some() || request.selective.is_some() {
+        return write_docx_s13_parts_with_report(request, &parts, Some(original_docx))
+            .map_err(|error| error.to_string());
     }
-    if wire.fresh_package || request.paragraph_ids.is_some() || request.selective.is_some() {
-        let localize_row_namespaces = request.paragraph_ids.is_some();
+    if wire.fresh_package {
         return write_parts(
             request,
             &parts,
             Some(original_docx),
             WriteSettings {
-                style_languages: wire.style_languages.as_ref(),
-                localize_row_namespaces,
-                product_save: wire.fresh_package,
+                product_save: true,
                 ..WriteSettings::default()
             },
         )
@@ -171,7 +163,6 @@ pub(crate) fn write_json(
         &ParseLimits::default(),
         coverage,
         wire_diagnostics,
-        None,
         source_digest.map(|(_, digest)| digest),
     )
     .map_err(|error| error.to_string())
@@ -194,18 +185,6 @@ pub fn write_model_with_body_policy(
     limits: &ParseLimits,
     rewrite_body: bool,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
-    write_native_model(request, original_docx, parts, limits, rewrite_body, None)
-}
-
-#[doc(hidden)]
-pub fn write_native_model(
-    request: S13SaveRequest,
-    original_docx: &[u8],
-    parts: &[(String, Vec<u8>)],
-    limits: &ParseLimits,
-    rewrite_body: bool,
-    whole_model_reason: Option<&str>,
-) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     write_model(
         request,
         original_docx,
@@ -218,20 +197,17 @@ pub fn write_native_model(
             unchanged_body: false,
         },
         None,
-        whole_model_reason,
         None,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_model(
-    mut request: S13SaveRequest,
+    request: S13SaveRequest,
     bytes: &[u8],
     parts: &[(String, Vec<u8>)],
     limits: &ParseLimits,
     coverage: Coverage,
     wire: Option<&mut Vec<String>>,
-    whole_model_reason: Option<&str>,
     source_digest: Option<String>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     if request.paragraph_ids.is_some() || request.selective.is_some() {
@@ -246,6 +222,21 @@ fn write_model(
         );
     }
     request.determinism.validate()?;
+    match write_guarded(&request, bytes, parts, limits, coverage, wire, source_digest) {
+        Ok(saved) => Ok(saved),
+        Err(error) => write_fallback(request, bytes, parts, &error.to_string()),
+    }
+}
+
+fn write_guarded(
+    request: &S13SaveRequest,
+    bytes: &[u8],
+    parts: &[(String, Vec<u8>)],
+    limits: &ParseLimits,
+    coverage: Coverage,
+    wire: Option<&mut Vec<String>>,
+    source_digest: Option<String>,
+) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     let parse_options = S9ParseOptions {
         detect_variables: false,
         parse_headers_footers: !request.header_entries.is_empty()
@@ -256,25 +247,11 @@ fn write_model(
         ..S9ParseOptions::default()
     };
     let unchanged_body = coverage.unchanged_body && !coverage.rewrite_body;
-    let source = parse_save_source(bytes, parts, parse_options, limits, unchanged_body);
-    let (body_path, source) = match source {
-        Ok(source) => source,
-        Err(error) => {
-            if let Some(requested) = &request.numbering
-                && let Some((path, xml)) = crate::s8::find_part(parts, NUMBERING)
-                && let Ok(original) = crate::numbering::parse_numbering(
-                    Some(xml),
-                    path,
-                    &mut ParseBudget::new(limits),
-                )
-                && requested != &original.definitions
-            {
-                return Err(save_error("cannot replace existing numbering definitions"));
-            }
-            return write_fallback(request, bytes, parts, coverage, &error.to_string());
-        }
-    };
+    let (body_path, source) = parse_save_source(bytes, parts, parse_options, limits, unchanged_body)?;
     let part_paths = PartPaths::new(parts);
+    if part_paths.0.len() != parts.len() {
+        return Err(save_error("ambiguous case-insensitive package paths"));
+    }
     let mut numbering_added = false;
     if let Some(numbering) = &request.numbering
         && numbering != &source.numbering
@@ -284,41 +261,27 @@ fn write_model(
                 relationship.relationship_type == relationship_types::NUMBERING
             })
         {
-            return Err(save_error("cannot replace existing numbering definitions"));
+            return Err(save_error("numbering differs from the source package"));
         }
         numbering_added = !numbering.abstract_nums.is_empty() || !numbering.nums.is_empty();
     }
-    if let Some(reason) = whole_model_reason {
-        return write_fallback(request, bytes, parts, coverage, reason);
-    }
-    if let Err(error) = validate_relationships(
+    validate_relationships(
         &body_path,
         &request.relationship_entries,
         &source.relationship_entries,
-    ) {
-        return write_fallback(request, bytes, parts, coverage, &error.to_string());
-    }
-    let aliases =
-        match header_footer_paths(&request, &source, &body_path, &part_paths, parts, limits) {
-            Ok(aliases) => aliases,
-            Err(error @ ParseError::Canonical(_)) => return Err(error),
-            Err(error) => {
-                return write_fallback(request, bytes, parts, coverage, &error.to_string());
-            }
-        };
-    if aliases.edits.values().any(|edit| {
-        edit.path.eq_ignore_ascii_case(&body_path)
+    )?;
+    let aliases = header_footer_paths(request, &source, &body_path, &part_paths, parts, limits)?;
+    if aliases.changed.iter().any(|path| {
+        path.eq_ignore_ascii_case(&body_path)
             || [COMMENTS, FOOTNOTES, ENDNOTES, NUMBERING]
                 .iter()
-                .any(|reserved| edit.path.eq_ignore_ascii_case(reserved))
+                .any(|reserved| path.eq_ignore_ascii_case(reserved))
     }) {
-        return write_fallback(
-            request,
-            bytes,
-            parts,
-            coverage,
-            "a header or footer targets another story part",
-        );
+        return Err(save_error("a header or footer targets another story part"));
+    }
+    if !unchanged_body && request.document.content.is_empty() && !source.document.content.is_empty()
+    {
+        return Err(save_error("the document body may be a placeholder"));
     }
     let mut changed = BTreeSet::new();
     let reuse_document_root = unchanged_body
@@ -340,13 +303,11 @@ fn write_model(
     {
         changed.insert(part_paths.resolve(COMMENTS).to_owned());
     }
-    changed.extend(aliases.edits.values().map(|edit| edit.path.clone()));
+    changed.extend(aliases.changed);
     let [footnotes, endnotes, footnote_separators, endnote_separators] = coverage.notes;
     let note_parts = [
         NotePart {
             path: part_paths.resolve(FOOTNOTES),
-            notes: &mut request.footnotes,
-            separators: &mut request.footnote_separators,
             source_notes: source.footnotes.as_deref().unwrap_or_default(),
             source_separators: source.footnote_separators.as_deref().unwrap_or_default(),
             notes_read: footnotes,
@@ -354,17 +315,18 @@ fn write_model(
         },
         NotePart {
             path: part_paths.resolve(ENDNOTES),
-            notes: &mut request.endnotes,
-            separators: &mut request.endnote_separators,
             source_notes: source.endnotes.as_deref().unwrap_or_default(),
             source_separators: source.endnote_separators.as_deref().unwrap_or_default(),
             notes_read: endnotes,
             separators_read: endnote_separators,
         },
     ];
-    for notes in &note_parts {
-        if notes.changed() {
-            changed.insert(notes.path.to_owned());
+    for (part, notes, separators) in [
+        (&note_parts[0], &request.footnotes, &request.footnote_separators),
+        (&note_parts[1], &request.endnotes, &request.endnote_separators),
+    ] {
+        if part.changed(notes, separators)? {
+            changed.insert(part.path.to_owned());
         }
     }
 
@@ -388,32 +350,38 @@ fn write_model(
                 )
         });
     if changed.is_empty() && !added_story_relationship {
+        let saved = save_core_only(request, &body_path, parts, bytes)?;
         if let Some(wire) = wire {
             wire.push(NO_BINDING_CHANGES.to_owned());
         }
-        return save_core_only(&request, &body_path, parts, bytes);
+        return Ok(saved);
     }
 
+    let mut request = request.clone();
     let mut empty_notes = [false; 2];
-    for (index, notes) in note_parts.into_iter().enumerate() {
-        if changed.contains(notes.path) {
-            notes.prepare(parts, &source, limits)?;
+    for (index, (part, notes, separators)) in [
+        (
+            note_parts[0],
+            &mut request.footnotes,
+            &mut request.footnote_separators,
+        ),
+        (
+            note_parts[1],
+            &mut request.endnotes,
+            &mut request.endnote_separators,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if changed.contains(part.path) {
+            part.prepare(notes, separators, parts, &source, limits)?;
             empty_notes[index] = true;
         }
     }
-    let mut index = 0;
+    let mut owners = aliases.owners.into_iter();
     for entries in [&mut request.header_entries, &mut request.footer_entries] {
-        entries.retain_mut(|(_, story)| {
-            let edit = aliases.targets[index]
-                .as_ref()
-                .and_then(|key| aliases.edits.get(key));
-            let keep = edit.is_none_or(|edit| edit.owner == index);
-            if let Some(edit) = edit.filter(|_| keep) {
-                *story = edit.story.clone();
-            }
-            index += 1;
-            keep
-        });
+        entries.retain(|_| owners.next().unwrap_or(true));
     }
 
     request.paragraph_ids = Some(source_part_plan(&source, &body_path, &part_paths, &changed));
@@ -427,7 +395,6 @@ fn write_model(
             wire,
             legacy_diagnostics: false,
             product_save: true,
-            ..WriteSettings::default()
         },
     )?;
     report.warnings.extend(changed.into_iter().map(|part| format!(
@@ -436,7 +403,6 @@ fn write_model(
     Ok((saved, report))
 }
 
-/// Fresh sessions retain authored IDs and have no paragraph ID claims to apply.
 fn source_part_plan(
     source: &S9PackageWire,
     body_path: &str,
@@ -463,27 +429,14 @@ fn write_fallback(
     request: S13SaveRequest,
     bytes: &[u8],
     parts: &[(String, Vec<u8>)],
-    coverage: Coverage,
     reason: &str,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
-    let empty_notes = [
-        coverage.notes[0] && coverage.notes[2],
-        coverage.notes[1] && coverage.notes[3],
-    ];
-    let empty_notes = std::array::from_fn(|index| {
-        empty_notes[index]
-            && parts
-                .iter()
-                .any(|(path, _)| path.eq_ignore_ascii_case([FOOTNOTES, ENDNOTES][index]))
-    });
     let (saved, mut report) = write_parts(
         request,
         parts,
         Some(bytes),
         WriteSettings {
-            empty_notes,
             legacy_diagnostics: false,
-            product_save: true,
             ..WriteSettings::default()
         },
     )?;
@@ -589,17 +542,9 @@ fn source_story_paths<'a>(
         })
 }
 
-struct AliasEdit {
-    owner: usize,
-    relationship_id: String,
-    kind: &'static str,
-    path: String,
-    story: HeaderFooter,
-}
-
 struct HeaderFooterPlan {
-    edits: HashMap<String, AliasEdit>,
-    targets: Vec<Option<String>>,
+    changed: BTreeSet<String>,
+    owners: Vec<bool>,
 }
 
 fn header_footer_paths(
@@ -636,8 +581,9 @@ fn header_footer_paths(
                 .or_insert(*original);
         }
     }
-    let mut edits = HashMap::<String, AliasEdit>::new();
-    let mut targets = Vec::new();
+    let mut seen = HashMap::<String, (&str, &HeaderFooter)>::new();
+    let mut changed = BTreeSet::new();
+    let mut owners = Vec::new();
     let mut story_relationships = HashMap::<String, RelationshipMap>::new();
     let mut budget = ParseBudget::new(limits);
     for (entries, kind) in [
@@ -649,221 +595,63 @@ fn header_footer_paths(
                 Some(relationship) => story_path(body_path, relationship, kind)?,
                 None => None,
             };
-            let path = target.as_deref().map(|target| paths.resolve(target));
-            let key = path.map(str::to_ascii_lowercase);
-            if let (Some(path), Some(key)) = (path, &key) {
-                let original = originals
-                    .get(id.as_str())
-                    .copied()
-                    .or_else(|| original_targets.get(&(key.clone(), kind)).copied());
-                let owner_relationships = if story.watermark.is_some()
-                    || original.is_some_and(|original| original.watermark.is_some())
+            let Some(target) = target else {
+                owners.push(true);
+                continue;
+            };
+            let path = paths.resolve(&target);
+            let key = path.to_ascii_lowercase();
+            let original = originals
+                .get(id.as_str())
+                .copied()
+                .or_else(|| original_targets.get(&(key.clone(), kind)).copied());
+            let previous = seen.get(&key).copied();
+            let owner_relationships = if story.watermark.is_some()
+                || original.is_some_and(|original| original.watermark.is_some())
+                || previous.is_some_and(|(_, story)| story.watermark.is_some())
+            {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    story_relationships.entry(key.clone())
                 {
-                    if !story_relationships.contains_key(key) {
-                        let rels_path = relationship_part_path(path);
-                        let relationships = match crate::s8::find_part(parts, &rels_path) {
-                            Some((name, bytes)) => parse_relationships(bytes, name, &mut budget)?,
-                            None => RelationshipMap::new(),
-                        };
-                        story_relationships.insert(key.clone(), relationships);
-                    }
-                    story_relationships.get(key)
-                } else {
-                    None
-                };
-                if original.is_none_or(|original| {
-                    !same_model_with_relationships(story, original, owner_relationships)
-                }) {
-                    if let Some(edit) = edits.get_mut(key) {
-                        let owner_id = &edit.relationship_id;
-                        let owner_base = originals
-                            .get(owner_id.as_str())
-                            .copied()
-                            .or_else(|| original_targets.get(&(key.clone(), edit.kind)).copied());
-                        if let Some(merged) = merge_alias(
-                            &edit.story,
-                            story,
-                            owner_base,
-                            original,
-                            owner_relationships,
-                        ) {
-                            edit.story = merged;
-                        } else {
-                            return Err(save_error(format!(
-                                "conflicting header/footer edits to {path} through {owner_id} and {id}"
-                            )));
-                        }
-                    } else {
-                        edits.insert(
-                            key.clone(),
-                            AliasEdit {
-                                owner: targets.len(),
-                                relationship_id: id.clone(),
-                                kind,
-                                path: path.to_owned(),
-                                story: story.clone(),
-                            },
-                        );
-                    }
+                    let rels_path = relationship_part_path(path);
+                    let relationships = match crate::s8::find_part(parts, &rels_path) {
+                        Some((name, bytes)) => parse_relationships(bytes, name, &mut budget)?,
+                        None => RelationshipMap::new(),
+                    };
+                    entry.insert(relationships);
                 }
+                story_relationships.get(&key)
+            } else {
+                None
+            };
+            if let Some((owner_id, owner)) = previous {
+                if !same_model_with_relationships(story, owner, owner_relationships) {
+                    return Err(save_error(format!(
+                        "conflicting header/footer models for {path} through {owner_id} and {id}"
+                    )));
+                }
+            } else {
+                seen.insert(key, (id.as_str(), story));
             }
-            targets.push(key);
+            owners.push(previous.is_none());
+            if story.content.is_empty()
+                && original.is_some_and(|original| !original.content.is_empty())
+            {
+                return Err(save_error(format!("{path} may be a placeholder")));
+            }
+            if original.is_none_or(|original| {
+                !same_model_with_relationships(story, original, owner_relationships)
+            }) {
+                changed.insert(path.to_owned());
+            }
         }
     }
-    Ok(HeaderFooterPlan { edits, targets })
+    Ok(HeaderFooterPlan { changed, owners })
 }
 
-fn merge_alias(
-    left: &HeaderFooter,
-    right: &HeaderFooter,
-    source_left: Option<&HeaderFooter>,
-    source_right: Option<&HeaderFooter>,
-    relationships: Option<&RelationshipMap>,
-) -> Option<HeaderFooter> {
-    fn tree(story: &HeaderFooter) -> Option<Value> {
-        let mut value = serde_json::to_value(story).ok()?;
-        if let Some(object) = value.as_object_mut() {
-            object.remove("type");
-            object.remove("hdrFtrType");
-            if let Some(Value::Array(bindings)) = object.remove("customRootBindings") {
-                object.insert(
-                    "customRootBindings".into(),
-                    Value::Object(
-                        bindings
-                            .into_iter()
-                            .filter_map(|binding| {
-                                Some((
-                                    binding["name"].as_str()?.to_owned(),
-                                    binding["value"].clone(),
-                                ))
-                            })
-                            .collect(),
-                    ),
-                );
-            }
-        }
-        Some(value)
-    }
-
-    // Each alias has its own parsed baseline, including generated paragraph metadata.
-    fn merge(
-        left: &Value,
-        right: &Value,
-        source_left: &Value,
-        source_right: &Value,
-        relationships: Option<&RelationshipMap>,
-    ) -> Option<Value> {
-        let same = |a, b| same_value(a, b, relationships);
-        if same(right, source_right) || same(left, right) {
-            return Some(left.clone());
-        }
-        if same(left, source_left)
-            && (same(source_left, source_right) || !right.is_object() && !right.is_array())
-        {
-            return Some(right.clone());
-        }
-        if let (Some(left), Some(right)) = (left.as_object(), right.as_object()) {
-            let keys: BTreeSet<_> = left
-                .keys()
-                .chain(right.keys())
-                .chain(
-                    source_left
-                        .as_object()
-                        .into_iter()
-                        .flatten()
-                        .map(|(key, _)| key),
-                )
-                .chain(
-                    source_right
-                        .as_object()
-                        .into_iter()
-                        .flatten()
-                        .map(|(key, _)| key),
-                )
-                .collect();
-            let mut fields = serde_json::Map::new();
-            for key in keys {
-                let value = if ignores_model_field(key, left, right, relationships) {
-                    left.get(key).cloned().unwrap_or_default()
-                } else {
-                    merge(
-                        left.get(key).unwrap_or(&Value::Null),
-                        right.get(key).unwrap_or(&Value::Null),
-                        &source_left[key.as_str()],
-                        &source_right[key.as_str()],
-                        relationships,
-                    )?
-                };
-                if !value.is_null() {
-                    fields.insert(key.clone(), value);
-                }
-            }
-            return Some(Value::Object(fields));
-        }
-        if let (Some(left), Some(right)) = (left.as_array(), right.as_array())
-            && left.len() == right.len()
-        {
-            return left
-                .iter()
-                .zip(right)
-                .enumerate()
-                .map(|(index, (first, second))| {
-                    merge(
-                        first,
-                        second,
-                        &source_left[index],
-                        &source_right[index],
-                        relationships,
-                    )
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(Value::Array);
-        }
-        if same(left, source_left) {
-            return Some(right.clone());
-        }
-        // A previously absent object can be edited independently by both aliases.
-        if source_left.is_null() && source_right.is_null() && (left.is_null() || right.is_null()) {
-            return Some(if left.is_null() { right } else { left }.clone());
-        }
-        None
-    }
-
-    let left_tree = tree(left)?;
-    let right_tree = tree(right)?;
-    let source_left = source_left.map(tree).unwrap_or(Some(Value::Null))?;
-    let source_right = source_right.map(tree).unwrap_or(Some(Value::Null))?;
-    let mut result = merge(
-        &left_tree,
-        &right_tree,
-        &source_left,
-        &source_right,
-        relationships,
-    )?;
-    let object = result.as_object_mut()?;
-    object.insert("type".into(), Value::String(left.story_type.clone()));
-    object.insert(
-        "hdrFtrType".into(),
-        Value::String(left.hdr_ftr_type.clone()),
-    );
-    if let Some(Value::Object(bindings)) = object.remove("customRootBindings") {
-        object.insert(
-            "customRootBindings".into(),
-            Value::Array(
-                bindings
-                    .into_iter()
-                    .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
-                    .collect(),
-            ),
-        );
-    }
-    serde_json::from_value(result).ok()
-}
-
+#[derive(Clone, Copy)]
 struct NotePart<'a> {
     path: &'a str,
-    notes: &'a mut Vec<Note>,
-    separators: &'a mut Vec<Note>,
     source_notes: &'a [Note],
     source_separators: &'a [Note],
     notes_read: bool,
@@ -871,22 +659,41 @@ struct NotePart<'a> {
 }
 
 impl NotePart<'_> {
-    fn changed(&self) -> bool {
-        (self.notes_read && !same_notes(self.notes, self.source_notes))
-            || (self.separators_read && !same_notes(self.separators, self.source_separators))
+    fn changed(&self, notes: &[Note], separators: &[Note]) -> Result<bool, ParseError> {
+        let may_be_placeholder = |notes: &[Note], originals: &[Note]| {
+            notes.iter().any(|note| {
+                note.content.is_empty()
+                    && note.verbatim_xml.is_none()
+                    && originals
+                        .iter()
+                        .any(|original| original.id == note.id && !original.content.is_empty())
+            })
+        };
+        if (self.notes_read && may_be_placeholder(notes, self.source_notes))
+            || (self.separators_read && may_be_placeholder(separators, self.source_separators))
+        {
+            return Err(save_error(format!(
+                "{} may contain note placeholders",
+                self.path
+            )));
+        }
+        Ok((self.notes_read && !same_notes(notes, self.source_notes))
+            || (self.separators_read && !same_notes(separators, self.source_separators)))
     }
 
     fn prepare(
         self,
+        notes: &mut Vec<Note>,
+        separators: &mut Vec<Note>,
         parts: &[(String, Vec<u8>)],
         source: &S9PackageWire,
         limits: &ParseLimits,
     ) -> Result<(), ParseError> {
         if !self.notes_read {
-            self.notes.extend_from_slice(self.source_notes);
+            notes.extend_from_slice(self.source_notes);
         }
         if !self.separators_read {
-            self.separators.extend_from_slice(self.source_separators);
+            separators.extend_from_slice(self.source_separators);
         }
         let note_key = |note: &Note| if note.id == 0.0 { 0 } else { note.id.to_bits() };
         let mut originals = HashMap::<u64, Vec<&Note>>::new();
@@ -939,10 +746,7 @@ impl NotePart<'_> {
             ids: &mut ids,
             part: self.path,
         };
-        for (notes, supplied) in [
-            (self.notes, self.notes_read),
-            (self.separators, self.separators_read),
-        ] {
+        for (notes, supplied) in [(notes, self.notes_read), (separators, self.separators_read)] {
             if supplied {
                 for note in notes {
                     let originals = originals
@@ -1112,7 +916,7 @@ fn same_model_with_relationships<T: serde::Serialize + PartialEq + ?Sized>(
 ) -> bool {
     left == right
         || match (serde_json::to_value(left), serde_json::to_value(right)) {
-            (Ok(left), Ok(right)) => same_value(&left, &right, relationships),
+            (Ok(left), Ok(right)) => same_value(&left, &right, relationships, false),
             _ => false,
         }
 }
@@ -1145,25 +949,42 @@ fn ignores_model_field(
     };
     match key {
         "sourceOrdinal" | "repeatedParaId" => true,
+        "hdrFtrType" => [left, right].into_iter().all(|fields| {
+            matches!(
+                fields.get("type").and_then(Value::as_str),
+                Some("header" | "footer")
+            )
+        }),
         "src" | "mimeType" => linked_image(left) && linked_image(right),
         "dataUrl" | "contentType" => linked_watermark(left) && linked_watermark(right),
         _ => false,
     }
 }
 
-fn same_value(left: &Value, right: &Value, relationships: Option<&RelationshipMap>) -> bool {
+fn same_value(
+    left: &Value,
+    right: &Value,
+    relationships: Option<&RelationshipMap>,
+    drawing_model: bool,
+) -> bool {
     match (left, right) {
         (Value::Object(left), Value::Object(right)) => {
-            let ignore = |key| ignores_model_field(key, left, right, relationships);
+            let shape = [left, right]
+                .into_iter()
+                .all(|fields| fields.get("type").and_then(Value::as_str) == Some("shape"));
+            let ignore = |key| {
+                (drawing_model && matches!(key, "otherSha256" | "textBoxContentSha256"))
+                    || ignores_model_field(key, left, right, relationships)
+            };
             left.keys().filter(|key| !ignore(key.as_str())).count()
                 == right.keys().filter(|key| !ignore(key.as_str())).count()
                 && left
                     .iter()
                     .filter(|(key, _)| !ignore(key.as_str()))
                     .all(|(key, value)| {
-                        right
-                            .get(key)
-                            .is_some_and(|other| same_value(value, other, relationships))
+                        right.get(key).is_some_and(|other| {
+                            same_value(value, other, relationships, shape && key == "drawingModel")
+                        })
                     })
         }
         (Value::Array(left), Value::Array(right)) => {
@@ -1171,7 +992,7 @@ fn same_value(left: &Value, right: &Value, relationships: Option<&RelationshipMa
                 && left
                     .iter()
                     .zip(right)
-                    .all(|(left, right)| same_value(left, right, relationships))
+                    .all(|(left, right)| same_value(left, right, relationships, false))
         }
         _ => left == right,
     }

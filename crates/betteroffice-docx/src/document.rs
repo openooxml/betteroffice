@@ -12,14 +12,13 @@ use docx_edit::content_controls::{
     ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
     find_package_content_controls, list_package_content_controls,
 };
-use docx_edit::save::session_paragraph_ids;
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
 };
 use docx_edit::{
-    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, Receipt, SegmentContent, StoryRange,
-    StorySegment, seed_from_docx_with_generation,
+    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, ParagraphSavePlan, Receipt,
+    SegmentContent, SpliceAnchor, StoryRange, StorySegment, seed_from_docx_with_generation,
 };
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
@@ -37,10 +36,11 @@ use docx_parse::s9::{
     S9WireEnvelope,
 };
 use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_body_policy};
+use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
 use docx_parse::serializer::s13::save_core_only;
 use docx_parse::serializer::{
-    S13ParagraphId, S13ParagraphIds, S13SaveOptions, S13SaveReport, S13SaveRequest,
-    SerializerDeterminism,
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveReport, S13SaveRequest,
+    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -1075,6 +1075,69 @@ fn body_part(identities: &ParagraphIdentities) -> String {
             _ => None,
         })
         .unwrap_or_else(|| "word/document.xml".to_owned())
+}
+
+/// `plan` as the package writer's request field, every planned part kept.
+fn session_paragraph_ids(plan: ParagraphSavePlan) -> S13ParagraphIds {
+    S13ParagraphIds {
+        removed_comment_ids: Vec::new(),
+        section_edits: None,
+        assignments: plan
+            .assignments
+            .into_iter()
+            .map(|(part, ordinal, para_id)| S13ParagraphId {
+                part,
+                ordinal,
+                para_id,
+            })
+            .collect(),
+        patched_parts: plan
+            .patched_parts
+            .into_iter()
+            .map(|(part, para_ids)| S13PatchedPart { part, para_ids })
+            .collect(),
+        spliced_parts: plan
+            .spliced_parts
+            .into_iter()
+            .map(|part| S13SplicedPart {
+                part: part.part,
+                sha256: part.sha256,
+                paragraphs: part
+                    .paragraphs
+                    .into_iter()
+                    .map(|(ordinal, _)| ordinal)
+                    .collect(),
+                changed: part.changed,
+                inserted: part
+                    .inserted
+                    .into_iter()
+                    .map(|anchor| match anchor {
+                        SpliceAnchor::Before(ordinal) => S13SpliceAnchor::Before(ordinal),
+                        SpliceAnchor::After(ordinal) => S13SpliceAnchor::After(ordinal),
+                    })
+                    .collect(),
+                removed: part.removed,
+                paragraph_patches: part.paragraph_patches,
+                legacy_paragraphs: part.legacy_paragraphs,
+                table_patches: part.table_patches,
+                format_only: part.format_only,
+            })
+            .collect(),
+        whole_parts: plan
+            .whole_parts
+            .into_iter()
+            .map(|part| S13WholePart {
+                part: part.part,
+                sha256: part.sha256,
+                changed: part.changed,
+            })
+            .collect(),
+        touched_parts: plan
+            .touched_parts
+            .into_iter()
+            .map(|(part, touched)| S13TouchedPart { part, touched })
+            .collect(),
+    }
 }
 
 fn replace_section_paragraphs(
