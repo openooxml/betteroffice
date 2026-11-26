@@ -947,7 +947,10 @@ fn cell_square_wrap_text_box_stacks_above_the_anchor_paragraph() {
     let (table, measure) = cell_anchor_table(&layout);
     let table_y = table["y"].as_f64().unwrap();
     let shape_height = 36.0;
-    assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
     assert_eq!(shape["y"].as_f64(), Some(table_y));
     assert_eq!(shape["h"].as_f64(), Some(shape_height));
     assert_eq!(

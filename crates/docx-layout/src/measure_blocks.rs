@@ -4619,7 +4619,7 @@ fn measure_table_with_compat_shift(
             });
             let measured = &mut rows[row_index].cells[cell_index];
             measured.blocks = if has_table_floats {
-                measure_cell_blocks_with_table_floats(&mut cell.blocks, length, true, config)?
+                measure_cell_blocks_with_table_floats(&mut cell.blocks, length, config)?
             } else {
                 measure_blocks(&mut cell.blocks, length, config)?
             };
@@ -5833,7 +5833,7 @@ mod tests {
             ]))
             .unwrap();
             let measures =
-                measure_cell_blocks_with_table_floats(&mut blocks, 600.0, false, &config).unwrap();
+                measure_cell_blocks_with_table_floats(&mut blocks, 600.0, &config).unwrap();
             let BlockExtent::Paragraph(paragraph) = &measures[1] else {
                 panic!()
             };
