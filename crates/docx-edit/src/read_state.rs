@@ -707,7 +707,6 @@ mod tests {
             font_family: Patch::Set(FontFamilyPatch {
                 ascii: "Georgia".into(),
                 h_ansi: None,
-                east_asia: None,
             }),
             font_size: Patch::Set(14.0),
             color: Patch::Set(ColorPatch::Rgb("336699".into())),

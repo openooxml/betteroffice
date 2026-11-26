@@ -134,7 +134,7 @@ function validDelta(value: unknown): value is YrsInlineFormatDelta {
     color: nullable((entry) => fields(entry, { rgb: string, themeColor: string }) &&
       object(entry) && ((typeof entry.rgb === 'string') !== (typeof entry.themeColor === 'string'))),
     highlight: nullable(string), fontSize: nullable(positive),
-    fontFamily: nullable((entry) => fields(entry, { ascii: string, hAnsi: string, eastAsia: string }) && object(entry) && string(entry.ascii)),
+    fontFamily: nullable((entry) => fields(entry, { ascii: string, hAnsi: string }) && object(entry) && string(entry.ascii)),
     other: (entry) => object(entry) && json(entry) && Object.keys(entry).every((key) => !PROTECTED_MARKS.has(key)),
   });
 }

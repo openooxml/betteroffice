@@ -1792,6 +1792,15 @@ impl EditingDoc {
         target: &TextTarget,
         delta: &InlineFormatDelta,
     ) -> OpResult<Result<crate::KeptUnchanged, EditRefusal>> {
+        self.format_text_target_with_font_slot(target, delta, None)
+    }
+
+    pub(crate) fn format_text_target_with_font_slot(
+        &self,
+        target: &TextTarget,
+        delta: &InlineFormatDelta,
+        east_asia: Option<&str>,
+    ) -> OpResult<Result<crate::KeptUnchanged, EditRefusal>> {
         if let Err(refusal) = self.refuse_empty_cell(target) {
             return Ok(Err(refusal));
         }
@@ -1812,10 +1821,10 @@ impl EditingDoc {
         {
             return Ok(Err(refusal));
         }
-        let attrs = delta.to_attrs()?;
+        let attrs = delta.to_attrs(east_asia)?;
         let ctx = EditCtx::local("", "");
         let kept = match span {
-            Some(span) => self.format_range_keeping(&ctx, span, delta)?.1,
+            Some(span) => self.format_range_with_font_slot(&ctx, span, delta, east_asia)?.1,
             None => crate::KeptUnchanged::new(),
         };
         if let Some(paragraph) = paragraph

@@ -94,12 +94,24 @@ impl OverlayRun {
     }
 }
 
-pub(crate) fn overlaid(base: &[(String, Any)], overlay: &[(String, Any)]) -> Vec<(String, Any)> {
-    base.iter()
-        .filter(|(key, _)| !overlay.iter().any(|(other, _)| other == key))
-        .chain(overlay)
+pub(crate) fn overlaid(base: &[(String, Any)], run: RunSlice<'_>) -> Vec<(String, Any)> {
+    let mut attrs: Vec<_> = base
+        .iter()
+        .filter(|(key, _)| !run.overlay.iter().any(|(other, _)| other == key))
         .cloned()
-        .collect()
+        .collect();
+    for (key, value) in run.overlay {
+        let value = if key == "fontFamily" {
+            let previous = base
+                .iter()
+                .find_map(|(key, value)| (key == "fontFamily").then_some(value));
+            crate::format::merge_font_family(previous, value, run.text, 0, u32::MAX)
+        } else {
+            value.clone()
+        };
+        attrs.push((key.clone(), value));
+    }
+    attrs
 }
 
 /// Resolves inherited, explicit, or plain insertion attributes.
@@ -493,7 +505,7 @@ impl EditingDoc {
         let carry = Carry::capture(&story, txn, at.index, at.index, indexed.as_ref());
         let mut end = at.index;
         for run in runs.iter().filter(|run| !run.text.is_empty()) {
-            let attrs = stamped_attrs(overlaid(&formatting, run.overlay), ins.clone());
+            let attrs = stamped_attrs(overlaid(&formatting, *run), ins.clone());
             if let Some(observe) = observe.take() {
                 observe(&attrs);
             }
@@ -726,7 +738,7 @@ impl EditingDoc {
         }
         let mut end = at;
         for run in runs.iter().filter(|run| !run.text.is_empty()) {
-            let attrs = stamped_attrs(overlaid(&formatting, run.overlay), revision.clone());
+            let attrs = stamped_attrs(overlaid(&formatting, *run), revision.clone());
             story.insert_with_attributes(txn, end, run.text, attrs);
             end += utf16_len(run.text);
         }

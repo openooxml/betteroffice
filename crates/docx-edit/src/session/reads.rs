@@ -120,10 +120,10 @@ impl EditSessionCore {
         delta_json: &str,
     ) -> EngineResult<String> {
         let target: TextTarget = serde_json::from_str(target_json).map_err(EngineError::message)?;
-        let delta = parse_inline_format_delta(delta_json)?;
+        let (delta, east_asia) = parse_inline_format_delta(delta_json)?;
         let doc = self.engine.doc();
         let outcome = doc
-            .format_text_target(&target, &delta)
+            .format_text_target_with_font_slot(&target, &delta, east_asia.as_deref())
             .map_err(EngineError::message)?;
         outcome_json(
             &outcome.map(|kept| {

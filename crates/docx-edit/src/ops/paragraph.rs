@@ -1786,7 +1786,7 @@ impl EditingDoc {
                 record.runs.iter().map(|run| run.slice()).collect()
             };
             for run in runs.iter().filter(|run| !run.text.is_empty()) {
-                let mut attrs: Attrs = crate::ops::text::overlaid(&record.run, run.overlay)
+                let mut attrs: Attrs = crate::ops::text::overlaid(&record.run, *run)
                     .into_iter()
                     .filter(|(key, _)| !PROTECTED_ATTRS.contains(&key.as_str()))
                     .map(|(key, value)| (Arc::from(key.as_str()), value))

@@ -695,7 +695,6 @@ fn split_at_end_carries_the_insertion_point_run_formatting() {
             font_family: Patch::Set(FontFamilyPatch {
                 ascii: "Georgia".into(),
                 h_ansi: None,
-                east_asia: None,
             }),
             ..InlineFormatDelta::default()
         },
@@ -1058,7 +1057,6 @@ fn format_range_lowers_the_word_value_shapes() {
             font_family: Patch::Set(FontFamilyPatch {
                 ascii: "Arial".into(),
                 h_ansi: None,
-                east_asia: None,
             }),
             color: Patch::Set(ColorPatch::Rgb("FF0000".into())),
             highlight: Patch::Set("#FFFF00".into()),

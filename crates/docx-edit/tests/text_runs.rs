@@ -289,7 +289,6 @@ fn marks_write_the_attributes_the_formatting_commands_write() {
                 font_family: Patch::Set(FontFamilyPatch {
                     ascii: "Arial".to_owned(),
                     h_ansi: Some("Arial".to_owned()),
-                    east_asia: None,
                 }),
                 ..Default::default()
             }),

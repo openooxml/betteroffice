@@ -273,7 +273,6 @@ pub(crate) fn apply_mark(
                 font_family: Patch::Set(FontFamilyPatch {
                     ascii: family.to_owned(),
                     h_ansi: None,
-                    east_asia: None,
                 }),
                 ..Default::default()
             }
@@ -306,7 +305,9 @@ pub(crate) fn apply_mark(
 /// Decodes a tri-state inline-formatting delta. An omitted key is
 /// [`Patch::Keep`], `null` is [`Patch::Clear`], any typed value is
 /// [`Patch::Set`]. Boolean `false` also clears.
-pub(crate) fn parse_inline_format_delta(delta_json: &str) -> EngineResult<InlineFormatDelta> {
+pub(crate) fn parse_inline_format_delta(
+    delta_json: &str,
+) -> EngineResult<(InlineFormatDelta, Option<String>)> {
     let value: Value = serde_json::from_str(delta_json).map_err(EngineError::message)?;
     let object = value
         .as_object()

@@ -888,15 +888,28 @@ fn validate_fragment_segment(
                 let map = format
                     .as_object()
                     .ok_or_else(|| invalid(format!("{detail} format must be an object")))?;
-                let delta = crate::format::parse_inline_format_delta(map)
+                let (delta, east_asia) = crate::format::parse_inline_format_delta(map)
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
                 let lowered = delta
-                    .to_attrs()
+                    .to_attrs(east_asia.as_deref())
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
+                let merge_font = matches!(delta.font_family, crate::Patch::Set(_))
+                    && !delta.other.contains_key("fontFamily");
                 for (key, entry) in lowered {
                     if entry == Any::Null {
                         merged.remove(&key);
                     } else {
+                        let entry = if merge_font && key.as_ref() == "fontFamily" {
+                            crate::format::merge_font_family(
+                                merged.get(&key),
+                                &entry,
+                                text,
+                                0,
+                                u32::MAX,
+                            )
+                        } else {
+                            entry
+                        };
                         merged.insert(key, entry);
                     }
                 }
