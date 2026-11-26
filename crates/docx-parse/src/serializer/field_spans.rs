@@ -25,10 +25,13 @@ pub(super) fn paragraph_key(paragraph: &Paragraph) -> usize {
 }
 
 pub(super) fn spans_paragraphs(field: &ComplexField) -> bool {
-    [field.structured_code.as_ref(), field.structured_result.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(|part| part.spans_paragraphs())
+    [
+        field.structured_code.as_ref(),
+        field.structured_result.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|part| part.spans_paragraphs())
 }
 
 fn story_has_span(model: &[BlockContent]) -> bool {
@@ -321,18 +324,14 @@ fn project_paragraphs(
             if removed.contains(&ordinal) {
                 return None;
             }
-            ordinals
-                .get(&ordinal)
-                .copied()
-                .flatten()
-                .or_else(|| {
-                    let id = source_id(element)?;
-                    if source_ids.get(&id) == Some(&Some(index)) {
-                        ids.get(&id).copied().flatten()
-                    } else {
-                        None
-                    }
-                })
+            ordinals.get(&ordinal).copied().flatten().or_else(|| {
+                let id = source_id(element)?;
+                if source_ids.get(&id) == Some(&Some(index)) {
+                    ids.get(&id).copied().flatten()
+                } else {
+                    None
+                }
+            })
         })
         .collect();
     let mut used: HashSet<_> = matches.iter().flatten().copied().collect();
@@ -496,7 +495,10 @@ fn run_boundary(
     }
     let mut cut = None;
     let mut original = Vec::new();
-    for child in source.child_elements().filter(|child| child.name != "w:pPr") {
+    for child in source
+        .child_elements()
+        .filter(|child| child.name != "w:pPr")
+    {
         if std::ptr::eq(child, closing.run) {
             cut = Some(original.len());
             continue;

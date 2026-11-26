@@ -9,6 +9,7 @@ use crate::formatting::{
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
     MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
+    inline_holds_field,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -1120,6 +1121,9 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
     (end_later
         && nodes.iter().flat_map(field_runs).eq(&field.field_result)
         && closed_inline_fields(nodes)
+        && (field.field_type == "TOC"
+            || !inline_holds_field(nodes)
+            || field_result_bookmarks(field).is_empty())
         && nodes.iter().all(|node| match node {
             InlineNode::Hyperlink(link) => {
                 link.structured_children.as_ref().is_none_or(|children| {
@@ -1153,7 +1157,9 @@ fn closed_inline_fields(nodes: &[InlineNode]) -> bool {
             }
             InlineNode::Hyperlink(link) => {
                 if !closed_inline_fields(
-                    link.structured_children.as_deref().unwrap_or(&link.children),
+                    link.structured_children
+                        .as_deref()
+                        .unwrap_or(&link.children),
                 ) {
                     return false;
                 }
