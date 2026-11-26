@@ -2371,12 +2371,9 @@ mod tests {
             }]}
         }))
         .unwrap();
-        let (_, report) = write_docx_s13_parts_with_report(
-            request,
-            &[(part.to_owned(), xml.into_bytes())],
-            None,
-        )
-        .unwrap();
+        let (_, report) =
+            write_docx_s13_parts_with_report(request, &[(part.to_owned(), xml.into_bytes())], None)
+                .unwrap();
         assert_eq!(
             report.warnings,
             ["DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"]
