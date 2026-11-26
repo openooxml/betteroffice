@@ -112,6 +112,30 @@ def test_rendering_uses_the_bundled_fonts_without_registration(
     assert len(png) == len(png.bytes) > 1000
 
 
+def test_arabic_in_arial_uses_naskh_glyphs(minimal_bytes: bytes) -> None:
+    document = Document.open(minimal_bytes)
+
+    def glyphs(family: str) -> list[int]:
+        envelope = {
+            "measured": [{
+                "block": {"kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 7, "runs": [{
+                    "kind": "text", "text": "مرحبا", "pmStart": 1, "pmEnd": 6,
+                    "fontFamily": family, "fontSize": 12,
+                }]},
+                "measure": {"kind": "paragraph", "lines": [], "totalHeight": 0},
+            }],
+            "options": {"pageSize": {"w": 816, "h": 1056},
+                        "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}},
+        }
+        page = document.layout(envelope).display_list.to_dict()["pages"][0]
+        return [glyph["id"] for item in page["primitives"] if item["kind"] == "glyphRun"
+                for glyph in item["glyphs"]]
+
+    naskh = glyphs("Noto Naskh Arabic")
+    assert naskh
+    assert glyphs("Arial") == naskh
+
+
 @pytest.mark.without_font_packs
 def test_rendering_text_needs_the_family_registered(
     minimal_bytes: bytes, layout_input: "dict[str, Any]", font_bytes: bytes

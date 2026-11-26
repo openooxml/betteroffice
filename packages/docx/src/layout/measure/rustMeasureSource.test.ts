@@ -538,7 +538,7 @@ test('the shared read of an implicit script fallback passes the same presence ch
   } finally { create.mockRestore(); warn.mockRestore(); }
 });
 
-test('Simplified and Traditional Arabic runs chain Noto Naskh Arabic as their Arabic fallback', async () => {
+test('Arabic runs in Arial and Arabic families chain Noto Naskh Arabic', async () => {
   const registered: Uint8Array[] = [];
   const source = createRustMeasureSource({
     bundled: fontManager.createFontProvider(),
@@ -560,12 +560,7 @@ test('Simplified and Traditional Arabic runs chain Noto Naskh Arabic as their Ar
   const sans = fontManager.BUNDLED_FONTS.filter((face) => face.family === 'Noto Sans Arabic').map((face) => face.byteLength);
   for (const requirement of requirements) {
     const lengths = chains[requirement.key]!.map((id) => registered[id]!.byteLength);
-    if (requirement.family.endsWith('Arabic')) {
-      expect(lengths).toContain(naskh);
-      for (const face of sans) expect(lengths).not.toContain(face);
-    } else {
-      expect(lengths).not.toContain(naskh);
-      expect(sans.some((face) => lengths.includes(face))).toBe(true);
-    }
+    expect(lengths).toContain(naskh);
+    for (const face of sans) expect(lengths).not.toContain(face);
   }
 });

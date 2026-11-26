@@ -15,7 +15,7 @@ export type ScriptFontDisplayList = DisplayList & { cellScriptFamilies?: CellScr
 export type CellScriptCache = Map<string, readonly BundledFontScript[]>;
 
 const NO_SCRIPTS: readonly BundledFontScript[] = [];
-const UNCOVERED_EDITOR_SCRIPTS = new Set<BundledFontScript>(['arabic']);
+const UNCOVERED_EDITOR_SCRIPTS = new Set<BundledFontScript>();
 const SCRIPT_CACHE_CAPACITY = 1024;
 const SCRIPT_CACHE_MAX_TEXT_LENGTH = 512;
 const scriptsByText = new Map<string, readonly BundledFontScript[]>();
