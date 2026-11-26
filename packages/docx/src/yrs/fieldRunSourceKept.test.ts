@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx, repackDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { ComplexField, Document, Paragraph, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
@@ -80,16 +81,22 @@ interface Opened {
   save(): Promise<string>;
 }
 
-async function projectedSession(parsed: Document): Promise<Opened> {
+async function projectedSession(parsed: Document, forceWrite = false): Promise<Opened> {
   const opened = await session();
   documentToYrs(opened, parsed);
   return {
     session: opened,
-    save: async () => documentXml(new Uint8Array(await repackDocx(yrsToDocument(opened, parsed)))),
+    save: async () => {
+      const projected = yrsToDocument(opened, parsed);
+      const buffer = forceWrite
+        ? (await writeDocumentWithRust(projected, projected.originalBuffer!)).buffer
+        : await repackDocx(projected);
+      return documentXml(new Uint8Array(buffer));
+    },
   };
 }
 
-type Loader = (bytes: Uint8Array<ArrayBuffer>) => Promise<Opened>;
+type Loader = (bytes: Uint8Array<ArrayBuffer>, forceWrite?: boolean) => Promise<Opened>;
 
 const nativeSeed: Loader = async (bytes) => {
   const opened = await session();
@@ -100,8 +107,8 @@ const nativeSeed: Loader = async (bytes) => {
   };
 };
 
-const parsedProjection: Loader = async (bytes) =>
-  projectedSession(await parseDocx(bytes.buffer, { preloadFonts: false }));
+const parsedProjection: Loader = async (bytes, forceWrite) =>
+  projectedSession(await parseDocx(bytes.buffer, { preloadFonts: false }), forceWrite);
 
 /** The parsed document without any kept run, as main parses it. */
 const mainProjection: Loader = async (bytes) => {
@@ -198,7 +205,7 @@ for (const [loader, load] of LOADERS) {
   });
 
   test(`${loader}: a save without an edit keeps the run in place`, async () => {
-    const opened = await load(fixture());
+    const opened = await load(fixture(), true);
     expect(around(await opened.save())).toEqual(['AB', 'CD']);
   });
 
@@ -362,7 +369,7 @@ const MARK_ROUTES: Array<[string, boolean, (bytes: Uint8Array<ArrayBuffer>) => P
   ['a full rewrite', true, fullRewrite, ''],
   ['native seed, a save without an edit', false, async (bytes) => (await nativeSeed(bytes)).save(), ''],
   ['native seed, typing after the run', true, typingAfter(nativeSeed), 'Z'],
-  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes)).save(), ''],
+  ['parseDocx and documentToYrs, a save without an edit', true, async (bytes) => (await parsedProjection(bytes, true)).save(), ''],
   ['parseDocx and documentToYrs, typing after the run', true, typingAfter(parsedProjection), 'Z'],
 ];
 
