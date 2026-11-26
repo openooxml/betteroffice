@@ -2,12 +2,15 @@ import type { BundledFontFace, BundledFontLoader, BundledFontScript, Progressive
 import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnDiagnostic, type FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import { scriptFontFace } from './commandScriptFonts';
 import type { DefaultFontFace, DefaultFontLanding, RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import { decodeFontFace } from '../wasm/loader';
 import { sessionFontDecoder } from './sessionFontDecoder';
 import type { createSlicedFontFaces } from './commandSlicedFonts';
+
+type SessionDefaultFontFace = DefaultFontFace & Pick<PngFontFace, 'face'>;
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean; preferArabic?: boolean }
@@ -163,7 +166,7 @@ export function prefetchCoverageFaces(
 export function createCommandDefaultFonts(
   supplied: readonly { family: string }[],
   collect: (slideId?: string) => RequestedFontFace[],
-  register: (face: DefaultFontFace) => void,
+  register: (face: SessionDefaultFontFace) => void,
   settled: (faces: DefaultFontLanding[]) => void,
   install?: (faces: readonly DefaultFontFace[]) => Promise<readonly DefaultFontFace[]>,
   beforeRegister?: () => void,
@@ -172,10 +175,10 @@ export function createCommandDefaultFonts(
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
   const attempts = new Map<string, { count: number; retryAt?: number }>();
-  const pending = new Map<string, Promise<DefaultFontFace | undefined>>();
+  const pending = new Map<string, Promise<SessionDefaultFontFace | undefined>>();
   const installations = new Map<string, Promise<boolean>>();
   const registered = new Map<string, 'substitute' | 'regular' | 'preferred'>();
-  const faceStatus = new WeakMap<DefaultFontFace, 'substitute' | 'preferred'>();
+  const faceStatus = new WeakMap<SessionDefaultFontFace, 'substitute' | 'preferred'>();
   let provider: ReturnType<typeof commandFontProvider.load> | undefined;
   let disposed = false;
   let prepared = false;
@@ -196,7 +199,7 @@ export function createCommandDefaultFonts(
     if (attempt) attempt.retryAt ??= Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[attempt.count - 1] ?? Infinity);
   };
 
-  function publish(wanted: FontRequest[], faces: (DefaultFontFace | undefined)[]): DefaultFontLanding[] {
+  function publish(wanted: FontRequest[], faces: (SessionDefaultFontFace | undefined)[]): DefaultFontLanding[] {
     if (disposed) return [];
     const additions: DefaultFontLanding[] = [];
     for (const [index, face] of faces.entries()) {
@@ -220,7 +223,7 @@ export function createCommandDefaultFonts(
     return additions;
   }
 
-  function request(face: FontRequest): Promise<DefaultFontFace | undefined> {
+  function request(face: FontRequest): Promise<SessionDefaultFontFace | undefined> {
     const id = key(face);
     const existing = pending.get(id);
     if (existing) return existing;
@@ -242,9 +245,9 @@ export function createCommandDefaultFonts(
       }
       return 'retry';
     };
-    const task = new Promise<DefaultFontFace | undefined>((resolve) => {
+    const task = new Promise<SessionDefaultFontFace | undefined>((resolve) => {
       let finished = false;
-      const finish = (value?: DefaultFontFace) => {
+      const finish = (value?: SessionDefaultFontFace) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
@@ -268,7 +271,7 @@ export function createCommandDefaultFonts(
         let italic = face.italic;
         let load: BundledFontLoader | undefined;
         let light: (() => Promise<ArrayBuffer>) | undefined;
-        let preferred: DefaultFontFace | undefined;
+        let preferred: SessionDefaultFontFace | undefined;
         let lastResort: BundledFontFace | undefined;
         if (face.kind === 'coverage') {
           const script = face.script as BundledFontScript;
