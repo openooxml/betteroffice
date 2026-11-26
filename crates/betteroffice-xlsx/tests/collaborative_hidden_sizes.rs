@@ -2,6 +2,8 @@ use betteroffice_xlsx::{
     CalculationOptions, CellRef, CellState, CellValue, EditOperation, EditRequest, EditStep, Op,
     RangeAddress, RangeTarget, Sheet, SheetId, Workbook, WorkbookModel,
 };
+use yrs::Update;
+use yrs::updates::{decoder::Decode, encoder::Encode};
 
 const DATA: SheetId = SheetId(0);
 type Sizes = (Option<f64>, Option<f64>, Option<f64>);
@@ -222,6 +224,88 @@ fn undo_of_unhide_and_resize_restores_pre_step_hidden_sizes() {
 }
 
 #[test]
+fn local_dimension_steps_undo_and_redo_in_order() {
+    let mut workbook = Workbook::open_collaborative(&source(), 7).unwrap();
+    let options = CalculationOptions::default();
+    apply(
+        &mut workbook,
+        vec![row_visibility(0, false), row_height(0, 40.0)],
+    );
+    apply(&mut workbook, vec![row_height(0, 55.0)]);
+
+    assert!(workbook.undo(options).unwrap().applied);
+    assert_eq!(sizes(&workbook).0, Some(40.0));
+    assert!(workbook.undo(options).unwrap().applied);
+    assert_eq!(
+        (sizes(&workbook).0, hidden_sizes(&workbook).0),
+        (Some(0.0), Some(25.0)),
+    );
+
+    assert!(workbook.redo(options).unwrap().applied);
+    assert_eq!(sizes(&workbook).0, Some(40.0));
+    assert!(workbook.redo(options).unwrap().applied);
+    assert_eq!(
+        (sizes(&workbook).0, hidden_sizes(&workbook).0),
+        (Some(55.0), None),
+    );
+}
+
+#[test]
+fn redundant_unhide_keeps_the_previous_step_for_undo() {
+    let mut workbook = Workbook::open_collaborative(&source(), 7).unwrap();
+    let options = CalculationOptions::default();
+    apply(
+        &mut workbook,
+        vec![row_visibility(0, false), row_height(0, 40.0)],
+    );
+    for op in [row_visibility(0, false), row_height(0, 40.0)] {
+        assert!(!workbook.apply_ops(vec![op], options).unwrap().applied);
+    }
+    assert!(workbook.undo(options).unwrap().applied);
+    assert_saved_hidden(&workbook);
+}
+
+#[test]
+fn redoing_an_appended_sheet_restores_its_hidden_size() {
+    let mut workbook = Workbook::open_collaborative(&source(), 7).unwrap();
+    let options = CalculationOptions::default();
+    let added = SheetId(1);
+    let visibility = |hidden| Op::SetRowVisibility {
+        sheet: added,
+        row: 0,
+        hidden,
+    };
+    apply(
+        &mut workbook,
+        vec![
+            Op::AddSheet {
+                index: 1,
+                name: "Added".into(),
+            },
+            Op::SetRowHeight {
+                sheet: added,
+                row: 0,
+                height: Some(40.0),
+            },
+            visibility(true),
+        ],
+    );
+    assert_eq!(
+        workbook.sheet(added).unwrap().hidden_row_heights.get(&0),
+        Some(&40.0),
+    );
+    assert!(workbook.undo(options).unwrap().applied);
+    assert_eq!(workbook.model().sheets.len(), 1);
+    assert!(workbook.redo(options).unwrap().applied);
+    assert!(workbook.sheet(added).unwrap().row_hidden(0));
+    apply(&mut workbook, vec![visibility(false)]);
+    assert_eq!(
+        workbook.sheet(added).unwrap().row_heights.get(&0),
+        Some(&40.0),
+    );
+}
+
+#[test]
 fn undo_of_unhide_and_resize_restores_an_unknown_hidden_size() {
     let mut model = Workbook::open(&source()).unwrap().into_model();
     model.sheets[0].hidden_row_heights.remove(&0);
@@ -325,7 +409,7 @@ fn undo_preserves_a_peer_size_that_matches_the_local_history() {
 }
 
 #[test]
-fn undo_preserves_a_reauthored_local_size_without_invalidating_another_row() {
+fn later_local_only_resizes_keep_the_earlier_undo_record() {
     let mut workbook = Workbook::open_collaborative(&source(), 7).unwrap();
     apply(
         &mut workbook,
@@ -356,10 +440,7 @@ fn undo_preserves_a_reauthored_local_size_without_invalidating_another_row() {
             .unwrap()
             .applied
     );
-    assert_eq!(
-        hidden_sizes(&workbook),
-        (Some(40.0), Some(30.0), Some(18.0))
-    );
+    assert_eq!(hidden_sizes(&workbook), AUTHORED);
 }
 
 #[test]
@@ -451,6 +532,49 @@ fn released_unhide_then_undo_restores_remembered_hidden_sizes() {
         (DEFAULT, DEFAULT)
     );
     released.undo(CalculationOptions::default()).unwrap();
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_saved_hidden(&current);
+}
+
+#[test]
+fn local_no_ops_keep_the_size_remembered_after_a_released_peer_unhides() {
+    let source = source();
+    let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut released = Workbook::from_model_collaborative(stripped_model(&source), 8).unwrap();
+    let options = CalculationOptions::default();
+    apply(&mut released, vec![row_visibility(0, false)]);
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_eq!(sizes(&current).0, None);
+    let version = current.version();
+    for op in [
+        row_visibility(0, false),
+        row_visibility(1, true),
+        Op::SetRowHeight {
+            sheet: DATA,
+            row: 0,
+            height: None,
+        },
+    ] {
+        assert!(!current.apply_ops(vec![op], options).unwrap().applied);
+    }
+    assert_eq!(current.version(), version);
+    apply(
+        &mut current,
+        vec![
+            row_visibility(0, false),
+            Op::SetCell {
+                sheet: DATA,
+                at: CellRef::new(2, 0),
+                cell: CellState {
+                    value: CellValue::Number { value: 4.0 },
+                    ..Default::default()
+                },
+            },
+        ],
+    );
+    assert!(released.undo(options).unwrap().applied);
     let update = diff(&released, &current);
     receive(&mut current, &update);
     assert_saved_hidden(&current);
@@ -587,6 +711,46 @@ fn remote_hide_remembers_the_size_of_a_previously_visible_row() {
             sheet.hidden_row_heights.get(&2).copied()
         ),
         (true, Some(22.0)),
+    );
+}
+
+#[test]
+fn retried_remote_hide_remembers_and_republishes_the_predecessor_height() {
+    let source = source();
+    let mut delayed = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut ready = Workbook::open_collaborative(&source, 8).unwrap();
+    let mut target = Workbook::open_collaborative(&source, 9).unwrap();
+    apply(&mut delayed, vec![row_height(2, 22.0)]);
+    let predecessor = diff(&delayed, &target);
+    let before_hide = delayed.encode_state_vector_v1();
+    apply(&mut delayed, vec![row_visibility(2, true)]);
+    let hide = delayed.encode_diff_v1(&before_hide).unwrap();
+    edit(&mut ready);
+    let merged = Update::merge_updates([
+        Update::decode_v1(&hide).unwrap(),
+        Update::decode_v1(&diff(&ready, &target)).unwrap(),
+    ])
+    .encode_v1();
+
+    receive(&mut target, &merged);
+    assert_eq!(target.cell(DATA, CellRef::new(2, 0)).unwrap().input, "4");
+    assert!(!target.sheet(DATA).unwrap().row_hidden(2));
+
+    receive(&mut target, &predecessor);
+    let sheet = target.sheet(DATA).unwrap();
+    assert!(sheet.row_hidden(2));
+    assert_eq!(sheet.hidden_row_heights.get(&2), Some(&22.0));
+
+    apply(&mut target, vec![row_visibility(2, false)]);
+    assert_eq!(
+        target.sheet(DATA).unwrap().row_heights.get(&2),
+        Some(&22.0),
+    );
+    let update = diff(&target, &delayed);
+    receive(&mut delayed, &update);
+    assert_eq!(
+        delayed.sheet(DATA).unwrap().row_heights.get(&2),
+        Some(&22.0),
     );
 }
 

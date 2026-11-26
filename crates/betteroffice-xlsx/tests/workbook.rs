@@ -10740,6 +10740,70 @@ fn moving_refuses_an_absolute_anchor_and_an_unknown_frame() {
     );
 }
 
+#[test]
+fn collaborative_chart_repin_uses_the_authored_height_restored_by_unhide() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let worksheet = "xl/worksheets/sheet1.xml";
+    let xml = test_part_text(&parts, worksheet).replace(
+        r#"<row r="1">"#,
+        r#"<row r="1" ht="5" customHeight="1" hidden="1">"#,
+    );
+    set_test_part(&mut parts, worksheet, xml.into_bytes());
+    let mut workbook =
+        Workbook::open_collaborative(&ooxml_opc::rezip_parts(&parts).unwrap(), 830).unwrap();
+    let sheet_id = SheetId(0);
+    let sheet = workbook.sheet(sheet_id).unwrap();
+    assert_eq!(sheet.format.default_row_height_pt, Some(15.0));
+    assert!(sheet.row_hidden(0));
+    let chart = &sheet.charts[0];
+    let before = chart.anchor;
+    let ChartAnchor::TwoCell { edit_as, .. } = before else {
+        panic!("expected a two-cell anchor");
+    };
+    let repin = Op::SetChartAnchor {
+        sheet: sheet_id,
+        frame: chart.frame_id(),
+        part: chart.part.clone(),
+        from: before,
+        to: ChartAnchor::TwoCell {
+            from: AnchorCell {
+                row_off: 95_250,
+                ..Default::default()
+            },
+            to: AnchorCell {
+                col: 4,
+                row: 1,
+                ..Default::default()
+            },
+            edit_as,
+        },
+    };
+    let version = workbook.version();
+    let state = workbook.encode_state_as_update_v1();
+    let error = workbook
+        .apply_ops(
+            vec![
+                Op::SetRowVisibility {
+                    sheet: sheet_id,
+                    row: 0,
+                    hidden: false,
+                },
+                repin,
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message.contains("corners are inverted")),
+        "{error:?}"
+    );
+    let sheet = workbook.sheet(sheet_id).unwrap();
+    assert_eq!(sheet.charts[0].anchor, before);
+    assert!(sheet.row_hidden(0));
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.encode_state_as_update_v1(), state);
+}
+
 /// `SetChartAnchor` accepts exactly what a save can write back, and each
 /// refusal says which part of the anchor the writer could not carry.
 #[test]

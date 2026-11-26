@@ -2905,7 +2905,8 @@ impl Workbook {
         for op in &ops {
             xlsx_ops::ensure_op_available(op)?;
         }
-        if self.is_collaborative() {
+        let collaborative = self.is_collaborative();
+        if collaborative {
             refuse_collaborative_structure(&ops, self.model.sheets.len())?;
         }
         let mut preview = self.with_staged_model(WorkbookModel::clone);
@@ -2931,6 +2932,11 @@ impl Workbook {
 
             self.ensure_move_keeps_inline_text(&origins, op)?;
             validate_op(staged, op)?;
+            if !collaborative
+                && let Op::SetChartAnchor { sheet, to, .. } = op
+            {
+                validate_chart_geometry(staged, require_sheet(staged, *sheet)?, *to)?;
+            }
             validate_insert_capacity(staged, op)?;
             batch.apply(op)?;
             match *op {
@@ -2994,6 +3000,7 @@ impl Workbook {
             && self.with_staged_model(|baseline| *baseline == preview)
         {
             if let WorkbookMode::Collaborative { structure } = &self.mode {
+                validate_committed_chart_geometry(&self.model, &ops)?;
                 let dimensions = dimension_changes(&ops);
                 if !dimensions.is_empty() {
                     for &index in dimensions.keys() {
@@ -3009,10 +3016,12 @@ impl Workbook {
                         batch.apply(op)?;
                     }
                     for (index, changes) in dimensions {
-                        self.hidden_sizes
-                            .forget_touched(&structure.sheet_keys[index], changes);
-                        HiddenSizes::take(&mut preview.sheets[index])
-                            .put(&mut self.model.sheets[index]);
+                        self.hidden_sizes.apply_no_op_sizes(
+                            &structure.sheet_keys[index],
+                            &mut self.model.sheets[index],
+                            HiddenSizes::take(&mut preview.sheets[index]),
+                            changes,
+                        );
                     }
                 }
             }
@@ -3021,7 +3030,7 @@ impl Workbook {
         mark(EditStage::Validated);
         // replicas holding stale results converge only through the full
         // recalculation every one of them runs on each exchange
-        let scope = if self.is_collaborative() {
+        let scope = if collaborative {
             CalculationScope::Full
         } else {
             CalculationScope::of(&self.model, &ops)
@@ -3036,6 +3045,9 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        if collaborative {
+            validate_committed_chart_geometry(&prepared.model, &prepared.ops)?;
+        }
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
         let update = self.commit_prepared(prepared)?;
@@ -3317,13 +3329,13 @@ impl Workbook {
             (undo_depth, redo_depth)
         };
         let step = self.hidden_sizes.take_step(redo, from_depth);
-        let moved = self.derive_replica_hidden_sizes(
+        self.derive_replica_hidden_sizes(
             &mut restored,
             &new_structure,
             DimensionTransition::Incoming,
             HiddenSizeHistory::Restore(&step, redo),
         );
-        self.hidden_sizes.store_moved_step(redo, to_depth, moved);
+        self.hidden_sizes.store_moved_step(redo, to_depth, step);
         self.install_model(restored)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -6032,8 +6044,6 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             // to as well: anything it accepts that they refuse would be
             // published and dropped, taking the rest of the session with it.
             validate_intrinsic_anchor(*to)?;
-            resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref, &model.styles), 0, 0)
-                .map_err(|error| Error::InvalidOperation(error.to_string()))?;
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
@@ -6089,6 +6099,27 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_committed_chart_geometry(model: &WorkbookModel, ops: &[Op]) -> Result<()> {
+    for op in ops {
+        if let Op::SetChartAnchor { sheet, frame, .. } = op {
+            let sheet = require_sheet(model, *sheet)?;
+            let chart = sheet
+                .charts
+                .iter()
+                .find(|chart| chart.frame_id() == *frame)
+                .ok_or_else(|| chart_frame_not_found(frame))?;
+            validate_chart_geometry(model, sheet, chart.anchor)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_chart_geometry(model: &WorkbookModel, sheet: &Sheet, anchor: ChartAnchor) -> Result<()> {
+    resolve_chart_anchor(anchor, &GridGeometry::new(sheet, &model.styles), 0, 0)
+        .map_err(|error| Error::InvalidOperation(error.to_string()))?;
     Ok(())
 }
 

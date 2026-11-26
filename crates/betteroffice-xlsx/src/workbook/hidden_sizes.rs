@@ -131,22 +131,9 @@ pub(super) fn derive_source_hidden_sizes(
 
 #[derive(Default)]
 pub(super) struct ReplicaHiddenSizes {
-    sheets: HashMap<String, ReplicaSheet>,
-    revision: u64,
+    remembered: HashMap<String, HiddenSizes>,
     undo: BTreeMap<usize, HiddenSizeStep>,
     redo: BTreeMap<usize, HiddenSizeStep>,
-}
-
-#[derive(Default)]
-struct ReplicaSheet {
-    rows: ReplicaAxis,
-    cols: ReplicaAxis,
-}
-
-#[derive(Default)]
-struct ReplicaAxis {
-    remembered: Sizes,
-    revisions: HashMap<u32, u64>,
 }
 
 pub(super) type HiddenSizeStep = HashMap<String, SheetSizeStep>;
@@ -158,17 +145,9 @@ pub(super) struct SheetSizeStep {
 
 type AxisStep = BTreeMap<u32, TrackSizeStep>;
 
-#[derive(Clone, Copy, PartialEq)]
-struct TrackSize {
-    shared: Option<f64>,
-    local: Option<f64>,
-}
-
-#[derive(Clone, Copy)]
 struct TrackSizeStep {
-    before: TrackSize,
-    after: TrackSize,
-    revision: u64,
+    before: Option<f64>,
+    after: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -185,15 +164,53 @@ pub(super) enum DimensionTransition {
 }
 
 impl ReplicaHiddenSizes {
-    pub(super) fn forget_touched(&mut self, key: &str, changes: DimensionChanges) {
-        if let Some(sheet) = self.sheets.get_mut(key) {
-            for (axis, changes) in [
-                (&mut sheet.rows, changes.rows),
-                (&mut sheet.cols, changes.cols),
-            ] {
-                for at in changes.tracks {
-                    axis.remembered.remove(&at);
-                    axis.revisions.remove(&at);
+    pub(super) fn apply_no_op_sizes(
+        &mut self,
+        key: &str,
+        sheet: &mut Sheet,
+        sizes: HiddenSizes,
+        mut changes: DimensionChanges,
+    ) {
+        changes
+            .rows
+            .tracks
+            .retain(|at| sheet.hidden_row_heights.get(at) != sizes.rows.get(at));
+        changes
+            .cols
+            .tracks
+            .retain(|at| sheet.hidden_col_widths.get(at) != sizes.cols.get(at));
+        if changes.rows.tracks.is_empty() && changes.cols.tracks.is_empty() {
+            return;
+        }
+        self.forget_history(key, &changes);
+        if let Some(remembered) = self.remembered.get_mut(key) {
+            for at in changes.rows.tracks {
+                remembered.rows.remove(&at);
+            }
+            for at in changes.cols.tracks {
+                remembered.cols.remove(&at);
+            }
+        }
+        sizes.put(sheet);
+    }
+
+    fn forget_history(&mut self, key: &str, changes: &DimensionChanges) {
+        for step in self.undo.values_mut().chain(self.redo.values_mut()) {
+            if let Some(sheet) = step.get_mut(key) {
+                for (axis, changes) in [
+                    (&mut sheet.rows, &changes.rows),
+                    (&mut sheet.cols, &changes.cols),
+                ] {
+                    if changes.replaced {
+                        axis.clear();
+                    } else {
+                        for at in &changes.tracks {
+                            axis.remove(at);
+                        }
+                    }
+                }
+                if sheet.rows.is_empty() && sheet.cols.is_empty() {
+                    step.remove(key);
                 }
             }
         }
@@ -237,8 +254,11 @@ impl ReplicaHiddenSizes {
         mut transition: DimensionTransition,
         history: HiddenSizeHistory<'_>,
     ) -> HiddenSizeStep {
-        self.revision = self.revision.wrapping_add(1);
-        let revision = self.revision;
+        if let DimensionTransition::Remote(sheets) = &transition {
+            for (key, changes) in sheets {
+                self.forget_history(key, changes);
+            }
+        }
         let (previous, previous_keys) = previous;
         let (model, keys) = installed;
         let previous_indices = (previous_keys != keys).then(|| {
@@ -289,27 +309,29 @@ impl ReplicaHiddenSizes {
             let (row_changes, col_changes) = changes.map_or((None, None), |changes| {
                 (Some(changes.rows), Some(changes.cols))
             });
-            let mut local = self.sheets.remove(key).unwrap_or_default();
+            let mut remembered = self.remembered.remove(key).unwrap_or_default();
             let record = matches!(history, HiddenSizeHistory::Record);
-            let row_steps = local.rows.reconcile(
+            let row_steps = reconcile_axis(
                 (rows, &sheet.row_heights),
+                &mut remembered.rows,
                 &mut hidden.rows,
                 row_changes,
                 authored.as_ref().map(|sizes| &sizes.rows),
                 (restore.map_or(&empty_step, |step| &step.rows), redo),
-                (record, revision),
+                record,
             );
-            let col_steps = local.cols.reconcile(
+            let col_steps = reconcile_axis(
                 (cols, &sheet.col_widths),
+                &mut remembered.cols,
                 &mut hidden.cols,
                 col_changes,
                 authored.as_ref().map(|sizes| &sizes.cols),
                 (restore.map_or(&empty_step, |step| &step.cols), redo),
-                (record, revision),
+                record,
             );
             hidden.put(sheet);
-            if !local.rows.is_empty() || !local.cols.is_empty() {
-                self.sheets.insert(key.clone(), local);
+            if !remembered.rows.is_empty() || !remembered.cols.is_empty() {
+                self.remembered.insert(key.clone(), remembered);
             }
             if !row_steps.is_empty() || !col_steps.is_empty() {
                 step.insert(
@@ -322,105 +344,71 @@ impl ReplicaHiddenSizes {
             }
         }
         if previous_indices.is_some() {
-            self.sheets.retain(|key, _| keys.contains(key));
+            self.remembered.retain(|key, _| keys.contains(key));
         }
         step
     }
 }
 
-impl ReplicaAxis {
-    fn is_empty(&self) -> bool {
-        self.remembered.is_empty() && self.revisions.is_empty()
-    }
-
-    fn reconcile(
-        &mut self,
-        (previous, installed): (&Sizes, &Sizes),
-        hidden: &mut Sizes,
-        changes: Option<AxisChanges>,
-        authored: Option<&Sizes>,
-        (restore, redo): (&AxisStep, bool),
-        (record, revision): (bool, u64),
-    ) -> AxisStep {
-        let mut touched = match changes {
-            Some(changes) => {
-                let mut tracks = changes.tracks;
-                if changes.replaced {
-                    tracks.extend(previous.keys().chain(installed.keys()).copied());
-                    tracks.extend(self.revisions.keys().copied());
-                }
-                tracks
+fn reconcile_axis(
+    (previous, installed): (&Sizes, &Sizes),
+    remembered: &mut Sizes,
+    hidden: &mut Sizes,
+    changes: Option<AxisChanges>,
+    authored: Option<&Sizes>,
+    (restore, redo): (&AxisStep, bool),
+    record: bool,
+) -> AxisStep {
+    let mut touched = match changes {
+        Some(changes) => {
+            let mut tracks = changes.tracks;
+            if changes.replaced {
+                tracks.extend(previous.keys().chain(installed.keys()).copied());
+                tracks.extend(hidden.keys().chain(remembered.keys()).copied());
             }
-            None if previous == installed => BTreeSet::new(),
-            None => previous
-                .keys()
-                .chain(installed.keys())
-                .filter(|at| previous.get(*at) != installed.get(*at))
-                .copied()
-                .collect(),
-        };
-        touched.extend(restore.iter().filter_map(|(&at, step)| {
-            (self.revisions.get(&at) == Some(&step.revision)).then_some(at)
-        }));
-        let mut step = AxisStep::new();
-        for at in touched {
-            let remembered = self.remembered.remove(&at);
-            let before = TrackSize {
-                shared: previous.get(&at).copied(),
-                local: hidden.remove(&at).or(remembered),
-            };
-            let prior_revision = self.revisions.remove(&at);
-            let shared = installed.get(&at).copied();
-            let local = match (authored, shared) {
-                (Some(sizes), None | Some(0.0)) => sizes.get(&at).copied(),
-                (None, None | Some(0.0)) => {
-                    before.local.or(before.shared.filter(|&size| size > 0.0))
-                }
-                _ => None,
-            };
-            let mut after = TrackSize { shared, local };
-            if let Some(restored) = restore.get(&at)
-                && prior_revision == Some(restored.revision)
-            {
-                let (from, to) = if redo {
-                    (restored.before, restored.after)
-                } else {
-                    (restored.after, restored.before)
-                };
-                if before == from && shared == to.shared {
-                    after.local = to.local;
-                    step.insert(
-                        at,
-                        TrackSizeStep {
-                            revision,
-                            ..*restored
-                        },
-                    );
-                }
-            }
-            if record && before != after {
-                step.insert(
-                    at,
-                    TrackSizeStep {
-                        before,
-                        after,
-                        revision,
-                    },
-                );
-            }
-            if step.contains_key(&at) {
-                self.revisions.insert(at, revision);
-            }
-            match (after.shared, after.local) {
-                (Some(0.0), Some(size)) => {
-                    hidden.insert(at, size);
-                }
-                (None, Some(size)) => {
-                    self.remembered.insert(at, size);
-                }
-                _ => {}
-            }
+            tracks
         }
-        step
+        None if previous == installed => BTreeSet::new(),
+        None => previous
+            .keys()
+            .chain(installed.keys())
+            .filter(|at| previous.get(*at) != installed.get(*at))
+            .copied()
+            .collect(),
+    };
+    touched.extend(restore.keys().copied());
+    let mut step = AxisStep::new();
+    for at in touched {
+        let prior_shared = previous.get(&at).copied();
+        let shared = installed.get(&at).copied();
+        if let Some(sizes) = authored
+            && prior_shared == shared
+            && hidden.get(&at) == sizes.get(&at)
+        {
+            continue;
+        }
+        let before = hidden.remove(&at).or(remembered.remove(&at));
+        let after = if let Some(restored) = restore.get(&at) {
+            if redo { restored.after } else { restored.before }
+        } else {
+            match (authored, shared) {
+                (Some(sizes), None | Some(0.0)) => sizes.get(&at).copied(),
+                (None, None | Some(0.0)) => before.or(prior_shared.filter(|&size| size > 0.0)),
+                _ => None,
+            }
+        };
+        if record && (prior_shared != shared || before != after) {
+            step.insert(at, TrackSizeStep { before, after });
+        }
+        match (shared, after) {
+            (Some(0.0), Some(size)) => {
+                hidden.insert(at, size);
+            }
+            (None, Some(size)) => {
+                remembered.insert(at, size);
+            }
+            _ => {}
+        }
     }
+    step
 }
