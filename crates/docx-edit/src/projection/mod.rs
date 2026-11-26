@@ -10,6 +10,7 @@ use yrs::{Any, ReadTxn, Transact, Transaction};
 
 use crate::identity::{SourceIndex, SourcePackage};
 use crate::seed::RunInheritance;
+use crate::structured::source::Provenance;
 use crate::{EditError, EditingDoc, ParagraphProperties, StorySegment};
 
 mod fields_dispatch;
@@ -506,6 +507,7 @@ struct ProjectionContext<'a, 'doc> {
     package_body_has_sections: bool,
     markers: &'a MarkerIndex,
     source_index: Option<&'a SourceIndex>,
+    source_provenance: Option<&'a Provenance>,
     inheritance: &'a mut RunInheritance,
     theme: &'a docx_parse::theme::Theme,
     visiting: BTreeSet<String>,
@@ -531,6 +533,7 @@ impl ProjectionContext<'_, '_> {
             package_body_has_sections: false,
             markers: self.markers,
             source_index: self.source_index,
+            source_provenance: self.source_provenance,
             inheritance: self.inheritance,
             theme: self.theme,
             visiting: std::mem::take(&mut self.visiting),
@@ -958,9 +961,10 @@ impl EditingDoc {
         };
         let package = &envelope.document.package;
         let mut projection = if id == "body" {
+            let source_metadata = self.source_metadata();
             if !same_styles {
                 let inheritance = if input.host.styles.is_none()
-                    && let Some(metadata) = self.source_metadata()
+                    && let Some(metadata) = &source_metadata
                 {
                     metadata.projection_inheritance()
                 } else {
@@ -996,6 +1000,9 @@ impl EditingDoc {
                 package_body_has_sections: package.document.sections.is_some()
                     || package.document.final_section_properties.is_some(),
                 source_index: source_index.as_deref(),
+                source_provenance: source_metadata
+                    .as_ref()
+                    .map(|metadata| &metadata.read().provenance),
                 inheritance: &mut cache.styles.as_mut().expect("style resolver initialized").1,
                 theme,
                 markers: &markers,

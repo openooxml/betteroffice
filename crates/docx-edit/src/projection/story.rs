@@ -170,10 +170,9 @@ fn relocated_breaks(
     id: &str,
     segments: &[StorySegment],
 ) -> HashMap<u32, usize> {
-    let Some(source) = context.source_index else {
+    let Some(provenance) = context.source_provenance else {
         return HashMap::new();
     };
-    let provenance = &source.read().provenance;
     let Some((_, relocated)) = provenance.by_story.get(id) else {
         return HashMap::new();
     };
