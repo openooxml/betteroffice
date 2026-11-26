@@ -701,7 +701,10 @@ fn whole_write_matches_repeated_toc_entries_by_anchor() -> Result<(), Box<dyn Er
         + &second
         + &paragraph(2, &(repeated(3) + &field_char("end")))
         + &paragraph(3, &text_run(BODY_NEXT));
-    let expected = source.replace(&second, &(second.clone() + &paragraph(9, &text_run(INSERTED))));
+    let expected = source.replace(
+        &second,
+        &(second.clone() + &paragraph(9, &text_run(INSERTED))),
+    );
     let saved = save(
         &package(&without_paragraph_ids(&source))?,
         Edit::Paragraph(ParagraphEdit::InsertAfter(1)),
@@ -710,7 +713,10 @@ fn whole_write_matches_repeated_toc_entries_by_anchor() -> Result<(), Box<dyn Er
     let xml = document_xml(&saved)?;
     assert_eq!(inspect(&xml), inspect(&expected));
     for number in 1..=3 {
-        assert!(xml.contains(&format!(r#"w:anchor="_Toc{number}""#)), "{xml}");
+        assert!(
+            xml.contains(&format!(r#"w:anchor="_Toc{number}""#)),
+            "{xml}"
+        );
     }
     Ok(())
 }
@@ -1079,7 +1085,10 @@ fn cross_cell_closes_keep_the_legacy_opening_paragraph() -> Result<(), Box<dyn E
     let xml = document_xml(&saved)?;
     let first_cell = xml.split_once("</w:tc>").unwrap().0;
     assert_eq!(inspect(first_cell).fields[0].end, Some(0), "{xml}");
-    assert!(xml.contains(&format!("<w:tc>{second_cell}</w:tc>")), "{xml}");
+    assert!(
+        xml.contains(&format!("<w:tc>{second_cell}</w:tc>")),
+        "{xml}"
+    );
     Ok(())
 }
 

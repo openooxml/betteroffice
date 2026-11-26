@@ -625,19 +625,20 @@ fn bookmark_boundary(
     }
     let live_index = |element: &XmlElement| {
         let key = bookmark(element)?;
-        let mut matches = paragraph
-            .content
-            .iter()
-            .enumerate()
-            .filter(|(_, content)| match content {
-                ParagraphContent::Inline(InlineNode::BookmarkStart(start)) => {
-                    key == ("w:bookmarkStart", start.id)
-                }
-                ParagraphContent::Inline(InlineNode::BookmarkEnd(end)) => {
-                    key == ("w:bookmarkEnd", end.id)
-                }
-                _ => false,
-            });
+        let mut matches =
+            paragraph
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(_, content)| match content {
+                    ParagraphContent::Inline(InlineNode::BookmarkStart(start)) => {
+                        key == ("w:bookmarkStart", start.id)
+                    }
+                    ParagraphContent::Inline(InlineNode::BookmarkEnd(end)) => {
+                        key == ("w:bookmarkEnd", end.id)
+                    }
+                    _ => false,
+                });
         let (index, _) = matches.next()?;
         matches.next().is_none().then_some(index)
     };
