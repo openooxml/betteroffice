@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use xlsx_calc::eval::MAX_EVALUATION_CELL_VISITS;
 use xlsx_calc::functions::criteria::CountTable;
-use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::parser::{parse_definition_for_cell, parse_formula_for_cell};
 use xlsx_calc::{BinaryOp, ColumnRange, EvalContext, Expr, RowRange, evaluate};
 use xlsx_model::styles::DifferentialFormat;
 use xlsx_model::value::CellValue;
@@ -1094,11 +1094,9 @@ fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr, dated: bool) -> bool 
         let Some(defined) = model.defined_name(owner, &name) else {
             continue;
         };
-        let formula = &defined.formula;
+        let formula = defined.formula.strip_prefix('=').unwrap_or(&defined.formula);
         let scope = defined.local_sheet.unwrap_or(owner);
-        let Ok(definition) =
-            parse_formula_for_cell(formula.strip_prefix('=').unwrap_or(formula), model, scope)
-        else {
+        let Ok(definition) = parse_definition_for_cell(formula, model, scope) else {
             continue;
         };
         if calls_volatile(model, scope, &definition, &mut names, dated) {

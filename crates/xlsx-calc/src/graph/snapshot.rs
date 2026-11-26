@@ -243,7 +243,7 @@ impl SnapshotGraphBuilder {
                     let owner = defined.local_sheet.unwrap_or(sheet);
                     if formula.expanded.insert(key)
                         && let Some(expression) =
-                            self.graph.parse_formula(owner, definition_source(defined))
+                            self.graph.parse_definition(&self.graph.asts, owner, defined)
                     {
                         formula.names.pop_front();
                         formula.expression(&self.graph, owner, &expression);
@@ -270,9 +270,10 @@ impl SnapshotGraphBuilder {
                     && formula
                         .volatile_expanded
                         .insert((sheet, name.2.to_ascii_lowercase()))
-                    && let Some(expression) = self.graph.parse_formula(
+                    && let Some(expression) = self.graph.parse_definition(
+                        &self.graph.asts,
                         defined.local_sheet.unwrap_or(sheet),
-                        definition_source(defined),
+                        defined,
                     )
                 {
                     formula.volatile = push_volatile_name_uses(

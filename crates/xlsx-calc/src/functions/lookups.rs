@@ -4,12 +4,13 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::deps::{is_indexed_workbook_reference, names_other_workbook};
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::graph::formula_source;
-use crate::parser::Expr;
+use crate::parser::{Expr, parse_released_definition};
 use crate::reference::{offset_rect, r1c1_rect};
 
 use super::{nth_int, nth_int_lifted, nth_number};
@@ -413,14 +414,22 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         let (sheet, reference) = match text.rsplit_once('!') {
             Some((prefix, reference)) => {
                 let source = format!("{prefix}!A1");
-                let qualifier = crate::parse_formula(&source).map_err(|_| {
-                    if r1c1_rect(reference, ctx.cell).is_some()
-                        && is_indexed_workbook_reference(&source)
-                    {
-                        ctx.record_other_workbook();
-                    }
-                    ErrorValue::Ref
-                })?;
+                let qualifier = crate::parse_formula(&source)
+                    .or_else(|error| {
+                        if prefix.contains('[') && is_path_qualifier(prefix) {
+                            parse_released_definition(&source)
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(|_| {
+                        if r1c1_rect(reference, ctx.cell).is_some()
+                            && is_indexed_workbook_reference(&source)
+                        {
+                            ctx.record_other_workbook();
+                        }
+                        ErrorValue::Ref
+                    })?;
                 let Expr::Ref {
                     sheet: Some(sheet), ..
                 } = qualifier

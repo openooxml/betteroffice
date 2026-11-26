@@ -139,6 +139,15 @@ pub fn parse_formula_for_cell(
     )
 }
 
+#[doc(hidden)]
+pub fn parse_definition_for_cell(
+    src: &str,
+    provider: &dyn CellProvider,
+    owner: SheetId,
+) -> Result<Expr, ParseError> {
+    parse_formula_for_cell(src, provider, owner).or_else(|_| parse_released_definition(src))
+}
+
 pub(crate) fn parse_with_sheet_span(
     src: &str,
     is_sheet_span: Option<&SheetSpan<'_>>,
