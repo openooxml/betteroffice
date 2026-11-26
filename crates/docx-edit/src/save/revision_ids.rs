@@ -1,8 +1,9 @@
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Write};
 use std::ptr;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
 use docx_parse::S13SaveRequest;
 use docx_parse::block::BlockContent;
@@ -17,18 +18,43 @@ use serde::ser::{
     self, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant, Serializer,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 const MAX_ID: u32 = 1 << 31;
 const PLACEHOLDER_LIMIT: f64 = (1u64 << 53) as f64;
+const NO_SITE: usize = usize::MAX;
 const HYPERLINK_FIELDS: [&str; 2] = ["children", "structuredChildren"];
 const STRUCTURED_FIELDS: [&str; 2] = ["inline", "blocks"];
 const FIELD_TREE_FIELDS: [&str; 3] = ["code", "result", "children"];
 const SCENE_NODE_FIELDS: [&str; 2] = ["shape", "children"];
 
+type FastMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
+type FastSet<T> = HashSet<T, foldhash::fast::RandomState>;
+
 #[cfg(test)]
 thread_local! {
-    static BLOCK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static WORK: std::cell::RefCell<Work> = std::cell::RefCell::new(Work::default());
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct Work {
+    fields: usize,
+    strings: usize,
+    string_bytes: usize,
+    reservation_inserts: usize,
+    site_inserts: usize,
+    collected_blocks: usize,
+    block_inserts: usize,
+    block_probes: usize,
+    make_mut: usize,
+    id_probes: usize,
+    verified: usize,
+}
+
+#[cfg(test)]
+fn count_work(count: impl FnOnce(&mut Work)) {
+    WORK.with_borrow_mut(count);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -63,7 +89,7 @@ pub fn assign_session_revision_ids(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
-    assign(request, session, None)
+    assign(request, session, None, || {})
 }
 
 #[doc(hidden)]
@@ -73,66 +99,118 @@ pub fn assign_session_revision_ids_with_paths(
     paths: &mut Vec<(String, u64)>,
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
     paths.clear();
-    assign(request, session, Some(paths))
+    assign(request, session, Some(paths), || {})
+}
+
+#[doc(hidden)]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn assign_session_revision_ids_with_timings(
+    request: &mut S13SaveRequest,
+    session: &BTreeSet<u64>,
+) -> Result<(BTreeMap<u64, u32>, [Duration; 3]), RevisionIdsError> {
+    let mut passes = [Duration::ZERO; 3];
+    let mut timings = passes.iter_mut();
+    let mut started = Instant::now();
+    let ids = assign(request, session, None, || {
+        let finished = Instant::now();
+        *timings.next().unwrap() = finished.duration_since(started);
+        started = finished;
+    })?;
+    Ok((ids, passes))
 }
 
 fn assign(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
     paths: Option<&mut Vec<(String, u64)>>,
+    mut pass_complete: impl FnMut(),
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
     if session.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut found = collect(request, session)?;
+    let session_ids = SessionIds::new(session);
+    let mut found = collect_with::<false, _>(request, &session_ids)?;
+    pass_complete();
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut walker = SiteWalker::new(session, paths, &found.blocks_with_sites);
+    let mut walker = SiteWalker::new(&session_ids, paths, &found.blocks_with_sites, found.site_count);
     walker.request(request);
+    walker.order_paths();
 
     let mut next = found.max;
-    let mut ids = BTreeMap::new();
-    let mut expected = BTreeMap::new();
-    for (placeholder, _) in &walker.sites {
-        let Some(remaining) = found.sites.get_mut(placeholder) else {
-            return Err(RevisionIdsError::Unassigned(*placeholder));
+    let mut index = walker.order.first;
+    while let Some(site) = walker.sites.get_mut(index) {
+        let Some(count) = found.sites.get_mut(&site.placeholder) else {
+            return Err(RevisionIdsError::Unassigned(site.placeholder));
         };
-        *remaining = remaining
+        count.remaining = count
+            .remaining
             .checked_sub(1)
-            .ok_or(RevisionIdsError::Unassigned(*placeholder))?;
-        let id = match ids.entry(*placeholder) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => *entry.insert(next_id(&mut next, found.max, &found.used)?),
-        };
-        if session.contains(&u64::from(id)) {
-            *expected.entry(u64::from(id)).or_default() += 1;
+            .ok_or(RevisionIdsError::Unassigned(site.placeholder))?;
+        if count.assigned == 0 {
+            count.assigned = next_id(&mut next, found.max, &found.used)?;
         }
+        site.assigned = count.assigned;
+        index = site.next;
     }
-    if let Some((&id, _)) = found.sites.iter().find(|(_, count)| **count != 0) {
-        return Err(RevisionIdsError::Unassigned(id));
-    }
-    for (placeholder, site) in walker.sites {
-        match site {
-            Site::Typed(id) => *id = f64::from(ids[&placeholder]),
-            Site::Model(id) => *id = Value::from(ids[&placeholder]),
-        }
-    }
-
-    let rewritten = collect_with(request, session, Collection::SitesOnly)?;
-    if let Some((&id, _)) = rewritten
+    if let Some(id) = found
         .sites
         .iter()
-        .find(|&(id, count)| expected.get(id) != Some(count))
-        .or_else(|| {
-            expected
-                .iter()
-                .find(|&(id, count)| rewritten.sites.get(id) != Some(count))
-        })
+        .filter_map(|(&id, count)| (count.remaining != 0).then_some(id))
+        .min()
     {
         return Err(RevisionIdsError::Unassigned(id));
     }
+    for site in &mut walker.sites {
+        site.write();
+    }
+    let mut assigned = Vec::with_capacity(found.sites.len());
+    assigned.extend(
+        session
+            .iter()
+            .filter_map(|id| found.sites.get(id).map(|count| (*id, count.assigned))),
+    );
+    let ids = assigned.into_iter().collect();
+    pass_complete();
+
+    if let Some(id) = walker
+        .sites
+        .iter()
+        .filter_map(PendingSite::unassigned)
+        .chain(found.sites.values().filter_map(|count| {
+            count
+                .hidden
+                .filter(|_| !session_ids.contains(u64::from(count.assigned)))
+        }))
+        .min()
+    {
+        return Err(RevisionIdsError::Unassigned(id));
+    }
+    pass_complete();
     Ok(ids)
+}
+
+struct SessionIds {
+    first: u64,
+    ids: FastSet<u64>,
+}
+
+impl SessionIds {
+    fn new(session: &BTreeSet<u64>) -> Self {
+        Self {
+            first: session.first().copied().unwrap_or(u64::MAX),
+            ids: session.iter().copied().collect(),
+        }
+    }
+
+    fn placeholder(&self, number: f64) -> Option<u64> {
+        placeholder(number).filter(|id| self.contains(*id))
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        id >= self.first && self.ids.contains(&id)
+    }
 }
 
 #[doc(hidden)]
@@ -147,20 +225,22 @@ pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<RevisionIdReservations, RevisionIdsError> {
-    let found = collect_with(request, session, Collection::Reservations)?;
+    let found = collect_with::<true, _>(request, &SessionIds::new(session))?;
     Ok(RevisionIdReservations {
-        used: found.used,
+        used: found.used.into_iter().collect(),
         max: found.max,
         sites: found.reservations,
     })
 }
 
-fn next_id(next: &mut u32, max: u32, used: &BTreeSet<u32>) -> Result<u32, RevisionIdsError> {
+fn next_id(next: &mut u32, max: u32, used: &FastSet<u32>) -> Result<u32, RevisionIdsError> {
     loop {
         *next = if *next + 1 < MAX_ID { *next + 1 } else { 1 };
         if *next == max {
             return Err(RevisionIdsError::Exhausted);
         }
+        #[cfg(test)]
+        count_work(|work| work.id_probes += 1);
         if !used.contains(next) {
             return Ok(*next);
         }
@@ -172,45 +252,60 @@ fn placeholder(id: f64) -> Option<u64> {
 }
 
 #[derive(Default)]
-enum Collection {
-    #[default]
-    Assignment,
-    Reservations,
-    SitesOnly,
+struct SiteCount {
+    remaining: usize,
+    assigned: u32,
+    hidden: Option<u64>,
 }
 
 #[derive(Default)]
 struct Collected {
     max: u32,
-    used: BTreeSet<u32>,
-    sites: BTreeMap<u64, usize>,
+    used: FastSet<u32>,
+    sites: FastMap<u64, SiteCount>,
     reservations: BTreeMap<(String, u32), usize>,
     pending: Vec<Observation>,
     pending_depth: usize,
-    collection: Collection,
+    pointer: Option<String>,
     site_count: usize,
-    blocks_with_sites: HashSet<*const ()>,
-    #[cfg(test)]
-    reservation_inserts: usize,
+    blocks_with_sites: FastSet<*const ()>,
 }
 
 enum Observation {
     Reservation(u32, bool, Option<String>),
-    Site(u64),
+    Site(u64, Option<u64>),
 }
 
 impl Collected {
-    fn note(&mut self, id: Kind, raises_base: bool, pointer: Option<&str>) {
-        if !matches!(self.collection, Collection::SitesOnly)
-            && let Kind::Number(id) = id
+    fn begin_pointer(&mut self, key: &str) -> Option<usize> {
+        self.pointer.as_mut().map(|pointer| {
+            let length = pointer.len();
+            push_pointer(pointer, key);
+            length
+        })
+    }
+
+    fn end_pointer(&mut self, start: Option<usize>) {
+        if let Some(start) = start {
+            self.pointer.as_mut().unwrap().truncate(start);
+        }
+    }
+
+    fn note(&mut self, id: Kind, raises_base: bool, key: Option<&str>) {
+        if let Kind::Number(id) = id
             && (0.0..f64::from(MAX_ID)).contains(&id)
             && id.fract() == 0.0
         {
-            self.observe(Observation::Reservation(
-                id as u32,
-                raises_base,
-                pointer.map(str::to_owned),
-            ));
+            let pointer = self.pointer.as_mut().map(|pointer| {
+                let length = pointer.len();
+                if let Some(key) = key {
+                    push_pointer(pointer, key);
+                }
+                let reservation = pointer.clone();
+                pointer.truncate(length);
+                reservation
+            });
+            self.observe(Observation::Reservation(id as u32, raises_base, pointer));
         }
     }
 
@@ -226,9 +321,7 @@ impl Collected {
         match observation {
             Observation::Reservation(id, raises_base, pointer) => {
                 #[cfg(test)]
-                {
-                    self.reservation_inserts += 1;
-                }
+                count_work(|work| work.reservation_inserts += 1);
                 self.used.insert(id);
                 if let Some(pointer) = pointer {
                     *self.reservations.entry((pointer, id)).or_default() += 1;
@@ -237,9 +330,15 @@ impl Collected {
                     self.max = self.max.max(id);
                 }
             }
-            Observation::Site(id) => {
+            Observation::Site(id, hidden) => {
+                #[cfg(test)]
+                count_work(|work| work.site_inserts += 1);
                 self.site_count += 1;
-                *self.sites.entry(id).or_default() += 1;
+                let count = self.sites.entry(id).or_default();
+                count.remaining += 1;
+                if let Some(hidden) = hidden {
+                    count.hidden = Some(count.hidden.map_or(hidden, |prior| prior.min(hidden)));
+                }
             }
         }
     }
@@ -247,8 +346,15 @@ impl Collected {
     fn finish_info(&mut self, start: usize, session_id: Option<u64>) {
         self.pending_depth -= 1;
         if let Some(id) = session_id {
-            self.pending.truncate(start);
-            self.observe(Observation::Site(id));
+            let hidden = self
+                .pending
+                .drain(start..)
+                .filter_map(|observation| match observation {
+                    Observation::Site(id, _) => Some(id),
+                    Observation::Reservation(..) => None,
+                })
+                .min();
+            self.observe(Observation::Site(id, hidden));
         }
         if self.pending_depth == 0 {
             while let Some(observation) = self.pending.pop() {
@@ -257,11 +363,20 @@ impl Collected {
         }
     }
 
-    fn scan_xml(&mut self, text: &str, pointer: Option<&str>) {
-        for (index, _) in text.match_indices("w:id") {
-            if index > 0
-                && (text.as_bytes()[index - 1].is_ascii_alphanumeric()
-                    || text.as_bytes()[index - 1] == b'_')
+    fn scan_xml(&mut self, text: &str) {
+        #[cfg(test)]
+        count_work(|work| {
+            work.strings += 1;
+            work.string_bytes += text.len();
+        });
+        let bytes = text.as_bytes();
+        if bytes.len() < 8 {
+            return;
+        }
+        for index in memchr::memchr_iter(b'w', bytes) {
+            if !bytes[index..].starts_with(b"w:id")
+                || (index > 0
+                    && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_'))
             {
                 continue;
             }
@@ -276,7 +391,7 @@ impl Collected {
             if matches!(tail.as_bytes().get(digits), Some(b'\'' | b'"'))
                 && let Ok(id) = tail[..digits].parse::<u32>()
             {
-                self.note(Kind::Number(f64::from(id)), true, pointer);
+                self.note(Kind::Number(f64::from(id)), true, None);
             }
         }
     }
@@ -334,109 +449,158 @@ enum Kind {
     #[default]
     Other,
     String(Symbol),
-    Key(String),
     Number(f64),
     Array,
 }
 
+#[cfg(test)]
 fn collect<T: Serialize>(value: &T, session: &BTreeSet<u64>) -> Result<Collected, RevisionIdsError> {
-    collect_with(value, session, Collection::Assignment)
+    collect_with::<false, _>(value, &SessionIds::new(session))
 }
 
-fn collect_with<T: Serialize>(
+fn collect_with<const PATHS: bool, T: Serialize>(
     value: &T,
-    session: &BTreeSet<u64>,
-    collection: Collection,
+    session: &SessionIds,
 ) -> Result<Collected, RevisionIdsError> {
-    let pointer = matches!(collection, Collection::Reservations).then(String::new);
     let mut found = Collected {
-        collection,
+        pointer: PATHS.then(String::new),
         ..Collected::default()
     };
-    value.serialize(Visitor {
+    value.serialize(Visitor::<PATHS> {
         session,
         found: &mut found,
         model: false,
         info: false,
-        scan_strings: true,
-        pointer,
+        key: false,
+        node_type: false,
     })?;
     Ok(found)
 }
 
-struct Visitor<'a> {
-    session: &'a BTreeSet<u64>,
+struct Visitor<'a, const PATHS: bool> {
+    session: &'a SessionIds,
     found: &'a mut Collected,
     model: bool,
     info: bool,
-    scan_strings: bool,
-    pointer: Option<String>,
+    key: bool,
+    node_type: bool,
 }
 
-fn child_pointer(pointer: Option<&str>, key: &str) -> Option<String> {
-    pointer.map(|pointer| format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")))
+fn push_pointer(pointer: &mut String, key: &str) {
+    pointer.push('/');
+    let mut start = 0;
+    for (index, character) in key.match_indices(['~', '/']) {
+        pointer.push_str(&key[start..index]);
+        pointer.push_str(if character == "~" { "~0" } else { "~1" });
+        start = index + 1;
+    }
+    pointer.push_str(&key[start..]);
 }
 
-struct Record<'a> {
-    visitor: Visitor<'a>,
-    name: &'static str,
-    key: Kind,
+impl<const PATHS: bool> Visitor<'_, PATHS> {
+    fn at<T>(&mut self, key: &str, visit: impl FnOnce(&mut Self) -> T) -> T {
+        if !PATHS {
+            return visit(self);
+        }
+        let start = self.found.begin_pointer(key);
+        let value = visit(self);
+        self.found.end_pointer(start);
+        value
+    }
+
+    fn child(&mut self, key: Symbol, model: bool) -> Visitor<'_, PATHS> {
+        Visitor {
+            session: self.session,
+            found: self.found,
+            model,
+            info: model && matches!(key, Symbol::Info),
+            key: false,
+            node_type: matches!(key, Symbol::Type),
+        }
+    }
+
+    fn number(self, value: impl fmt::Display, number: f64) -> Kind {
+        if self.key {
+            if PATHS && let Some(pointer) = &mut self.found.pointer {
+                write!(pointer, "/{value}").unwrap();
+            }
+            Kind::Other
+        } else {
+            Kind::Number(number)
+        }
+    }
+}
+
+struct Record<'a, const PATHS: bool> {
+    visitor: Visitor<'a, PATHS>,
+    kind: RecordKind,
+    key: Symbol,
+    key_start: Option<usize>,
+    variant_start: Option<usize>,
     pending_start: Option<usize>,
-    site_count_at_start: usize,
-    block_key: Option<*const ()>,
-    author: Kind,
+    block: Option<(*const (), usize)>,
+    author: bool,
     id: Kind,
     revision_id: Kind,
-    content: Kind,
-    node_type: Kind,
+    content_array: bool,
+    node_type: Symbol,
 }
 
-impl<'a> Record<'a> {
-    fn new(visitor: Visitor<'a>, name: &'static str) -> Self {
+#[derive(Clone, Copy)]
+enum RecordKind {
+    Other,
+    Block,
+    ShapeTextBody,
+    Shape,
+    TablePatch,
+}
+
+impl<'a, const PATHS: bool> Record<'a, PATHS> {
+    fn new(visitor: Visitor<'a, PATHS>, name: &'static str) -> Self {
+        let kind = match name {
+            "Paragraph" | "Table" | "BlockSdt" => RecordKind::Block,
+            "ShapeTextBody" => RecordKind::ShapeTextBody,
+            "Shape" => RecordKind::Shape,
+            "S13TablePatch" => RecordKind::TablePatch,
+            _ => RecordKind::Other,
+        };
         let info = visitor.info || matches!(name, "TrackedChangeInfo" | "PropertyChangeInfo");
         let pending_start = info.then(|| {
             visitor.found.pending_depth += 1;
             visitor.found.pending.len()
         });
+        let block = (!PATHS && matches!(kind, RecordKind::Block))
+            .then(|| (ptr::null(), visitor.found.site_count));
         Self {
-            site_count_at_start: visitor.found.site_count,
             visitor,
-            name,
-            key: Kind::Other,
+            kind,
+            key: Symbol::Other,
+            key_start: None,
+            variant_start: None,
             pending_start,
-            block_key: None,
-            author: Kind::Other,
+            block,
+            author: false,
             id: Kind::Other,
             revision_id: Kind::Other,
-            content: Kind::Other,
-            node_type: Kind::Other,
+            content_array: false,
+            node_type: Symbol::Other,
         }
     }
 
-    fn field<T: Serialize + ?Sized>(
-        &mut self,
-        key: Symbol,
-        model: bool,
-        pointer: Option<String>,
-        value: &T,
-    ) -> Result<(), RevisionIdsError> {
-        let kind = value.serialize(Visitor {
-            session: self.visitor.session,
-            found: self.visitor.found,
-            model,
-            info: model && matches!(key, Symbol::Info),
-            scan_strings: self.visitor.scan_strings,
-            pointer,
-        })?;
+    fn field(&mut self, key: Symbol, kind: Kind) {
         match key {
-            Symbol::Author => self.author = kind,
+            Symbol::Author => self.author = matches!(kind, Kind::String(_)),
             Symbol::Id => self.id = kind,
             Symbol::RevisionId => self.revision_id = kind,
-            Symbol::Content => self.content = kind,
-            Symbol::Type => self.node_type = kind,
+            Symbol::Content => self.content_array = matches!(kind, Kind::Array),
+            Symbol::Type => {
+                self.node_type = match kind {
+                    Kind::String(symbol) => symbol,
+                    _ => Symbol::Other,
+                };
+            }
             _ => {}
         }
-        Ok(())
     }
 
     fn named_field<T: Serialize + ?Sized>(
@@ -444,95 +608,102 @@ impl<'a> Record<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<(), RevisionIdsError> {
-        if key == "type" && matches!(self.name, "Paragraph" | "Table" | "BlockSdt") {
+        #[cfg(test)]
+        count_work(|work| work.fields += 1);
+        let symbol = Symbol::from(key);
+        if matches!(symbol, Symbol::Type) {
             #[cfg(test)]
-            BLOCK_VISITS.set(BLOCK_VISITS.get() + 1);
-            if matches!(self.visitor.found.collection, Collection::Assignment) {
-                self.block_key = Some(ptr::from_ref(value).cast::<()>());
+            if matches!(self.kind, RecordKind::Block) {
+                count_work(|work| work.collected_blocks += 1);
+            }
+            if let Some((key, _)) = &mut self.block {
+                *key = ptr::from_ref(value).cast::<()>();
             }
         }
         let model = self.visitor.model
             || matches!(
-                (self.name, key),
-                ("ShapeTextBody", "content")
-                    | ("Shape", "drawingModel")
-                    | ("S13TablePatch", "before" | "after")
+                (self.kind, key),
+                (RecordKind::ShapeTextBody, "content")
+                    | (RecordKind::Shape, "drawingModel")
+                    | (RecordKind::TablePatch, "before" | "after")
             );
-        let pointer = child_pointer(self.visitor.pointer.as_deref(), key);
-        self.field(Symbol::from(key), model, pointer, value)
+        let kind = self
+            .visitor
+            .at(key, |visitor| value.serialize(visitor.child(symbol, model)))?;
+        self.field(symbol, kind);
+        Ok(())
     }
 
     fn finish(self) -> Kind {
         let found = self.visitor.found;
-        if let Some(key) = self.block_key
-            && found.site_count != self.site_count_at_start
+        if let Some((key, site_count)) = self.block
+            && !key.is_null()
+            && found.site_count != site_count
         {
+            #[cfg(test)]
+            count_work(|work| work.block_inserts += 1);
             found.blocks_with_sites.insert(key);
         }
         if let Some(start) = self.pending_start {
-            let session_id = match (&self.author, &self.id) {
-                (Kind::String(_), Kind::Number(id)) => {
-                    placeholder(*id).filter(|id| self.visitor.session.contains(id))
-                }
+            let session_id = match (self.author, &self.id) {
+                (true, Kind::Number(id)) => self.visitor.session.placeholder(*id),
                 _ => None,
             };
             found.finish_info(start, session_id);
             if session_id.is_some() {
+                if PATHS {
+                    found.end_pointer(self.variant_start);
+                }
                 return Kind::Other;
             }
         }
-        let pointer = self.visitor.pointer.as_deref();
-        if matches!(self.author, Kind::String(_)) {
-            let raises_base = !matches!(self.content, Kind::Array);
-            found.note(
-                self.id,
-                raises_base,
-                child_pointer(pointer, "id").as_deref(),
-            );
-            found.note(
-                self.revision_id,
-                raises_base,
-                child_pointer(pointer, "revisionId").as_deref(),
-            );
-        } else if let Kind::String(symbol @ (Symbol::CommentMarker | Symbol::Annotation)) =
-            self.node_type
-        {
-            found.note(
-                self.id,
-                matches!(symbol, Symbol::Annotation),
-                child_pointer(pointer, "id").as_deref(),
-            );
+        if self.author {
+            let raises_base = !self.content_array;
+            found.note(self.id, raises_base, Some("id"));
+            found.note(self.revision_id, raises_base, Some("revisionId"));
+        } else if let symbol @ (Symbol::CommentMarker | Symbol::Annotation) = self.node_type {
+            found.note(self.id, matches!(symbol, Symbol::Annotation), Some("id"));
+        }
+        if PATHS {
+            found.end_pointer(self.variant_start);
         }
         Kind::Other
     }
 }
 
-impl SerializeMap for Record<'_> {
+impl<const PATHS: bool> SerializeMap for Record<'_, PATHS> {
     type Ok = Kind;
     type Error = RevisionIdsError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
-        self.key = key.serialize(Visitor {
+        if PATHS {
+            self.key_start = self.visitor.found.pointer.as_ref().map(String::len);
+        }
+        let kind = key.serialize(Visitor::<PATHS> {
             session: self.visitor.session,
             found: self.visitor.found,
             model: false,
             info: false,
-            scan_strings: false,
-            pointer: self.visitor.pointer.as_ref().map(|_| String::new()),
+            key: true,
+            node_type: false,
         })?;
+        self.key = match kind {
+            Kind::String(symbol) => symbol,
+            _ => Symbol::Other,
+        };
         Ok(())
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-        let (symbol, pointer) = match &self.key {
-            Kind::Key(key) => (
-                Symbol::from(key.as_str()),
-                child_pointer(self.visitor.pointer.as_deref(), key),
-            ),
-            Kind::String(symbol) => (*symbol, None),
-            _ => (Symbol::Other, None),
-        };
-        self.field(symbol, self.visitor.model, pointer, value)
+        #[cfg(test)]
+        count_work(|work| work.fields += 1);
+        let model = self.visitor.model;
+        let kind = value.serialize(self.visitor.child(self.key, model))?;
+        if PATHS {
+            self.visitor.found.end_pointer(self.key_start);
+        }
+        self.field(self.key, kind);
+        Ok(())
     }
 
     fn end(self) -> Result<Kind, Self::Error> {
@@ -540,7 +711,7 @@ impl SerializeMap for Record<'_> {
     }
 }
 
-impl SerializeStruct for Record<'_> {
+impl<const PATHS: bool> SerializeStruct for Record<'_, PATHS> {
     type Ok = Kind;
     type Error = RevisionIdsError;
 
@@ -557,7 +728,7 @@ impl SerializeStruct for Record<'_> {
     }
 }
 
-impl SerializeStructVariant for Record<'_> {
+impl<const PATHS: bool> SerializeStructVariant for Record<'_, PATHS> {
     type Ok = Kind;
     type Error = RevisionIdsError;
 
@@ -574,35 +745,41 @@ impl SerializeStructVariant for Record<'_> {
     }
 }
 
-struct Sequence<'a> {
-    visitor: Visitor<'a>,
+struct Sequence<'a, const PATHS: bool> {
+    visitor: Visitor<'a, PATHS>,
     index: usize,
+    variant_start: Option<usize>,
 }
 
 macro_rules! sequence {
     ($trait:ident, $field:ident, $kind:expr) => {
-        impl $trait for Sequence<'_> {
+        impl<const PATHS: bool> $trait for Sequence<'_, PATHS> {
             type Ok = Kind;
             type Error = RevisionIdsError;
 
             fn $field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-                let pointer = self.visitor.pointer.as_ref().map(|pointer| {
-                    let index = self.index;
+                #[cfg(test)]
+                count_work(|work| work.fields += 1);
+                let model = self.visitor.model;
+                if !PATHS {
+                    value.serialize(self.visitor.child(Symbol::Other, model))?;
+                    return Ok(());
+                }
+                let start = self.visitor.found.pointer.as_mut().map(|pointer| {
+                    let start = pointer.len();
+                    write!(pointer, "/{}", self.index).unwrap();
                     self.index += 1;
-                    format!("{pointer}/{index}")
+                    start
                 });
-                value.serialize(Visitor {
-                    session: self.visitor.session,
-                    found: self.visitor.found,
-                    model: self.visitor.model,
-                    info: false,
-                    scan_strings: self.visitor.scan_strings,
-                    pointer,
-                })?;
+                value.serialize(self.visitor.child(Symbol::Other, model))?;
+                self.visitor.found.end_pointer(start);
                 Ok(())
             }
 
             fn end(self) -> Result<Kind, Self::Error> {
+                if PATHS {
+                    self.visitor.found.end_pointer(self.variant_start);
+                }
                 Ok($kind)
             }
         }
@@ -618,26 +795,22 @@ macro_rules! number {
     ($($method:ident: $type:ty),+ $(,)?) => {
         $(
             fn $method(self, value: $type) -> Result<Kind, Self::Error> {
-                if !self.scan_strings && self.pointer.is_some() {
-                    Ok(Kind::Key(value.to_string()))
-                } else {
-                    Ok(Kind::Number(value as f64))
-                }
+                Ok(self.number(value, value as f64))
             }
         )+
     };
 }
 
-impl<'a> Serializer for Visitor<'a> {
+impl<'a, const PATHS: bool> Serializer for Visitor<'a, PATHS> {
     type Ok = Kind;
     type Error = RevisionIdsError;
-    type SerializeSeq = Sequence<'a>;
-    type SerializeTuple = Sequence<'a>;
-    type SerializeTupleStruct = Sequence<'a>;
-    type SerializeTupleVariant = Sequence<'a>;
-    type SerializeMap = Record<'a>;
-    type SerializeStruct = Record<'a>;
-    type SerializeStructVariant = Record<'a>;
+    type SerializeSeq = Sequence<'a, PATHS>;
+    type SerializeTuple = Sequence<'a, PATHS>;
+    type SerializeTupleStruct = Sequence<'a, PATHS>;
+    type SerializeTupleVariant = Sequence<'a, PATHS>;
+    type SerializeMap = Record<'a, PATHS>;
+    type SerializeStruct = Record<'a, PATHS>;
+    type SerializeStructVariant = Record<'a, PATHS>;
 
     number!(
         serialize_i8: i8, serialize_i16: i16, serialize_i32: i32, serialize_i64: i64,
@@ -646,11 +819,10 @@ impl<'a> Serializer for Visitor<'a> {
     );
 
     fn serialize_bool(self, value: bool) -> Result<Kind, Self::Error> {
-        if !self.scan_strings && self.pointer.is_some() {
-            Ok(Kind::Key(value.to_string()))
-        } else {
-            Ok(Kind::Other)
+        if PATHS && self.key && let Some(pointer) = &mut self.found.pointer {
+            write!(pointer, "/{value}").unwrap();
         }
+        Ok(Kind::Other)
     }
 
     fn serialize_char(self, value: char) -> Result<Kind, Self::Error> {
@@ -658,12 +830,18 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_str(self, value: &str) -> Result<Kind, Self::Error> {
-        if self.scan_strings && !matches!(self.found.collection, Collection::SitesOnly) {
-            self.found.scan_xml(value, self.pointer.as_deref());
-        } else if !self.scan_strings && self.pointer.is_some() {
-            return Ok(Kind::Key(value.to_owned()));
+        if self.key {
+            if PATHS {
+                self.found.begin_pointer(value);
+            }
+            return Ok(Kind::String(Symbol::from(value)));
         }
-        Ok(Kind::String(Symbol::from(value)))
+        self.found.scan_xml(value);
+        Ok(Kind::String(if self.node_type {
+            Symbol::from(value)
+        } else {
+            Symbol::Other
+        }))
     }
 
     fn serialize_bytes(self, _: &[u8]) -> Result<Kind, Self::Error> {
@@ -704,14 +882,22 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
-        mut self,
+        self,
         _: &'static str,
         _: u32,
         variant: &'static str,
         value: &T,
     ) -> Result<Kind, Self::Error> {
-        self.pointer = child_pointer(self.pointer.as_deref(), variant);
-        value.serialize(self)?;
+        if !PATHS {
+            value.serialize(self)?;
+            return Ok(Kind::Other);
+        }
+        let start = self.found.begin_pointer(variant);
+        value.serialize(Visitor {
+            found: &mut *self.found,
+            ..self
+        })?;
+        self.found.end_pointer(start);
         Ok(Kind::Other)
     }
 
@@ -719,6 +905,7 @@ impl<'a> Serializer for Visitor<'a> {
         Ok(Sequence {
             visitor: self,
             index: 0,
+            variant_start: None,
         })
     }
 
@@ -735,14 +922,22 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_tuple_variant(
-        mut self,
+        self,
         _: &'static str,
         _: u32,
         variant: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        self.pointer = child_pointer(self.pointer.as_deref(), variant);
-        self.serialize_seq(None)
+        let variant_start = if PATHS {
+            self.found.begin_pointer(variant)
+        } else {
+            None
+        };
+        Ok(Sequence {
+            visitor: self,
+            index: 0,
+            variant_start,
+        })
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
@@ -758,20 +953,26 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_struct_variant(
-        mut self,
+        self,
         _: &'static str,
         _: u32,
         variant: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
-        self.pointer = child_pointer(self.pointer.as_deref(), variant);
-        Ok(Record::new(
+        let variant_start = if PATHS {
+            self.found.begin_pointer(variant)
+        } else {
+            None
+        };
+        let mut record = Record::new(
             Visitor {
                 info: false,
                 ..self
             },
             "",
-        ))
+        );
+        record.variant_start = variant_start;
+        Ok(record)
     }
 }
 
@@ -780,43 +981,89 @@ enum Site<'a> {
     Model(&'a mut Value),
 }
 
+struct PendingSite<'a> {
+    site: Site<'a>,
+    placeholder: u64,
+    assigned: u32,
+    next: usize,
+}
+
+impl PendingSite<'_> {
+    fn write(&mut self) {
+        match &mut self.site {
+            Site::Typed(id) => **id = f64::from(self.assigned),
+            Site::Model(id) => **id = Value::from(self.assigned),
+        }
+    }
+
+    fn unassigned(&self) -> Option<u64> {
+        #[cfg(test)]
+        count_work(|work| work.verified += 1);
+        let assigned = match &self.site {
+            Site::Typed(id) => **id == f64::from(self.assigned),
+            Site::Model(id) => id.as_u64() == Some(u64::from(self.assigned)),
+        };
+        (!assigned).then_some(self.placeholder)
+    }
+}
+
+fn model_info_id(record: &Map<String, Value>) -> Option<f64> {
+    if record.get("author").is_some_and(Value::is_string) {
+        record.get("id").and_then(Value::as_f64)
+    } else {
+        None
+    }
+}
+
+struct SiteOrder {
+    first: usize,
+    last: usize,
+}
+
+impl Default for SiteOrder {
+    fn default() -> Self {
+        Self {
+            first: NO_SITE,
+            last: NO_SITE,
+        }
+    }
+}
+
 struct SiteWalker<'a, 's, 'p> {
-    session: &'s BTreeSet<u64>,
-    blocks_with_sites: &'s HashSet<*const ()>,
-    sites: Vec<(u64, Site<'a>)>,
+    session: &'s SessionIds,
+    blocks_with_sites: &'s FastSet<*const ()>,
+    sites: Vec<PendingSite<'a>>,
+    order: SiteOrder,
     paths: Option<&'p mut Vec<(String, u64)>>,
     path: String,
-    #[cfg(test)]
-    block_make_mut: usize,
 }
 
 impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     fn new(
-        session: &'s BTreeSet<u64>,
-        paths: Option<&'p mut Vec<(String, u64)>>,
-        blocks_with_sites: &'s HashSet<*const ()>,
+        session: &'s SessionIds,
+        mut paths: Option<&'p mut Vec<(String, u64)>>,
+        blocks_with_sites: &'s FastSet<*const ()>,
+        site_count: usize,
     ) -> Self {
+        if let Some(paths) = &mut paths {
+            paths.reserve(site_count);
+        }
         Self {
             session,
             blocks_with_sites,
-            sites: Vec::new(),
+            sites: Vec::with_capacity(site_count),
+            order: SiteOrder::default(),
             paths,
             path: String::new(),
-            #[cfg(test)]
-            block_make_mut: 0,
         }
     }
 
     fn at(&mut self, key: &str, visit: impl FnOnce(&mut Self)) {
-        let length = self.path.len();
-        if self.paths.is_some() {
-            self.path.push('/');
-            if key.contains(['~', '/']) {
-                self.path.push_str(&key.replace('~', "~0").replace('/', "~1"));
-            } else {
-                self.path.push_str(key);
-            }
+        if self.paths.is_none() {
+            return visit(self);
         }
+        let length = self.path.len();
+        push_pointer(&mut self.path, key);
         visit(self);
         self.path.truncate(length);
     }
@@ -826,13 +1073,17 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         values: impl IntoIterator<Item = T>,
         mut visit: impl FnMut(&mut Self, T),
     ) {
-        for (index, value) in values.into_iter().enumerate() {
-            let length = self.path.len();
-            if self.paths.is_some() {
+        if self.paths.is_some() {
+            for (index, value) in values.into_iter().enumerate() {
+                let length = self.path.len();
                 write!(self.path, "/{index}").unwrap();
+                visit(self, value);
+                self.path.truncate(length);
             }
-            visit(self, value);
-            self.path.truncate(length);
+        } else {
+            for value in values {
+                visit(self, value);
+            }
         }
     }
 
@@ -904,11 +1155,54 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         if let Some(paths) = &mut self.paths {
             paths.push((format!("{}/id", self.path), placeholder));
         }
-        self.sites.push((placeholder, site));
+        let index = self.sites.len();
+        self.sites.push(PendingSite {
+            site,
+            placeholder,
+            assigned: 0,
+            next: NO_SITE,
+        });
+        self.append(SiteOrder {
+            first: index,
+            last: index,
+        });
+    }
+
+    fn append(&mut self, order: SiteOrder) {
+        if order.first == NO_SITE {
+            return;
+        }
+        if let Some(last) = self.sites.get_mut(self.order.last) {
+            last.next = order.first;
+        } else {
+            self.order.first = order.first;
+        }
+        self.order.last = order.last;
+    }
+
+    fn order_paths(&mut self) {
+        let Some(paths) = &mut self.paths else {
+            return;
+        };
+        let mut index = self.order.first;
+        let in_visit_order = self.sites.iter().enumerate().all(|(position, site)| {
+            let matches = index == position;
+            index = site.next;
+            matches
+        });
+        if !in_visit_order {
+            let mut unordered = std::mem::take(*paths);
+            paths.reserve(unordered.len());
+            let mut index = self.order.first;
+            while let Some(site) = self.sites.get(index) {
+                paths.push(std::mem::take(&mut unordered[index]));
+                index = site.next;
+            }
+        }
     }
 
     fn id(&mut self, id: &'a mut f64) {
-        if let Some(placeholder) = self.session_placeholder(*id) {
+        if let Some(placeholder) = self.session.placeholder(*id) {
             self.push(placeholder, Site::Typed(id));
         }
     }
@@ -917,25 +1211,19 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         self.at("info", |walker| walker.id(id));
     }
 
-    fn session_placeholder(&self, id: f64) -> Option<u64> {
-        placeholder(id).filter(|id| self.session.contains(id))
-    }
-
     fn block_mut<T: Clone>(
         &mut self,
         block: &'a mut Arc<T>,
         node_type: impl FnOnce(&T) -> &String,
     ) -> Option<&'a mut T> {
         #[cfg(test)]
-        BLOCK_VISITS.set(BLOCK_VISITS.get() + 1);
+        count_work(|work| work.block_probes += 1);
         let key = ptr::from_ref(node_type(block.as_ref())).cast::<()>();
         if !self.blocks_with_sites.contains(&key) {
             return None;
         }
         #[cfg(test)]
-        {
-            self.block_make_mut += 1;
-        }
+        count_work(|work| work.make_mut += 1);
         Some(Arc::make_mut(block))
     }
 
@@ -1138,9 +1426,8 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         match model {
             Value::Object(record) => {
                 if info
-                    && record.get("author").is_some_and(Value::is_string)
-                    && let Some(number) = record.get("id").and_then(Value::as_f64)
-                    && let Some(placeholder) = self.session_placeholder(number)
+                    && let Some(placeholder) =
+                        model_info_id(record).and_then(|id| self.session.placeholder(id))
                 {
                     self.push(placeholder, Site::Model(record.get_mut("id").unwrap()));
                     return;
@@ -1152,16 +1439,20 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                         self.model_field(kind, key, value);
                     }
                 } else {
-                    let mut fields: Vec<_> = record.iter_mut().collect();
-                    fields.sort_by_key(|(key, _)| {
-                        order
-                            .iter()
-                            .position(|name| *name == key.as_str())
-                            .unwrap_or(order.len())
-                    });
-                    for (key, value) in fields {
+                    let prefix = std::mem::take(&mut self.order);
+                    let mut fields = [const { None }; 5];
+                    for (key, value) in record {
+                        if let Some(index) = order.iter().position(|name| *name == key.as_str()) {
+                            fields[index] = Some((key, value));
+                        } else {
+                            self.model_field(kind, key, value);
+                        }
+                    }
+                    let extra = std::mem::replace(&mut self.order, prefix);
+                    for (key, value) in fields.into_iter().flatten() {
                         self.model_field(kind, key, value);
                     }
+                    self.append(extra);
                 }
             }
             Value::Array(items) => {

@@ -371,7 +371,7 @@ fn scans_xml_in_values_with_javascript_boundaries() {
     )
     .unwrap();
     assert_eq!(found.max, 42);
-    assert_eq!(found.used, BTreeSet::from([31, 42]));
+    assert_eq!(found.used, [31, 42].into_iter().collect());
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn uses_serialized_names_and_does_not_descend_into_session_infos() {
     )
     .unwrap();
     assert!(found.sites.is_empty());
-    assert_eq!(found.used, BTreeSet::from([3, 5]));
+    assert_eq!(found.used, [3, 5].into_iter().collect());
 
     let infos = [
         docx_parse::TrackedChangeInfo {
@@ -409,9 +409,10 @@ fn uses_serialized_names_and_does_not_descend_into_session_infos() {
         },
     ];
     let found = collect(&infos, &BTreeSet::from([3])).unwrap();
-    assert_eq!(found.sites, BTreeMap::from([(3, 1)]));
+    assert_eq!(found.site_count, 1);
+    assert_eq!(found.sites[&3].remaining, 1);
     assert_eq!(found.max, 12);
-    assert_eq!(found.used, BTreeSet::from([5, 12]));
+    assert_eq!(found.used, [5, 12].into_iter().collect());
 }
 
 #[test]
@@ -501,7 +502,7 @@ fn wraps_and_skips_used_ids() {
 fn errors_on_returning_to_the_base() {
     let mut next = 3;
     assert_eq!(
-        next_id(&mut next, 5, &BTreeSet::from([4])),
+        next_id(&mut next, 5, &[4].into_iter().collect()),
         Err(RevisionIdsError::Exhausted)
     );
 }
@@ -577,9 +578,11 @@ fn clones_only_shared_blocks_on_a_revision_site_path() {
 
     let mut probe = original.clone();
     let found = collect(&probe, &session).unwrap();
-    let mut walker = SiteWalker::new(&session, None, &found.blocks_with_sites);
+    let session = SessionIds::new(&session);
+    let mut walker = SiteWalker::new(&session, None, &found.blocks_with_sites, found.site_count);
+    WORK.with_borrow_mut(|work| *work = Work::default());
     walker.request(&mut probe);
-    assert_eq!(walker.block_make_mut, 2);
+    assert_eq!(WORK.with_borrow(|work| work.make_mut), 2);
 }
 
 #[test]
@@ -606,18 +609,77 @@ fn bounds_visits_to_nested_shared_blocks() {
                 original.document.content.push(block);
                 let mut actual = original.clone();
 
-                BLOCK_VISITS.set(0);
+                WORK.with_borrow_mut(|work| *work = Work::default());
                 assert_eq!(
                     assign_session_revision_ids(&mut actual, &BTreeSet::from([FIRST])).unwrap(),
                     BTreeMap::from([(FIRST, 1)])
                 );
-                let visits = BLOCK_VISITS.get();
+                let visits = WORK.with_borrow(|work| work.collected_blocks + work.block_probes);
                 assert!(visits <= 3 * (2 * depth + 1), "{visits} visits at depth {depth}");
             }
         })
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn bounds_work_for_flat_revision_requests() {
+    fn assign_flat(paragraphs: usize) -> Work {
+        let mut session = BTreeSet::new();
+        let mut blocks = Vec::with_capacity(paragraphs + paragraphs / 50);
+        for index in 0..paragraphs {
+            let mut content = vec![json!({
+                "type": "run", "content": [{"type": "text", "text": "Earlier inspection."}]
+            })];
+            if index % 10 == 0 {
+                let id = FIRST - index as u64;
+                session.insert(id);
+                content.push(change(id));
+            }
+            blocks.push(json!({"type": "paragraph", "content": content}));
+            if index % 50 == 0 {
+                blocks.push(json!({"type": "rawXml", "xml": "<w:customXml w:id='42'/>"}));
+            }
+        }
+        let mut request = request(Value::Array(blocks));
+        WORK.with_borrow_mut(|work| *work = Work::default());
+        let ids = assign_session_revision_ids(&mut request, &session).unwrap();
+        assert_eq!(ids.len(), paragraphs / 10);
+        assert_eq!(ids.values().copied().min(), Some(43));
+        WORK.with_borrow(|work| *work)
+    }
+
+    let paragraphs = 2_000;
+    let small = assign_flat(paragraphs);
+    let large = assign_flat(10 * paragraphs);
+    for (name, small, large, bound) in [
+        ("fields", small.fields, large.fields, 16),
+        ("strings", small.strings, large.strings, 5),
+        ("string bytes", small.string_bytes, large.string_bytes, 128),
+        ("reservations", small.reservation_inserts, large.reservation_inserts, 1),
+        ("site inserts", small.site_inserts, large.site_inserts, 1),
+        ("collected blocks", small.collected_blocks, large.collected_blocks, 1),
+        ("block inserts", small.block_inserts, large.block_inserts, 1),
+        ("block probes", small.block_probes, large.block_probes, 1),
+        ("make_mut", small.make_mut, large.make_mut, 1),
+        ("id probes", small.id_probes, large.id_probes, 1),
+        ("verified sites", small.verified, large.verified, 1),
+    ] {
+        assert!(small > 0 && small <= bound * paragraphs + 128, "{name}: {small}");
+        assert!(large <= bound * 10 * paragraphs + 128, "{name}: {large}");
+        assert!(large <= 10 * small + 32, "{name}: {small} -> {large}");
+    }
+    for (count, work) in [(paragraphs, small), (10 * paragraphs, large)] {
+        assert_eq!(work.reservation_inserts, count / 50);
+        assert_eq!(work.site_inserts, count / 10);
+        assert_eq!(work.collected_blocks, count);
+        assert_eq!(work.block_inserts, count / 10);
+        assert_eq!(work.block_probes, count);
+        assert_eq!(work.make_mut, count / 10);
+        assert_eq!(work.id_probes, count / 10);
+        assert_eq!(work.verified, count / 10);
+    }
 }
 
 #[test]
@@ -642,9 +704,10 @@ fn inserts_each_nested_model_reservation_once() {
                 shape.drawing_model = Some(Value::Object(
                     [("info".to_owned(), model)].into_iter().collect(),
                 ));
+                WORK.with_borrow_mut(|work| *work = Work::default());
                 let found = collect(&shape, &BTreeSet::from([FIRST])).unwrap();
                 assert_eq!(found.used, (1..=count).collect());
-                assert_eq!(found.reservation_inserts, count as usize);
+                assert_eq!(WORK.with_borrow(|work| work.reservation_inserts), count as usize);
             }
         })
         .unwrap()
@@ -734,6 +797,39 @@ fn assigns_text_box_scene_shape_before_child_nodes() {
     assert_text_box_model_order(
         json!({"type": "run", "content": [{"type": "shape", "shape": shape}]}),
         &[FIRST, SECOND],
+    );
+}
+
+#[test]
+fn assigns_ordered_model_fields_before_extra_fields() {
+    assert_text_box_model_order(
+        json!({
+            "type": "insertion",
+            "additional": {"info": {"id": FIRST - 1, "author": "Reviewer"}},
+            "content": [change(SECOND)],
+            "info": {"id": FIRST, "author": "Reviewer"}
+        }),
+        &[FIRST, SECOND, FIRST - 1],
+    );
+}
+
+#[test]
+fn checks_model_sites_revealed_by_an_assignment() {
+    let shape = model_shape(json!([{
+        "type": "insertion",
+        "content": [],
+        "info": {"id": FIRST, "author": "Reviewer", "info": {"id": SECOND, "author": "Reviewer"}}
+    }]));
+    let original = request(json!([{"type": "paragraph", "content": [{
+        "type": "run", "content": [{"type": "shape", "shape": shape}]
+    }]}]));
+    assert_eq!(
+        assign_session_revision_ids(&mut original.clone(), &BTreeSet::from([FIRST, SECOND])),
+        Err(RevisionIdsError::Unassigned(SECOND))
+    );
+    assert_eq!(
+        assign_session_revision_ids(&mut original.clone(), &BTreeSet::from([1, FIRST, SECOND])),
+        Ok(BTreeMap::from([(FIRST, 1)]))
     );
 }
 
