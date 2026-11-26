@@ -7,7 +7,7 @@ use crate::paragraph_patch::{
 };
 use crate::serializer::xml_writer::escape_xml;
 
-use super::lower::{Cell, Lowered, Node, WORD, Xml};
+use super::lower::{Cell, Lowered, Node, Xml};
 use super::{
     Failure, apply_bytes, apply_deltas, attr_deltas, flatten, insert_into_root, properties,
     unit_attrs,
@@ -481,13 +481,7 @@ fn fragments(
             let mut key = String::new();
             let mut cursor = node.open.start;
             for attribute in &node.attributes {
-                let Some((prefix, local)) = attribute.name.split_once(':') else {
-                    continue;
-                };
-                if prefix != "w"
-                    || !local.starts_with("rsid")
-                    || xml.root_namespaces.get(prefix).map(String::as_str) != Some(WORD)
-                {
+                if !attribute.run_revision {
                     continue;
                 }
                 key.push_str(&wrapped[cursor..attribute.token.start]);
@@ -1195,7 +1189,7 @@ fn direct_mark_attrs(source: &str) -> Result<Attrs, Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::PatchContext;
+    use super::super::{PatchContext, lower::WORD};
     use super::*;
     use crate::paragraph_patch::{
         AttrDeltaV1, InheritanceV1, InsertedTextV1, RunEditV1, SeedV1, SlotV1, result_sha256,

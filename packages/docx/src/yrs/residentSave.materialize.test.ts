@@ -7,10 +7,12 @@ import type { Document } from '../types/document';
 import { createEditSession, preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { DirtyProjectionStories, mergeDocxHostMetadata, saveEditorDocument } from './editorSave';
+import { createYrsSession } from './index';
 import { createResidentEngineSession } from './residentEngineSession';
 import * as residentEngineSession from './residentEngineSession';
 import { saveResidentDocument, type ResidentSaveRecord } from './residentSave';
 import { warmResidentSave } from './residentSaveWarmup';
+import { captureSessionSave, saveYrsDocx, writeSessionSave } from './saveYrsDocx';
 import * as parseWasm from '../docx/parseWasm';
 import { sectionPackage } from './sectionTestPackage';
 import { sessionInternals } from './sessionInternals';
@@ -50,6 +52,55 @@ function fixture(text = 'before table'): Uint8Array<ArrayBuffer> {
   parts.set('word/document.xml', toBytes(xml.replace('before table', text)));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
+
+it('keeps worker and main-thread peer editor saves on base alignment after a recorded save', async () => {
+  const parts = new Map(Object.entries(unzipContainer(fixture())));
+  parts.set('word/document.xml', toBytes(
+    `<w:document xmlns:w="${W}" xmlns:w14="${W14}"><w:body>` +
+    '<w:p w14:paraId="00000001"><w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000002"><w:r><w:t>left</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>right</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000003"><w:r><w:t>restyle</w:t></w:r></w:p>' +
+    '<w:p w14:paraId="00000004"><w:r><w:t>delete this text</w:t></w:r></w:p>' +
+    '<w:sectPr/></w:body></w:document>'
+  ));
+  const source = new Uint8Array(rezipPartsToArrayBuffer(parts));
+  const { raw, hostJson, host, session } = open(source);
+  const peer = await createYrsSession({ clientId: 412 });
+  owned.push(peer);
+  const range = (paraId: string, from: number, to: number) => ({
+    story: 'body', start: { paraId, offset: from }, end: { paraId, offset: to },
+  });
+  session.insertText({ story: 'body', paraId: '00000001', offset: 1 }, 'i');
+  session.replaceRange(range('00000002', 2, 7), 'X');
+  session.formatRange(range('00000003', 0, 3), { bold: true });
+  session.deleteRange(range('00000004', 0, 7));
+
+  const state = session.encodeState();
+  const sidecar = session.encodeEditProvenanceForTransfer(state);
+  peer.bootstrapPeerWithProvenance(state, session.encodePeerMetadata(), source, host, sidecar);
+  const projected = yrsToDocument(peer, mergeDocxHostMetadata(peer.materializeDocx()!, host.document));
+  const capture = captureSessionSave(peer);
+  const bodyPart = (plan: typeof capture.plan) => plan.splicedParts!.find(({ part }) => part === 'word/document.xml')!;
+  expect(bodyPart(capture.plan).legacyParagraphs?.map(({ ordinal }) => ordinal)).toContain(0);
+  expect(peer.paragraphSavePlan()).toEqual(capture.plan);
+  for (const replica of [session, peer]) {
+    expect(bodyPart(replica.paragraphSavePlanWithLocalProvenance()).paragraphPatches?.map(({ ordinal }) => ordinal)).toContain(0);
+  }
+  const base = await writeSessionSave(peer, projected, capture, source.buffer, {}, () => true, true);
+  const saveWorker = async () => {
+    const dirty = new DirtyProjectionStories();
+    dirty.add('body');
+    return new Uint8Array(await saveResidentDocument(raw, 411, source, hostJson, host.document, [], { full: false }, dirty));
+  };
+  const savePeer = async () => new Uint8Array(await saveEditorDocument(peer, projected, [], { full: false }));
+  expect(await saveWorker()).toEqual(new Uint8Array(base.bytes));
+  expect(await savePeer()).toEqual(new Uint8Array(base.bytes));
+
+  const recorded = await saveYrsDocx(session, { useLocalProvenance: true });
+  expect(unzipContainer(recorded.bytes)['word/document.xml']).not.toEqual(unzipContainer(base.bytes)['word/document.xml']);
+  expect(await saveWorker()).toEqual(new Uint8Array(base.bytes));
+  expect(await savePeer()).toEqual(new Uint8Array(base.bytes));
+});
 
 it('warms the resident writer with a separate edited document and preserves the opened session', async () => {
   const opened = open(fixture());

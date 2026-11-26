@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { attachDocx, openDocx, type DocxAgentDocument } from '../src';
+import * as proposalSplices from '../src/proposal-splices';
 import { fixture } from './fixture';
 
 const opened: DocxAgentDocument[] = [];
@@ -244,6 +245,17 @@ describe('grep, read, propose, export', () => {
     }
   });
 
+  test('accepts replacing only a combining accent in a paragraph', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const { paraId } = doc.session.paragraphs('body')[0];
+    doc.session.insertText({ story: 'body', paraId, offset: 0 }, 'e\u0301 ');
+    const p = doc.read(hit.ref);
+    const proposal = doc.propose({ author: 'test', edits: [{ ...p, start: 1, oldText: '\u0301', newText: '\u0300' }] });
+    await doc.accept(proposal.id);
+    expect(doc.read(p.ref).text).toBe('e\u0300 Executive summary');
+  });
+
   test('direct accept trims shared text and exports the final text without revisions', async () => {
     for (const [oldText, newText] of [['X', 'X tail'], ['X', 'tail X'], ['the red car', 'the blue car'], ['aaa', 'aaaa']]) {
       const { doc, ref, xml } = await replacement(oldText, newText, false);
@@ -251,6 +263,74 @@ describe('grep, read, propose, export', () => {
       expect(xmlText(xml.match(/<w:p\b[\s\S]*?<\/w:p>/)![0])).toBe(newText);
       expect(xml).not.toMatch(/<w:(ins|del)\b/);
     }
+  });
+
+  test('accept applies the stored proposal splices without recomputing them', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const split = spyOn(proposalSplices, 'spliceChange');
+    try {
+      const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'EXECUTIVE SUMMARY' }] });
+      expect(split).toHaveBeenCalledTimes(1);
+      split.mockImplementation(() => { throw new Error('Recomputed proposal splices'); });
+      await expect(doc.accept(proposal.id)).resolves.toMatchObject({ status: 'accepted' });
+      expect(split).toHaveBeenCalledTimes(1);
+      expect(doc.read(hit.ref).text).toBe('EXECUTIVE SUMMARY');
+    } finally { split.mockRestore(); }
+  });
+
+  test('applying stored insertions checks the intervening text before making any edit', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'START Executive summary END' }] });
+    const held = doc['proposals'].get(proposal.id)!;
+    expect(held.splices).toMatchObject([{ oldText: '' }, { oldText: '' }]);
+    const draft = await doc['fork']();
+    try {
+      const { paraId } = draft.paragraphs('body')[0];
+      draft.replaceRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 9 } }, 'Alternate');
+      const before = draft.encodeState();
+      await expect(Promise.resolve().then(() => doc['apply'](draft, held))).rejects.toMatchObject({ code: 'STALE_TARGET' });
+      expect(draft.encodeState()).toEqual(before);
+    } finally { draft.destroy(); }
+  });
+
+  test('applying a trimmed insertion checks the original context before making any edit', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'Executive summary proposed' }] });
+    const held = doc['proposals'].get(proposal.id)!;
+    expect(held.splices).toMatchObject([{ oldText: '', newText: ' proposed' }]);
+    const draft = await doc['fork']();
+    try {
+      const { paraId } = draft.paragraphs('body')[0];
+      draft.replaceRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 9 } }, 'Alternate');
+      const before = draft.encodeState();
+      expect(() => doc['apply'](draft, held)).toThrow('Target text changed.');
+      expect(draft.encodeState()).toEqual(before);
+    } finally { draft.destroy(); doc.close(); }
+  });
+
+  test('direct accept inherits formatting at each splice and preserves untouched runs', async () => {
+    const bold = (text: string) => `<w:r><w:rPr><w:b/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const red = (text: string) => `<w:r><w:rPr><w:color w:val="C00000"/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const punctuation = '<w:r><w:rPr><w:i/></w:rPr><w:t>&#x21;</w:t></w:r>';
+    const separator = '<w:r><w:t>&#x7C;</w:t></w:r>';
+    const bracket = '<w:r><w:rPr><w:strike/></w:rPr><w:t>]</w:t></w:r>';
+    const zip = await JSZip.loadAsync(await fixture());
+    const source = await zip.file('word/document.xml')!.async('string');
+    zip.file('word/document.xml', source
+      .replace('<w:t>Project Aurora revenue is </w:t>', '<w:t xml:space="preserve">Project Aurora revenue is </w:t>')
+      .replace('<w:r><w:t>Executive summary</w:t></w:r>', bold('Left?') + punctuation + red('old') + separator + bracket));
+    const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
+    const [hit] = doc.grep({ query: 'Left?!old|]' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: '(Left?!NEW|' }] });
+    await doc.accept(proposal.id);
+    expect(doc.read(hit.ref).text).toBe('(Left?!NEW|');
+    const saved = await JSZip.loadAsync(await doc.export());
+    const xml = await saved.file('word/document.xml')!.async('string');
+    expect(xml).toContain(bold('(Left?') + punctuation + red('NEW') + separator + '</w:p>');
+    expect(xml).not.toContain(bracket);
   });
 
   test('invalidates cursors after edits and releases attached sessions without destroying them', async () => {
