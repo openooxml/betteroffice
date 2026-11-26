@@ -23,7 +23,9 @@ use docx_layout::display_list::{
 };
 use docx_layout::skipped_effects::{PrimitiveAt, Region};
 use ooxml_raster::svg;
-use ooxml_raster::{clip_dashed_polyline, encode_png, parse_css_color, stroke_path_length};
+use ooxml_raster::{
+    clip_dashed_polyline, clipped_dash_outline, encode_png, parse_css_color, stroke_path_length,
+};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
@@ -945,14 +947,24 @@ fn paint_shape<'k>(
                         (target.width(), target.height()),
                         period,
                     ) {
+                        budget.charge_scratch(
+                            (std::mem::size_of_val(dash.as_slice()) as u64)
+                                .saturating_mul(fragments.len() as u64),
+                        )?;
                         for (fragment, _) in &fragments {
                             budget
                                 .charge_path(dash_segments(stroke_path_length(fragment), dash))?;
                         }
-                        let mut stroke = stroked.stroke.clone();
-                        for (fragment, phase) in fragments {
-                            stroke.dash = StrokeDash::new(dash.clone(), phase);
-                            target.stroke_path(&fragment, &stroked.paint, &stroke, transform, mask);
+                        if let Some(outline) =
+                            clipped_dash_outline(fragments, dash, &stroked.stroke, transform)
+                        {
+                            target.fill_path(
+                                &outline,
+                                &stroked.paint,
+                                FillRule::Winding,
+                                transform,
+                                mask,
+                            );
                         }
                         return Ok(());
                     }
@@ -4052,18 +4064,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn off_page_dashed_connector_exports_with_its_original_dash_phase() {
-        let scene: DisplayList = serde_json::from_value(json!({
-            "pages": [{
-                "pageIndex": 0, "width": 192, "height": 160,
-                "primitives": [{
-                    "kind": "shape", "x": 32, "y": 24, "w": 96, "h": 96,
-                    "geometryPath": [
-                        {"type": "move", "x": 32, "y": 24},
-                        {"type": "line", "x": 96000032, "y": 24},
-                        {"type": "line", "x": 96000032, "y": 120},
-                        {"type": "line", "x": 128, "y": 120}
-    #[test]
     fn overlapping_clipped_dashes_preserve_stroke_opacity() {
         let scene: DisplayList = serde_json::from_value(json!({
             "pages": [{
@@ -4092,6 +4092,18 @@ mod tests {
         assert_eq!(picture_pixel(&png, 18, 8), single);
     }
 
+    #[test]
+    fn off_page_dashed_connector_exports_with_its_original_dash_phase() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0, "width": 192, "height": 160,
+                "primitives": [{
+                    "kind": "shape", "x": 32, "y": 24, "w": 96, "h": 96,
+                    "geometryPath": [
+                        {"type": "move", "x": 32, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 120},
+                        {"type": "line", "x": 128, "y": 120}
                     ],
                     "strokePaint": {"color": "#ff0000", "width": 4, "customDash": [2, 1]}
                 }]

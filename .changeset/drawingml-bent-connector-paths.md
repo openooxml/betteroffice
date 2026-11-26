@@ -7,4 +7,4 @@
 "@betteroffice/python-pptx": patch
 ---
 
-PowerPoint and Word draw connectors along their corrected paths, keep dashes aligned in PNG exports, and point Word arrowheads along the line. PowerPoint also lets you select bent connectors along their visible route.
+PowerPoint and Word draw corrected connector paths and preserve dash alignment and opacity in PNG exports. You can select bent connectors along their visible path in PowerPoint, and Word arrowheads follow the connector’s direction.

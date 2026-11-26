@@ -11,7 +11,8 @@ pub mod downscale;
 #[cfg(all(feature = "downscale", target_arch = "wasm32"))]
 compile_error!("the reduced raster decoder is native only");
 
-pub use dash::{clip_dashed_polyline, stroke_path_length};
+#[doc(hidden)]
+pub use dash::{clip_dashed_polyline, clipped_dash_outline, stroke_path_length};
 pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
 
 use ooxml_drawingml::GeometryPathCommand;

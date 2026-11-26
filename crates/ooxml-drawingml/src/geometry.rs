@@ -28,16 +28,6 @@ pub fn preset_geometry_layers(
     adjustments: &HashMap<String, f64>,
     aspect_ratio: f64,
 ) -> Option<Vec<PresetGeometryPath>> {
-    if matches!(
-        shape_type,
-        "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
-    ) {
-        return Some(vec![PresetGeometryPath {
-            commands: preset_geometry_to_path(shape_type, adjustments, aspect_ratio)?,
-            fill: PresetPathFill::None,
-            stroke: true,
-        }]);
-    }
     presets::paths(shape_type, adjustments, aspect_ratio)
 }
 
@@ -88,9 +78,7 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         "donut" => vec![("adj", 0.25)],
         "noSmoking" => vec![("adj", 0.1875)],
         "foldedCorner" => vec![("adj", 0.166_67)],
-        "bentConnector3" => vec![("adj1", 0.5)],
-        "corner" | "bentConnector4" => vec![("adj1", 0.5), ("adj2", 0.5)],
-        "bentConnector5" => vec![("adj1", 0.5), ("adj2", 0.5), ("adj3", 0.5)],
+        "corner" => vec![("adj1", 0.5), ("adj2", 0.5)],
         "mathMultiply" => vec![("adj1", 0.2352)],
         "ribbon" => vec![("adj1", 0.166_67), ("adj2", 0.5)],
         "ellipseRibbon" => vec![("adj1", 0.25), ("adj2", 0.5), ("adj3", 0.125)],

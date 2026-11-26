@@ -1,4 +1,4 @@
-use tiny_skia::{Path, PathBuilder, PathSegment, Point, Stroke, Transform};
+use tiny_skia::{Path, PathBuilder, PathSegment, PathStroker, Point, Stroke, StrokeDash, Transform};
 
 /// Clips an open polyline and keeps the dash phase measured from its original start.
 pub fn clip_dashed_polyline(
@@ -87,6 +87,23 @@ pub fn clip_dashed_polyline(
         fragments.push((path, phase));
     }
     Some(fragments)
+}
+
+pub fn clipped_dash_outline(
+    fragments: Vec<(Path, f32)>,
+    pattern: &[f32],
+    stroke: &Stroke,
+    transform: Transform,
+) -> Option<Path> {
+    let resolution = PathStroker::compute_resolution_scale(&transform);
+    let mut dashed = PathBuilder::new();
+    for (fragment, phase) in fragments {
+        let dash = StrokeDash::new(pattern.to_vec(), phase)?;
+        if let Some(path) = fragment.dash(&dash, resolution) {
+            dashed.push_path(&path);
+        }
+    }
+    dashed.finish()?.stroke(stroke, resolution)
 }
 
 fn clip_interval(a: [f64; 2], b: [f64; 2], low: [f64; 2], high: [f64; 2]) -> Option<(f64, f64)> {

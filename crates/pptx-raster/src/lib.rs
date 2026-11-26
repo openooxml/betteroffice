@@ -46,7 +46,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_raster::{clip_dashed_polyline, encode_png, stroke_path_length};
+use ooxml_raster::{clip_dashed_polyline, clipped_dash_outline, encode_png, stroke_path_length};
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
     GradientType, ImageCrop, ImageDestination, ImageTile, Paint as SlidePaint, Primitive,
@@ -1291,10 +1291,8 @@ fn stroke_visible_path(
             return Err("dashed stroke exceeds raster path budget".to_owned());
         }
         if let Some(fragments) = fragments {
-            let mut stroke = stroke.clone();
-            for (fragment, phase) in fragments {
-                stroke.dash = StrokeDash::new(pattern.to_vec(), phase);
-                target.stroke_path(&fragment, paint, &stroke, transform, clip);
+            if let Some(outline) = clipped_dash_outline(fragments, &pattern, stroke, transform) {
+                target.fill_path(&outline, paint, FillRule::Winding, transform, clip);
             }
             return Ok(());
         }
@@ -1709,6 +1707,8 @@ pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn overlapping_clipped_dashes_preserve_stroke_opacity() {
         let mut builder = PathBuilder::new();
@@ -1739,8 +1739,6 @@ mod tests {
         assert_eq!(target.pixel(14, 8), Some(single));
         assert_eq!(target.pixel(18, 8), Some(single));
     }
-
-    use super::*;
 
     #[test]
     fn extreme_bent_connector_guides_paint_visible_dashes_at_the_original_phase() {
