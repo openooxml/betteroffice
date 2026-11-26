@@ -2704,6 +2704,73 @@ fn typing_outside_a_nested_field_keeps_both_fields() {
 }
 
 #[test]
+fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_cached_runs() {
+    let content = concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> REF Bookmark </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:t xml:space="preserve">First </w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    );
+    let field_payload = |doc: &EditingDoc| {
+        doc.story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                docx_edit::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let nested = |payload: &BTreeMap<String, Any>| {
+        let Any::String(data) = &payload["fieldData"] else {
+            panic!("expected field data");
+        };
+        let field: serde_json::Value = serde_json::from_str(data).unwrap();
+        field["structuredResult"]["inline"][0].clone()
+    };
+    let bytes = package(content);
+    let doc = open(content);
+    let before = nested(&field_payload(&doc));
+    assert_eq!(before["instruction"], json!("REF Bookmark"));
+    assert_eq!(before["fieldResult"].as_array().unwrap().len(), 2);
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    assert_insertion_patch(&doc, 1);
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let (saved, warnings) = save_planned_bytes(&plan, Some(part), &bytes, |source| {
+        save_document(source, |_| {})
+    });
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let reopened = EditingDoc::new(72);
+    seed_from_docx(&reopened, &saved).unwrap();
+    assert!(
+        reopened.paragraphs("body").unwrap()[0]
+            .text
+            .contains("aXbc")
+    );
+    let payload = field_payload(&reopened);
+    assert_eq!(payload["instruction"], Any::from("QUOTE"));
+    assert_eq!(payload["displayText"], Any::from("First Second"));
+    let after = nested(&payload);
+    for key in ["instruction", "fieldResult", "structuredResult"] {
+        assert_eq!(after[key], before[key]);
+    }
+}
+
+#[test]
 fn repeated_text_deletes_the_recorded_unit() {
     let doc = open(&text("aaaa"));
     doc.delete_range(&ctx(), StoryRange::new("body", 1, 2))
