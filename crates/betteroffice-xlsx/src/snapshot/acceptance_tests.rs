@@ -3060,6 +3060,209 @@ fn deferred_wrapper_probe_is_per_worksheet() {
     assert!(workbook.source_package_is_unmaterialized_for_test());
 }
 
+fn two_sheet_wrapper_source(choice: &str, fallback: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    for (row, value) in [(0, 1.0), (1, 2.0)] {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets.extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    *xml = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test" mc:Ignorable="x">
+        <sheetData><row r="1"><mc:AlternateContent>
+        <mc:Choice Requires="x">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback>
+        </mc:AlternateContent></row></sheetData></worksheet>"#
+    )
+    .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn assert_wrapped_sheet_refusal(error: crate::Error) {
+    assert!(matches!(
+        error,
+        crate::Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+            if message.contains("Sheet2") && message.contains("mc:AlternateContent")
+    ));
+}
+
+#[test]
+fn deferred_edits_refuse_a_wrapped_cache_changed_by_earlier_recalculation() {
+    let cell = r#"<c r="A1"><f>Sheet1!A2*2</f><v>3</v></c>"#;
+    let bytes = two_sheet_wrapper_source(cell, cell);
+    let budget = budgets()[2];
+    let at = CellRef::new(0, 0);
+    let wrapped = SheetId(1);
+    let opened = Workbook::open(&bytes).unwrap();
+    let recalculated = worker(&bytes);
+    for (original, explicit) in [(&recalculated, false), (&opened, true)] {
+        let mut workbook = hydrate(original, budget);
+        if explicit {
+            assert_eq!(
+                workbook.recalculate_all(context()).changed,
+                vec![CellAddress {
+                    sheet: wrapped,
+                    cell: at,
+                }]
+            );
+            assert!(workbook.recalculate_all(context()).changed.is_empty());
+        }
+        assert_eq!(
+            workbook.model().value(wrapped, at),
+            CellValue::Number { value: 4.0 }
+        );
+        assert!(
+            !workbook
+                .source_package
+                .as_ref()
+                .unwrap()
+                .sheet_alternates_cached(1)
+        );
+        let model = workbook.model().clone();
+        let version = workbook.version();
+        assert_wrapped_sheet_refusal(
+            workbook
+                .edit_cell(SheetId(0), at, "5", context())
+                .unwrap_err(),
+        );
+        assert_eq!(workbook.model(), &model);
+        assert_eq!(workbook.version(), version);
+        assert!(!workbook.can_undo());
+        assert!(
+            workbook
+                .source_package
+                .as_ref()
+                .unwrap()
+                .sheet_alternates_cached(1)
+        );
+        assert!(workbook.source_package_is_unmaterialized_for_test());
+        if explicit {
+            assert_wrapped_sheet_refusal(workbook.save().unwrap_err());
+        }
+    }
+}
+
+#[test]
+fn deferred_style_edits_recheck_a_wrapped_sheet_with_an_edited_filter() {
+    let bytes =
+        two_sheet_wrapper_source(r#"<c r="A1"><v>1</v></c>"#, r#"<c r="B1"><v>2</v></c>"#);
+    let original = Workbook::open(&bytes).unwrap();
+    let mut workbook = hydrate(&original, budgets()[2]);
+    let filter_range = CellRange::parse_a1("A1:B2").unwrap();
+    assert!(
+        workbook
+            .apply_ops(
+                vec![Op::SetAutoFilter {
+                    sheet: SheetId(1),
+                    range: Some(filter_range),
+                }],
+                context(),
+            )
+            .unwrap()
+            .applied
+    );
+    assert!(
+        !workbook
+            .source_package
+            .as_ref()
+            .unwrap()
+            .sheet_alternates_cached(0)
+    );
+    let model = workbook.model().clone();
+    let version = workbook.version();
+    let at = CellRef::new(0, 0);
+    assert_wrapped_sheet_refusal(
+        workbook
+            .edit_cell(SheetId(0), at, "50%", context())
+            .unwrap_err(),
+    );
+    assert_wrapped_sheet_refusal(
+        workbook
+            .patch_range_style(
+                SheetId(0),
+                CellRange::new(at, at),
+                crate::StylePatch {
+                    bold: Some(true),
+                    ..crate::StylePatch::default()
+                },
+                context(),
+            )
+            .unwrap_err(),
+    );
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.version(), version);
+    assert!(workbook.source_package_is_unmaterialized_for_test());
+    let saved = Workbook::open(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        saved.model().sheets[1].auto_filter,
+        model.sheets[1].auto_filter
+    );
+}
+
+#[test]
+fn deferred_sheet_add_and_move_only_probe_changed_worksheet_content() {
+    let at = CellRef::new(0, 0);
+    for value in [3.0, 4.0] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        let mut sheet = xlsx_model::Sheet::new("Sheet2");
+        sheet.set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value },
+                formula: Some("2+2".into()),
+                style: None,
+            },
+        );
+        model.sheets.push(sheet);
+        model.defined_names.push(crate::DefinedName {
+            name: "Local".into(),
+            formula: "Sheet2!$A$1".into(),
+            local_sheet: Some(SheetId(1)),
+            hidden: false,
+        });
+        let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let original = Workbook::open(&bytes).unwrap();
+        for (op, new_index) in [
+            (
+                Op::AddSheet {
+                    index: 0,
+                    name: "New".into(),
+                },
+                SheetId(2),
+            ),
+            (Op::MoveSheet { from: 1, to: 0 }, SheetId(0)),
+        ] {
+            let mut workbook = hydrate(&original, budgets()[2]);
+            assert!(workbook.apply_ops(vec![op], context()).unwrap().applied);
+            assert_eq!(
+                workbook.model().defined_names[0].local_sheet,
+                Some(new_index)
+            );
+            assert_eq!(
+                workbook.model().value(new_index, at),
+                CellValue::Number { value: 4.0 }
+            );
+            let package = workbook.source_package.as_ref().unwrap();
+            assert!(!package.sheet_alternates_cached(0));
+            assert_eq!(package.sheet_alternates_cached(1), value != 4.0);
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn measure_first_edit_wrapper_probe() {

@@ -8981,7 +8981,7 @@ const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibi
 
 #[test]
 fn worksheet_wrapper_probe_stays_inside_sheet_data() {
-    let xml = br#"<s:worksheet xmlns:s="urn:sheet" xmlns:m="urn:mc">
+    let xml = br#"<s:worksheet xmlns:s="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:m="urn:mc">
         <s:sheetData>
             <!-- </s:sheetData><m:AlternateContent/> -->
             <![CDATA[</s:sheetData><m:AlternateContent/>]]>
@@ -8997,6 +8997,30 @@ fn worksheet_wrapper_probe_stays_inside_sheet_data() {
     assert!(worksheet_has_alternate_content(xml.as_bytes()).unwrap());
     let empty = br#"<worksheet><sheetData/><AlternateContent/></worksheet>"#;
     assert!(!worksheet_has_alternate_content(empty).unwrap());
+}
+
+#[test]
+fn worksheet_wrapper_probe_resolves_the_sheet_data_namespace() {
+    for namespace in [crate::write::NS_MAIN, crate::write::NS_STRICT_MAIN] {
+        for foreign in [
+            "<x:sheetData/>",
+            "<x:sheetData><m:AlternateContent/></x:sheetData>",
+            r#"<sheetData xmlns="urn:test"/>"#,
+            "<sheetData/>",
+        ] {
+            let worksheet = |grid| {
+                format!(
+                    r#"<s:worksheet xmlns:s="{namespace}" xmlns:x="urn:test" xmlns:m="http://schemas.openxmlformats.org/markup-compatibility/2006">{foreign}{grid}</s:worksheet>"#
+                )
+            };
+            let wrapped = worksheet("<s:sheetData><m:AlternateContent/></s:sheetData>");
+            assert!(worksheet_has_alternate_content(wrapped.as_bytes()).unwrap());
+            let empty = worksheet("<s:sheetData/>");
+            assert!(!worksheet_has_alternate_content(empty.as_bytes()).unwrap());
+        }
+    }
+    let unqualified = br#"<worksheet xmlns:m="http://schemas.openxmlformats.org/markup-compatibility/2006"><sheetData><m:AlternateContent/></sheetData></worksheet>"#;
+    assert!(!worksheet_has_alternate_content(unqualified).unwrap());
 }
 
 fn alternate_cell(cell: &str) -> Workbook {

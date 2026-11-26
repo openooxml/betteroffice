@@ -327,6 +327,10 @@ pub fn workbook_calculation_settings(data: &[u8]) -> Result<(bool, bool), ParseE
     parse_workbook_xml(data).map(|meta| (meta.full_precision, meta.iterate))
 }
 
+pub(crate) fn workbook_defined_names(data: &[u8]) -> Result<Vec<DefinedName>, ParseError> {
+    parse_workbook_xml(data).map(|meta| meta.defined_names)
+}
+
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();

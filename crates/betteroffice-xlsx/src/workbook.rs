@@ -1939,11 +1939,14 @@ impl Workbook {
             .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
         let package = package.materialize()?;
         let facts = xlsx_parse::PackageFacts::from_package(package);
-        self.source_package = Some(PackageSlot::deferred(
+        let mut deferred = PackageSlot::deferred(
             source.clone(),
             facts,
             &package.original_workbook().styles,
-        ));
+        );
+        deferred
+            .record_unchecked_calculation(&self.preserved.origins, &self.last_calculation.changed);
+        self.source_package = Some(deferred);
         Ok(())
     }
 
@@ -2526,9 +2529,10 @@ impl Workbook {
             at: cell,
             cell: state,
         }];
+        let styles_may_change = format.is_some();
         ops.extend(format);
         let seeds = [(sheet, cell)];
-        if self.needs_cell_alternate_preview(std::iter::once(sheet))? {
+        if self.needs_cell_alternate_preview(std::iter::once(sheet), styles_may_change)? {
             let mut preview = self.model.clone();
             let inverse = xlsx_ops::apply_ops(&mut preview, &ops)?;
             let touched = [(sheet, cell, formula)];
@@ -2701,7 +2705,9 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet))? {
+        let styles_changed = prepared.model.styles != self.model.styles;
+        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet), styles_changed)?
+        {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, true)?;
             self.publish(update);
@@ -3039,7 +3045,7 @@ impl Workbook {
         if preview.defined_names != self.model.defined_names
             && let Some(package) = &self.source_package
         {
-            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+            package.validate_defined_name_edits(&preview, &origins)?;
         }
         let proposals_changed = self
             .rebased_proposals(&ops)
@@ -3158,6 +3164,9 @@ impl Workbook {
             && self.has_uncached_source_formulas();
         let before = calculation_status(&self.last_calculation);
         let result = self.rebuild_and_recalculate(options);
+        if let Some(package) = &mut self.source_package {
+            package.record_unchecked_calculation(&self.preserved.origins, &result.changed);
+        }
         if !result.changed.is_empty() || first || calculation_status(&result) != before {
             self.committed_changes += 1;
             self.emit_update(UpdateEvent {
@@ -3717,7 +3726,9 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet))? {
+        let styles_changed = prepared.model.styles != self.model.styles;
+        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet), styles_changed)?
+        {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, false)?;
             self.proposals.remove(id);
@@ -4608,6 +4619,7 @@ impl Workbook {
     fn needs_cell_alternate_preview(
         &mut self,
         sheets: impl Iterator<Item = SheetId>,
+        styles_may_change: bool,
     ) -> Result<bool> {
         let Some(package) = &self.source_package else {
             return Ok(false);
@@ -4621,6 +4633,12 @@ impl Workbook {
             {
                 return Ok(true);
             }
+        }
+        if self.preserved.origins.iter().flatten().any(|&origin| {
+            package.sheet_may_have_alternate_content(origin)
+                && package.sheet_needs_alternate_validation(origin, styles_may_change)
+        }) {
+            return Ok(true);
         }
         if !self.needs_alternate_preview() {
             return Ok(false);
@@ -4681,27 +4699,39 @@ impl Workbook {
                     std::iter::empty(),
                 );
             }
+            let before_by_origin: HashMap<_, _> = self
+                .preserved
+                .origins
+                .iter()
+                .zip(&self.model.sheets)
+                .filter_map(|(&origin, sheet)| Some((origin?, sheet)))
+                .collect();
+            let source_sheets_changed = before_by_origin.len() != origins.iter().flatten().count()
+                || origins.iter().zip(&model.sheets).any(|(&origin, sheet)| {
+                    origin.is_some_and(|origin| {
+                        before_by_origin
+                            .get(&origin)
+                            .is_none_or(|before| before.name != sheet.name)
+                    })
+                });
             let all_sheets_may_change = model.shared_strings != self.model.shared_strings
-                || origins != self.preserved.origins.as_slice()
-                || model
-                    .sheets
-                    .iter()
-                    .zip(&self.model.sheets)
-                    .any(|(after, before)| after.name != before.name)
-                || (axes != self.preserved.axes.as_slice()
+                || source_sheets_changed
+                || ((axes != self.preserved.axes.as_slice()
+                    || origins != self.preserved.origins.as_slice())
                     && axes
                         .iter()
                         .chain(&self.preserved.axes)
                         .flatten()
                         .any(|axes| !axes.is_identity()));
-            let changed_origins = origins.iter().zip(&model.sheets).enumerate().filter_map(
-                |(index, (&origin, sheet))| {
-                    let origin = origin?;
-                    (package.sheet_may_have_alternate_content(origin)
-                        && (all_sheets_may_change || self.model.sheets.get(index) != Some(sheet)))
-                    .then_some(origin)
-                },
-            );
+            let styles_changed = model.styles != self.model.styles;
+            let changed_origins = origins.iter().zip(&model.sheets).filter_map(|(&origin, sheet)| {
+                let origin = origin?;
+                (package.sheet_may_have_alternate_content(origin)
+                    && (all_sheets_may_change
+                        || package.sheet_needs_alternate_validation(origin, styles_changed)
+                        || before_by_origin.get(&origin).copied() != Some(sheet)))
+                .then_some(origin)
+            });
             package.validate_alternate_content(
                 model,
                 origins,

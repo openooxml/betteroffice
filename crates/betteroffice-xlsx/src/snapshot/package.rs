@@ -9,7 +9,7 @@ use xlsx_parse::{
 };
 
 use super::{SnapshotError, SnapshotResult};
-use crate::{Error, Result};
+use crate::{CellAddress, Error, Result};
 
 const PACKAGE_DEFERRED: bool = true;
 
@@ -22,6 +22,7 @@ pub(crate) enum PackageSlot {
         facts: PackageFacts,
         rebuilt: OnceLock<std::result::Result<PreservedPackage, String>>,
         sheet_alternates: Vec<SheetAlternates>,
+        unchecked_calculation_origins: HashSet<usize>,
         implicit_default_style: bool,
     },
 }
@@ -40,6 +41,7 @@ impl PackageSlot {
             facts,
             rebuilt: OnceLock::new(),
             sheet_alternates,
+            unchecked_calculation_origins: HashSet::new(),
             implicit_default_style: styles.cell_xfs.first() == Some(&Xf::default()),
         }
     }
@@ -214,6 +216,23 @@ impl PackageSlot {
         }
     }
 
+    pub(crate) fn validate_defined_name_edits(
+        &self,
+        workbook: &WorkbookModel,
+        origins: &[Option<usize>],
+    ) -> Result<()> {
+        if let Some(package) = self.materialized() {
+            xlsx_parse::validate_defined_name_edits(workbook, package, origins)?;
+        } else {
+            let path = "xl/workbook.xml";
+            let source = self
+                .part_bytes(path)
+                .ok_or_else(|| xlsx_parse::ParseError::MissingPart(path.into()))?;
+            xlsx_parse::validate_defined_name_edits_from_workbook_xml(workbook, &source, origins)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn sheet_may_have_alternate_content(&self, sheet: usize) -> bool {
         if let Some(package) = self.materialized() {
             return package
@@ -237,6 +256,44 @@ impl PackageSlot {
             return Ok(self.sheet_may_have_alternate_content(sheet));
         }
         Ok(self.sheet_alternate_source(sheet)?.is_some())
+    }
+
+    pub(crate) fn record_unchecked_calculation(
+        &mut self,
+        origins: &[Option<usize>],
+        changed: &[CellAddress],
+    ) {
+        if let Self::Deferred {
+            unchecked_calculation_origins,
+            ..
+        } = self
+        {
+            unchecked_calculation_origins.extend(
+                changed
+                    .iter()
+                    .filter_map(|address| origins.get(address.sheet.0 as usize).copied().flatten()),
+            );
+        }
+    }
+
+    pub(crate) fn sheet_needs_alternate_validation(
+        &self,
+        sheet: usize,
+        styles_changed: bool,
+    ) -> bool {
+        let Self::Deferred {
+            unchecked_calculation_origins,
+            sheet_alternates,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        unchecked_calculation_origins.contains(&sheet)
+            || (styles_changed
+                && sheet_alternates
+                    .get(sheet)
+                    .is_some_and(|cached| matches!(cached.get(), Some(Ok(Some(_)))))
     }
 
     fn sheet_alternate_source(&self, sheet: usize) -> Result<Option<&AlternateContentSources>> {

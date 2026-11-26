@@ -9,6 +9,7 @@ use xlsx_model::{CellRef, SheetId, Workbook};
 
 use crate::read::{SharedStringCells, SourceCellFacts, WorksheetCellFacts};
 use crate::reference::UnpatchableReference;
+use crate::write::{NS_MAIN, NS_STRICT_MAIN};
 use crate::xml::{
     PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
     resolve_part_path, text_attribute, utf8_bom_len, xml_err,
@@ -903,13 +904,26 @@ pub(crate) struct XmlChild {
 #[doc(hidden)]
 pub fn worksheet_has_alternate_content(bytes: &[u8]) -> Result<bool, ParseError> {
     let bytes = &bytes[utf8_bom_len(bytes)..];
-    let mut reader = Reader::from_reader(bytes);
-    let mut root = false;
+    let mut reader = NsReader::from_reader(bytes);
+    let mut root_namespace = None;
     loop {
-        match reader.read_event().map_err(xml_err)? {
-            Event::Start(_) if !root => root = true,
+        let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+        let namespace = match namespace {
+            ResolveResult::Bound(ns) if ns.as_ref() == NS_MAIN.as_bytes() => Some(NS_MAIN),
+            ResolveResult::Bound(ns) if ns.as_ref() == NS_STRICT_MAIN.as_bytes() => {
+                Some(NS_STRICT_MAIN)
+            }
+            _ => None,
+        };
+        match event {
+            Event::Start(_) if root_namespace.is_none() => {
+                if namespace.is_none() {
+                    return Ok(false);
+                }
+                root_namespace = namespace;
+            }
             Event::Start(element) => {
-                if element.local_name().as_ref() == b"sheetData" {
+                if element.local_name().as_ref() == b"sheetData" && namespace == root_namespace {
                     let offset = reader.buffer_position() as usize;
                     return Ok(grid_has_alternate_content(
                         &bytes[offset..],
@@ -918,7 +932,11 @@ pub fn worksheet_has_alternate_content(bytes: &[u8]) -> Result<bool, ParseError>
                 }
                 reader.read_to_end(element.name()).map_err(xml_err)?;
             }
-            Event::Empty(element) if !root || element.local_name().as_ref() == b"sheetData" => {
+            Event::Empty(element)
+                if root_namespace.is_none()
+                    || (element.local_name().as_ref() == b"sheetData"
+                        && namespace == root_namespace) =>
+            {
                 return Ok(false);
             }
             Event::End(_) | Event::Eof => return Ok(false),

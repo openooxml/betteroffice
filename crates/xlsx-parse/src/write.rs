@@ -2621,7 +2621,12 @@ fn workbook_xml_with_template(
     let mut template = package.workbook_template.clone();
     if wb.defined_names != package.original_workbook.defined_names {
         let origins = sheets.iter().map(|sheet| sheet.origin).collect::<Vec<_>>();
-        let defined_names = edited_defined_names(wb, package, &origins)?;
+        let defined_names = edited_defined_names(
+            wb,
+            &package.workbook_template,
+            &package.original_workbook.defined_names,
+            &origins,
+        )?;
         if let Some(index) = template
             .children
             .iter()
@@ -2672,26 +2677,51 @@ pub fn validate_defined_name_edits(
     package: &PreservedPackage,
     origins: &[Option<usize>],
 ) -> Result<(), ParseError> {
-    if wb.defined_names != package.original_workbook.defined_names {
-        edited_defined_names(wb, package, origins)?;
+    validate_defined_name_edits_against(
+        wb,
+        &package.workbook_template,
+        &package.original_workbook.defined_names,
+        origins,
+    )
+}
+
+#[doc(hidden)]
+pub fn validate_defined_name_edits_from_workbook_xml(
+    wb: &Workbook,
+    source: &[u8],
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    let originals = crate::read::workbook_defined_names(source)?;
+    let root = XmlTemplate::capture(source)?;
+    validate_defined_name_edits_against(wb, &root, &originals, origins)
+}
+
+fn validate_defined_name_edits_against(
+    wb: &Workbook,
+    root: &XmlTemplate,
+    originals: &[xlsx_model::DefinedName],
+    origins: &[Option<usize>],
+) -> Result<(), ParseError> {
+    if wb.defined_names != originals {
+        edited_defined_names(wb, root, originals, origins)?;
     }
     Ok(())
 }
 
 fn edited_defined_names(
     wb: &Workbook,
-    package: &PreservedPackage,
+    root: &XmlTemplate,
+    originals: &[xlsx_model::DefinedName],
     origins: &[Option<usize>],
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let unsupported = || ParseError::UnsupportedEdit("ambiguous defined name source layout".into());
-    let root = &package.workbook_template;
     root.require_unwrapped_child("definedNames")?;
     let containers = root.children_named("definedNames").collect::<Vec<_>>();
     if containers.len() > 1 {
         return Err(unsupported());
     }
     let Some(container) = containers.first() else {
-        if !package.original_workbook.defined_names.is_empty() {
+        if !originals.is_empty() {
             return Err(unsupported());
         }
         return if wb.defined_names.is_empty() {
@@ -2704,7 +2734,6 @@ fn edited_defined_names(
     template.require_unwrapped_child("definedName")?;
     let sources = template.children_named("definedName").collect::<Vec<_>>();
     let names = DefinedFunctionNames::new(&wb.defined_names);
-    let originals = &package.original_workbook.defined_names;
     if sources.len() != originals.len() {
         return Err(unsupported());
     }
