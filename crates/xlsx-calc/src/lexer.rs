@@ -286,14 +286,15 @@ fn looks_like_range_group(tokens: &[Token], allow_union: bool) -> bool {
     if !allow_union {
         return false;
     }
-    for pair in tokens.chunks_exact(2) {
+    let (pairs, _) = tokens.as_chunks::<2>();
+    for [reference, separator] in pairs {
         if !matches!(
-            pair[0].kind,
+            reference.kind,
             TokKind::Range { .. } | TokKind::ColumnRange { .. } | TokKind::RowRange { .. }
         ) {
             return false;
         }
-        match pair[1].kind {
+        match separator.kind {
             TokKind::Comma => {}
             TokKind::RParen => return true,
             _ => return false,

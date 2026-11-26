@@ -511,9 +511,8 @@ fn reference_end(source: &str, start: usize) -> usize {
         return table_reference_end(source, end);
     }
     if let Some(further) = range_address_end(source, start, end)
-        && !source[further..]
-            .trim_start()
-            .starts_with([':', '!', '(', '['])
+        && !source[further..].starts_with('[')
+        && !source[further..].trim_start().starts_with([':', '!', '('])
     {
         return further;
     }
@@ -782,6 +781,7 @@ mod removal_tests {
             ("SUM(Amt:Tax!Table1[Old])", Some("SUM(Amt:#REF!)")),
             ("SUM(Amounts:Tax!B5)", Some("SUM(Amounts:#REF!)")),
             ("SUM(Tax!Amt:Fee[Old])", Some("SUM(#REF!:Fee[Old])")),
+            ("SUM(Tax!Amt:Fee [@Old])", Some("SUM(#REF! [@Old])")),
             ("SUM('[Book.xlsx]Data:Tax'!A1)", None),
         ] {
             assert_eq!(
