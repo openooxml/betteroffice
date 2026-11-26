@@ -502,9 +502,8 @@ pub fn write_docx_s13_parts_with_report(
                     &request.document.content,
                     &[],
                     |_, paragraph| {
-                        emitted_paragraph_id(paragraph).is_some_and(|id| {
-                            changed.as_ref().is_some_and(|ids| ids.contains(id))
-                        })
+                        emitted_paragraph_id(paragraph)
+                            .is_some_and(|id| changed.as_ref().is_some_and(|ids| ids.contains(id)))
                     },
                 );
                 context.begin_form_data_tokens(&original);
@@ -526,10 +525,12 @@ pub fn write_docx_s13_parts_with_report(
             .original_bytes(&path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
         {
-            let removed = stories.spliced.get(&path).map_or(&[][..], |part| part.removed.as_slice());
-            context.field_spans = FieldSpans::from_document(
-                source, &request.document.content, removed, |_, _| true,
-            );
+            let removed = stories
+                .spliced
+                .get(&path)
+                .map_or(&[][..], |part| part.removed.as_slice());
+            context.field_spans =
+                FieldSpans::from_document(source, &request.document.content, removed, |_, _| true);
         }
         stories.write(&package, &path, &mut context, |context| {
             serialize_document_part(&request.document, context)
@@ -1758,8 +1759,10 @@ impl StoryParts<'_> {
             part.changed.extend(carried.iter().copied());
             part.changed.sort_unstable();
             part.changed.dedup();
-            part.paragraph_patches.retain(|patch| !carried.contains(&patch.ordinal));
-            part.format_only.retain(|ordinal| !carried.contains(ordinal));
+            part.paragraph_patches
+                .retain(|patch| !carried.contains(&patch.ordinal));
+            part.format_only
+                .retain(|ordinal| !carried.contains(ordinal));
             patched.retain(|ordinal, _| !carried.contains(ordinal));
             part
         });
@@ -3936,12 +3939,14 @@ fn build_selective_document_xml(
         };
         targets.push((span, paragraph.as_ref()));
     }
-    if targets.iter().any(|(span, _)| original_xml[span.start..span.end].contains("fldChar")) {
-        context.field_spans = FieldSpans::from_document(
-            original_xml, &document.content, &[], |_, paragraph| {
+    if targets
+        .iter()
+        .any(|(span, _)| original_xml[span.start..span.end].contains("fldChar"))
+    {
+        context.field_spans =
+            FieldSpans::from_document(original_xml, &document.content, &[], |_, paragraph| {
                 emitted_paragraph_id(paragraph).is_some_and(|id| index.changed.contains(id))
-            },
-        );
+            });
     }
     let mut replacements = targets
         .into_iter()
@@ -3995,7 +4000,11 @@ fn build_source_patched_document_xml(
         .ok_or_else(|| save_error("the main document part has no body"))?;
     let blocks = crate::block::story_block_elements(body);
     if original_xml.contains("fldChar") {
-        let selected: HashSet<_> = sources.paragraphs.iter().map(|target| target.block).collect();
+        let selected: HashSet<_> = sources
+            .paragraphs
+            .iter()
+            .map(|target| target.block)
+            .collect();
         context.field_spans = FieldSpans::from_body(body, &document.content, &[], |block, _| {
             selected.contains(&block)
         });

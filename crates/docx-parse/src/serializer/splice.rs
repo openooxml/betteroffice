@@ -1585,7 +1585,9 @@ fn spanning_field_boundaries(xml: &str) -> Option<HashSet<usize>> {
                 stories.push(Vec::new());
             }
             _ if !tag.end && local_name(tag.name) == "fldChar" => {
-                let Some(&paragraph) = paragraphs.last() else { continue };
+                let Some(&paragraph) = paragraphs.last() else {
+                    continue;
+                };
                 let fields = stories.last_mut()?;
                 match field_character_type(xml, &tag) {
                     Some("begin") => fields.push((paragraph, Vec::new())),
@@ -3055,7 +3057,8 @@ fn splice_story_part_inner(
                             .iter()
                             .any(|entry| entry.ordinal == *ordinal));
                 if recorded.carried_field_ends.contains(ordinal)
-                    || (recorded.paired_fields.contains(ordinal) && keeps_field_characters(paragraph, xml))
+                    || (recorded.paired_fields.contains(ordinal)
+                        && keeps_field_characters(paragraph, xml))
                 {
                     keeps_ranges(
                         &without_field_characters(paragraph, false)?,
@@ -3614,9 +3617,9 @@ pub(crate) fn replace_story_part(
         && (unpaired_field_characters(&source)
             .is_some_and(|unpaired| unpaired.iter().all(|kind| *kind == "separate"))
             || spanning_field_boundaries(&source).is_some_and(|boundaries| {
-                changed_boundaries.iter().any(|range| {
-                    !range.is_empty() && boundaries.contains(&range.start)
-                })
+                changed_boundaries
+                    .iter()
+                    .any(|range| !range.is_empty() && boundaries.contains(&range.start))
             }))
     {
         reasons.push("field: replacement changes the field characters around it".to_owned());
@@ -7706,7 +7709,9 @@ mod tests {
         let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
         let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r><w:r><w:t>After the end</w:t></w:r></w:p>";
         for kind in ["separate", "begin", "end"] {
-            let stray = format!("<w:p><w:r><w:fldChar w:fldCharType=\"{kind}\"/></w:r><w:r><w:t>Stray</w:t></w:r></w:p>");
+            let stray = format!(
+                "<w:p><w:r><w:fldChar w:fldCharType=\"{kind}\"/></w:r><w:r><w:t>Stray</w:t></w:r></w:p>"
+            );
             let source = body(&format!("{opening}{closing}{stray}{outside}"));
             assert_eq!(
                 replaced(&source, &[opening, edited_closing, &stray, outside], &[1]),

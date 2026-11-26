@@ -351,7 +351,11 @@ fn project_paragraphs(
 }
 
 fn source_id(element: &XmlElement) -> Option<u32> {
-    parse_paragraph_id(element.attributes.get(element.para_id_attribute.as_ref()?)?)
+    parse_paragraph_id(
+        element
+            .attributes
+            .get(element.para_id_attribute.as_ref()?)?,
+    )
 }
 
 fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
@@ -432,7 +436,8 @@ fn place(
                 && (offset < width || (offset == width && *prefer_previous))
             {
                 if offset == 0 || offset == width {
-                    run.content.insert(at + usize::from(offset != 0), end.clone());
+                    run.content
+                        .insert(at + usize::from(offset != 0), end.clone());
                 } else {
                     let RunContent::Text {
                         text,
@@ -474,7 +479,10 @@ fn place(
                 let prefix_len = at + usize::from(offset != 0);
                 run.content.truncate(prefix_len);
                 let tail = ParagraphContent::Inline(InlineNode::Run(tail));
-                content.splice(index + usize::from(prefix_len != 0)..index + 1, [marker, tail]);
+                content.splice(
+                    index + usize::from(prefix_len != 0)..index + 1,
+                    [marker, tail],
+                );
                 return Some(content);
             }
             offset -= width;
@@ -772,7 +780,10 @@ impl FieldSpans {
                     matches!(child, ParagraphContent::Inline(InlineNode::ComplexField(_)))
                 })
                 .count();
-            self.paragraphs.entry(paragraph_key(opener)).or_default().opening = Some(field);
+            self.paragraphs
+                .entry(paragraph_key(opener))
+                .or_default()
+                .opening = Some(field);
         }
     }
 }

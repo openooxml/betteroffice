@@ -50,10 +50,16 @@ pub fn serialize_paragraph(
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let enclosing = std::mem::take(&mut context.direction);
     let spanning = std::mem::take(&mut context.in_spanning_result);
-    let plan = context.field_spans.paragraphs.get(&paragraph_key(paragraph)).cloned();
+    let plan = context
+        .field_spans
+        .paragraphs
+        .get(&paragraph_key(paragraph))
+        .cloned();
     let result = serialize_paragraph_inner(
         paragraph,
-        plan.as_ref().and_then(|plan| plan.closing.as_deref()).unwrap_or(&paragraph.content),
+        plan.as_ref()
+            .and_then(|plan| plan.closing.as_deref())
+            .unwrap_or(&paragraph.content),
         plan.as_ref().and_then(|plan| plan.opening),
         context,
     );
@@ -149,7 +155,11 @@ fn serialize_paragraph_inner(
     for (index, content) in contents.iter().enumerate() {
         if paragraph_content_zero_width(content) && context.direction.any_open() {
             if upcoming.is_none() {
-                upcoming = Some(upcoming_paragraph_scopes(paragraph, contents, Within::of(context)));
+                upcoming = Some(upcoming_paragraph_scopes(
+                    paragraph,
+                    contents,
+                    Within::of(context),
+                ));
             }
             if let Some(scopes) = &upcoming {
                 context.direction.look_ahead(scopes[index]);
@@ -1114,7 +1124,10 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
         && nodes.iter().all(|node| match node {
             InlineNode::Hyperlink(link) => {
                 link.structured_children.as_ref().is_none_or(|children| {
-                    children.iter().filter(runs).eq(link.children.iter().filter(runs))
+                    children
+                        .iter()
+                        .filter(runs)
+                        .eq(link.children.iter().filter(runs))
                 })
             }
             _ => true,
