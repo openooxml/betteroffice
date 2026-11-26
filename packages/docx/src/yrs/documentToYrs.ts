@@ -614,25 +614,164 @@ function chartPayload(chart: Chart): Attrs {
   }) as Attrs;
 }
 
+function flatFieldResult(field: SimpleField | ComplexField): readonly (Run | Hyperlink)[] {
+  return field.type === 'simpleField' ? field.content : field.fieldResult;
+}
+
+function fieldResultFormatting(
+  field: SimpleField | ComplexField,
+  runs: readonly ParagraphContent[]
+): TextFormatting | undefined {
+  return firstFieldRunFormatting(runs) ?? (field.type === 'complexField' ? field.formatting : undefined);
+}
+
+function firstFieldRunFormatting(runs: readonly ParagraphContent[]): TextFormatting | undefined {
+  if (Array.isArray(runs)) {
+    for (const child of runs) {
+      if (child?.type === 'run' && child.formatting) return child.formatting;
+    }
+  }
+}
+
+function cachedRunTexts(run: Run): string[] {
+  if (!Array.isArray(run.content)) return [];
+  return run.content.flatMap((content) => content?.type === 'text' ? [content.text] : []);
+}
+
+function styleChainContains(
+  styleResolver: StyleResolver,
+  styleId: string | undefined,
+  ancestorId: string
+): boolean {
+  const seen = new Set<string>();
+  while (styleId && !seen.has(styleId)) {
+    if (styleId === ancestorId) return true;
+    seen.add(styleId);
+    styleId = styleResolver.getStyle(styleId)?.basedOn;
+  }
+  return false;
+}
+
+type CachedResultScope = 'owner' | 'ownerHyperlink' | 'ownerSimpleField' | 'container' | 'nested';
+type CachedOwnerRun = { texts: string[]; text: string };
+
+function cachedResultFragments(
+  field: SimpleField | ComplexField,
+  ownerRuns: readonly CachedOwnerRun[],
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  projected: boolean
+): string[] | undefined {
+  const inline = field.structuredResult?.inline;
+  if (!Array.isArray(inline)) return undefined;
+  const defaultCharacter = styleResolver?.getDefaultCharacterStyle();
+  const defaultRun = defaultCharacter?.rPr
+    ? mergeStyleRunFormatting(styleFormatting, defaultCharacter.rPr)
+    : styleFormatting;
+  const flattenedComplexResult = !projected && field.type === 'complexField';
+  const fragments: string[] = [];
+  let hasNestedResult = false;
+  let ownerIndex = 0;
+  const takeOwnerRun = (run: Run): CachedOwnerRun | undefined => {
+    const expected = ownerRuns[ownerIndex];
+    if (!expected) return undefined;
+    const texts = cachedRunTexts(run);
+    if (texts.length !== expected.texts.length || !texts.every((text, index) => text === expected.texts[index])) return undefined;
+    ownerIndex++;
+    return expected;
+  };
+  const pending: { node: ParagraphContent; scope: CachedResultScope }[] = [];
+  const push = (children: readonly ParagraphContent[], scope: CachedResultScope) => {
+    if (!Array.isArray(children)) return;
+    for (let index = children.length - 1; index >= 0; index--) {
+      const node = children[index];
+      if (node) pending.push({ node, scope });
+    }
+  };
+  push(inline, 'owner');
+  while (pending.length > 0) {
+    const { node, scope } = pending.pop()!;
+    switch (node.type) {
+      case 'run': {
+        if (scope === 'container') break;
+        const ownerRun = scope === 'nested' ? undefined : takeOwnerRun(node);
+        if (ownerRun) {
+          fragments.push(ownerRun.text);
+        } else if (scope === 'nested' || scope === 'ownerSimpleField') {
+          const styleId = node.formatting?.styleId;
+          const style = styleResolver?.getRunStyleOwnProperties(styleId);
+          const inherited = styleResolver && defaultCharacter
+            && style?.hidden === true
+            && styleChainContains(styleResolver, styleId, defaultCharacter.styleId)
+            ? styleFormatting
+            : defaultRun;
+          const effective = mergeTextFormatting(
+            mergeStyleRunFormatting(inherited, style),
+            node.formatting
+          );
+          if (effective?.hidden === true) break;
+          for (const text of cachedRunTexts(node)) {
+            if (typeof text === 'string') fragments.push(text);
+          }
+        }
+        break;
+      }
+      case 'complexField':
+      case 'simpleField': {
+        const ownerSimpleField = scope === 'owner' && node.type === 'simpleField';
+        if (projected && ownerSimpleField) break;
+        hasNestedResult = true;
+        const resultScope = flattenedComplexResult && ownerSimpleField ? 'ownerSimpleField' : 'nested';
+        const result = node.structuredResult?.inline;
+        const flat = flatFieldResult(node);
+        if (Array.isArray(result)) push(result, resultScope);
+        else if (Array.isArray(flat)) push(flat.filter((child) => child?.type === 'run'), resultScope);
+        break;
+      }
+      case 'inlineSdt':
+        push(node.content, scope === 'nested' || scope === 'ownerSimpleField' ? 'nested' : 'container');
+        break;
+      case 'hyperlink': {
+        const children = node.structuredChildren ?? node.children;
+        if (projected && scope === 'owner') {
+          if (Array.isArray(children)) {
+            push(
+              children.filter((child) => child?.type === 'inlineSdt' && !hasTrackedControlContent(child)),
+              'container'
+            );
+          }
+          break;
+        }
+        const childScope = flattenedComplexResult && scope === 'owner' ? 'ownerHyperlink' : 'container';
+        push(children, scope === 'nested' || scope === 'ownerSimpleField' ? 'nested' : childScope);
+        break;
+      }
+    }
+  }
+  return hasNestedResult ? fragments.concat(ownerRuns.slice(ownerIndex).map((run) => run.text)) : undefined;
+}
+
 function fieldPayload(
   field: SimpleField | ComplexField,
-  styleFormatting?: TextFormatting
+  styleFormatting: TextFormatting | undefined,
+  styleResolver: StyleResolver | null,
+  projected = false
 ): {
   payload: Attrs;
   marks: MarkDescriptor[];
 } {
-  let displayText = '';
-  let fieldFormatting: TextFormatting | undefined;
-  const runs = field.type === 'simpleField' ? field.content : field.fieldResult;
-  for (const child of runs) {
-    if (child.type !== 'run') continue;
-    for (const content of child.content) {
-      if (content.type === 'text') displayText += content.text;
-    }
-    if (!fieldFormatting && child.formatting) fieldFormatting = child.formatting;
-  }
-  const formatting =
-    fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
+  const runs = projected ? field.structuredResult?.inline ?? [] : flatFieldResult(field);
+  const ownerRuns = Array.isArray(runs)
+    ? runs.flatMap((child) => {
+        if (child?.type !== 'run') return [];
+        const texts = cachedRunTexts(child);
+        return [{ texts, text: texts.reduce((text, value) => text + value, '') }];
+      })
+    : [];
+  const cachedText = ownerRuns.map((run) => run.text).join('');
+  const fragments = cachedResultFragments(field, ownerRuns, styleFormatting, styleResolver, projected);
+  const displayText = fragments?.join('') ?? cachedText;
+  const formatting = fieldResultFormatting(field, runs);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
   return {
     payload: {
@@ -643,7 +782,7 @@ function fieldPayload(
       fldLock: field.fldLock ?? false,
       dirty: field.dirty ?? false,
       displayMode,
-      hasCachedResult: displayText.length > 0,
+      hasCachedResult: cachedText.length > 0,
       fieldData: JSON.stringify(field),
       modelKind: 'field',
     },
@@ -781,25 +920,27 @@ function fieldToUnits(
   projectionId: number,
   opaqueSequences: string[]
 ): InlineUnit[] {
-  const result = value.structuredResult?.inline ?? [];
-  const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
-  const projectedChildren = [
-    ...code.map((child, index) => ({ child, index: -index - 1 })),
-    ...result.map((child, index) => ({ child, index })),
-  ];
-  if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+  if (value.type !== 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(value));
-    const field = fieldPayload(value, styleFormatting);
+    const field = fieldPayload(value, styleFormatting, styleResolver);
     return [embedUnit('field', field.payload, field.marks)];
   }
+  const result = value.structuredResult?.inline;
+  const code = value.structuredCode?.inline;
+  const resultChildren = Array.isArray(result) ? result : [];
+  const codeChildren = Array.isArray(code) ? code : [];
+  const projectedChildren = [
+    ...codeChildren.map((child, index) => ({ child, index: -index - 1 })),
+    ...resultChildren.map((child, index) => ({ child, index })),
+  ];
   const units: InlineUnit[] = [];
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
-    if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    if (child?.type !== 'hyperlink' && child?.type !== 'simpleField') return;
     opaqueSequences.push(
       ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
     );
-    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting) : null;
+    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting, styleResolver) : null;
     const projected = child.type === 'hyperlink'
       ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
@@ -809,13 +950,17 @@ function fieldToUnits(
     for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
     units.push(...projected);
   });
-  const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
-  const field = fieldPayload(visible, styleFormatting);
-  opaqueSequences.push(
-    ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)
+  const sequenceSource = children.length > 0 && sequenceName(value.instruction ?? '') === undefined
+    ? { ...value, fieldResult: resultChildren.filter((child): child is Run => child?.type === 'run') }
+    : value;
+  opaqueSequences.push(...nestedSequenceNames(sequenceSource));
+  const field = fieldPayload(
+    value,
+    styleFormatting,
+    styleResolver,
+    children.length > 0
   );
-  field.payload.fieldData = JSON.stringify(value);
-  field.payload.resultProjection = { id: projectionId, children };
+  if (children.length > 0) field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
   return units;
 }
@@ -979,7 +1124,7 @@ function hyperlinkToUnits(
       for (const content of child.content) units.push(...replayedRunContentToUnits(child, content, marks, opaqueSequences));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, styleResolver);
       units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
     } else if (child.type === 'mathEquation') {
       units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
@@ -1059,7 +1204,7 @@ function inlineContainerUnits(
   }
   if (child.type === 'simpleField' || child.type === 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(child));
-    const field = fieldPayload(child, styleFormatting);
+    const field = fieldPayload(child, styleFormatting, styleResolver);
     return [embedUnit('field', field.payload, field.marks)];
   }
   if (child.type === 'inlineSdt') {
@@ -1110,7 +1255,7 @@ function sdtPayload(
       hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences).forEach(append);
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       opaqueSequences.push(...nestedSequenceNames(child));
-      const field = fieldPayload(child, styleFormatting);
+      const field = fieldPayload(child, styleFormatting, styleResolver);
       append(embedUnit('field', field.payload, field.marks));
     } else if (child.type === 'inlineSdt') {
       append(embedUnit('sdt', sdtPayload(child, styleFormatting, styleResolver, opaqueSequences)));
