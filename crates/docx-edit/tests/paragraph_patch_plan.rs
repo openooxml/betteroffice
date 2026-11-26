@@ -436,7 +436,7 @@ fn assert_text_edit(
     donor: u32,
     target: Vec<UnitV1>,
 ) {
-    let patch = patch(doc);
+    let patch = patch_from_plan(doc.paragraph_save_plan_from_records());
     assert_eq!(patch.text_edits.len(), 1);
     let edit = &patch.text_edits[0];
     assert_eq!((edit.from, edit.to), (from, to));
@@ -3596,7 +3596,7 @@ fn inserting_or_deleting_a_complete_paragraph_does_not_mark_its_neighbor() {
         )
         .unwrap()
         .unwrap();
-        let plan = doc.paragraph_save_plan();
+        let plan = doc.paragraph_save_plan_from_records();
         let body = body_plan(&plan);
         assert!(body.changed.is_empty(), "{:?}", body.changed);
         assert_eq!(body.inserted.len(), insert as usize);
@@ -3604,7 +3604,7 @@ fn inserting_or_deleting_a_complete_paragraph_does_not_mark_its_neighbor() {
 
         let start = if insert { 8 } else { 0 };
         replace(&doc, start + 1, start + 2, "X");
-        let plan = doc.paragraph_save_plan();
+        let plan = doc.paragraph_save_plan_from_records();
         let body = body_plan(&plan);
         assert_eq!(body.changed, [1]);
         assert!(
