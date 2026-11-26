@@ -361,6 +361,7 @@ version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
  "betteroffice-opc",
  "libm",
  "quick-xml",
@@ -399,6 +400,7 @@ version = "0.6.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
+ "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",

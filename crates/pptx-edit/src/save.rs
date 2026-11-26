@@ -832,7 +832,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             strike: run.style.strike.clone(),
             caps: run.style.caps,
             font_family: run.style.font_family.clone(),
-            east_asian_font_family: run.style.east_asian_font_family.clone(),
+            east_asian_font_family: None,
             color: run.style.color.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,

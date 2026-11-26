@@ -46,7 +46,6 @@ const ALIGNMENTS: [&str; 7] = ["l", "ctr", "r", "just", "justLow", "dist", "thai
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_style_values(
     font_family: Option<&str>,
-    east_asian_font_family: Option<&str>,
     underline: Option<&str>,
     strike: Option<&str>,
     color: Option<&str>,
@@ -55,8 +54,8 @@ pub(crate) fn validate_style_values(
     baseline_pct: Option<f64>,
     kern_pt: Option<f64>,
 ) -> EditResult<()> {
-    for family in [font_family, east_asian_font_family].into_iter().flatten() {
-        validate_xml_text(family)?;
+    if let Some(font_family) = font_family {
+        validate_xml_text(font_family)?;
     }
     if let Some(underline) = underline
         && !UNDERLINE_TYPES.contains(&underline)
@@ -375,7 +374,6 @@ impl DeckSession {
                 let style = &run.style;
                 validate_style_values(
                     style.font_family.as_deref(),
-                    style.east_asian_font_family.as_deref(),
                     style.underline.as_deref(),
                     style.strike.as_deref(),
                     style.color.as_deref(),
@@ -721,7 +719,6 @@ impl DeckSession {
         validate_xml_text(text)?;
         validate_style_values(
             style.font_family.as_deref(),
-            style.east_asian_font_family.as_deref(),
             style.underline.as_deref(),
             style.strike.as_deref(),
             style.color.as_deref(),
@@ -913,7 +910,6 @@ impl DeckSession {
     ) -> EditResult<TextReceipt> {
         validate_style_values(
             patch.font_family.as_deref(),
-            patch.east_asian_font_family.as_deref(),
             patch.underline.as_deref(),
             patch.strike.as_deref(),
             patch.color.as_deref(),
@@ -1662,7 +1658,7 @@ pub(crate) fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 12] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 11] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -1678,14 +1674,6 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 12] {
             "fontFamily",
             style
                 .font_family
-                .as_deref()
-                .map(Any::from)
-                .unwrap_or(Any::Null),
-        ),
-        (
-            "eastAsianFontFamily",
-            style
-                .east_asian_font_family
                 .as_deref()
                 .map(Any::from)
                 .unwrap_or(Any::Null),
@@ -1721,17 +1709,13 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 12] {
     ]
 }
 
-fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 10] {
+fn patch_values(patch: &TextStylePatch) -> [(&'static str, Option<Any>); 9] {
     [
         ("bold", patch.bold.map(Any::Bool)),
         ("italic", patch.italic.map(Any::Bool)),
         ("fontSize", patch.font_size_pt.map(Any::Number)),
         ("color", patch.color.as_deref().map(Any::from)),
         ("fontFamily", patch.font_family.as_deref().map(Any::from)),
-        (
-            "eastAsianFontFamily",
-            patch.east_asian_font_family.as_deref().map(Any::from),
-        ),
         ("underline", patch.underline.as_deref().map(Any::from)),
         ("strike", patch.strike.as_deref().map(Any::from)),
         ("spacing", patch.spacing_pt.map(Any::Number)),
@@ -1746,7 +1730,6 @@ pub fn style_from_run_properties(properties: &RunProperties, theme: Option<&Them
         font_size_pt: properties.font_size_pt,
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
-        east_asian_font_family: properties.east_asian_font_family.clone(),
         underline: properties.underline.clone(),
         strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
@@ -1763,7 +1746,6 @@ pub(crate) fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         font_size_pt: attrs.and_then(|attrs| any_number(attrs.get("fontSize"))),
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
-        east_asian_font_family: attrs.and_then(|attrs| any_string(attrs.get("eastAsianFontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
         strike: attrs.and_then(|attrs| any_string(attrs.get("strike"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),

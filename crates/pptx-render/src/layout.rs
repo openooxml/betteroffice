@@ -1,8 +1,10 @@
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+use ooxml_diff::{DiffKind, DiffLimits, LimitFallback, diff_tokens};
 use ooxml_drawingml::chart::{PlotFont, PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
@@ -19,8 +21,8 @@ use ooxml_text::family_metrics::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, ShapedGlyph, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    han_script_for_language, paragraph_scripts_with_languages, presentation_break_opportunities,
-    shape, single_line_box, uppercase_for_language,
+    han_script_for_language, paragraph_scripts_with_han_fallback, paragraph_scripts_with_languages,
+    presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
     ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
@@ -4429,6 +4431,160 @@ struct ContentRun {
     languages: Vec<(std::ops::Range<usize>, Option<String>)>,
 }
 
+fn source_font_ranges<'a>(
+    sources: &[&'a pptx_parse::TextParagraph],
+    live: &[&str],
+) -> Vec<(Range<usize>, &'a RunProperties)> {
+    let source_runs = || sources.iter().flat_map(|paragraph| &paragraph.runs);
+    if !source_runs().any(|run| run.properties.east_asian_font_family.is_some())
+        || live.iter().all(|text| text.is_ascii())
+    {
+        return Vec::new();
+    }
+    let source: Vec<_> = source_runs().collect();
+    let old: String = source.iter().map(|run| run.text.as_str()).collect();
+    let new: String = live.iter().copied().collect();
+    if old == new {
+        let mut offset = 0;
+        return source
+            .into_iter()
+            .filter_map(|run| {
+                let start = offset;
+                offset += run.text.len();
+                run.properties
+                    .east_asian_font_family
+                    .as_ref()
+                    .map(|_| (start..offset, &run.properties))
+            })
+            .collect();
+    }
+    let old_chars: Vec<_> = old.chars().collect();
+    let (mut new_offsets, new_chars): (Vec<_>, Vec<_>) = new.char_indices().unzip();
+    new_offsets.push(new.len());
+    let Ok(diff) = diff_tokens(
+        &old_chars,
+        &new_chars,
+        DiffLimits::new(usize::MAX, 1 << 20, LimitFallback::ReplaceMiddle),
+    ) else {
+        return Vec::new();
+    };
+    let ends: Vec<_> = source
+        .iter()
+        .scan(0, |offset, run| {
+            *offset += run.text.chars().count();
+            Some(*offset)
+        })
+        .collect();
+    let run_at = |offset| {
+        ends.partition_point(|end| *end <= offset)
+            .min(source.len() - 1)
+    };
+    let mut fallback = 0;
+    let mut replaced = None;
+    let mut ranges = Vec::new();
+    let mut push = |start, end, index: usize| {
+        let run = source[index];
+        let properties = &run.properties;
+        if properties.east_asian_font_family.is_some() {
+            ranges.push((new_offsets[start]..new_offsets[end], properties));
+        }
+    };
+    for hunk in diff.hunks {
+        match hunk.kind {
+            DiffKind::Equal => {
+                let mut old_start = hunk.old.start;
+                let mut new_start = hunk.new.start;
+                while old_start < hunk.old.end {
+                    fallback = run_at(old_start);
+                    let count = ends[fallback].min(hunk.old.end) - old_start;
+                    push(new_start, new_start + count, fallback);
+                    old_start += count;
+                    new_start += count;
+                }
+                replaced = None;
+            }
+            DiffKind::Delete => replaced = Some(run_at(hunk.old.start)),
+            DiffKind::Insert => {
+                fallback = replaced.take().unwrap_or(fallback);
+                push(hunk.new.start, hunk.new.end, fallback);
+            }
+        }
+    }
+    ranges
+}
+
+fn push_font_runs<'a>(
+    runs: &mut Vec<ContentRun>,
+    run: ContentRun,
+    fonts: impl Iterator<Item = (Range<usize>, &'a RunProperties)>,
+) {
+    if run.text.is_ascii() {
+        runs.push(run);
+        return;
+    }
+    let mut families = fonts
+        .filter_map(|(range, source)| {
+            let family = source
+                .east_asian_font_family
+                .as_deref()
+                .filter(|family| !family.trim().is_empty() && family.len() <= 256)?;
+            ((run.style.font_family.is_none() || run.style.font_family == source.font_family)
+                && run.style.font_family.as_deref() != Some(family))
+            .then_some((range, family))
+        })
+        .peekable();
+    if families.peek().is_none() {
+        drop(families);
+        runs.push(run);
+        return;
+    }
+    let mut start = 0;
+    let mut current = None;
+    let mut push = |range: Range<usize>, family: Option<&str>| {
+        let mut style = run.style.clone();
+        if let Some(family) = family {
+            style.font_family = Some(family.to_owned());
+        }
+        runs.push(ContentRun {
+            text: run.text[range.clone()].to_owned(),
+            style,
+            languages: run
+                .languages
+                .iter()
+                .filter_map(|(span, language)| {
+                    let start = span.start.max(range.start);
+                    let end = span.end.min(range.end);
+                    (start < end)
+                        .then(|| (start - range.start..end - range.start, language.clone()))
+                })
+                .collect(),
+        });
+    };
+    for (index, cluster) in run.text.grapheme_indices(true) {
+        while families.peek().is_some_and(|(range, _)| range.end <= index) {
+            families.next();
+        }
+        let family = families
+            .peek()
+            .filter(|(range, _)| {
+                range.start <= index
+                    && !cluster.is_ascii()
+                    && paragraph_scripts_with_han_fallback([cluster], false)
+                        .iter()
+                        .any(|script| script.starts_with("cjk-"))
+            })
+            .map(|(_, family)| *family);
+        if family != current {
+            if start < index {
+                push(start..index, current);
+            }
+            start = index;
+            current = family;
+        }
+    }
+    push(start..run.text.len(), current);
+}
+
 /// For each story paragraph without a source paragraph (new or split off), the nearest
 /// preceding and following paragraphs that have one; their languages stand in for its own.
 fn sourced_neighbours<'a>(
@@ -4533,6 +4689,8 @@ fn content_from_story(
                     }
                     .into_iter();
                     let mut runs = Vec::with_capacity(paragraph.runs.len() + insertions.len());
+                    let font_ranges = source_font_ranges(&sources, &live);
+                    let mut font_index = 0;
                     let mut insertion_index = 0;
                     let mut offset = 0;
                     for (run_index, run) in paragraph.runs.iter().enumerate() {
@@ -4555,6 +4713,7 @@ fn content_from_story(
                             });
                             insertion_index += 1;
                         }
+                        let start = offset;
                         offset += run.text.len();
                         let languages = live_languages.next().unwrap_or_default();
                         let replaced = replacements
@@ -4570,11 +4729,35 @@ fn content_from_story(
                             .collect(),
                             _ => languages,
                         };
-                        runs.push(ContentRun {
+                        let has_replacement = replaced
+                            .as_deref()
+                            .is_some_and(|text| text != run.text.as_str());
+                        let run = ContentRun {
                             languages,
                             text: replaced.unwrap_or_else(|| run.text.clone()),
                             style: run.style.clone(),
-                        });
+                        };
+                        if has_replacement {
+                            runs.push(run);
+                        } else {
+                            while font_ranges
+                                .get(font_index)
+                                .is_some_and(|(range, _)| range.end <= start)
+                            {
+                                font_index += 1;
+                            }
+                            let fonts = font_ranges[font_index..]
+                                .iter()
+                                .take_while(|(range, _)| range.start < offset)
+                                .map(|(range, properties)| {
+                                    (
+                                        range.start.saturating_sub(start)
+                                            ..range.end.min(offset) - start,
+                                        *properties,
+                                    )
+                                });
+                            push_font_runs(&mut runs, run, fonts);
+                        }
                     }
                     while insertion_index < insertions.len() {
                         let source_run = insertions[insertion_index].1;
@@ -4648,15 +4831,21 @@ fn content_from_body(
                 runs: paragraph
                     .runs
                     .iter()
-                    .map(|run| {
+                    .fold(Vec::new(), |mut runs, run| {
                         let text = field_text(run, slide_number);
-                        ContentRun {
+                        let range = 0..text.len();
+                        let content = ContentRun {
                             languages: vec![(0..text.len(), run.properties.language.clone())],
                             text,
                             style: style_from_properties(&run.properties, theme),
-                        }
-                    })
-                    .collect(),
+                        };
+                        push_font_runs(
+                            &mut runs,
+                            content,
+                            std::iter::once((range, &run.properties)),
+                        );
+                        runs
+                    }),
                 end_language: paragraph
                     .end_properties
                     .as_ref()
@@ -7336,7 +7525,6 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme))
             .or_else(|| linked.then(|| format!("#{}", get_theme_color(Some(theme), "hlink")))),
         font_family: properties.font_family.clone(),
-        east_asian_font_family: properties.east_asian_font_family.clone(),
         underline: properties
             .underline
             .clone()
@@ -15429,6 +15617,73 @@ mod tests {
         resolve_bullet_style(&renderer, &theme, &properties, &text, "\u{2192}", &mut log).unwrap();
         assert_eq!(log.entries.len(), 1);
         assert_eq!(log.entries[0].requested_family, "Wingdings");
+    }
+
+    #[test]
+    fn east_asian_glyphs_request_the_source_face_until_a_font_pick() {
+        let namespaces = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let parts = [
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>"#.to_owned()),
+            ("_rels/.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="{rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>"#)),
+            ("ppt/presentation.xml", format!(r#"<p:presentation {namespaces}><p:sldIdLst><p:sldId id="256" r:id="slide1"/></p:sldIdLst><p:sldSz cx="6096000" cy="3429000"/></p:presentation>"#)),
+            ("ppt/_rels/presentation.xml.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide1" Type="{rel}/slide" Target="slides/slide1.xml"/></Relationships>"#)),
+            ("ppt/slides/slide1.xml", format!(r#"<p:sld {namespaces}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4267200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>abc中文。</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#)),
+        ]
+        .into_iter()
+        .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+        .collect::<Vec<_>>();
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let session = DeckSession::open(&source, 7101).unwrap();
+        let renderer = SlideRenderer::new();
+        let assert_faces = |session: &DeckSession, east_asian: &str| {
+            let scope = session.slide_scope(0).unwrap();
+            let requests = renderer
+                .requested_font_faces_with_scripts(session.package(), std::slice::from_ref(&scope))
+                .unwrap();
+            let chinese: Vec<_> = requests
+                .iter()
+                .filter(|face| face.scripts.iter().any(|script| script == "cjk-sc"))
+                .map(|face| face.family.as_str())
+                .collect();
+            assert_eq!(chinese, [east_asian]);
+            let rendered = renderer.layout_scoped_slide(session.package(), &scope).unwrap();
+            let mut painted = Vec::new();
+            for primitive in &rendered.display_list.primitives {
+                if let Primitive::TextBox { lines, .. } = primitive {
+                    for run in lines.iter().flat_map(|line| &line.runs) {
+                        painted.push((run.text.as_str(), run.font_family.as_str()));
+                    }
+                }
+            }
+            assert_eq!(painted, [("abc", "Arial"), ("中文。", east_asian)]);
+        };
+        assert_faces(&session, "SimSun");
+        let attached = DeckSession::open_from_update_with_source(
+            &session.encode_state_as_update_v1(),
+            &source,
+            7103,
+        )
+        .unwrap();
+        assert_faces(&attached, "SimSun");
+        let snapshot = session.snapshot().unwrap();
+        let story = &snapshot.slides[0].shapes[0].text_stories[0];
+        session
+            .format_text(
+                &EditCtx::local("pick"),
+                &story.id,
+                3,
+                story.length - 1,
+                &TextStylePatch {
+                    font_family: Some("Microsoft YaHei".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_faces(&session, "Microsoft YaHei");
+        let saved = session.save().unwrap();
+        let reopened = DeckSession::open(&saved, 7102).unwrap();
+        assert_faces(&reopened, "Microsoft YaHei");
     }
 
     #[test]

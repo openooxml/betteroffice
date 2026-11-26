@@ -19,6 +19,7 @@ font-registration = []
 fuzzing = []
 
 [dependencies]
+ooxml-diff.workspace = true
 ooxml-drawingml.workspace = true
 ooxml-metafile.workspace = true
 ooxml-text.workspace = true

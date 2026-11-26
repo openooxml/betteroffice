@@ -697,7 +697,6 @@ impl DeckSession {
         crate::model::validate_xml_text(&draft.text)?;
         crate::story::validate_style_values(
             draft.style.font_family.as_deref(),
-            draft.style.east_asian_font_family.as_deref(),
             draft.style.underline.as_deref(),
             draft.style.strike.as_deref(),
             draft.style.color.as_deref(),
@@ -3975,7 +3974,6 @@ mod tests {
             font_size_pt: Some(28.0),
             color: Some("123ABC".into()),
             font_family: Some("Arial".into()),
-            east_asian_font_family: None,
             underline: Some("dbl".into()),
             strike: Some("sngStrike".into()),
             spacing_pt: Some(1.5),

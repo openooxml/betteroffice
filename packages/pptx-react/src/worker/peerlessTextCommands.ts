@@ -41,7 +41,7 @@ export function formatPeerlessText(store: PeerlessViewStore, action: FormattingA
     case 'strikethrough': patch = { strike: formatting?.strike === 'sngStrike' || formatting?.strike === 'dblStrike' ? 'noStrike' : 'sngStrike' }; break;
     default:
       switch (action.type) {
-        case 'fontFamily': patch = { fontFamily: action.value, eastAsianFontFamily: action.value }; break;
+        case 'fontFamily': patch = { fontFamily: action.value }; break;
         case 'fontSize': patch = { fontSizePt: action.value }; break;
         case 'textColor': patch = { color: action.value }; break;
         default: return null;

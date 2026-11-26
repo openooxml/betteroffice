@@ -8,6 +8,7 @@ use std::ops::Range;
 use ooxml_drawingml::{
     ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
 };
+use ooxml_text::paragraph_scripts_with_han_fallback;
 
 use crate::PptxError;
 use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
@@ -3031,7 +3032,6 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.strike == target.strike
         && source.caps == target.caps
         && source.font_family == target.font_family
-        && source.east_asian_font_family == target.east_asian_font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
             == resolve_color_value_to_hex_with_theme(target.color.as_ref(), theme)
 }
@@ -3187,7 +3187,13 @@ fn span_elements(
                 text: &remaining[..length],
                 ..*segment
             };
-            let element = if range.field && offset == range_start && offset + length == range.end {
+            let intact = offset == range_start && offset + length == range.end;
+            let element = if intact
+                && source.local_name() == "r"
+                && segment_matches(source, &piece, theme)
+            {
+                source.clone()
+            } else if range.field && intact {
                 field_element(source, &piece, theme, prefixes)
             } else {
                 segment_element(&piece, source.child("rPr"), theme, prefixes)
@@ -3490,14 +3496,25 @@ fn segment_properties(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> Option<XmlElement> {
-    match template {
-        Some(template) => {
-            let mut base = template.clone();
-            apply_run_properties(&mut base, segment.properties, theme, prefixes);
-            Some(base)
-        }
-        None => run_properties_element(segment.properties, prefixes),
+    let mut properties = if let Some(template) = template {
+        let mut base = template.clone();
+        apply_run_properties(&mut base, segment.properties, theme, prefixes);
+        base
+    } else {
+        run_properties_element(segment.properties, prefixes)?
+    };
+    let source_family = template
+        .and_then(|element| element.child("latin"))
+        .and_then(|latin| latin.attribute("typeface"));
+    if let Some(family) = segment.properties.font_family.as_deref()
+        && source_family != Some(family)
+        && paragraph_scripts_with_han_fallback([segment.text], false)
+            .iter()
+            .any(|script| script.starts_with("cjk-"))
+    {
+        apply_font_typeface(&mut properties, "ea", family, &POST_LATIN_ELEMENTS[1..], prefixes);
     }
+    Some(properties)
 }
 
 fn segment_element(
@@ -3677,44 +3694,50 @@ fn apply_run_properties(
             XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
         );
     }
-    for (name, family, following) in [
-        ("latin", &properties.font_family, &POST_LATIN_ELEMENTS[..]),
-        (
-            "ea",
-            &properties.east_asian_font_family,
-            &POST_LATIN_ELEMENTS[1..],
-        ),
-    ] {
-        let Some(family) = family else {
-            if name == "latin" {
-                base.children.retain(|child| {
-                    !matches!(child, XmlNode::Element(element) if element.local_name() == name)
-                });
-            }
-            continue;
-        };
-        if let Some(font) = base.child_mut(name) {
-            if font.attribute("typeface") != Some(family.as_str()) {
-                // panose, pitchFamily and charset describe the old face.
-                font.attributes
-                    .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
-                font.set_attribute("typeface", family.clone());
-            }
-        } else {
-            let position = base
-                .children
-                .iter()
-                .position(|child| {
-                    matches!(child, XmlNode::Element(element) if following.contains(&element.local_name()))
-                })
-                .unwrap_or(base.children.len());
-            base.children.insert(
-                position,
-                XmlNode::Element(
-                    XmlElement::new(prefixes.drawing(name)).with_attribute("typeface", family.clone()),
-                ),
-            );
+    let Some(family) = &properties.font_family else {
+        base.children.retain(|child| {
+            !matches!(
+                child,
+                XmlNode::Element(element) if element.local_name() == "latin"
+            )
+        });
+        return;
+    };
+    apply_font_typeface(base, "latin", family, &POST_LATIN_ELEMENTS, prefixes);
+}
+
+fn apply_font_typeface(
+    base: &mut XmlElement,
+    name: &str,
+    family: &str,
+    following: &[&str],
+    prefixes: &Prefixes,
+) {
+    if let Some(font) = base.child_mut(name) {
+        if font.attribute("typeface") != Some(family) {
+            font
+                .attributes
+                .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+            font.set_attribute("typeface", family);
         }
+    } else {
+        let position = base
+            .children
+            .iter()
+            .position(|child| {
+                matches!(
+                    child,
+                    XmlNode::Element(element)
+                        if following.contains(&element.local_name())
+                )
+            })
+            .unwrap_or(base.children.len());
+        base.children.insert(
+            position,
+            XmlNode::Element(
+                XmlElement::new(prefixes.drawing(name)).with_attribute("typeface", family),
+            ),
+        );
     }
 }
 
@@ -3844,12 +3867,6 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     if let Some(family) = &properties.font_family {
         element = element.with_child(
             XmlElement::new(prefixes.drawing("latin")).with_attribute("typeface", family.clone()),
-        );
-        present = true;
-    }
-    if let Some(family) = &properties.east_asian_font_family {
-        element = element.with_child(
-            XmlElement::new(prefixes.drawing("ea")).with_attribute("typeface", family.clone()),
         );
         present = true;
     }
