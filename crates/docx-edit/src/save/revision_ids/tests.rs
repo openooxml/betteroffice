@@ -541,9 +541,9 @@ fn reports_reservations_at_serialized_typed_and_json_paths() {
 
 fn drawing_string_path_examples() -> Vec<Value> {
     let transforms = [
-        "tint", "shade", "hue", "hueMod", "hueOff", "sat", "satMod", "satOff", "lum",
-        "lumMod", "lumOff", "red", "redMod", "redOff", "green", "greenMod", "greenOff",
-        "blue", "blueMod", "blueOff", "alpha", "alphaMod", "alphaOff",
+        "tint", "shade", "hue", "hueMod", "hueOff", "sat", "satMod", "satOff", "lum", "lumMod",
+        "lumOff", "red", "redMod", "redOff", "green", "greenMod", "greenOff", "blue", "blueMod",
+        "blueOff", "alpha", "alphaMod", "alphaOff",
     ]
     .into_iter()
     .map(|kind| json!({"kind": kind, "value": 0.5}))
@@ -629,15 +629,17 @@ fn drawing_string_path_examples() -> Vec<Value> {
         }}),
     ];
     drawings.extend(
-        ["picture", "shape", "textBox", "group", "chart", "diagram", "other"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, kind)| {
-                json!({"type": "drawing", "image": image, "drawing": {
-                    "type": kind, "placement": if index == 0 { "inline" } else { "anchor" },
-                    "hidden": false, "decorative": false, "name": "Example"
-                }})
-            }),
+        [
+            "picture", "shape", "textBox", "group", "chart", "diagram", "other",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            json!({"type": "drawing", "image": image, "drawing": {
+                "type": kind, "placement": if index == 0 { "inline" } else { "anchor" },
+                "hidden": false, "decorative": false, "name": "Example"
+            }})
+        }),
     );
     drawings
 }
@@ -668,9 +670,18 @@ fn patch_string_path_examples() -> Value {
     let current = patch.clone();
     patch["inheritance"] = json!("unknown");
     let legacy = [
-        "MISSING_SOURCE", "SOURCE_DIGEST_MISMATCH", "INVALID_PLAN", "SEED_MISMATCH",
-        "AMBIGUOUS_ALIGNMENT", "AMBIGUOUS_DONOR", "INVALID_BOUNDARY", "UNSUPPORTED_KEY",
-        "UNSUPPORTED_STRUCTURE", "PROPERTY_CONFLICT", "PATCH_CONFLICT", "RESULT_MISMATCH",
+        "MISSING_SOURCE",
+        "SOURCE_DIGEST_MISMATCH",
+        "INVALID_PLAN",
+        "SEED_MISMATCH",
+        "AMBIGUOUS_ALIGNMENT",
+        "AMBIGUOUS_DONOR",
+        "INVALID_BOUNDARY",
+        "UNSUPPORTED_KEY",
+        "UNSUPPORTED_STRUCTURE",
+        "PROPERTY_CONFLICT",
+        "PATCH_CONFLICT",
+        "RESULT_MISMATCH",
     ]
     .into_iter()
     .enumerate()

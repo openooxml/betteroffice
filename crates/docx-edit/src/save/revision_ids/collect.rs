@@ -704,7 +704,13 @@ string_enum!(docx_parse::inline::BookmarkEndType { BookmarkEnd });
 string_enum!(docx_parse::inline::DirectionKind { Dir, Bdo });
 string_enum!(docx_parse::image::DrawingPlacement { Inline, Anchor });
 string_enum!(docx_parse::image::DrawingType {
-    Picture, Shape, TextBox, Group, Chart, Diagram, Other,
+    Picture,
+    Shape,
+    TextBox,
+    Group,
+    Chart,
+    Diagram,
+    Other,
 });
 string_enum!(docx_parse::relationships::TargetMode { Internal, External });
 string_enum!(docx_parse::paragraph_patch::PatchErrorCode {

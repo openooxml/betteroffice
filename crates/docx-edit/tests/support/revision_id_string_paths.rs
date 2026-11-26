@@ -3,12 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 pub fn json_string_paths(value: &Value, skipped: &BTreeSet<&str>) -> BTreeSet<String> {
-    fn visit(
-        value: &Value,
-        path: &str,
-        skipped: &BTreeSet<&str>,
-        paths: &mut BTreeSet<String>,
-    ) {
+    fn visit(value: &Value, path: &str, skipped: &BTreeSet<&str>, paths: &mut BTreeSet<String>) {
         if skipped.contains(path) {
             return;
         }

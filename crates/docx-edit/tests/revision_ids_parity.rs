@@ -137,8 +137,13 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         .collect();
     let expected_strings = string_paths::json_string_paths(&typed_before, &skipped);
     if reservations.string_paths != expected_strings {
-        let missing = expected_strings.difference(&reservations.string_paths).next();
-        let extra = reservations.string_paths.difference(&expected_strings).next();
+        let missing = expected_strings
+            .difference(&reservations.string_paths)
+            .next();
+        let extra = reservations
+            .string_paths
+            .difference(&expected_strings)
+            .next();
         return Err(format!(
             "string paths differ: first JSON-only path {missing:?}, first Rust-only path {extra:?}"
         )
