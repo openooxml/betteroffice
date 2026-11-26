@@ -705,6 +705,31 @@ impl SourceMetadata {
             .is_some_and(|style| string(field(Some(style), "type")) == Some("paragraph"))
     }
 
+    /// The document's character style id for unvisited hyperlinks (`Hyperlink`), if defined.
+    pub(crate) fn hyperlink_style_id(&self) -> Option<&str> {
+        if let Some((id, _)) = self.styles.styles.iter().find(|(id, style)| {
+            string(field(Some(style), "type")) == Some("character")
+                && id.eq_ignore_ascii_case("Hyperlink")
+        }) {
+            return Some(id.as_str());
+        }
+        self.styles.styles.iter().find_map(|(id, style)| {
+            (string(field(Some(style), "type")) == Some("character")
+                && string(field(Some(style), "name"))
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Hyperlink")))
+            .then_some(id.as_str())
+        })
+    }
+
+    /// Whether `style_id` names or resolves to a Hyperlink or FollowedHyperlink character style.
+    pub(crate) fn is_hyperlink_style(&self, style_id: &str) -> bool {
+        is_hyperlink_style_name(style_id)
+            || self.styles.style(style_id).is_some_and(|style| {
+                string(field(Some(style), "type")) == Some("character")
+                    && string(field(Some(style), "name")).is_some_and(is_hyperlink_style_name)
+            })
+    }
+
     /// What seeding produces for an unformatted paragraph carrying only `style_id`.
     pub(crate) fn styled_paragraph(
         &self,
@@ -2740,7 +2765,7 @@ impl RunInheritance {
     }
 }
 
-fn is_hyperlink_style_name(name: &str) -> bool {
+pub(crate) fn is_hyperlink_style_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("Hyperlink") || name.eq_ignore_ascii_case("FollowedHyperlink")
 }
 

@@ -1191,9 +1191,160 @@ enum RunDelta<'a> {
     Clear(Option<&'a crate::seed::SourceMetadata>),
 }
 
+const DEFAULT_HYPERLINK_STYLE_ID: &str = "Hyperlink";
+const DEFAULT_HYPERLINK_COLOR_RGB: &str = "0563C1";
+
+fn default_hyperlink_run_style(style_id: &str) -> Any {
+    Any::Map(Arc::new(HashMap::from([(
+        "styleId".into(),
+        Any::from(style_id),
+    )])))
+}
+
+fn default_hyperlink_text_color() -> Any {
+    Any::Map(Arc::new(HashMap::from([
+        ("rgb".into(), Any::from(DEFAULT_HYPERLINK_COLOR_RGB)),
+        ("themeColor".into(), Any::Null),
+        ("themeTint".into(), Any::Null),
+        ("themeShade".into(), Any::Null),
+        ("inheritedHyperlink".into(), Any::Bool(true)),
+    ])))
+}
+
+fn default_hyperlink_underline() -> Any {
+    Any::Map(Arc::new(HashMap::from([
+        ("style".into(), Any::from("single")),
+        ("color".into(), Any::Null),
+        ("inheritedHyperlink".into(), Any::Bool(true)),
+    ])))
+}
+
+pub(crate) fn is_inherited_hyperlink_attr(value: Option<&Any>) -> bool {
+    matches!(
+        value,
+        Some(Any::Map(map)) if map.get("inheritedHyperlink") == Some(&Any::Bool(true))
+    )
+}
+
+pub(crate) fn run_style_id(value: Option<&Any>) -> Option<&str> {
+    match value {
+        Some(Any::Map(map)) => match map.get("styleId") {
+            Some(Any::String(id)) => Some(id.as_ref()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn is_hyperlink_run_style(
+    value: Option<&Any>,
+    source: Option<&crate::seed::SourceMetadata>,
+) -> bool {
+    let Some(style_id) = run_style_id(value) else {
+        return false;
+    };
+    match source {
+        Some(source) => source.is_hyperlink_style(style_id),
+        None => crate::seed::is_hyperlink_style_name(style_id),
+    }
+}
+
+struct HyperlinkStyleDefaults {
+    run_style: Any,
+    text_color: Option<Any>,
+    underline: Option<Any>,
+}
+
+fn hyperlink_style_defaults(
+    source: Option<&crate::seed::SourceMetadata>,
+    story_id: &str,
+    paragraph_style: Option<&str>,
+) -> OpResult<HyperlinkStyleDefaults> {
+    if let Some(source) = source
+        && let Some(style_id) = source.hyperlink_style_id()
+    {
+        let run_style = default_hyperlink_run_style(style_id);
+        let seeded = styled_run_base(source, story_id, paragraph_style, Some(&run_style))?;
+        return Ok(HyperlinkStyleDefaults {
+            run_style,
+            text_color: seeded.get("textColor").cloned(),
+            underline: seeded.get("underline").cloned(),
+        });
+    }
+    Ok(HyperlinkStyleDefaults {
+        run_style: default_hyperlink_run_style(DEFAULT_HYPERLINK_STYLE_ID),
+        text_color: Some(default_hyperlink_text_color()),
+        underline: Some(default_hyperlink_underline()),
+    })
+}
+
+fn hyperlink_style_delta_for_chunk(
+    chunk_attrs: &BTreeMap<String, Any>,
+    adding: bool,
+    story_id: &str,
+    paragraph_style: Option<&str>,
+    source: Option<&crate::seed::SourceMetadata>,
+) -> OpResult<Vec<(&'static str, Any)>> {
+    let had_hyperlink = chunk_attrs.get(HYPERLINK).is_some_and(|v| *v != Any::Null);
+    let mut delta = Vec::new();
+    if adding {
+        if had_hyperlink {
+            return Ok(delta);
+        }
+        let has_custom_run_style = run_style_id(chunk_attrs.get("runStyle"))
+            .is_some_and(|id| !id.eq_ignore_ascii_case("DefaultParagraphFont"));
+        if has_custom_run_style {
+            return Ok(delta);
+        }
+        let base = match source {
+            Some(source) => styled_run_base(source, story_id, paragraph_style, None)?,
+            None => BTreeMap::new(),
+        };
+        let defaults = hyperlink_style_defaults(source, story_id, paragraph_style)?;
+        delta.push(("runStyle", defaults.run_style));
+        if chunk_attrs.get("textColor") == base.get("textColor")
+            && let Some(color) = defaults.text_color
+            && Some(&color) != base.get("textColor")
+        {
+            delta.push(("textColor", color));
+        }
+        if chunk_attrs.get("underline") == base.get("underline")
+            && let Some(underline) = defaults.underline
+            && Some(&underline) != base.get("underline")
+        {
+            delta.push(("underline", underline));
+        }
+    } else if had_hyperlink {
+        let restore_color = is_inherited_hyperlink_attr(chunk_attrs.get("textColor"));
+        let restore_underline = is_inherited_hyperlink_attr(chunk_attrs.get("underline"));
+        if is_hyperlink_run_style(chunk_attrs.get("runStyle"), source) {
+            delta.push(("runStyle", Any::Null));
+        }
+        if restore_color || restore_underline {
+            let base = match source {
+                Some(source) => styled_run_base(source, story_id, paragraph_style, None)?,
+                None => BTreeMap::new(),
+            };
+            if restore_color {
+                delta.push((
+                    "textColor",
+                    base.get("textColor").cloned().unwrap_or(Any::Null),
+                ));
+            }
+            if restore_underline {
+                delta.push((
+                    "underline",
+                    base.get("underline").cloned().unwrap_or(Any::Null),
+                ));
+            }
+        }
+    }
+    Ok(delta)
+}
+
 /// The run attributes the styles give an unformatted run of a paragraph styled `paragraph_style`
 /// in `story_id`.
-fn styled_run_base(
+pub(crate) fn styled_run_base(
     source: &crate::seed::SourceMetadata,
     story_id: &str,
     paragraph_style: Option<&str>,
@@ -1558,6 +1709,14 @@ impl EditingDoc {
         (range.start, range.end) =
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
         let len = range.end - range.start;
+        let source = self.source_metadata();
+        let paragraphs = story_paragraphs(&story, &txn);
+        let paragraph_style_at = |offset: u32| -> Option<&str> {
+            paragraphs
+                .iter()
+                .find(|paragraph| paragraph.start <= offset && offset < paragraph.end)
+                .and_then(|paragraph| paragraph.style.as_deref())
+        };
         if ctx.is_suggesting() {
             let chunks = crate::ops::snapshot_range(&story, &txn, range.start, range.end);
             if holds_suggestion_container(&chunks, &txn) {
@@ -1586,11 +1745,26 @@ impl EditingDoc {
                     &text.encode_utf16().collect::<Vec<_>>()
                         [(start - chunk.start) as usize..(end - chunk.start) as usize],
                 );
+                let style_delta = hyperlink_style_delta_for_chunk(
+                    &chunk.attrs,
+                    hyperlink.is_some(),
+                    &range.story,
+                    paragraph_style_at(start),
+                    source.as_deref(),
+                )?;
                 let mut attrs = chunk.attrs.clone();
                 changed |= attrs.get(HYPERLINK) != hyperlink.as_ref();
                 attrs.remove(HYPERLINK);
                 if let Some(value) = &hyperlink {
                     attrs.insert(HYPERLINK.to_owned(), value.clone());
+                }
+                for (key, value) in style_delta {
+                    if value == Any::Null {
+                        changed |= attrs.remove(key).is_some_and(|prev| prev != Any::Null);
+                    } else {
+                        changed |= attrs.get(key) != Some(&value);
+                        attrs.insert(key.to_owned(), value);
+                    }
                 }
                 runs.push(crate::RichRun {
                     text,
@@ -1609,12 +1783,43 @@ impl EditingDoc {
             );
             return Ok(receipt);
         }
+        let mut style_updates: Vec<(u32, u32, Attrs)> = Vec::new();
+        for chunk in crate::ops::snapshot_range(&story, &txn, range.start, range.end) {
+            let start = chunk.start.max(range.start);
+            let end = chunk.end().min(range.end);
+            if start >= end || !matches!(chunk.kind, crate::ops::ChunkKind::Text(_)) {
+                continue;
+            }
+            let delta = hyperlink_style_delta_for_chunk(
+                &chunk.attrs,
+                hyperlink.is_some(),
+                &range.story,
+                paragraph_style_at(start),
+                source.as_deref(),
+            )?;
+            if delta.is_empty() {
+                continue;
+            }
+            let attrs: Attrs = delta
+                .into_iter()
+                .map(|(key, value)| (Arc::from(key), value))
+                .collect();
+            match style_updates.last_mut() {
+                Some((_, last_end, last_attrs)) if *last_end == start && *last_attrs == attrs => {
+                    *last_end = end;
+                }
+                _ => style_updates.push((start, end, attrs)),
+            }
+        }
         story.format(
             &mut txn,
             range.start,
             len,
             Attrs::from([(Arc::from(HYPERLINK), hyperlink.unwrap_or(Any::Null))]),
         );
+        for (start, end, attrs) in style_updates {
+            story.format(&mut txn, start, end - start, attrs);
+        }
         let loc_range =
             crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
         Ok(Receipt {

@@ -1045,3 +1045,251 @@ fn empty_previous_and_current_properties_still_reopen_as_a_change() {
         .unwrap();
     assert!(engine.doc().list_revisions().unwrap().is_empty());
 }
+
+fn document_with_styles(body: &str, styles: &str) -> Vec<u8> {
+    ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/styles.xml".to_owned(),
+            format!(
+                r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{styles}</w:styles>"#
+            )
+            .into_bytes(),
+        ),
+        (
+            "word/document.xml".to_owned(),
+            format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#
+            )
+            .into_bytes(),
+        ),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn set_hyperlink_applies_and_clears_default_style_and_typing_after_exits() {
+    let engine = EngineSession::new(9310);
+    seed_from_docx(
+        engine.doc(),
+        &document("<w:p><w:r><w:t>Visit site</w:t></w:r></w:p>"),
+    )
+    .unwrap();
+    let ctx = EditCtx::local("", "");
+    engine
+        .doc()
+        .set_hyperlink(
+            &ctx,
+            StoryRange::new("body", 6, 10),
+            Some(Any::from_json(r#"{"href":"https://example.com"}"#).unwrap()),
+        )
+        .unwrap();
+
+    let runs = attrs(&engine);
+    assert_eq!(runs[0].0, "Visit ");
+    assert!(runs[0].1["hyperlink"].is_null());
+    assert!(runs[0].1["runStyle"].is_null());
+    assert_eq!(runs[1].0, "site");
+    assert_eq!(runs[1].1["hyperlink"]["href"], "https://example.com");
+    assert_eq!(runs[1].1["runStyle"]["styleId"], "Hyperlink");
+    assert_eq!(runs[1].1["textColor"]["rgb"], "0563C1");
+    assert_eq!(runs[1].1["textColor"]["inheritedHyperlink"], true);
+    assert_eq!(runs[1].1["underline"]["style"], "single");
+    assert_eq!(runs[1].1["underline"]["inheritedHyperlink"], true);
+
+    engine
+        .doc()
+        .insert_text(
+            &ctx,
+            crate::Position::new("body", 8),
+            "X",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &ctx,
+            crate::Position::new("body", 11),
+            " now",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let after_typing = attrs(&engine);
+    assert_eq!(after_typing[1].0, "siXte");
+    assert_eq!(after_typing[1].1["runStyle"]["styleId"], "Hyperlink");
+    assert_eq!(after_typing[2].0, " now");
+    assert!(after_typing[2].1["hyperlink"].is_null());
+    assert!(after_typing[2].1["runStyle"].is_null());
+    assert!(after_typing[2].1["textColor"].is_null());
+    assert!(after_typing[2].1["underline"].is_null());
+
+    engine
+        .doc()
+        .set_hyperlink(&ctx, StoryRange::new("body", 6, 11), None)
+        .unwrap();
+    for (_, run_attrs) in attrs(&engine) {
+        assert!(run_attrs["hyperlink"].is_null());
+        assert!(run_attrs["runStyle"].is_null());
+        assert!(run_attrs["textColor"].is_null());
+        assert!(run_attrs["underline"].is_null());
+    }
+}
+
+#[test]
+fn set_hyperlink_reuses_document_style_preserves_custom_color_and_restores_heading_color() {
+    let styles = concat!(
+        r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:color w:val="2F5496"/></w:rPr></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="af"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="CustomChar"><w:name w:val="Custom"/><w:rPr><w:color w:val="008000"/></w:rPr></w:style>"#,
+    );
+    let body = concat!(
+        r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>Red</w:t></w:r><w:r><w:rPr><w:rStyle w:val="CustomChar"/></w:rPr><w:t>Char</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(9311);
+    seed_from_docx(engine.doc(), &document_with_styles(body, styles)).unwrap();
+    let ctx = EditCtx::local("", "");
+
+    engine
+        .doc()
+        .set_hyperlink(
+            &ctx,
+            StoryRange::new("body", 0, 5),
+            Some(Any::from_json(r#"{"href":"https://example.com"}"#).unwrap()),
+        )
+        .unwrap();
+    let runs = attrs(&engine);
+    assert_eq!(runs[0].0, "Title");
+    assert_eq!(runs[0].1["runStyle"]["styleId"], "af");
+    assert_eq!(runs[0].1["textColor"]["rgb"], "0000FF");
+    assert_eq!(runs[0].1["textColor"]["inheritedHyperlink"], true);
+    assert_eq!(runs[0].1["underline"]["style"], "single");
+    assert_eq!(runs[0].1["underline"]["inheritedHyperlink"], true);
+
+    engine
+        .doc()
+        .set_hyperlink(&ctx, StoryRange::new("body", 0, 5), None)
+        .unwrap();
+    let unlinked = attrs(&engine);
+    assert!(unlinked[0].1["runStyle"].is_null());
+    assert_eq!(unlinked[0].1["textColor"]["rgb"], "2F5496");
+    assert!(unlinked[0].1["textColor"]["inheritedHyperlink"].is_null());
+    assert!(unlinked[0].1["underline"].is_null());
+
+    engine
+        .doc()
+        .set_hyperlink(
+            &ctx,
+            StoryRange::new("body", 6, 13),
+            Some(Any::from_json(r#"{"href":"https://example.org"}"#).unwrap()),
+        )
+        .unwrap();
+    let second_para = attrs(&engine);
+    assert_eq!(second_para[1].0, "Red");
+    assert_eq!(second_para[1].1["runStyle"]["styleId"], "af");
+    assert_eq!(second_para[1].1["textColor"]["rgb"], "FF0000");
+    assert!(second_para[1].1["textColor"]["inheritedHyperlink"].is_null());
+    assert_eq!(second_para[1].1["underline"]["style"], "single");
+    assert_eq!(second_para[1].1["underline"]["inheritedHyperlink"], true);
+
+    assert_eq!(second_para[2].0, "Char");
+    assert_eq!(second_para[2].1["runStyle"]["styleId"], "CustomChar");
+    assert_eq!(second_para[2].1["textColor"]["rgb"], "008000");
+
+    engine
+        .doc()
+        .set_hyperlink(&ctx, StoryRange::new("body", 6, 9), None)
+        .unwrap();
+    let red_unlinked = attrs(&engine);
+    assert!(red_unlinked[1].1["hyperlink"].is_null());
+    assert!(red_unlinked[1].1["runStyle"].is_null());
+    assert_eq!(red_unlinked[1].1["textColor"]["rgb"], "FF0000");
+    assert!(red_unlinked[1].1["underline"].is_null());
+}
+
+#[test]
+fn typing_after_mid_paragraph_hyperlink_restores_paragraph_style_color() {
+    let styles = concat!(
+        r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:rPr><w:color w:val="2F5496"/></w:rPr></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>"#,
+    );
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Start link trailing text</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(9312);
+    seed_from_docx(engine.doc(), &document_with_styles(body, styles)).unwrap();
+    let ctx = EditCtx::local("", "");
+
+    engine
+        .doc()
+        .set_hyperlink(
+            &ctx,
+            StoryRange::new("body", 6, 10),
+            Some(Any::from_json(r#"{"href":"https://example.com"}"#).unwrap()),
+        )
+        .unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &ctx,
+            crate::Position::new("body", 10),
+            "!",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+
+    let runs = attrs(&engine);
+    assert_eq!(runs[1].0, "link");
+    assert_eq!(runs[1].1["textColor"]["rgb"], "0563C1");
+    assert_eq!(runs[2].0, "! trailing text");
+    assert!(runs[2].1["hyperlink"].is_null());
+    assert!(runs[2].1["runStyle"].is_null());
+    assert_eq!(runs[2].1["textColor"]["rgb"], "2F5496");
+    assert!(runs[2].1["underline"].is_null());
+}
+
+#[test]
+fn suggested_hyperlink_applies_default_style_and_rejection_clears_it() {
+    let engine = engine();
+    let receipt = engine
+        .doc()
+        .set_hyperlink(
+            &suggesting(),
+            StoryRange::new("body", 1, 5),
+            Some(Any::from_json(r##"{"href":"#target"}"##).unwrap()),
+        )
+        .unwrap();
+    let inserted = attrs(&engine)
+        .into_iter()
+        .find(|(_, a)| !a["ins"].is_null())
+        .expect("inserted suggestion run");
+    assert_eq!(inserted.1["runStyle"]["styleId"], "Hyperlink");
+    assert_eq!(inserted.1["textColor"]["rgb"], "0563C1");
+    assert_eq!(inserted.1["underline"]["style"], "single");
+
+    engine
+        .doc()
+        .reject_change(
+            &suggesting(),
+            &ChangeTarget::Revision(receipt.revision_ids[0].clone()),
+        )
+        .unwrap();
+    for (_, a) in attrs(&engine) {
+        assert!(a["hyperlink"].is_null());
+        assert!(a["runStyle"].is_null());
+        assert!(a["textColor"].is_null());
+        assert!(a["underline"].is_null());
+    }
+}

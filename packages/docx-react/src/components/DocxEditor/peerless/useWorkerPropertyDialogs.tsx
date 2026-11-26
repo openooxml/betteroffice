@@ -138,7 +138,9 @@ export function useWorkerPropertyDialogs(controller: WorkerShellController, prop
   const writeLink = async (opened: WorkerLink, data: HyperlinkData | null) => {
     if (opened.query.value?.kind !== 'hyperlink') return false;
     const hyperlink = data ? { href: data.bookmark ? `#${data.bookmark}` : data.url ?? '', ...(data.tooltip ? { tooltip: data.tooltip } : {}) } : null;
-    const displayText = data && opened.replaceText && data.displayText ? data.displayText : undefined;
+    const { anchor, focus } = opened.targetSelection;
+    const collapsed = anchor.paraId === focus.paraId && anchor.offset === focus.offset;
+    const displayText = data && opened.replaceText ? data.displayText || (collapsed ? hyperlink?.href : undefined) || undefined : undefined;
     if (!await applyWorkerProperty(controller, opened.query, { kind: 'setHyperlink', payload: { selection: opened.targetSelection,
       hyperlink, displayText, expectVersion: opened.query.version } }, props.onError)) return false;
     if (data) {
