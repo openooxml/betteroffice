@@ -1,3 +1,4 @@
+use docx_parse::BlockContent;
 use docx_parse::paragraph::Paragraph;
 
 use super::{
@@ -13,20 +14,20 @@ pub(super) struct StoryData {
     section_ranges_deferred: bool,
 }
 
+pub(super) fn project_root(story_id: &str, blocks: &[BlockContent]) -> StoryProjection {
+    let kind = if story_id.starts_with("hf:") { "headerFooterStory" } else { "noteStory" };
+    let mut result = StoryProjection {
+        story_id: story_id.to_owned(),
+        blocks: blocks.to_vec(),
+        ..StoryProjection::default()
+    };
+    result.defer(ProjectionFamily::StoriesAux, kind, story_id, None);
+    result
+}
+
 impl ProjectionHooks for Hooks {
     fn family(&self) -> ProjectionFamily {
         ProjectionFamily::StoriesAux
-    }
-
-    fn project_root(
-        &self,
-        _context: &mut ProjectionContext<'_, '_>,
-        story_id: &str,
-    ) -> Result<StoryProjection, ProjectionError> {
-        let kind = if story_id.starts_with("hf:") { "headerFooterStory" } else { "noteStory" };
-        let mut result = StoryProjection::default();
-        result.defer(self.family(), kind, story_id, None);
-        Ok(result)
     }
 
     fn finish_paragraph(
@@ -51,9 +52,7 @@ impl ProjectionHooks for Hooks {
         story: &mut StoryPosition<'_>,
     ) -> Result<(), ProjectionError> {
         if story.id == "body"
-            && (story.state.aux.section_ranges_deferred
-                || context.source.envelope.document.package.document.sections.is_some()
-                || context.source.envelope.document.package.document.final_section_properties.is_some())
+            && (story.state.aux.section_ranges_deferred || context.package_body_has_sections)
         {
             story.result.defer(self.family(), "sectionRanges", story.id, None);
         }

@@ -984,7 +984,7 @@ impl EditSession {
         self.core
             .engine
             .doc()
-            .projection_json(None, input_json)
+            .projection_document_json(input_json)
             .map_err(JsValue::from)
     }
 
@@ -993,7 +993,7 @@ impl EditSession {
         self.core
             .engine
             .doc()
-            .projection_json(Some(story_id), input_json)
+            .projection_story_json(story_id, input_json)
             .map_err(JsValue::from)
     }
 

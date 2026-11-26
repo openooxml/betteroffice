@@ -8,7 +8,7 @@ use docx_parse::s9::S9DocumentBodyWire;
 use yrs::Any;
 
 use super::{
-    Attrs, HOOKS, Lowered, LoweringInput, ProjectionContext, ProjectionError, StoryPosition, StoryProjection,
+    Attrs, HOOKS, Lowered, LoweringInput, ProjectionContext, ProjectionError, ProjectionHooks, StoryPosition, StoryProjection,
     StoryState, attr_string, embed_hook, fields_dispatch, markers_dispatch, paragraph, runs,
 };
 use crate::{ParagraphProperties, SegmentContent, StorySegment};
@@ -25,7 +25,7 @@ pub(super) fn project(
     state: StoryState,
 ) -> Result<StoryProjection, ProjectionError> {
     let mut story = StoryPosition { id, state, ..StoryPosition::default() };
-    story.result.dependencies.insert(id.to_owned());
+    story.result.story_id = id.to_owned();
     let read_error = |error| ProjectionError::StoryRead { story_id: id.to_owned(), error };
     let segments = context.doc.story_segments_in(context.txn, id).map_err(read_error)?;
     let saved_ids = context.doc.story_paragraph_ids_in(context.txn, id, context.source_index)
@@ -35,8 +35,7 @@ pub(super) fn project(
     }
     let segments = tabs_as_embeds(segments);
     let mut items = Vec::new();
-    let source_blocks = context.source.stories.get(id);
-    let mut raw_blocks = source_blocks.map(|source| RawBlocks::new(&source.blocks)).unwrap_or_default();
+    let mut raw_blocks = RawBlocks::new(&context.source.blocks);
     for segment in segments {
         match &segment.content {
             SegmentContent::Text(text) => {
@@ -59,8 +58,7 @@ pub(super) fn project(
             SegmentContent::OtherEmbed { kind, payload } if container(kind, payload) => {
                 let source_id = container_id(&mut story, kind, payload);
                 if let Some(id) = &source_id
-                    && let Some(container) = context.source.containers.get(id)
-                    && let Some(block) = container.blocks.first()
+                    && let Some(block) = context.source.containers.get(id)
                 {
                     raw_blocks.before_block(block, &mut story.result.blocks);
                 }
@@ -69,7 +67,7 @@ pub(super) fn project(
                 if matches!(lowered, Lowered::Deferred) {
                     story.result.defer(hook.family(), kind, id, Some(story.state.paragraph_index));
                     if let Some(source) = source_id.and_then(|id| context.source.containers.get(&id)) {
-                        lowered = Lowered::Blocks(source.clone());
+                        lowered = Lowered::Blocks(StoryProjection { blocks: vec![source.clone()], ..StoryProjection::default() });
                     }
                 }
                 for hook in HOOKS {
@@ -208,7 +206,7 @@ fn finish_paragraph(
     for hook in HOOKS {
         hook.finish_paragraph(context, story, properties, source, &mut paragraph)?;
     }
-    story.result.paragraph_keys.push(properties.map_or_else(String::new, |props| props.para_id.clone()));
+    story.result.paragraph_session_keys.push(properties.map_or_else(String::new, |props| props.para_id.clone()));
     story.result.blocks.push(BlockContent::Paragraph(Arc::new(paragraph)));
     Ok(())
 }

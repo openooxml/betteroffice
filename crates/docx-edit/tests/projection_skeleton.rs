@@ -9,17 +9,27 @@ use docx_parse::paragraph::{Paragraph, ParagraphContent};
 const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
 fn seeded(body: &str) -> EditingDoc {
-    let parts = [
-        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#.to_owned()),
+    seeded_with_parts(body, "", "", &[])
+}
+
+fn seeded_with_parts(
+    body: &str,
+    overrides: &str,
+    relationships: &str,
+    extra: &[(&str, String)],
+) -> EditingDoc {
+    let mut parts = [
+        ("[Content_Types].xml", format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{overrides}</Types>"#)),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
         ("word/document.xml", format!(
-            r#"<w:document xmlns:w="{WORD}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}</w:body></w:document>"#
+            r#"<w:document xmlns:w="{WORD}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}</w:body></w:document>"#
         )),
-        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="numbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>{relationships}</Relationships>"#)),
         ("word/numbering.xml", format!(
             r#"<w:numbering xmlns:w="{WORD}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
         )),
-    ].map(|(path, xml)| (path.to_owned(), xml.into_bytes()));
+    ].into_iter().map(|(path, xml)| (path.to_owned(), xml.into_bytes())).collect::<Vec<_>>();
+    parts.extend(extra.iter().map(|(path, xml)| ((*path).to_owned(), xml.as_bytes().to_vec())));
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let doc = EditingDoc::new(41);
     seed_from_docx(&doc, &bytes).unwrap();
@@ -135,7 +145,7 @@ fn reprojects_after_an_edit_and_carries_the_last_assembled_body() {
     assert_eq!(text(paragraph(&body(&unchanged)[0])), "A😀Z");
     let after = doc.project_document(&defaults).unwrap();
     assert_eq!(text(paragraph(&body(&after)[0])), "A😀!Z");
-    assert_eq!(body(&story), body(&after));
+    assert_eq!(story.blocks.as_slice(), body(&after));
     assert_eq!(after.paragraph_session_keys, before.paragraph_session_keys);
     assert_eq!(story.paragraph_session_keys, after.paragraph_session_keys);
 }
@@ -172,6 +182,88 @@ fn carries_a_deferred_table_without_projecting_its_paragraph_keys() {
         deferral.family == ProjectionFamily::Tables && deferral.kind == "table"
             && deferral.story_id == "body" && deferral.paragraph == Some(1)
     }));
+}
+
+fn seeded_with_auxiliary_stories() -> EditingDoc {
+    let parts = [
+        ("header", "header1", "header1", "hdr", "", "Header"),
+        ("footer", "footer1", "footer1", "ftr", "", "Footer"),
+        ("footnotes", "footnotes", "footnotes", "footnotes", "footnote", "Footnote"),
+        ("endnotes", "endnotes", "endnotes", "endnotes", "endnote", "Endnote"),
+    ];
+    let mut overrides = String::new();
+    let mut relationships = String::new();
+    let mut extra = Vec::new();
+    let paths: Vec<_> = parts.iter().map(|(_, file, _, _, _, _)| format!("word/{file}.xml")).collect();
+    for ((kind, file, rel, tag, child, text), path) in parts.into_iter().zip(&paths) {
+        use std::fmt::Write;
+        write!(overrides, r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml"/>"#).unwrap();
+        write!(relationships, r#"<Relationship Id="{rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{file}.xml"/>"#).unwrap();
+        let paragraph = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let content = if child.is_empty() { paragraph } else {
+            format!(r#"<w:{child} w:id="1">{paragraph}</w:{child}>"#)
+        };
+        extra.push((path.as_str(), format!(r#"<w:{tag} xmlns:w="{WORD}">{content}</w:{tag}>"#)));
+    }
+    seeded_with_parts(
+        concat!(
+            r#"<w:p w14:paraId="00000011"><w:r><w:t>Body</w:t></w:r></w:p>"#,
+            r#"<w:sectPr><w:headerReference w:type="default" r:id="header1"/><w:footerReference w:type="default" r:id="footer1"/></w:sectPr>"#,
+        ),
+        &overrides,
+        &relationships,
+        &extra,
+    )
+}
+
+#[test]
+fn projects_each_root_as_the_matching_part_of_the_document() {
+    let doc = seeded_with_auxiliary_stories();
+    let input = ProjectionInput::default();
+    let document = doc.project_document(&input).unwrap();
+    let package = &document.document.package;
+    let body = &package.document.content;
+    let header = &package.header_entries.as_ref().unwrap()[0].1.content;
+    let footer = &package.footer_entries.as_ref().unwrap()[0].1.content;
+    let footnote = &package.footnotes.as_ref().unwrap()[0].content;
+    let endnote = &package.endnotes.as_ref().unwrap()[0].content;
+    let mut keys = Vec::new();
+    let mut placeholders = BTreeSet::new();
+    let mut sites = Vec::new();
+    let mut deferred = Vec::new();
+    for (id, blocks) in [
+        ("body", body),
+        ("en:1", endnote),
+        ("fn:1", footnote),
+        ("hf:footer1", footer),
+        ("hf:header1", header),
+    ] {
+        let story = doc.project_story(id, &input).unwrap();
+        assert_eq!(story.story_id, id);
+        assert_eq!(&story.blocks, blocks);
+        let offset = keys.len();
+        keys.extend(story.paragraph_session_keys);
+        placeholders.extend(story.session_revision_placeholders);
+        sites.extend(story.created_list_sites.into_iter().map(|mut site| {
+            site.paragraph += offset;
+            site
+        }));
+        deferred.extend(story.deferred);
+    }
+    assert_eq!(document.paragraph_session_keys, keys);
+    assert_eq!(document.session_revision_placeholders, placeholders);
+    assert_eq!(document.created_list_sites, sites);
+    assert_eq!(document.deferred, deferred);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn projecting_a_header_does_not_visit_the_body() {
+    let doc = seeded_with_auxiliary_stories();
+    let header = doc.project_story("hf:header1", &ProjectionInput::default()).unwrap();
+    assert_eq!(text(paragraph(&header.blocks[0])), "Header");
+    assert!(doc.projection_has_visited_source_story("hf:header1"));
+    assert!(!doc.projection_has_visited_source_story("body"));
 }
 
 #[test]

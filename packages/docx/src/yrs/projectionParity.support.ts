@@ -210,6 +210,10 @@ export function edit(
   return applied;
 }
 
+export function projectionRootOrder(storyIds: Iterable<string>): string[] {
+  return [...storyIds].sort();
+}
+
 export function normalizeProjection(value: unknown): unknown {
   if (value instanceof ArrayBuffer) return { base64: Buffer.from(value).toString('base64') };
   if (ArrayBuffer.isView(value)) {

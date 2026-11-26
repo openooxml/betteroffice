@@ -1,5 +1,5 @@
 use docx_parse::paragraph::Paragraph;
-use yrs::{Any, Map, ReadTxn};
+use yrs::Any;
 
 use super::{
     Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks, StoryPosition,
@@ -25,20 +25,11 @@ impl ProjectionHooks for Hooks {
         story: &mut StoryPosition<'_>,
         _segments: &[StorySegment],
     ) -> Result<(), ProjectionError> {
-        let source = context.source.stories.get(story.id);
-        if source.is_some_and(|source| source.blocks.iter().any(super::story::has_comment_ranges))
-            || context.txn.get_map(crate::COMMENTS).is_some_and(|comments| {
-            comments.keys(context.txn).any(|id| {
-                context.doc.comment_anchors_in(context.txn, id)
-                    .is_ok_and(|anchors| anchors.iter().any(|anchor| anchor.story == story.id))
-            })
-        }) {
+        if context.source.has_comment_ranges || context.markers.has_comments(story.id) {
             story.result.defer(self.family(), "commentRanges", story.id, None);
         }
-        story.state.markers.raw_mark_offsets = context.doc.resolve_raw_marks_in(context.txn)
-            .into_iter().filter(|mark| mark.story == story.id)
-            .map(|mark| mark.offset as usize).collect();
-        if source.is_some_and(|source| source.blocks.iter().any(super::story::has_revision_ranges)) {
+        story.state.markers.raw_mark_offsets = context.markers.raw_offsets(context.txn, story.id);
+        if context.source.has_revision_ranges {
             story.result.defer(self.family(), "revisions", story.id, None);
         }
         Ok(())
@@ -71,8 +62,9 @@ impl ProjectionHooks for Hooks {
                 story.result.defer(self.family(), kind, story.id, index);
             }
         }
-        if story.state.markers.raw_mark_offsets.iter()
-            .any(|offset| (story.state.paragraph_start..=story.state.offset).contains(offset))
+        if story.state.markers.raw_mark_offsets
+            [story.state.markers.raw_mark_offsets.partition_point(|offset| *offset < story.state.paragraph_start)..]
+            .first().is_some_and(|offset| *offset <= story.state.offset)
             || source.is_some_and(|source| source.content.iter().any(|inline| inline.node_type() == "rawXml"))
         {
             story.result.defer(self.family(), "rawInline", story.id, index);

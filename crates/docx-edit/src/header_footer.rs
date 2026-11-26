@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use docx_parse::HeaderFooterAliasGroup;
-use yrs::{Map, ReadTxn, Transact};
+use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::{EditCtx, EditingDoc, map_string};
 
@@ -30,6 +31,45 @@ fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
         }
     }
     Ok(groups)
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectionAliases {
+    declaration: Option<Arc<str>>,
+    by_alias: HashMap<String, Arc<[String]>>,
+}
+
+impl ProjectionAliases {
+    pub(crate) fn canonical<T: ReadTxn>(&mut self, doc: &EditingDoc, txn: &T, root: &str) -> Option<String> {
+        let relationship = root.strip_prefix("hf:")?;
+        let declaration = txn.get_map(crate::identity::SESSION)
+            .and_then(|session| match session.get(txn, HF_ALIASES) {
+                Some(Out::Any(Any::String(value))) => Some(value),
+                _ => None,
+            });
+        let same = match (&self.declaration, &declaration) {
+            (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.by_alias.clear();
+            if let Some(groups) = declaration.as_deref().and_then(|json| parse_groups(json).ok()) {
+                for group in groups {
+                    let roots: Arc<[String]> = group.relationship_ids.iter()
+                        .map(|relationship| story_id(relationship)).collect::<Vec<_>>().into();
+                    for alias in &group.relationship_ids[1..] {
+                        self.by_alias.insert(alias.clone(), Arc::clone(&roots));
+                    }
+                }
+            }
+            self.declaration = declaration;
+        }
+        let group = self.by_alias.get(relationship)?;
+        let revisions = doc.story_revisions.lock().unwrap();
+        group[1..].iter().all(|alias| revisions.live_projection_roots.get(alias).is_none_or(HashSet::is_empty))
+            .then(|| group[0].clone())
+    }
 }
 
 impl EditingDoc {

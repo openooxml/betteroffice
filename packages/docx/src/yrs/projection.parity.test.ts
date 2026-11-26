@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 
-import { decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { decodeS9Blocks, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type { BlockContent, Document } from '../types/document';
 import { createEditSession, type EditSession } from '../wasm/edit';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
@@ -11,6 +11,7 @@ import {
   edit,
   normalizeProjection,
   preloadSeedParityWasm,
+  projectionRootOrder,
   random,
   seedParityFixtures,
   type ProjectionEdit,
@@ -39,19 +40,39 @@ interface Feature {
 
 type Deferral = Site & Feature;
 
-interface ProjectionWire {
-  document: unknown;
+interface CreatedListSite {
+  paragraph: number;
+  slot: 'current' | 'previous';
+  key: string;
+}
+
+interface ProjectionSideTables {
   paragraphSessionKeys: string[];
   sessionRevisionPlaceholders: number[];
-  createdListSites: unknown;
+  createdListSites: CreatedListSite[];
   deferred: Deferral[];
 }
 
-interface NativeProjection extends Omit<ProjectionWire, 'document'> {
+interface ProjectionWire extends ProjectionSideTables {
+  document: unknown;
+}
+
+interface NativeProjection extends ProjectionSideTables {
   document: Document;
 }
 
+interface StoryProjectionWire extends ProjectionSideTables {
+  storyId: string;
+  blocks: unknown;
+}
+
+interface NativeStoryProjection extends ProjectionSideTables {
+  storyId: string;
+  blocks: BlockContent[];
+}
+
 interface Story {
+  content: readonly BlockContent[];
   blocks: readonly unknown[];
   keys: readonly (string | undefined)[];
   owner?: Site & Feature;
@@ -70,30 +91,44 @@ function projectionExport<K extends ProjectionExport>(session: EditSession, name
   return method as NonNullable<ProjectionSession[K]>;
 }
 
-function nativeProjection(
-  raw: EditSession,
-  buffer: ArrayBuffer,
-  roots?: ReadonlySet<string>,
-  storyId?: string
-): NativeProjection {
-  const input = JSON.stringify(roots ? { rootStories: [...roots].sort() } : {});
-  const json = storyId === undefined
-    ? projectionExport(raw, 'project_document_json').call(raw, input)
-    : projectionExport(raw, 'project_story_json').call(raw, storyId, input);
-  const wire = JSON.parse(json) as ProjectionWire;
+function validateSideTables(wire: ProjectionSideTables): void {
   expect(wire.paragraphSessionKeys.every((key) => typeof key === 'string')).toBe(true);
   expect(wire.sessionRevisionPlaceholders.every(Number.isFinite)).toBe(true);
-  expect(wire.createdListSites).toBeDefined();
+  expect(wire.createdListSites.every(({ paragraph, slot, key }) =>
+    Number.isSafeInteger(paragraph) && paragraph >= 0 &&
+    (slot === 'current' || slot === 'previous') && typeof key === 'string'
+  )).toBe(true);
   expect(wire.deferred.every(({ family, kind, storyId, paragraph }) =>
     families.has(family) && typeof kind === 'string' && typeof storyId === 'string' &&
     (paragraph === null || (Number.isSafeInteger(paragraph) && paragraph >= 0))
   )).toBe(true);
+}
+
+function nativeProjection(
+  raw: EditSession,
+  buffer: ArrayBuffer,
+  roots?: ReadonlySet<string>
+): NativeProjection {
+  const input = JSON.stringify(roots ? { rootStories: projectionRootOrder(roots) } : {});
+  const wire = JSON.parse(projectionExport(raw, 'project_document_json').call(raw, input)) as ProjectionWire;
+  validateSideTables(wire);
   const { document } = decodeS9EnvelopeValue({
     wireVersion: 1,
     document: wire.document,
     embeddedFontParts: [],
   }, buffer);
   return { ...wire, document };
+}
+
+function nativeStoryProjection(raw: EditSession, storyId: string): NativeStoryProjection {
+  const json = projectionExport(raw, 'project_story_json').call(raw, storyId, '{}');
+  const wire = JSON.parse(json) as StoryProjectionWire;
+  expect(Object.keys(wire).sort()).toEqual([
+    'blocks', 'createdListSites', 'deferred', 'paragraphSessionKeys', 'sessionRevisionPlaceholders', 'storyId',
+  ]);
+  expect(wire.storyId).toBe(storyId);
+  validateSideTables(wire);
+  return { ...wire, blocks: decodeS9Blocks(wire.blocks, 'wire.blocks') };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -113,54 +148,59 @@ function typeOf(value: unknown): string | undefined {
   return typeof type === 'string' ? type : undefined;
 }
 
+function collectStory(
+  stories: Map<string, Story>,
+  storyId: string,
+  blocks: readonly BlockContent[],
+  owner?: Story['owner']
+): void {
+  if (stories.has(storyId)) return;
+  const keys: Story['keys'][number][] = [];
+  const skeleton: unknown[] = [];
+  stories.set(storyId, { content: blocks, blocks: skeleton, keys, owner });
+  let tableIndex = 0;
+  let sdtIndex = 0;
+  for (const block of blocks) {
+    const site = { storyId, paragraph: keys.length, kind: block.type };
+    if (block.type === 'paragraph') keys.push(projectedSessionKey(block));
+    if (block.type === 'blockSdt') {
+      const child = blockSdtStoryId(storyId, sdtIndex++);
+      collectStory(stories, child, block.content, { ...site, family: 'storiesAux' });
+      skeleton.push(normalizeProjection({ ...block, content: { storyId: child } }));
+    } else if (block.type === 'table') {
+      const table = tableIndex++;
+      const cells = seededCellIndices(block);
+      const rows = block.rows.map((row, rowIndex) => ({
+        ...row,
+        cells: row.cells.map((cell, cellIndex) => {
+          const ordinal = cells[rowIndex]!.indexOf(cellIndex);
+          if (ordinal < 0) return cell;
+          const child = tableCellStoryId(storyId, table, rowIndex, ordinal);
+          collectStory(stories, child, cell.content, { ...site, family: 'tables' });
+          return { ...cell, content: { storyId: child } };
+        }),
+      }));
+      skeleton.push(normalizeProjection({ ...block, rows }));
+    } else {
+      skeleton.push(normalizeProjection(block));
+    }
+  }
+}
+
 function canonicalStories(session: YrsSession, document: Document): Map<string, Story> {
   const stories = new Map<string, Story>();
-  const visit = (storyId: string, blocks: readonly BlockContent[], owner?: Story['owner']): void => {
-    if (stories.has(storyId)) return;
-    const keys: Story['keys'][number][] = [];
-    const skeleton: unknown[] = [];
-    stories.set(storyId, { blocks: skeleton, keys, owner });
-    let tableIndex = 0;
-    let sdtIndex = 0;
-    for (const block of blocks) {
-      const site = { storyId, paragraph: keys.length, kind: block.type };
-      if (block.type === 'paragraph') keys.push(projectedSessionKey(block));
-      if (block.type === 'blockSdt') {
-        const child = blockSdtStoryId(storyId, sdtIndex++);
-        visit(child, block.content, { ...site, family: 'storiesAux' });
-        skeleton.push(normalizeProjection({ ...block, content: { storyId: child } }));
-      } else if (block.type === 'table') {
-        const table = tableIndex++;
-        const cells = seededCellIndices(block);
-        const rows = block.rows.map((row, rowIndex) => ({
-          ...row,
-          cells: row.cells.map((cell, cellIndex) => {
-            const ordinal = cells[rowIndex]!.indexOf(cellIndex);
-            if (ordinal < 0) return cell;
-            const child = tableCellStoryId(storyId, table, rowIndex, ordinal);
-            visit(child, cell.content, { ...site, family: 'tables' });
-            return { ...cell, content: { storyId: child } };
-          }),
-        }));
-        skeleton.push(normalizeProjection({ ...block, rows }));
-      } else {
-        skeleton.push(normalizeProjection(block));
-      }
-    }
-  };
-
   const pkg = document.package;
-  visit('body', pkg.document.content);
+  collectStory(stories, 'body', pkg.document.content);
   const furniture = [...(pkg.headers ?? []), ...(pkg.footers ?? [])];
   for (const [id, part] of furniture) {
     const canonical = headerFooterStory(session, id);
     const canonicalPart = furniture.find(([relId]) => canonical === `hf:${relId}`)?.[1] ?? part;
-    visit(canonical, canonicalPart.content, { storyId: canonical, paragraph: null, family: 'storiesAux', kind: 'headerFooterStory' });
+    collectStory(stories, canonical, canonicalPart.content, { storyId: canonical, paragraph: null, family: 'storiesAux', kind: 'headerFooterStory' });
   }
   for (const [prefix, notes] of [['fn', pkg.footnotes], ['en', pkg.endnotes]] as const) {
     for (const note of notes ?? []) {
       const storyId = `${prefix}:${note.id}`;
-      visit(storyId, note.content, { storyId, paragraph: null, family: 'storiesAux', kind: 'noteStory' });
+      collectStory(stories, storyId, note.content, { storyId, paragraph: null, family: 'storiesAux', kind: 'noteStory' });
     }
   }
   return stories;
@@ -470,19 +510,18 @@ function compareStories(
   }
 }
 
-function compareBodyKeys(
+function compareStoryKeys(
   comparison: Comparison,
-  body: Story | undefined,
-  actual: readonly string[],
-  roots?: ReadonlySet<string>
+  storyId: string,
+  story: Story | undefined,
+  actual: readonly string[]
 ): void {
-  if (roots && !roots.has('body')) return;
-  const expected = body?.keys.flatMap((key, paragraph) =>
+  const expected = story?.keys.flatMap((key, paragraph) =>
     key === undefined ? [] : [{ key, paragraph }]
   ) ?? [];
   for (let index = 0; index < Math.max(expected.length, actual.length); index++) {
     comparison.compare(expected[index]?.key, actual[index], {
-      storyId: 'body',
+      storyId,
       paragraph: expected[index]?.paragraph ?? index,
     }, `paragraphSessionKeys[${index}]`);
   }
@@ -493,19 +532,67 @@ function check(
   ts: Document,
   native: NativeProjection,
   source: Map<string, Story>,
-  roots?: ReadonlySet<string>,
-  storyOnly = false
+  roots?: ReadonlySet<string>
 ): string[] {
   const comparison = new Comparison(native.deferred);
   const expected = canonicalStories(session, ts);
   const actual = canonicalStories(session, native.document);
-  compareStories(comparison, expected, actual, source, storyOnly ? roots : undefined);
-  compareBodyKeys(comparison, expected.get('body'), native.paragraphSessionKeys, roots);
-  if (!storyOnly) {
-    comparison.compare(packageFields(session, ts), packageFields(session, native.document), {
-      storyId: '<package>', paragraph: null,
-    }, '');
+  compareStories(comparison, expected, actual, source);
+  if (!roots || roots.has('body')) {
+    compareStoryKeys(comparison, 'body', expected.get('body'), native.paragraphSessionKeys);
   }
+  comparison.compare(packageFields(session, ts), packageFields(session, native.document), {
+    storyId: '<package>', paragraph: null,
+  }, '');
+  return comparison.differences;
+}
+
+function checkStory(
+  expected: Map<string, Story>,
+  native: NativeStoryProjection,
+  source: Map<string, Story>
+): string[] {
+  const { storyId, blocks, deferred, paragraphSessionKeys } = native;
+  const comparison = new Comparison(deferred);
+  const actual = new Map<string, Story>();
+  collectStory(actual, storyId, blocks);
+  compareStories(comparison, expected, actual, source, new Set([storyId]));
+  const rootDeferred = deferred.some((entry) => entry.storyId === storyId && entry.paragraph === null &&
+    entry.family === 'storiesAux' && (entry.kind === 'headerFooterStory' || entry.kind === 'noteStory'));
+  if (!rootDeferred) compareStoryKeys(comparison, storyId, expected.get(storyId), paragraphSessionKeys);
+  return comparison.differences;
+}
+
+function checkComposition(
+  session: YrsSession,
+  stories: NativeStoryProjection[],
+  native: NativeProjection
+): string[] {
+  const comparison = new Comparison([], true);
+  const document = canonicalStories(session, native.document);
+  const keys: string[] = [];
+  const placeholders = new Set<number>();
+  const sites: CreatedListSite[] = [];
+  const deferred: Deferral[] = [];
+  for (const story of stories) {
+    comparison.compare(
+      normalizeProjection(document.get(story.storyId)?.content),
+      normalizeProjection(story.blocks),
+      { storyId: story.storyId, paragraph: null },
+      'blocks'
+    );
+    const offset = keys.length;
+    keys.push(...story.paragraphSessionKeys);
+    for (const id of story.sessionRevisionPlaceholders) placeholders.add(id);
+    for (const site of story.createdListSites) sites.push({ ...site, paragraph: site.paragraph + offset });
+    deferred.push(...story.deferred);
+  }
+  const location = { storyId: '<package>', paragraph: null };
+  comparison.compare(native.paragraphSessionKeys, keys, location, 'paragraphSessionKeys');
+  comparison.compare(native.sessionRevisionPlaceholders, [...placeholders].sort((a, b) => a - b), location,
+    'sessionRevisionPlaceholders');
+  comparison.compare(native.createdListSites, sites, location, 'createdListSites');
+  comparison.compare(native.deferred, deferred, location, 'deferred');
   return comparison.differences;
 }
 
@@ -575,14 +662,16 @@ describe('Native DOCX projection parity', () => {
         const checkState = (label: string, differences: string[]) => {
           if (differences.length) failures.push(`${label}\n${differences.join('\n')}`);
         };
-        const body = new Set(['body']);
         const checkProjections = (label: string, ts: Document, native: NativeProjection): void => {
           checkState(`${label}, document`, check(session, ts, native, source));
-          const nativeBody = nativeProjection(raw, buffer, undefined, 'body');
-          checkState(`${label}, body`, check(session, ts, nativeBody, source, body, true));
-          checkState(`${label}, native body versus document`,
-            compareSnapshots(session, native.document, nativeBody.document, body)
-          );
+          const expected = canonicalStories(session, ts);
+          const roots = projectionRootOrder([...expected.keys()].filter((id) => dirtyProjectionStory(id) === id));
+          const stories = roots.map((id) => {
+            const story = nativeStoryProjection(raw, id);
+            checkState(`${label}, ${id}`, checkStory(expected, story, source));
+            return story;
+          });
+          checkState(`${label}, composed stories versus document`, checkComposition(session, stories, native));
         };
 
         let ts = yrsToDocument(session, base);

@@ -162,7 +162,7 @@ pub(super) fn make_run(
     };
     let inherited = direct(&inherited.into_iter().collect());
     let live = direct(attrs);
-    let formatting = relative(attrs, &live, &inherited, source, &context.theme);
+    let formatting = relative(attrs, &live, &inherited, source, context.theme);
     Run {
         node_type: RunType::Run,
         formatting,

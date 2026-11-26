@@ -1,26 +1,27 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use docx_parse::formatting::TextFormatting;
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::s9::{S9SectionWire, S9WireEnvelope};
 use docx_parse::{BlockContent, S9DocumentWire};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use yrs::types::ToJson;
 use yrs::{Any, ReadTxn, Transact, Transaction};
 
 use crate::identity::{SourceIndex, SourcePackage};
-use crate::seed::{RunInheritance, SourceMetadata};
+use crate::seed::RunInheritance;
 use crate::{EditError, EditingDoc, ParagraphProperties, SegmentContent, StorySegment};
 
 mod fields_dispatch;
+mod marker_index;
 mod markers_dispatch;
 mod paragraph;
 mod runs;
 mod stories_aux_dispatch;
 mod story;
 mod tables_dispatch;
+
+pub(crate) use marker_index::MarkerIndex;
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -147,14 +148,16 @@ pub enum ProjectionFamily {
     StoriesAux,
 }
 
-#[derive(Clone, Default)]
-struct StoryProjection {
-    blocks: Vec<BlockContent>,
-    paragraph_keys: Vec<String>,
-    deferred: Vec<ProjectionDeferral>,
-    revision_placeholders: BTreeSet<u64>,
-    created_list_sites: Vec<CreatedListSite>,
-    dependencies: BTreeSet<String>,
+#[doc(hidden)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoryProjection {
+    pub story_id: String,
+    pub blocks: Vec<docx_parse::BlockContent>,
+    pub paragraph_session_keys: Vec<String>,
+    pub session_revision_placeholders: BTreeSet<u64>,
+    pub created_list_sites: Vec<CreatedListSite>,
+    pub deferred: Vec<ProjectionDeferral>,
 }
 
 impl StoryProjection {
@@ -168,171 +171,293 @@ impl StoryProjection {
     }
 
     fn append(&mut self, mut child: Self) {
-        let offset = self.paragraph_keys.len();
-        self.created_list_sites.extend(child.created_list_sites.drain(..).map(|mut site| {
+        self.append_side_tables(&child);
+        self.blocks.append(&mut child.blocks);
+    }
+
+    fn append_side_tables(&mut self, child: &Self) {
+        let offset = self.paragraph_session_keys.len();
+        self.created_list_sites.extend(child.created_list_sites.iter().cloned().map(|mut site| {
             site.paragraph += offset;
             site
         }));
-        self.blocks.append(&mut child.blocks);
-        self.paragraph_keys.append(&mut child.paragraph_keys);
-        self.deferred.append(&mut child.deferred);
-        self.revision_placeholders.append(&mut child.revision_placeholders);
-        self.dependencies.append(&mut child.dependencies);
+        self.paragraph_session_keys.extend_from_slice(&child.paragraph_session_keys);
+        self.session_revision_placeholders.extend(&child.session_revision_placeholders);
+        self.deferred.extend_from_slice(&child.deferred);
     }
+}
+
+#[derive(Clone, Copy)]
+enum SourceRoot {
+    Header(usize),
+    Footer(usize),
+    Footnote(usize),
+    Endnote(usize),
 }
 
 struct SourceCache {
     envelope: Arc<S9WireEnvelope>,
-    paragraphs: BTreeMap<String, Arc<Paragraph>>,
-    stories: BTreeMap<String, StoryProjection>,
-    containers: BTreeMap<String, StoryProjection>,
+    roots: BTreeMap<String, SourceRoot>,
+    stories: BTreeMap<String, Arc<SourceStory>>,
+    materialize_media: bool,
+    materialized_document: Option<Arc<S9DocumentWire>>,
 }
 
 impl SourceCache {
-    fn new(envelope: S9WireEnvelope) -> Self {
-        let mut source = Self {
-            envelope: Arc::new(envelope),
-            paragraphs: BTreeMap::new(),
-            stories: BTreeMap::new(),
-            containers: BTreeMap::new(),
-        };
-        let package = source.envelope.document.package.clone();
-        source.index_story("body", &package.document.content);
-        for (id, part) in package.header_entries.iter().chain(&package.footer_entries).flatten() {
-            source.index_story(&format!("hf:{id}"), &part.content);
-        }
-        for (prefix, notes) in [("fn", package.footnotes), ("en", package.endnotes)] {
-            for note in notes.into_iter().flatten() {
-                source.index_story(&format!("{prefix}:{}", note.id), &note.content);
+    fn new(envelope: Arc<S9WireEnvelope>, materialize_media: bool) -> Self {
+        let package = &envelope.document.package;
+        let mut roots = BTreeMap::new();
+        for (header, entries) in [(true, &package.header_entries), (false, &package.footer_entries)] {
+            for (index, (id, _)) in entries.iter().flatten().enumerate() {
+                let part = if header { SourceRoot::Header(index) } else { SourceRoot::Footer(index) };
+                roots.entry(format!("hf:{id}")).or_insert(part);
             }
         }
-        source
+        for (footnote, entries) in [(true, &package.footnotes), (false, &package.endnotes)] {
+            for (index, note) in entries.iter().flatten().enumerate() {
+                let (prefix, part) = if footnote {
+                    ("fn", SourceRoot::Footnote(index))
+                } else {
+                    ("en", SourceRoot::Endnote(index))
+                };
+                roots.entry(format!("{prefix}:{}", note.id)).or_insert(part);
+            }
+        }
+        Self {
+            envelope,
+            roots,
+            stories: BTreeMap::new(),
+            materialize_media,
+            materialized_document: None,
+        }
     }
 
-    fn index_story(&mut self, story_id: &str, blocks: &[BlockContent]) {
-        let mut result = StoryProjection::default();
+    fn document(&mut self, doc: &EditingDoc) -> Result<S9DocumentWire, ProjectionError> {
+        if let Some(document) = &self.materialized_document {
+            return Ok((**document).clone());
+        }
+        let mut document = self.envelope.document.clone();
+        if self.materialize_media && let Some(table) = doc.media_table() && !table.is_empty() {
+            materialize_package(&mut document, &table)?;
+            self.materialized_document = Some(Arc::new(document.clone()));
+        }
+        Ok(document)
+    }
+
+    fn blocks(&self, id: &str) -> &[BlockContent] {
+        let package = &self.envelope.document.package;
+        if id == "body" {
+            return &package.document.content;
+        }
+        match self.roots.get(id) {
+            Some(SourceRoot::Header(index)) => &package.header_entries.as_ref().unwrap()[*index].1.content,
+            Some(SourceRoot::Footer(index)) => &package.footer_entries.as_ref().unwrap()[*index].1.content,
+            Some(SourceRoot::Footnote(index)) => &package.footnotes.as_ref().unwrap()[*index].content,
+            Some(SourceRoot::Endnote(index)) => &package.endnotes.as_ref().unwrap()[*index].content,
+            None => &[],
+        }
+    }
+
+    fn story(&mut self, doc: &EditingDoc, id: &str) -> Result<Arc<SourceStory>, ProjectionError> {
+        if let Some(story) = self.stories.get(id) {
+            return Ok(Arc::clone(story));
+        }
+        let blocks = self.blocks(id);
+        let blocks = if self.materialize_media && let Some(table) = doc.media_table()
+            && !table.is_empty()
+        {
+            materialize(&blocks.to_vec(), &table)?
+        } else {
+            blocks.to_vec()
+        };
+        let mut source = SourceStory { blocks, ..SourceStory::default() };
+        if id == "body" {
+            source.index(id);
+        }
+        let source = Arc::new(source);
+        self.stories.insert(id.to_owned(), Arc::clone(&source));
+        Ok(source)
+    }
+}
+
+#[derive(Default)]
+struct SourceStory {
+    blocks: Vec<BlockContent>,
+    paragraphs: BTreeMap<String, Arc<Paragraph>>,
+    containers: BTreeMap<String, BlockContent>,
+    children: Mutex<BTreeMap<String, Arc<SourceStory>>>,
+    table_cells: Mutex<BTreeMap<String, Vec<Vec<usize>>>>,
+    has_comment_ranges: bool,
+    has_revision_ranges: bool,
+}
+
+impl SourceStory {
+    fn index(&mut self, story_id: &str) {
         let (mut paragraph, mut table, mut sdt) = (0, 0, 0);
-        for block in blocks {
+        for block in &self.blocks {
             match block {
                 BlockContent::Paragraph(source) => {
                     let key = source.para_id.as_ref()
                         .filter(|id| !id.is_empty() && source.repeated_para_id != Some(true))
                         .cloned()
                         .unwrap_or_else(|| format!("{story_id}:p{paragraph}"));
-                    self.paragraphs.entry(key.clone()).or_insert_with(|| Arc::clone(source));
+                    self.paragraphs.entry(key).or_insert_with(|| Arc::clone(source));
+                    self.has_comment_ranges |= story::has_comment_ranges(block);
+                    self.has_revision_ranges |= story::has_revision_ranges(block);
                     paragraph += 1;
                 }
-                BlockContent::Table(source) => {
-                    let id = format!("{story_id}:t{table}");
-                    let cell_indices = serde_json::to_value(source)
-                        .map(|value| crate::seed::source_cells(&value))
-                        .unwrap_or_default();
-                    for (row, content) in source.rows.iter().enumerate() {
-                        let indices = cell_indices.get(row).map(Vec::as_slice).unwrap_or_default();
-                        for (cell, content) in content.cells.iter().enumerate() {
-                            if let Ok(ordinal) = indices.binary_search(&cell) {
-                                self.index_story(&format!("{id}:r{row}c{ordinal}"), &content.content);
-                            }
-                        }
-                    }
-                    self.containers.insert(id, StoryProjection {
-                        blocks: vec![block.clone()],
-                        ..StoryProjection::default()
-                    });
+                BlockContent::Table(_) => {
+                    self.containers.insert(format!("{story_id}:t{table}"), block.clone());
                     table += 1;
                 }
-                BlockContent::BlockSdt(source) => {
-                    let id = format!("{story_id}:sdt{sdt}");
-                    self.index_story(&id, &source.content);
-                    self.containers.insert(id, StoryProjection {
-                        blocks: vec![block.clone()],
-                        ..StoryProjection::default()
-                    });
+                BlockContent::BlockSdt(_) => {
+                    self.containers.insert(format!("{story_id}:sdt{sdt}"), block.clone());
                     sdt += 1;
                 }
                 BlockContent::RawXml(_) => {}
             }
-            result.blocks.push(block.clone());
         }
-        self.stories.insert(story_id.to_owned(), result);
     }
+
+    fn child(&self, id: &str) -> Option<Arc<Self>> {
+        let mut children = self.children.lock().unwrap();
+        if let Some(child) = children.get(id) {
+            return Some(Arc::clone(child));
+        }
+        let blocks = if let Some(BlockContent::BlockSdt(source)) = self.containers.get(id) {
+            &source.content
+        } else {
+            let table_id = crate::structured::source::cell_table(id)?;
+            let BlockContent::Table(table) = self.containers.get(table_id)? else { return None };
+            let (row, cell) = id.get(table_id.len() + 2..)?.split_once('c')?;
+            let row: usize = row.parse().ok()?;
+            let cell: usize = cell.parse().ok()?;
+            let mut table_cells = self.table_cells.lock().unwrap();
+            let cells = table_cells.entry(table_id.to_owned())
+                .or_insert_with(|| crate::seed::source_cells(&json_value(table)));
+            let source_cell = *cells.get(row)?.get(cell)?;
+            &table.rows.get(row)?.cells.get(source_cell)?.content
+        };
+        let mut child = Self { blocks: blocks.clone(), ..Self::default() };
+        child.index(id);
+        let child = Arc::new(child);
+        children.insert(id.to_owned(), Arc::clone(&child));
+        Some(child)
+    }
+
 }
 
 #[derive(Default)]
 pub(crate) struct ProjectionCache {
-    source: Option<SourceCache>,
-    revision: u64,
-    dependencies: Option<OverlayDependencies>,
+    source: Option<Result<SourceCache, String>>,
+    generation: Option<String>,
+    aliases: crate::header_footer::ProjectionAliases,
+    styles: Option<(Override<docx_parse::styles::StyleDefinitions>, RunInheritance)>,
+    theme: Option<Override<docx_parse::theme::Theme>>,
     stories: BTreeMap<String, CachedStory>,
-    assembled: BTreeMap<String, Arc<StoryProjection>>,
+    assembled: BTreeMap<String, StoryProjection>,
 }
 
-#[derive(Clone)]
 struct CachedStory {
-    paragraph_formatting: Option<Value>,
-    run_formatting: Option<Value>,
-    projection: Arc<StoryProjection>,
+    revision: u64,
+    markers_revision: u64,
+    projection: StoryProjection,
 }
 
 impl ProjectionCache {
+    pub(crate) fn for_source(source: &SourcePackage) -> Self {
+        let (bytes, digest) = match source {
+            SourcePackage::Ready(index) => {
+                if let Some(envelope) = &index.projection_envelope {
+                    return Self {
+                        source: Some(Ok(SourceCache::new(Arc::clone(envelope), true))),
+                        ..Self::default()
+                    };
+                }
+                (index.bytes(), Some(index.package_digest().to_owned()))
+            }
+            SourcePackage::Pending(bytes, digest) => (bytes.clone(), digest.clone()),
+        };
+        let digest = digest.unwrap_or_else(|| crate::seed::package_digest(&bytes));
+        let source = crate::seed::parse_docx_package_with_digest(&bytes, digest)
+            .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false));
+        Self { source: Some(source), ..Self::default() }
+    }
+
+    fn source(&mut self) -> Result<&mut SourceCache, ProjectionError> {
+        self.source.as_mut().ok_or(ProjectionError::MissingSource)?.as_mut()
+            .map_err(|error| ProjectionError::SourceParse(error.clone()))
+    }
+
+    pub(crate) fn reset_opening(&mut self) {
+        let source = self.source.take();
+        *self = Self { source, ..Self::default() };
+        if let Some(Ok(source)) = &mut self.source {
+            source.stories.clear();
+            source.materialized_document = None;
+        }
+    }
+
     pub(crate) fn invalidate_stories(&mut self) {
         self.stories.clear();
     }
-}
 
-#[derive(PartialEq)]
-struct OverlayDependencies {
-    input: ProjectionInput,
-    side_maps: [Option<Any>; 5],
-    aliases: Vec<(String, String)>,
-    generation: Option<String>,
+    fn begin_generation(&mut self, generation: Option<String>) {
+        if self.generation != generation {
+            self.generation = generation;
+            self.stories.clear();
+            self.assembled.clear();
+            self.styles = None;
+            self.theme = None;
+            if let Some(Ok(source)) = &mut self.source {
+                source.stories.clear();
+                source.materialized_document = None;
+            }
+        }
+    }
 }
 
 struct ProjectionContext<'a, 'doc> {
     doc: &'a EditingDoc,
     txn: &'a Transaction<'doc>,
     input: &'a ProjectionInput,
-    source: &'a SourceCache,
-    #[allow(dead_code)]
-    source_metadata: Option<&'a SourceMetadata>,
+    source: &'a SourceStory,
+    package_body_has_sections: bool,
+    markers: &'a MarkerIndex,
     source_index: Option<&'a SourceIndex>,
-    inheritance: RunInheritance,
-    theme: docx_parse::theme::Theme,
-    stories: &'a mut BTreeMap<String, CachedStory>,
+    inheritance: &'a mut RunInheritance,
+    theme: &'a docx_parse::theme::Theme,
     visiting: BTreeSet<String>,
 }
 
 impl ProjectionContext<'_, '_> {
+    #[allow(dead_code)]
     fn project_content_story(
         &mut self,
         id: &str,
         state: StoryState,
     ) -> Result<Arc<StoryProjection>, ProjectionError> {
-        if self.visiting.contains(id) {
+        if !self.visiting.insert(id.to_owned()) {
             return Err(ProjectionError::InvalidInput(format!("cyclic story {id}")));
         }
-        if let Some(cached) = self.stories.get(id)
-            && cached.paragraph_formatting == state.table_paragraph_formatting
-            && cached.run_formatting == state.table_run_formatting
-        {
-            return Ok(Arc::clone(&cached.projection));
-        }
-        self.visiting.insert(id.to_owned());
-        let paragraph_formatting = state.table_paragraph_formatting.clone();
-        let run_formatting = state.table_run_formatting.clone();
-        let projection = if root_id(id) && id != "body" {
-            stories_aux_dispatch::Hooks.project_root(self, id)
-        } else {
-            story::project(self, id, state)
+        let source = self.source.child(id);
+        let empty = SourceStory::default();
+        let mut child = ProjectionContext {
+            doc: self.doc,
+            txn: self.txn,
+            input: self.input,
+            source: source.as_deref().unwrap_or(&empty),
+            package_body_has_sections: false,
+            markers: self.markers,
+            source_index: self.source_index,
+            inheritance: self.inheritance,
+            theme: self.theme,
+            visiting: std::mem::take(&mut self.visiting),
         };
+        let result = story::project(&mut child, id, state);
+        self.visiting = child.visiting;
         self.visiting.remove(id);
-        let projection = Arc::new(projection?);
-        self.stories.insert(id.to_owned(), CachedStory {
-            paragraph_formatting,
-            run_formatting,
-            projection: Arc::clone(&projection),
-        });
-        Ok(projection)
+        result.map(Arc::new)
     }
 
     #[allow(dead_code)]
@@ -446,24 +571,6 @@ trait ProjectionHooks: Sync {
     ) -> Result<(), ProjectionError> {
         Ok(())
     }
-
-    fn project_root(
-        &self,
-        _context: &mut ProjectionContext<'_, '_>,
-        _story_id: &str,
-    ) -> Result<StoryProjection, ProjectionError> {
-        Ok(StoryProjection::default())
-    }
-
-    fn finish_document(
-        &self,
-        _context: &mut ProjectionContext<'_, '_>,
-        _selected: &BTreeSet<String>,
-        _stories: &BTreeMap<String, Arc<StoryProjection>>,
-        _document: &mut S9DocumentWire,
-    ) -> Result<(), ProjectionError> {
-        Ok(())
-    }
 }
 
 const HOOKS: [&dyn ProjectionHooks; 4] = [
@@ -486,10 +593,17 @@ fn embed_hook(kind: &str, payload: &Attrs) -> &'static dyn ProjectionHooks {
     }
 }
 
+pub(crate) fn projection_root(id: &str) -> Option<&str> {
+    let mut parts = id.splitn(3, ':');
+    match (parts.next()?, parts.next()) {
+        ("body", _) => Some("body"),
+        ("hf" | "fn" | "en", Some(item)) if !item.is_empty() => Some(&id[..3 + item.len()]),
+        _ => None,
+    }
+}
+
 fn root_id(id: &str) -> bool {
-    id == "body" || id.split_once(':').is_some_and(|(kind, item)| {
-        matches!(kind, "hf" | "fn" | "en") && !item.is_empty() && !item.contains(':')
-    })
+    projection_root(id) == Some(id)
 }
 
 fn attr_string<'a>(attrs: &'a Attrs, key: &str) -> Option<&'a str> {
@@ -504,18 +618,85 @@ fn decode<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Option<T> {
     serde_json::from_value(value?.clone()).ok()
 }
 
-fn source_base(doc: &EditingDoc) -> Result<SourceCache, ProjectionError> {
-    let (bytes, digest) = {
-        let source = doc.source.lock().unwrap();
-        match source.as_ref().ok_or(ProjectionError::MissingSource)? {
-            SourcePackage::Pending(bytes, digest) => (bytes.clone(), digest.clone()),
-            SourcePackage::Ready(index) => (index.bytes(), Some(index.package_digest().to_owned())),
+fn materialize<T: Clone + Serialize + serde::de::DeserializeOwned>(
+    value: &T,
+    table: &docx_parse::media::MediaTable,
+) -> Result<T, ProjectionError> {
+    fn replace(
+        value: &mut Value,
+        table: &docx_parse::media::MediaTable,
+        urls: &mut BTreeMap<usize, String>,
+    ) -> Result<bool, ProjectionError> {
+        let mut changed = false;
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    changed |= replace(value, table, urls)?;
+                }
+            }
+            Value::Object(fields) => {
+                for (key, value) in fields {
+                    if matches!(key.as_str(), "src" | "dataUrl")
+                        && let Some(index) = value.as_str().and_then(docx_parse::media::media_token_index)
+                        && index < table.len()
+                    {
+                        let url = match urls.entry(index) {
+                            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(table.data_url(index).map_err(ProjectionError::SourceParse)?)
+                            }
+                        };
+                        *value = Value::String(url.clone());
+                        changed = true;
+                    } else {
+                        changed |= replace(value, table, urls)?;
+                    }
+                }
+            }
+            _ => {}
         }
-    };
-    let digest = digest.unwrap_or_else(|| crate::seed::package_digest(&bytes));
-    let (envelope, _) = crate::seed::parse_docx_package_with_digest(&bytes, digest)
-        .map_err(ProjectionError::SourceParse)?;
-    Ok(SourceCache::new(envelope))
+        Ok(changed)
+    }
+
+    let mut wire = serde_json::to_value(value).map_err(|error| ProjectionError::SourceParse(error.to_string()))?;
+    if replace(&mut wire, table, &mut BTreeMap::new())? {
+        serde_json::from_value(wire).map_err(|error| ProjectionError::SourceParse(error.to_string()))
+    } else {
+        Ok(value.clone())
+    }
+}
+
+fn materialize_package(document: &mut S9DocumentWire, table: &docx_parse::media::MediaTable) -> Result<(), ProjectionError> {
+    let package = &mut document.package;
+    package.document.content = materialize(&package.document.content, table)?;
+    package.document.comments = materialize(&package.document.comments, table)?;
+    for entries in [&mut package.header_entries, &mut package.footer_entries] {
+        for (_, part) in entries.iter_mut().flatten() {
+            part.content = materialize(&part.content, table)?;
+        }
+    }
+    for notes in [&mut package.footnotes, &mut package.endnotes,
+        &mut package.footnote_separators, &mut package.endnote_separators]
+    {
+        for note in notes.iter_mut().flatten() {
+            note.content = materialize(&note.content, table)?;
+        }
+    }
+    let mut urls = BTreeMap::new();
+    package.media_entries = table.media_map().into_iter().map(|(path, file)| {
+        let index = docx_parse::media::media_token_index(&file.data_url).expect("media table token");
+        let file = match urls.entry(index) {
+            std::collections::btree_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let mut file = (*file).clone();
+                file.data_url = table.data_url(index).map_err(ProjectionError::SourceParse)?;
+                file.base64 = file.data_url.split_once(',').map_or("", |(_, base64)| base64).to_owned();
+                Arc::clone(entry.insert(Arc::new(file)))
+            }
+        };
+        Ok((path, file))
+    }).collect::<Result<_, ProjectionError>>()?;
+    Ok(())
 }
 
 fn validate_input(input: &ProjectionInput) -> Result<(), ProjectionError> {
@@ -531,16 +712,144 @@ fn validate_input(input: &ProjectionInput) -> Result<(), ProjectionError> {
 impl EditingDoc {
     #[doc(hidden)]
     pub fn project_document(&self, input: &ProjectionInput) -> Result<ProjectionOutput, ProjectionError> {
-        self.project(input, None).map(|(output, _)| output)
+        validate_input(input)?;
+        let (mut document, requested, aliases, mut assembled) = {
+            let mut cache = self.projection.lock().unwrap();
+            let txn = self.doc.transact();
+            cache.begin_generation(projection_generation(&txn));
+            let source = cache.source()?;
+            let aliases: BTreeMap<_, _> = self.header_footer_aliases_in(&txn).into_iter().collect();
+            let requested: BTreeSet<_> = input.root_stories.clone().unwrap_or_else(|| {
+                let mut roots: BTreeSet<_> = source.roots.keys().cloned().collect();
+                if let Some(stories) = txn.get_map(crate::STORIES) {
+                    roots.extend(crate::live_stories(&stories, &txn).map(|(id, _)| id)
+                        .filter(|id| root_id(id)).map(str::to_owned));
+                }
+                roots
+            }).into_iter().map(|id| {
+                id.strip_prefix("hf:").and_then(|id| aliases.get(id))
+                    .map_or(id, |canonical| format!("hf:{canonical}"))
+            }).collect();
+            let document = source.document(self)?;
+            let assembled = if input.root_stories.is_some() {
+                cache.assembled.clone()
+            } else {
+                BTreeMap::new()
+            };
+            (document, requested, aliases, assembled)
+        };
+        for story_id in requested {
+            let projection = self.project_story(&story_id, input)?;
+            assembled.insert(projection.story_id.clone(), projection);
+        }
+
+        apply_host_metadata(&mut document, &input.host);
+        assemble_stories(&mut document, &assembled, &aliases);
+        let mut side_tables = StoryProjection::default();
+        for projection in assembled.values() {
+            side_tables.append_side_tables(projection);
+        }
+        self.projection.lock().unwrap().assembled = assembled;
+        Ok(ProjectionOutput {
+            document,
+            paragraph_session_keys: side_tables.paragraph_session_keys,
+            session_revision_placeholders: side_tables.session_revision_placeholders,
+            created_list_sites: side_tables.created_list_sites,
+            deferred: side_tables.deferred,
+        })
     }
 
     #[doc(hidden)]
-    pub fn project_story(&self, story_id: &str, input: &ProjectionInput) -> Result<ProjectionOutput, ProjectionError> {
-        self.project(input, Some(story_id)).map(|(output, _)| output)
+    pub fn project_story(&self, story_id: &str, input: &ProjectionInput) -> Result<StoryProjection, ProjectionError> {
+        if !root_id(story_id) {
+            return Err(ProjectionError::InvalidInput(format!("{story_id} is not a root story")));
+        }
+        let mut cache = self.projection.lock().unwrap();
+        cache.source()?;
+        let txn = self.doc.transact();
+        cache.begin_generation(projection_generation(&txn));
+        let canonical = cache.aliases.canonical(self, &txn, story_id);
+        let id = canonical.as_deref().unwrap_or(story_id);
+        if crate::story_text(&txn, id).is_none() && (id == "body" || !cache.source()?.roots.contains_key(id)) {
+            return Err(ProjectionError::StoryRead {
+                story_id: story_id.to_owned(),
+                error: EditError::StoryNotFound(id.to_owned()),
+            });
+        }
+        let revision = self.story_revisions.lock().unwrap().projection_roots.get(id).copied().unwrap_or_default();
+        let markers = self.projection_markers.lock().unwrap();
+        let markers_revision = markers.revision(id);
+        let same_styles = cache.styles.as_ref().is_some_and(|(styles, _)| *styles == input.host.styles);
+        let same_theme = cache.theme.as_ref() == Some(&input.host.theme);
+        if (id != "body" || (same_styles && same_theme))
+            && let Some(cached) = cache.stories.get(id)
+            && cached.revision == revision && cached.markers_revision == markers_revision
+        {
+            let mut projection = cached.projection.clone();
+            projection.story_id = story_id.to_owned();
+            return Ok(projection);
+        }
+
+        let (source, envelope) = {
+            let cache = cache.source()?;
+            (cache.story(self, id)?, Arc::clone(&cache.envelope))
+        };
+        let package = &envelope.document.package;
+        let mut projection = if id == "body" {
+            if !same_styles {
+                let inheritance = if input.host.styles.is_none()
+                    && let Some(metadata) = self.source_metadata()
+                {
+                    metadata.projection_inheritance()
+                } else {
+                    let definitions = input.host.styles.as_ref().unwrap_or(&package.styles)
+                        .as_ref().map(json_value);
+                    RunInheritance::new(definitions.as_ref())
+                };
+                cache.styles = Some((input.host.styles.clone(), inheritance));
+            }
+            cache.theme = Some(input.host.theme.clone());
+            let default_theme = docx_parse::theme::Theme::default();
+            let theme = input.host.theme.as_ref().map_or(Some(&package.theme), Option::as_ref)
+                .unwrap_or(&default_theme);
+            let source_index = match self.source.lock().unwrap().as_ref() {
+                Some(SourcePackage::Ready(index)) => Some(Arc::clone(index)),
+                _ => None,
+            };
+            let mut context = ProjectionContext {
+                doc: self,
+                txn: &txn,
+                input,
+                source: &source,
+                package_body_has_sections: package.document.sections.is_some()
+                    || package.document.final_section_properties.is_some(),
+                source_index: source_index.as_deref(),
+                inheritance: &mut cache.styles.as_mut().expect("style resolver initialized").1,
+                theme,
+                markers: &markers,
+                visiting: BTreeSet::from([id.to_owned()]),
+            };
+            story::project(&mut context, id, StoryState::default())?
+        } else {
+            stories_aux_dispatch::project_root(id, &source.blocks)
+        };
+        cache.stories.insert(id.to_owned(), CachedStory {
+            revision,
+            markers_revision,
+            projection: projection.clone(),
+        });
+        projection.story_id = story_id.to_owned();
+        Ok(projection)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn projection_has_visited_source_story(&self, story_id: &str) -> bool {
+        self.projection.lock().unwrap().source().is_ok_and(|source| source.stories.contains_key(story_id))
     }
 
     #[cfg(feature = "wasm")]
-    pub(crate) fn projection_json(&self, story_id: Option<&str>, input_json: &str) -> Result<String, String> {
+    pub(crate) fn projection_document_json(&self, input_json: &str) -> Result<String, String> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct WireOutput {
@@ -552,9 +861,10 @@ impl EditingDoc {
             deferred: Vec<ProjectionDeferral>,
         }
 
-        let input = serde_json::from_str(input_json)
-            .map_err(|error| ProjectionError::InvalidInput(error.to_string()).to_string())?;
-        let (output, source) = self.project(&input, story_id).map_err(|error| error.to_string())?;
+        let input = projection_input_json(input_json)?;
+        let output = self.project_document(&input).map_err(|error| error.to_string())?;
+        let source = Arc::clone(&self.projection.lock().unwrap().source()
+            .map_err(|error| error.to_string())?.envelope);
         serde_json::to_string(&WireOutput {
             envelope: S9WireEnvelope {
                 wire_version: source.wire_version,
@@ -571,146 +881,48 @@ impl EditingDoc {
         }).map_err(|error| error.to_string())
     }
 
-    fn project(
-        &self,
-        input: &ProjectionInput,
-        story_id: Option<&str>,
-    ) -> Result<(ProjectionOutput, Arc<S9WireEnvelope>), ProjectionError> {
-        validate_input(input)?;
-        let mut cache = self.projection.lock().unwrap();
-        if cache.source.is_none() {
-            cache.source = Some(source_base(self)?);
+    #[cfg(feature = "wasm")]
+    pub(crate) fn projection_story_json(&self, story_id: &str, input_json: &str) -> Result<String, String> {
+        let input = projection_input_json(input_json)?;
+        let story = self.project_story(story_id, &input).map_err(|error| error.to_string())?;
+        serde_json::to_string(&story).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(feature = "wasm")]
+fn projection_input_json(input_json: &str) -> Result<ProjectionInput, String> {
+    serde_json::from_str(input_json)
+        .map_err(|error| ProjectionError::InvalidInput(error.to_string()).to_string())
+}
+
+fn projection_generation(txn: &Transaction<'_>) -> Option<String> {
+    txn.get_map(crate::identity::SESSION).and_then(|session| {
+        crate::map_string(&session, txn, crate::identity::GENERATION)
+    })
+}
+
+fn assemble_stories(
+    document: &mut S9DocumentWire,
+    stories: &BTreeMap<String, StoryProjection>,
+    aliases: &BTreeMap<String, String>,
+) {
+    let package = &mut document.package;
+    if let Some(body) = stories.get("body") {
+        package.document.content.clone_from(&body.blocks);
+        story::clamp_sections(&mut package.document);
+    }
+    for (id, part) in package.header_entries.iter_mut().chain(&mut package.footer_entries).flatten() {
+        let id = aliases.get(id).unwrap_or(id);
+        if let Some(story) = stories.get(&format!("hf:{id}")) {
+            part.content.clone_from(&story.blocks);
         }
-        let source_index = self.source_index();
-        let metadata = self.source_metadata();
-        let txn = self.doc.transact();
-        let requested = match story_id {
-            Some(id) => BTreeSet::from([id.to_owned()]),
-            None => input.root_stories.clone().unwrap_or_else(|| {
-                txn.get_map(crate::STORIES).map_or_else(BTreeSet::new, |stories| {
-                    crate::live_stories(&stories, &txn).map(|(id, _)| id)
-                        .filter(|id| root_id(id)).map(str::to_owned).collect()
-                })
-            }),
-        };
-        let aliases = self.header_footer_aliases_in(&txn);
-        let mut selected = BTreeSet::new();
-        for id in requested {
-            if !root_id(&id) {
-                return Err(ProjectionError::InvalidInput(format!("{id} is not a root story")));
+    }
+    for (prefix, notes) in [("fn", &mut package.footnotes), ("en", &mut package.endnotes)] {
+        for note in notes.iter_mut().flatten() {
+            if let Some(story) = stories.get(&format!("{prefix}:{}", note.id)) {
+                note.content.clone_from(&story.blocks);
             }
-            let canonical = id.strip_prefix("hf:").and_then(|relationship| {
-                aliases.iter().find(|(alias, _)| alias == relationship)
-            }).map_or_else(|| id.clone(), |(_, canonical)| format!("hf:{canonical}"));
-            if let Err(error) = crate::story_ref(&txn, &canonical) {
-                return Err(ProjectionError::StoryRead {
-                    story_id: id.clone(),
-                    error,
-                });
-            }
-            selected.insert(canonical);
         }
-
-        let dependencies = OverlayDependencies {
-            input: ProjectionInput { root_stories: None, ..input.clone() },
-            side_maps: [
-                crate::COMMENTS,
-                crate::RAW_INLINES,
-                crate::section_margins::SECTION_MARGINS,
-                crate::part_metadata::PART_METADATA,
-                crate::document_properties::DOCUMENT_PROPERTIES,
-            ].map(|name| txn.get_map(name).map(|map| map.to_json(&txn))),
-            aliases,
-            generation: txn.get_map(crate::identity::SESSION).and_then(|session| {
-                crate::map_string(&session, &txn, crate::identity::GENERATION)
-            }),
-        };
-        let (revision, changed) = self.stories_changed_since(cache.revision);
-        let same_dependencies = cache.dependencies.as_ref() == Some(&dependencies);
-        let mut stories = if same_dependencies { cache.stories.clone() } else { BTreeMap::new() };
-        stories.retain(|id, cached| !changed.iter().any(|changed| {
-            changed == id || cached.projection.dependencies.contains(changed)
-                || changed.strip_prefix(id).is_some_and(|suffix| suffix.starts_with(':'))
-        }));
-
-        let cached_source = cache.source.as_ref().expect("source cached");
-        let mut document = cached_source.envelope.document.clone();
-        let same_opening = cache.dependencies.as_ref().is_some_and(|prior| {
-            prior.generation == dependencies.generation
-        });
-        let mut assembled = if story_id.is_none() && same_opening {
-            cache.assembled.clone()
-        } else {
-            BTreeMap::new()
-        };
-        if story_id.is_none() && input.root_stories.is_none() {
-            assembled.retain(|story, _| selected.contains(story));
-        }
-        let definitions = input.host.styles.as_ref().unwrap_or(&document.package.styles)
-            .as_ref().map(json_value);
-        let inheritance = metadata.as_deref().filter(|_| input.host.styles.is_none())
-            .map_or_else(|| RunInheritance::new(definitions.as_ref()), SourceMetadata::projection_inheritance);
-        let theme = input.host.theme.clone().unwrap_or_else(|| Some(document.package.theme.clone()))
-            .unwrap_or_default();
-        if story_id.is_none() {
-            apply_host_metadata(&mut document, &input.host);
-        }
-        let mut context = ProjectionContext {
-            doc: self,
-            txn: &txn,
-            input,
-            source: cached_source,
-            source_metadata: metadata.as_deref(),
-            source_index: source_index.as_deref(),
-            inheritance,
-            theme,
-            stories: &mut stories,
-            visiting: BTreeSet::new(),
-        };
-        for id in &selected {
-            let projection = context.project_content_story(id, StoryState::default())?;
-            assembled.insert(id.clone(), projection);
-        }
-        if let Some(body) = assembled.get("body") {
-            document.package.document.content.clone_from(&body.blocks);
-            story::clamp_sections(&mut document.package.document);
-        }
-        for hook in HOOKS {
-            hook.finish_document(&mut context, &selected, &assembled, &mut document)?;
-        }
-
-        let mut output = ProjectionOutput {
-            document,
-            paragraph_session_keys: assembled.get("body").map_or_else(Vec::new, |body| body.paragraph_keys.clone()),
-            session_revision_placeholders: BTreeSet::new(),
-            created_list_sites: Vec::new(),
-            deferred: Vec::new(),
-        };
-        for (id, projection) in &assembled {
-            if id != "body" {
-                let offset = output.paragraph_session_keys.len();
-                output.paragraph_session_keys.extend(projection.paragraph_keys.iter().cloned());
-                output.created_list_sites.extend(projection.created_list_sites.iter().cloned().map(|mut site| {
-                    site.paragraph += offset;
-                    site
-                }));
-            } else {
-                output.created_list_sites.extend_from_slice(&projection.created_list_sites);
-            }
-            output.session_revision_placeholders.extend(&projection.revision_placeholders);
-            output.deferred.extend_from_slice(&projection.deferred);
-        }
-
-        let envelope = Arc::clone(&cached_source.envelope);
-        cache.revision = revision;
-        cache.stories = stories;
-        if story_id.is_none() {
-            cache.assembled = assembled;
-        } else if !same_opening {
-            cache.assembled.clear();
-        }
-        cache.dependencies = Some(dependencies);
-        Ok((output, envelope))
     }
 }
 

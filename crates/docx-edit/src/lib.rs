@@ -651,6 +651,8 @@ struct StoryRevisions {
     geometry: u64,
     sections: u64,
     stamped: HashMap<Arc<str>, u64>,
+    projection_roots: HashMap<String, u64>,
+    live_projection_roots: HashMap<String, HashSet<Arc<str>>>,
     /// The revision that last changed each story by more than inserting plain
     /// text: deleting, formatting, embedding, a tracked change or its entry.
     /// Text inserted without revision marks leaves the story's paragraphs,
@@ -679,6 +681,12 @@ fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> b
 }
 
 impl StoryRevisions {
+    fn stamp_projection_root(&mut self, story: &Arc<str>) {
+        if let Some(root) = projection::projection_root(story) {
+            self.projection_roots.insert(root.to_owned(), self.current);
+        }
+    }
+
     fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
         self.current += 1;
         if events.iter().any(|event| matches!(event, yrs::types::Event::Map(event)
@@ -735,6 +743,7 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    self.stamp_projection_root(story);
                     if !inserts_plain_text(txn, event) {
                         self.marked.insert(Arc::clone(story), self.current);
                     }
@@ -744,6 +753,18 @@ impl StoryRevisions {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.stamp_projection_root(story);
+                            if let Some(root) = projection::projection_root(story) {
+                                let live = txn.get_map(STORIES).is_some_and(|stories| {
+                                    stories.contains_key(txn, story) && !story_is_removed(txn, story)
+                                });
+                                if live {
+                                    self.live_projection_roots.entry(root.to_owned()).or_default()
+                                        .insert(Arc::clone(story));
+                                } else if let Some(members) = self.live_projection_roots.get_mut(root) {
+                                    members.remove(story);
+                                }
+                            }
                             self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
@@ -862,6 +883,7 @@ pub struct EditingDoc {
     paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
     projection: Mutex<projection::ProjectionCache>,
+    projection_markers: Arc<Mutex<projection::MarkerIndex>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     source_note_separators: Mutex<Option<SourceNoteSeparators>>,
@@ -874,6 +896,7 @@ pub struct EditingDoc {
     commit_hooks: Rc<RefCell<CommitHooks>>,
     _update_sub: Subscription,
     _story_revision_subs: [Subscription; 2],
+    _projection_marker_subs: [Subscription; 2],
     _seen_subs: Vec<Subscription>,
 }
 
@@ -945,6 +968,7 @@ impl EditingDoc {
                     stamped.lock().unwrap().stamp(txn, events);
                     identity::StoryStateCache::evict_root_changes(&cached, txn, events);
                 });
+        let (projection_markers, projection_marker_subs) = projection::MarkerIndex::watch(&doc);
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -980,6 +1004,7 @@ impl EditingDoc {
             paragraph_facts: Mutex::default(),
             source: Arc::new(Mutex::new(None)),
             projection: Mutex::default(),
+            projection_markers,
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             source_note_separators: Mutex::default(),
@@ -992,6 +1017,7 @@ impl EditingDoc {
             commit_hooks,
             _update_sub: update_sub,
             _story_revision_subs: [story_revision_sub, removed_story_sub],
+            _projection_marker_subs: projection_marker_subs,
             _seen_subs: seen_subs,
         }
     }
@@ -1377,7 +1403,7 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
-        *self.projection.lock().unwrap() = projection::ProjectionCache::default();
+        *self.projection.lock().unwrap() = projection::ProjectionCache::for_source(&source);
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
