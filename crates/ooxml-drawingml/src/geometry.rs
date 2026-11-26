@@ -2077,4 +2077,20 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn public_preset_geometry_keeps_the_released_connector_route() {
+        let adjustments = HashMap::from([("adj1".to_owned(), 1.5), ("adj2".to_owned(), -0.25)]);
+        let path = preset_geometry_to_path("bentConnector4", &adjustments, 1.0).unwrap();
+        assert_eq!(
+            path,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.25, y: 0.5 },
+                GeometryPathCommand::Line { x: 0.75, y: 0.5 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+    }
 }

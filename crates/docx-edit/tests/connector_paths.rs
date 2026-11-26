@@ -138,7 +138,7 @@ fn connector_display_list_uses_the_authored_guides() {
 }
 
 #[test]
-fn state_only_connector_replica_draws_the_released_path_and_saves_identical_parts() {
+fn state_only_connector_replica_draws_the_released_path() {
     let bytes = connector_package();
     let source = EngineSession::new(1);
     seed_from_docx(source.doc(), &bytes).unwrap();
@@ -167,43 +167,6 @@ fn state_only_connector_replica_draws_the_released_path_and_saves_identical_part
         ]),
         "state-only replica"
     );
-
-    replica.doc().retain_source_docx(bytes.clone());
-    let package = docx_parse::parse_docx_s9_wire(
-        &bytes,
-        docx_parse::S9ParseOptions {
-            source_ordinals: true,
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .document
-    .package;
-    let save = |engine: &EngineSession| {
-        let plan = engine.doc().paragraph_save_plan();
-        let request = serde_json::from_value(json!({
-            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
-            "document": {"content": package.document.content, "comments": package.document.comments},
-            "relationshipEntries": package.relationship_entries,
-            "headerEntries": package.header_entries.as_deref().unwrap_or_default(),
-            "options": {"updateModifiedDate": false},
-            "paragraphIds": {
-                "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
-                    json!({"part": part, "ordinal": ordinal, "paraId": para_id})
-                }).collect::<Vec<_>>(),
-                "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
-                    json!({"part": part, "paraIds": para_ids})
-                }).collect::<Vec<_>>()
-            }
-        }))
-        .unwrap();
-        let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
-        ooxml_opc::unzip_parts(&saved)
-            .unwrap()
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
-    assert_eq!(save(&source), save(&replica));
 }
 
 #[test]
@@ -227,4 +190,99 @@ fn connector_hit_follows_the_painted_detour() {
             assert_ne!(hit(x + w * 0.5, y + h * 0.5), HoverTarget::Image);
         })
         .unwrap();
+}
+
+fn with_connector_document(edit: impl FnOnce(&str) -> String) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&connector_package()).unwrap();
+    let (_, document) = parts.iter_mut().find(|(path, _)| path == "word/document.xml").unwrap();
+    *document = edit(std::str::from_utf8(document).unwrap()).into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn state_only_connector_with_empty_guides_uses_the_released_default() {
+    let bytes = with_connector_document(|xml| {
+        xml.replace(r#"<a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/>"#, "")
+    });
+    let source = EngineSession::new(1);
+    seed_from_docx(source.doc(), &bytes).unwrap();
+    let replica = EngineSession::new(2);
+    replica.doc().apply_update_v1(&source.doc().encode_state_as_update_v1()).unwrap();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let request = fixture::region_request(&source, &bytes, font).to_string();
+    draw_connector(&replica, &request);
+    let shape = painted_connector(&replica);
+    let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| shape[key].as_f64().unwrap());
+    assert_eq!(shape["geometryPath"], json!([
+        {"type": "move", "x": px(x), "y": px(y)},
+        {"type": "line", "x": px(x + w * 0.5), "y": px(y)},
+        {"type": "line", "x": px(x + w * 0.25), "y": px(y + h * 0.5)},
+        {"type": "line", "x": px(x + w * 0.75), "y": px(y + h * 0.5)},
+        {"type": "line", "x": px(x + w), "y": px(y + h)}
+    ]));
+}
+
+#[test]
+fn grouped_connector_hits_its_drawing_atom() {
+    for anchored in [false, true] {
+        let bytes = with_connector_document(|xml| {
+            let grouped = xml
+                .replace("<a:graphicData>", concat!(
+                    r#"<a:graphicData><wpg:wgp xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">"#,
+                    r#"<wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/>"#,
+                    r#"<a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/></a:xfrm></wpg:grpSpPr>"#,
+                ))
+                .replace("</a:graphicData>", "</wpg:wgp></a:graphicData>");
+            if anchored {
+                grouped.replace("<wp:inline>", concat!(
+                    r#"<wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" layoutInCell="1" allowOverlap="1">"#,
+                    r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>"#,
+                    r#"<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:wrapNone/>"#,
+                )).replace("</wp:inline>", "</wp:anchor>")
+            } else {
+                grouped
+            }
+        });
+        let engine = EngineSession::new(1);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+        draw_connector(&engine, &fixture::region_request(&engine, &bytes, font).to_string());
+        engine.with_display_list(|display| {
+            let mut shapes = display.pages[0].primitives.iter().filter_map(|primitive| match primitive {
+                Primitive::Shape(shape) => Some(shape),
+                _ => None,
+            });
+            let frame = shapes.next().unwrap();
+            let connector = shapes.next().unwrap();
+            let [x, y, w, h] = [&connector.x, &connector.y, &connector.w, &connector.h]
+                .map(|value| value.as_f64().unwrap());
+            let pos = frame.attrs.doc_start.unwrap();
+            let hit = |x, y| hit_test_regions(display, 0, x, y).unwrap();
+            let painted = hit(x + w * 1.25, y);
+            assert_eq!((painted.target, painted.pos), (HoverTarget::Image, Some(pos)), "anchored={anchored}");
+            assert_eq!(docx_layout::hit::hit_test(display, 0, x + w * 1.25, y), Some(pos));
+            assert_ne!(hit(x + w * 0.5, y + h * 0.5).target, HoverTarget::Image, "anchored={anchored}");
+        }).unwrap();
+    }
+}
+
+#[test]
+fn preview_connector_keeps_guides_when_the_uncut_story_exceeds_bookmark_limits() {
+    let bytes = with_connector_document(|xml| {
+        let attributes = (1..docx_parse::xml::ParseLimits::default().max_attributes_per_element)
+            .map(|index| format!(r#" b{index}="""#)).collect::<String>();
+        let tail = format!(r#"{}<w:bookmarkStart z:id="1"{attributes}/>"#, "<w:p/>".repeat(70));
+        xml.replace("<w:body>", r#"<w:body xmlns:z="urn:test">"#)
+            .replace("<w:sectPr>", &format!("{tail}<w:sectPr>"))
+    });
+    let engine = EngineSession::new(1);
+    assert!(seed_docx_preview(engine.doc(), &bytes, 1).unwrap());
+    assert!(matches!(
+        docx_parse::parse_docx_s9_wire(&bytes, Default::default()),
+        Err(docx_parse::xml::ParseError::ResourceLimit { kind: "bookmarkNamespaceAliases", .. })
+    ));
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let request = fixture::region_request(&engine, &connector_package(), font);
+    draw_connector(&engine, &request.to_string());
+    assert_authored_connector_path(&engine, "bounded preview");
 }

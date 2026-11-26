@@ -4161,4 +4161,48 @@ mod tests {
             assert_eq!(hit_test(&dl, 0, 111.0, 195.0), Some(end), "{text:?}");
         }
     }
+
+    #[test]
+    fn connector_band_ownership_follows_dashes_and_arrowhead_wings() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let y = top + 35.0;
+            let connector = serde_json::json!({
+                "kind": "shape", "shapeType": "bentConnector2",
+                "x": 100, "y": y, "w": 80, "h": 30, "docStart": 10, "docEnd": 11,
+                "geometryPath": [
+                    {"type": "move", "x": 100, "y": y},
+                    {"type": "line", "x": 180, "y": y}
+                ],
+                "stroke": {"color": "#000000", "width": 8, "dash": "dash"},
+                "strokePaint": {"tailEnd": {"type": "triangle"}}
+            });
+            let dl = band_page(kind, top, vec![connector]);
+            let hit = |x, y| hit_test_regions(&dl, 0, x, y).unwrap();
+            assert_eq!(hit(132.0, y).region, region);
+            assert_eq!(hit_test(&dl, 0, 132.0, y), None);
+            for (x, y) in [(110.0, y), (151.0, y + 13.0)] {
+                let painted = hit(x, y);
+                assert_eq!((painted.region, painted.pos, painted.target),
+                    (HitRegion::Body, Some(10), HoverTarget::Image));
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_tolerance_does_not_claim_a_band_click_for_the_body() {
+        let connector = serde_json::json!({
+            "kind": "shape", "shapeType": "bentConnector2",
+            "x": 180, "y": 35, "w": 80, "h": 30, "docStart": 10,
+            "geometryPath": [
+                {"type": "move", "x": 180, "y": 35}, {"type": "line", "x": 260, "y": 35}
+            ],
+            "stroke": {"color": "#000000", "width": 1}
+        });
+        let dl = band_page("header", 0.0, vec![connector]);
+        assert_eq!(hit_test_regions(&dl, 0, 200.0, 37.0).unwrap().region, HitRegion::Header);
+        assert_eq!(hit_test(&dl, 0, 200.0, 37.0), Some(10));
+    }
 }
