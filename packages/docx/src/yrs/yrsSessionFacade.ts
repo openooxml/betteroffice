@@ -220,6 +220,29 @@ function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
 }
 
+function parseParagraphSavePlan(json: string): DocxParagraphSavePlan {
+  const { provenanceNet, ...plan } = JSON.parse(json) as DocxParagraphSavePlan & { provenanceNet?: number };
+  for (const part of plan.splicedParts ?? []) {
+    if (!part.changed.length) continue;
+    if (!part.paragraphPatches || !part.legacyParagraphs) {
+      throw new Error(
+        `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+      );
+    }
+    const writerVersion = paragraphPatchWriterVersionWire();
+    if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
+      throw new Error(
+        `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+        'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+      );
+    }
+  }
+  if (provenanceNet) {
+    console.debug(`DOCX_MINIMAL_PATCH replace counts ${JSON.stringify({ provenanceNet })}`);
+  }
+  return plan;
+}
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
@@ -1627,29 +1650,9 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: (useLocalProvenance) => {
-      const { provenanceNet, ...plan } = JSON.parse(session.paragraph_save_plan(useLocalProvenance)) as
-        DocxParagraphSavePlan & { provenanceNet?: number };
-      for (const part of plan.splicedParts ?? []) {
-        if (!part.changed.length) continue;
-        if (!part.paragraphPatches || !part.legacyParagraphs) {
-          throw new Error(
-            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
-          );
-        }
-        const writerVersion = paragraphPatchWriterVersionWire();
-        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
-          throw new Error(
-            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
-            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
-          );
-        }
-      }
-      if (provenanceNet) {
-        console.debug(`DOCX_MINIMAL_PATCH replace counts ${JSON.stringify({ provenanceNet })}`);
-      }
-      return plan;
-    },
+    paragraphSavePlan: () => parseParagraphSavePlan(session.paragraph_save_plan()),
+    paragraphSavePlanWithLocalProvenance: () =>
+      parseParagraphSavePlan(session.paragraph_save_plan_with_local_provenance()),
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>

@@ -819,6 +819,7 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// @internal
     pub fn bootstrap_peer_with_provenance(
         &self,
         state: &[u8],
@@ -1014,6 +1015,7 @@ impl EditSession {
         self.core.encode_state()
     }
 
+    /// @internal
     pub fn encode_edit_provenance_for_transfer(
         &self,
         bytes: &[u8],
@@ -1109,6 +1111,7 @@ impl EditSession {
         self.core.apply_local_update(update).map_err(JsValue::from)
     }
 
+    /// @internal
     pub fn apply_local_update_with_provenance(
         &self,
         update: &[u8],
@@ -2978,12 +2981,16 @@ impl EditSession {
     /// "changed":[ordinal],"inserted":[{"before"|"after":ordinal}],"removed":[ordinal]}]`,
     /// whose session keys the caller resolves to the model paragraphs it marks
     /// with their ordinals.
-    pub fn paragraph_save_plan(
-        &self,
-        use_local_provenance: Option<bool>,
-    ) -> Result<String, JsValue> {
+    pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
         self.core
-            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))
+            .paragraph_save_plan_with_local_provenance(false)
+            .map_err(JsValue::from)
+    }
+
+    /// @internal
+    pub fn paragraph_save_plan_with_local_provenance(&self) -> Result<String, JsValue> {
+        self.core
+            .paragraph_save_plan_with_local_provenance(true)
             .map_err(JsValue::from)
     }
 

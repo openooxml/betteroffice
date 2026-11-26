@@ -1437,6 +1437,7 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    /// @internal
     #[napi(catch_unwind, js_name = "apply_local_update_with_provenance")]
     pub fn apply_local_update_with_provenance(
         &self,
@@ -1570,6 +1571,7 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    /// @internal
     #[napi(catch_unwind, js_name = "bootstrap_peer_with_provenance")]
     pub fn bootstrap_peer_with_provenance(
         &self,
@@ -1853,6 +1855,7 @@ impl EditSession {
             .and_then(|bytes| byte_result(env, bytes))
     }
 
+    /// @internal
     #[napi(catch_unwind, js_name = "encode_edit_provenance_for_transfer")]
     pub fn encode_edit_provenance_for_transfer(
         &self,
@@ -2556,14 +2559,19 @@ impl EditSession {
     }
 
     #[napi(catch_unwind, js_name = "paragraph_save_plan")]
-    pub fn paragraph_save_plan(
-        &self,
-        env: Env,
-        use_local_provenance: Option<bool>,
-    ) -> Result<String> {
+    pub fn paragraph_save_plan(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))
+            .paragraph_save_plan_with_local_provenance(false)
+            .map_err(|error| map_error(env, error))
+    }
+
+    /// @internal
+    #[napi(catch_unwind, js_name = "paragraph_save_plan_with_local_provenance")]
+    pub fn paragraph_save_plan_with_local_provenance(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .paragraph_save_plan_with_local_provenance(true)
             .map_err(|error| map_error(env, error))
     }
 

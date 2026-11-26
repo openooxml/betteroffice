@@ -409,11 +409,18 @@ export interface DocxSessionSave {
 /** Captures a save of `session`, in the task that projects the saved document. @internal */
 export function captureSessionSave(
   session: YrsSession,
-  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities(),
-  useLocalProvenance = false
+  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities()
+): DocxSessionSave {
+  return captureSessionSaveInternal(session, false, identities);
+}
+
+function captureSessionSaveInternal(
+  session: YrsSession,
+  useLocalProvenance = false,
+  identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities()
 ): DocxSessionSave {
   engineProgress();
-  const plan = session.paragraphSavePlan(useLocalProvenance);
+  const plan = useLocalProvenance ? session.paragraphSavePlanWithLocalProvenance() : session.paragraphSavePlan();
   engineProgress();
   return { identities, plan };
 }
@@ -777,7 +784,7 @@ export async function saveYrsDocx(
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
   if (options.commentDeletion && !options.commentBaseline) throw new Error('Comment deletion requires a saved comment baseline');
-  let capture = captureSessionSave(session, undefined, options.useLocalProvenance);
+  let capture = captureSessionSaveInternal(session, options.useLocalProvenance);
   if (options.commentBaseline) {
     await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
     const source = options.commentDeletion ? Uint8Array.from(options.commentBaseline.bytes).buffer

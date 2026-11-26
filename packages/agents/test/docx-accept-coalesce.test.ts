@@ -52,7 +52,7 @@ function forceLegacy(doc: DocxAgentDocument) {
   doc.session.setParagraphAttrs({
     story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 },
   }, { defaultTextFormatting: { fontSize: 40 } });
-  const parts = doc.session.paragraphSavePlan(true).splicedParts ?? [];
+  const parts = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts ?? [];
   const part = parts.find(part => part.part === 'word/document.xml');
   if (part) expect(part.legacyParagraphs?.some(entry => entry.ordinal === 1)).toBe(true);
   else expect(parts).toHaveLength(0);
@@ -108,7 +108,7 @@ for (const legacy of [false, true]) {
         }, { bold: null });
         if (legacy) forceLegacy(doc);
         else {
-          const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === 'word/document.xml');
+          const part = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === 'word/document.xml');
           expect(part?.paragraphPatches?.some(patch => patch.ordinal === 1)).toBe(true);
         }
         const saved = await savedParagraph(doc);

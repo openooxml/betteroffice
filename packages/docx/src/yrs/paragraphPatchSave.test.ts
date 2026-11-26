@@ -184,8 +184,10 @@ it('keeps adjacent replacement patches through paired adoption and bootstrap and
     );
     return peer;
   };
-  const plan = (session: YrsSession, useLocalProvenance = true) => session.paragraphSavePlan(useLocalProvenance).splicedParts!
-    .find(({ part }) => part === 'word/document.xml')!;
+  const plan = (session: YrsSession, useLocalProvenance = true) => {
+    const savePlan = useLocalProvenance ? session.paragraphSavePlanWithLocalProvenance() : session.paragraphSavePlan();
+    return savePlan.splicedParts!.find(({ part }) => part === 'word/document.xml')!;
+  };
   try {
     const live = await create(41_001);
     live.seedFromDocx(source);

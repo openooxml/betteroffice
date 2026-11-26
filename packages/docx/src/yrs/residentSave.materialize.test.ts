@@ -79,12 +79,12 @@ it('keeps worker and main-thread peer editor saves on base alignment after a rec
   const sidecar = session.encodeEditProvenanceForTransfer(state);
   peer.bootstrapPeerWithProvenance(state, session.encodePeerMetadata(), source, host, sidecar);
   const projected = yrsToDocument(peer, mergeDocxHostMetadata(peer.materializeDocx()!, host.document));
-  const capture = captureSessionSave(peer, undefined, false);
+  const capture = captureSessionSave(peer);
   const bodyPart = (plan: typeof capture.plan) => plan.splicedParts!.find(({ part }) => part === 'word/document.xml')!;
   expect(bodyPart(capture.plan).legacyParagraphs?.map(({ ordinal }) => ordinal)).toContain(0);
   expect(peer.paragraphSavePlan()).toEqual(capture.plan);
   for (const replica of [session, peer]) {
-    expect(bodyPart(replica.paragraphSavePlan(true)).paragraphPatches?.map(({ ordinal }) => ordinal)).toContain(0);
+    expect(bodyPart(replica.paragraphSavePlanWithLocalProvenance()).paragraphPatches?.map(({ ordinal }) => ordinal)).toContain(0);
   }
   const base = await writeSessionSave(peer, projected, capture, source.buffer, {}, () => true, true);
   const saveWorker = async () => {

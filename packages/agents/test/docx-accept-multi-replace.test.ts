@@ -65,9 +65,9 @@ async function compareWithBaseExport(doc: DocxAgentDocument, untouched: readonly
   const draft = await doc['fork']();
   try {
     const base = draft.materializeDocx()!;
-    const capture = captureSessionSave(draft, draft.paragraphIdentities(), false);
+    const capture = captureSessionSave(draft, draft.paragraphIdentities());
     const basePart = capture.plan.splicedParts?.find(part => part.part === DOCUMENT);
-    const localPart = draft.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
+    const localPart = draft.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === DOCUMENT);
     const basePatched = basePart?.paragraphPatches?.map(patch => patch.ordinal) ?? [];
     const localPatched = localPart?.paragraphPatches?.map(patch => patch.ordinal) ?? [];
     expect(localPatched).toEqual(expect.arrayContaining(basePatched));
@@ -271,7 +271,7 @@ for (const [name, query, newText, savedText] of [
       const [hit] = doc.grep({ query }).matches;
       const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText }] });
       expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
-      const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
+      const part = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === DOCUMENT);
       expect(part?.changed).toEqual([1]);
       expect(part?.paragraphPatches).toEqual([]);
       expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
@@ -417,7 +417,7 @@ test('tracked acceptance rewrites the edited paragraph and keeps its neighbours'
     const edits = contractorEdits.map(({ query, newText }) => ({ match: doc.grep({ query }).matches[0]!.match, newText }));
     const proposal = doc.propose({ author: 'Agent', edits });
     await doc.accept(proposal.id, { tracked: true, date: '2026-01-01T00:00:00Z' });
-    const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
+    const part = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === DOCUMENT);
     expect(part?.changed).toEqual([1]);
     expect(part?.paragraphPatches ?? []).toEqual([]);
     expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
@@ -439,10 +439,10 @@ test('an insertion after a leading inline drawing rewrites only that paragraph',
     const [hit] = doc.grep({ query: 'tail' }).matches;
     const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit!.match, newText: 'First tail' }] });
     await doc.accept(proposal.id);
-    const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
+    const part = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === DOCUMENT);
     expect(part?.changed).toEqual([1]);
     expect(part?.paragraphPatches ?? []).toEqual([]);
-    const base = doc.session.paragraphSavePlan(false).splicedParts?.find(part => part.part === DOCUMENT);
+    const base = doc.session.paragraphSavePlan().splicedParts?.find(part => part.part === DOCUMENT);
     expect(part?.legacyParagraphs).toEqual(base?.legacyParagraphs);
     expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
     const xml = await documentXml(await doc.export());

@@ -1239,9 +1239,8 @@ describe('docx native engine parity', () => {
         session.open_docx(bytes, true, 'opening');
         const paraId = paragraphId(session);
         session.replace_range('body', paraId, 0, paraId, 6, 'bKEEPy');
-        const base = JSON.parse(session.paragraph_save_plan(false)) as DocxParagraphSavePlan;
-        const recorded = JSON.parse(session.paragraph_save_plan(true)) as DocxParagraphSavePlan;
-        expect(JSON.parse(session.paragraph_save_plan())).toEqual(base);
+        const base = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+        const recorded = JSON.parse(session.paragraph_save_plan_with_local_provenance()) as DocxParagraphSavePlan;
         const edits = (plan: DocxParagraphSavePlan) => plan.splicedParts?.find(entry => entry.part === part)
           ?.paragraphPatches?.[0]?.textEdits.map(({ from, to, insert }) => [from, to, insert.map(run => run.text).join('')]);
         expect(edits(base)).toEqual([[0, 1, 'b'], [5, 6, 'y']]);
