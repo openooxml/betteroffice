@@ -22,6 +22,7 @@ on:
       - "Cargo.lock"
       - "package.json"
       - "Cargo.toml"
+      - "rust-toolchain.toml"
       - ".dockerignore"
       - ".github/workflows/wopi-image.yml"
   push:
@@ -36,6 +37,7 @@ on:
       - "Cargo.lock"
       - "package.json"
       - "Cargo.toml"
+      - "rust-toolchain.toml"
       - ".dockerignore"
       - ".github/workflows/wopi-image.yml"
   workflow_dispatch:

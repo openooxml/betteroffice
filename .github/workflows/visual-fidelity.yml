@@ -309,6 +309,23 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+            .github/actions/wasm-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Keep workflow tools out of measured source status
+        run: |
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '\n/.workflow-tools/\n' >> "$exclude"
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         if: ${{ !inputs.private_corpus }}
         with:
@@ -345,15 +362,16 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
         with:
+          override: 'true'
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm-${{ matrix.format }}
 
-      - uses: ./.github/actions/wasm-toolchain
+      - uses: ./.workflow-tools/.github/actions/wasm-toolchain
 
       - uses: taiki-e/install-action@v2
         with:
@@ -483,6 +501,16 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.docx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
@@ -491,7 +519,9 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
+        with:
+          override: 'true'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -543,7 +573,19 @@ jobs:
           ref: ${{ inputs.branch }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
+        with:
+          override: 'true'
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -608,6 +650,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+            .github/actions/wasm-toolchain/
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
@@ -699,15 +752,16 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
         with:
+          override: 'true'
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: wasm-docx
 
-      - uses: ./.github/actions/wasm-toolchain
+      - uses: ./.workflow-tools/.github/actions/wasm-toolchain
 
       - uses: taiki-e/install-action@v2
         with:
@@ -837,13 +891,24 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.xlsx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
+        with:
+          override: 'true'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: xlsx-native-${{ matrix.channel }}
@@ -995,13 +1060,24 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
           ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.pptx-published-source || needs.prepare.outputs.source-sha }}
           path: .source/native-source
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
+        with:
+          override: 'true'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: pptx-native-${{ matrix.channel }}
@@ -1274,13 +1350,24 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.workflow_sha }}
+          path: .workflow-tools
+          sparse-checkout: |
+            rust-toolchain.toml
+            .github/actions/rust-toolchain/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
           ref: ${{ matrix.source }}
           path: .source/roundtrip-source
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.workflow-tools/.github/actions/rust-toolchain
+        with:
+          override: 'true'
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: roundtrip-${{ matrix.format }}-${{ matrix.channel }}

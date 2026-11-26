@@ -42,6 +42,13 @@ updates:
           - "major"
         group-by: dependency-name
 
+  - package-ecosystem: "rust-toolchain"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: "github-actions"
     directories:
       - "/"

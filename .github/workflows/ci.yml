@@ -77,7 +77,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -262,7 +262,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -339,7 +339,7 @@ jobs:
         id: ws
         run: echo "present=$([ -f Cargo.toml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         if: steps.ws.outputs.present == 'true'
         with:
           components: clippy, rustfmt
@@ -498,7 +498,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
         run: |
-          if [ "$EVENT" = pull_request ] && git diff --quiet HEAD^1 HEAD -- apps/native-viewer crates Cargo.lock .github/workflows/ci.yml; then
+          if [ "$EVENT" = pull_request ] && git diff --quiet HEAD^1 HEAD -- apps/native-viewer crates Cargo.lock rust-toolchain.toml .github/actions/rust-toolchain .github/workflows/ci.yml; then
             echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -508,7 +508,7 @@ jobs:
         if: steps.changes.outputs.run == 'true' && runner.environment == 'github-hosted'
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         if: steps.changes.outputs.run == 'true'
         with:
           components: clippy, rustfmt
@@ -539,7 +539,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -573,7 +573,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -770,7 +770,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:

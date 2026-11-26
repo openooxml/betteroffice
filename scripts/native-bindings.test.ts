@@ -582,8 +582,15 @@ describe('native package release wiring', () => {
       sha: '${{ inputs.sha }}'
     });
     expect(publish.jobs.publish.steps[0].with.ref).toBe('${{ inputs.sha }}');
-    const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
-    expect(toolchain.with.targets).toBe('${{ matrix.platform.target }}');
+    const pin = job.steps.find((step: any) => step.id === 'rust-pin');
+    expect(pin.shell).toBe('bash');
+    expect(pin.run).toContain('rust-toolchain.toml');
+    expect(pin.run).toContain('toolchain=stable');
+    const toolchain = job.steps.find((step: any) => step.uses?.startsWith('dtolnay/rust-toolchain@'));
+    expect(toolchain.with).toEqual({
+      toolchain: '${{ steps.rust-pin.outputs.toolchain }}',
+      targets: '${{ matrix.platform.target }}'
+    });
     const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
     expect(cache.with).toEqual({
       workspaces: 'bindings',
@@ -817,7 +824,7 @@ describe('native package release wiring', () => {
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const bun = job.steps.find((step: any) => step.uses === 'oven-sh/setup-bun@v2');
     expect(bun.with['bun-version']).toBe('1.4.3');
-    const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
+    const toolchain = job.steps.find((step: any) => step.uses === './.github/actions/rust-toolchain');
     expect(toolchain.with.targets).toBe('wasm32-unknown-unknown');
     const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
     expect(cache.with).toEqual({ workspaces: '.\nbindings\n', key: 'native' });
@@ -937,9 +944,10 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('package assembly runs after merges to main, path-filtered, and builds every format', () => {
+  test('package assembly runs on filtered pushes and toolchain pull requests and builds every format', () => {
     expect(packages.name).toBe('Native packages');
-    expect(Object.keys(packages.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(Object.keys(packages.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch']);
+    expect(packages.on.pull_request.paths).toEqual(['rust-toolchain.toml']);
     expect(packages.on.push.branches).toEqual(['main']);
     expect(packages.on.push.paths).toEqual([
       'bindings/*-native/**',
@@ -958,6 +966,7 @@ describe('native package release wiring', () => {
       'shared/**',
       'scripts/version-packages.mjs',
       'scripts/workspace-ranges.mjs',
+      'rust-toolchain.toml',
       '.github/workflows/native-packages.yml',
       '.github/workflows/native-dist.yml',
       '.github/workflows/publish-native.yml'

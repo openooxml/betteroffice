@@ -31,7 +31,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         if: matrix.app == 'demo'
         with:
           targets: wasm32-unknown-unknown

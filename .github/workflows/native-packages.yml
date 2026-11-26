@@ -1,6 +1,8 @@
 name: Native packages
 
 on:
+  pull_request:
+    paths: ['rust-toolchain.toml']
   push:
     branches: [main]
     paths:
@@ -20,6 +22,7 @@ on:
       - 'shared/**'
       - 'scripts/version-packages.mjs'
       - 'scripts/workspace-ranges.mjs'
+      - 'rust-toolchain.toml'
       - '.github/workflows/native-packages.yml'
       - '.github/workflows/native-dist.yml'
       - '.github/workflows/publish-native.yml'

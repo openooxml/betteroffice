@@ -13,6 +13,8 @@ const workflow = Bun.YAML.parse(
   )
 ) as any;
 const { prepare, measure, publish } = workflow.jobs;
+const sourceCheckout = (job: any, path = '.source/native-source') =>
+  job.steps.find((step: any) => step.uses?.startsWith('actions/checkout@') && step.with?.path === path);
 
 test('one frozen plan feeds independent format jobs at the same source revision', () => {
   expect(workflow.on.workflow_dispatch.inputs.collection.default).toBe('office-quality');
@@ -34,6 +36,11 @@ test('one frozen plan feeds independent format jobs at the same source revision'
   const evaluate = measure.steps.find(
     (step: any) => step.run === 'node scripts/office-quality/private-step.mjs measure -- node scripts/office-quality/run.mjs'
   );
+  const exclude = measure.steps.findIndex((step: any) => step.name === 'Keep workflow tools out of measured source status');
+  expect(exclude).toBeGreaterThan(measure.steps.indexOf(sourceCheckout(measure, '.workflow-tools')));
+  expect(exclude).toBeLessThan(measure.steps.indexOf(evaluate));
+  expect(measure.steps[exclude].run).toContain('git rev-parse --git-path info/exclude');
+  expect(measure.steps[exclude].run).toContain("printf '\\n/.workflow-tools/\\n' >> \"$exclude\"");
   expect(evaluate.env.QUALITY_PLAN).toBe('${{ runner.temp }}/fidelity-plan/plan.json');
   expect(evaluate.env.QUALITY_FORMAT).toBe('${{ matrix.format }}');
   expect(evaluate.env.QUALITY_SHARD).toBe('${{ matrix.shard }}');
@@ -106,7 +113,7 @@ test('native builds and paired DOCX shards are isolated from browser measurement
   const benchmark = workflow.jobs['docx-benchmark'];
   expect(build.needs).toBe('prepare');
   expect(build.strategy.matrix.channel).toEqual(['published', 'commit']);
-  expect(build.steps[1].with.ref).toContain('needs.prepare.outputs.docx-published-source');
+  expect(sourceCheckout(build).with.ref).toContain('needs.prepare.outputs.docx-published-source');
   expect(benchmark.needs).toEqual(['prepare', 'native-build', 'libreoffice-archive']);
   expect(benchmark.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.docx-shards) }}');
   expect(benchmark['runs-on']).toBe('ubuntu-24.04');
@@ -131,7 +138,7 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
   expect(pptx.steps.filter((step: any) => step.uses?.startsWith('actions/upload-artifact@')).map((step: any) => step.with.name))
     .toEqual(['pptx-benchmark-report-${{ matrix.shard }}', 'pptx-benchmark-diagnostics-${{ matrix.shard }}']);
   expect(publish.steps.find((step: any) => step.with?.pattern === 'pptx-benchmark-report-*')).toBeDefined();
-  expect(workflow.jobs['pptx-native-build'].steps[1].with.ref).toContain('needs.prepare.outputs.pptx-published-source');
+  expect(sourceCheckout(workflow.jobs['pptx-native-build']).with.ref).toContain('needs.prepare.outputs.pptx-published-source');
   expect(pptx.steps.find((step: any) => step.run?.includes('pptx_benchmark.py')).env.QUALITY_NATIVE).toBe('${{ runner.temp }}/native');
   expect(publish.if).toContain("needs.xlsx-benchmark.result == 'success'");
   expect(publish.if).toContain("needs.pptx-benchmark.result == 'success'");
@@ -140,7 +147,7 @@ test('XLSX calculation and PPTX LibreOffice run independently and gate publicati
   expect(merge.env.QUALITY_REQUIRE_XLSX_BENCHMARK).toBe('true');
   const builds = workflow.jobs['xlsx-native-build'];
   expect(builds.strategy.matrix.channel).toEqual(['published','commit']);
-  expect(builds.steps[1].with.ref).toContain('needs.prepare.outputs.xlsx-published-source');
+  expect(sourceCheckout(builds).with.ref).toContain('needs.prepare.outputs.xlsx-published-source');
 });
 
 
@@ -158,7 +165,7 @@ test('native parse/edit/save probes run independently and gate the final report'
   const build = workflow.jobs['roundtrip-build'];
   expect(build.needs).toBe('prepare');
   expect(build.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}');
-  expect(build.steps[1].with.ref).toBe('${{ matrix.source }}');
+  expect(sourceCheckout(build, '.source/roundtrip-source').with.ref).toBe('${{ matrix.source }}');
   expect(workflow.jobs.roundtrip).toBeUndefined();
   const [first, second] = ['a', 'b'].map(half => {
     const probe = workflow.jobs[`roundtrip-${half}`];
@@ -355,7 +362,7 @@ test('every per-document artifact has a private bundle of the same name and dire
       store.step.if === 'always() && inputs.private_corpus')).toBe(true);
 });
 
-test('private runs check out only the main commit they were dispatched from', () => {
+test('private runs pin measured source and workflow tools to their respective commits', () => {
   const checkout = prepare.steps.find((step: any) => step.uses?.startsWith('actions/checkout@'));
   expect(checkout.with.ref).toBe('${{ inputs.private_corpus && github.sha || inputs.branch }}');
   const pin = prepare.steps.find((step: any) => step.id === 'source');
@@ -364,9 +371,11 @@ test('private runs check out only the main commit they were dispatched from', ()
   expect(publishCheckout.with.ref).toBe('${{ inputs.private_corpus && needs.prepare.outputs.source-sha || inputs.branch }}');
   for (const [name, job] of Object.entries<any>(workflow.jobs)) {
     if (job.environment === undefined || name === 'prepare' || name === 'publish') continue;
-    for (const step of job.steps ?? [])
-      if (step.uses?.startsWith('actions/checkout@'))
-        expect({ name, ref: step.with?.ref }).toEqual({ name, ref: '${{ needs.prepare.outputs.source-sha }}' });
+    for (const step of job.steps ?? []) {
+      if (!step.uses?.startsWith('actions/checkout@')) continue;
+      const ref = step.with?.path === '.workflow-tools' ? '${{ github.workflow_sha }}' : '${{ needs.prepare.outputs.source-sha }}';
+      expect(step.with?.ref, name).toBe(ref);
+    }
   }
 });
 
@@ -467,9 +476,8 @@ test('the README writer runs from the workflow revision, not the measured branch
     expect(String(writer.run).trim()).toStartWith('node .workflow-tools/scripts/office-quality/readme.mjs ');
     expect(String(writer.run).split('.workflow-tools').length).toBe(2);
   }
-  const users = steps.filter(({ step }) => JSON.stringify(step).includes('.workflow-tools'))
-    .map(({ job, step }) => `${job}/${step.uses?.startsWith('actions/checkout@') ? step.with?.ref : step.name}`);
-  expect(users).toEqual(['publish/${{ github.workflow_sha }}', `publish/${PUBLIC_WRITER}`, `publish/${LARGE_WRITER}`]);
+  const users = publish.steps.filter((step: any) => JSON.stringify(step).includes('.workflow-tools'));
+  expect(users).toEqual([tools[0], ...writers]);
 });
 
 test('the reconciled artifact always carries the aggregate, and the private bundle keeps it too', () => {

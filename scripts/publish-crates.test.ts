@@ -1011,7 +1011,7 @@ describe('release workflow crates auth', () => {
       'oven-sh/setup-bun@v2',
       'actions/setup-node@v7.1.0',
       'bun install --frozen-lockfile',
-      'dtolnay/rust-toolchain@stable',
+      './.github/actions/rust-toolchain',
       'Swatinem/rust-cache@v2',
       './.github/actions/wasm-toolchain',
       'taiki-e/install-action@v2',
