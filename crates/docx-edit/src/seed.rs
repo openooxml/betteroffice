@@ -2925,8 +2925,8 @@ fn cached_result_fragments(field_value: &Value) -> Vec<CachedResultFragment<'_>>
     while let Some((node, hidden, source_index)) = pending.pop() {
         let children = match string(field(Some(node), "type")) {
             Some("run") => {
-                let hidden =
-                    hidden || boolean(field(field(Some(node), "formatting"), "hidden")) == Some(true);
+                let hidden = hidden
+                    || boolean(field(field(Some(node), "formatting"), "hidden")) == Some(true);
                 for content in array(field(Some(node), "content")) {
                     if string(field(Some(content), "type")) == Some("text")
                         && let Some(text) = string(field(Some(content), "text"))
@@ -2991,7 +2991,10 @@ fn field_payload_with_projection(
         .map(|fragment| fragment.text)
         .collect();
     let formatting = if projected_result_indexes.is_some() {
-        field_formatting_from_runs(field_value, structured_field_result(field_value).unwrap_or(&[]))
+        field_formatting_from_runs(
+            field_value,
+            structured_field_result(field_value).unwrap_or(&[]),
+        )
     } else {
         field_result_formatting(field_value)
     };
