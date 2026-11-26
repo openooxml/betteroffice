@@ -710,6 +710,23 @@ it('saves an old projection without writing a later session edit', () =>
   })
 );
 
+it('saves an explicit spacing override followed by another paragraph edit', () => {
+  const parts = { ...sourceParts };
+  const secondId = '11223344';
+  parts[BODY] = encodePart(`<w:document xmlns:w="${NS.w}" xmlns:w14="${NS.w14}"><w:body><w:p w14:paraId="${EDIT_PARAGRAPH_ID}"><w:r><w:t>First</w:t></w:r></w:p><w:p w14:paraId="${secondId}"><w:r><w:t>Second</w:t></w:r></w:p></w:body></w:document>`);
+  parts[STYLES] = encodePart(`<w:styles xmlns:w="${NS.w}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="160"/></w:pPr></w:style></w:styles>`);
+  return withSession(rezipContainer(parts), async session => {
+    const at = { paraId: EDIT_PARAGRAPH_ID, offset: 0 };
+    session.setParagraphAttrs({ story: 'body', start: at, end: at }, { spaceAfter: 160 });
+    session.insertText({ story: 'body', paraId: secondId, offset: 6 }, ' updated');
+    const projected = yrsToDocument(session, session.materializeDocx()!);
+    const saved = await repackDocx(projected, noStamp);
+    const xml = decodePart(unzipContainer(new Uint8Array(saved))[BODY]);
+    expect(xml).toContain('w:after="160"');
+    expect(xml).toContain('updated');
+  });
+});
+
 it('writes an in-place edit to a current projection', () =>
   withSession(fixture.bytes, async (session) => {
     const projected = yrsToDocument(session, session.materializeDocx()!);
@@ -859,6 +876,27 @@ it('keeps an explicit raw bookmark attribute on a note with unchanged text', asy
   expect(decodePart(saved[FOOTNOTES])).toContain('w:displacedByCustomXml="next"');
 });
 
+it('accepts consistent verbatim and model edits to a bookmarked note with an external hyperlink', async () => {
+  const parts = unzipContainer(bookmarkedNotePackage());
+  const href = 'https://example.org/note';
+  changedPart(parts, FOOTNOTES, xml => xml
+    .replace('<w:footnotes ', `<w:footnotes xmlns:r="${NS.r}" `)
+    .replace('</w:p>', '<w:hyperlink r:id="rIdLink"><w:r><w:rPr><w:rStyle w:val="LinkedNote"/></w:rPr><w:t>Note link</w:t></w:r></w:hyperlink></w:p>'));
+  parts[STYLES] = encodePart(`<w:styles xmlns:w="${NS.w}"><w:style w:type="character" w:styleId="LinkedNote"><w:name w:val="Linked Note"/><w:rPr><w:b/></w:rPr></w:style></w:styles>`);
+  parts['word/_rels/footnotes.xml.rels'] = encodePart(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdLink" Type="${NS.r}/hyperlink" Target="${href}" TargetMode="External"/></Relationships>`);
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  const note = document.package.footnotes![0]!;
+  firstText(note.content).text = 'Edited note';
+  note.verbatimXml = note.verbatimXml!.replace('Original note', 'Edited note');
+  const saved = await repackDocx(document, noStamp);
+  const reopened = await parseDocx(new Uint8Array(saved), { preloadFonts: false });
+  const reopenedNote = reopened.package.footnotes![0]!;
+  expect(firstText(reopenedNote.content).text).toBe('Edited note');
+  expect(reopenedNote.verbatimXml).toContain('w:name="note"');
+  const paragraph = reopenedNote.content.find(block => block.type === 'paragraph')!;
+  expect(paragraph.content).toContainEqual(expect.objectContaining({ type: 'hyperlink', href }));
+});
+
 it('cleans deleted comment markers from headers with mixed-case archive names', async () => {
   const parts = { ...sourceParts };
   const original = await parseDocx(fixture.bytes, { preloadFonts: false });
@@ -962,6 +1000,30 @@ it('removes comment markers from a Windows-1252 main part without changing its t
   expect(xml).toContain('<w:t>Café</w:t>');
   expect(xml).not.toMatch(/<w:comment(?:RangeStart|RangeEnd|Reference)\b/);
 });
+
+for (const littleEndian of [true, false]) {
+  const encoding = littleEndian ? 'utf-16le' : 'utf-16be';
+  it(`removes deleted comment markers from a retained ${encoding} header`, async () => {
+    const original = await parseDocx(fixture.bytes, { preloadFonts: false });
+    const id = original.package.document.comments![0]!.id;
+    const header = `<?xml version="1.0" encoding="UTF-16"?><w:hdr xmlns:w="${NS.w}"><w:p><w:commentRangeStart w:id="${id}"/><w:r><w:t>Café</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p></w:hdr>`;
+    const bytes = new Uint8Array((header.length + 1) * 2);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(0, 0xfeff, littleEndian);
+    for (let index = 0; index < header.length; index += 1) {
+      view.setUint16((index + 1) * 2, header.charCodeAt(index), littleEndian);
+    }
+    const source = rezipContainer({ ...sourceParts, [HEADER]: bytes });
+    const document = await parseDocx(source, { preloadFonts: false, parseHeadersFooters: false });
+    document.package.document.comments = [];
+    const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)))[HEADER]!;
+    expect(saved.slice(0, 2)).toEqual(bytes.slice(0, 2));
+    const xml = new TextDecoder(encoding, { fatal: true }).decode(saved);
+    expect(xml).toContain('encoding="UTF-16"');
+    expect(xml).toContain('<w:t>Café</w:t>');
+    expect(xml).not.toMatch(/<w:comment(?:RangeStart|RangeEnd|Reference)\b/);
+  });
+}
 
 it('reports a conflicting verbatim note edit with its note ID', async () => {
   const document = await parseDocx(bookmarkedNotePackage(), { preloadFonts: false });

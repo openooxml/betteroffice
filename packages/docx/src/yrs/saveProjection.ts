@@ -8,7 +8,7 @@ import type { ProjectionFormatEdit } from './saveYrsDocx';
 import { sessionMaterializedSource, sessionSourceDigest, sessionSourcePackage } from './sessionInternals';
 
 const hostEnvelopes = new WeakMap<Document, { fingerprint: string; sourceDigest: string | undefined }>();
-const formatEdits = new WeakMap<YrsSession, { version: string; edits: ProjectionFormatEdit[] }>();
+const formatEdits = new WeakMap<YrsSession, readonly ProjectionFormatEdit[]>();
 const projections = new WeakMap<Document, {
   session: YrsSession;
   version: string;
@@ -19,12 +19,13 @@ const projections = new WeakMap<Document, {
   formatEdits: readonly ProjectionFormatEdit[];
 }>();
 
-export function rememberProjectionFormatEdit(session: YrsSession, previousVersion: string, edit: ProjectionFormatEdit): void {
+export function rememberProjectionFormatEdit(session: YrsSession, edit: ProjectionFormatEdit): void {
   const previous = formatEdits.get(session);
-  formatEdits.set(session, {
-    version: session.version(),
-    edits: [...(previous?.version === previousVersion ? previous.edits : []), edit],
-  });
+  formatEdits.set(session, [...(previous ?? []), edit]);
+}
+
+export function clearProjectionFormatEdits(session: YrsSession): void {
+  formatEdits.delete(session);
 }
 
 export function rememberHostEnvelope(document: Document, sourceDigest: string | undefined): void {
@@ -51,7 +52,6 @@ export function rememberSaveProjection(session: YrsSession, base: Document, proj
   const baseFingerprint = saveTreeFingerprint(modelSaveFields(base));
   if (host && (host.sourceDigest !== sourceDigest || host.fingerprint !== baseFingerprint)) return;
   const version = session.version();
-  const formatting = formatEdits.get(session);
   projections.set(projection, {
     session,
     version,
@@ -59,7 +59,7 @@ export function rememberSaveProjection(session: YrsSession, base: Document, proj
     base,
     baseAtProjection: host ? undefined : baseFingerprint,
     baseline: saveTreeFingerprint(modelSaveFields(projection)),
-    formatEdits: formatting?.version === version ? formatting.edits : [],
+    formatEdits: formatEdits.get(session) ?? [],
   });
 }
 
@@ -88,13 +88,18 @@ export async function saveCurrentProjection(
     if (baseAtProjection !== saveTreeFingerprint(modelSaveFields(base))) return undefined;
   }
   const { saved, warnings } = await save.saveYrsDocxWithWarnings(session, options, provenance.formatEdits);
+  if (saved.keptUnchanged) {
+    const { structure, paragraphs } = saved.keptUnchanged;
+    const parts = [...new Set(paragraphs.map(({ part }) => part))];
+    const location = parts.length ? ` in ${parts.join(', ')}` : '';
+    warnings.push(`DOCX_KEPT_UNCHANGED Edits were skipped to preserve source structure in ${structure} ${structure === 1 ? 'paragraph' : 'paragraphs'}${location}.`);
+  }
+  for (const { part, dropped } of saved.structureDropped ?? []) {
+    warnings.push(`DOCX_PART_REWRITTEN ${part} was rewritten from the document model. Content the model does not carry may be lost. Saving edits through a session (createYrsSession, saveYrsDocx) patches changed paragraphs in place where it can. Dropped elements include ${dropped.join(', ')}.`);
+  }
   const published = save.publishedSaveVersion(saved);
   if (published === session.version() && provenance.version === version) {
     provenance.version = published;
-    const formatting = formatEdits.get(session);
-    if (formatting?.version === version && formatting.edits === provenance.formatEdits) {
-      formatting.version = published;
-    }
   }
   return {
     buffer: Uint8Array.from(saved.bytes).buffer,

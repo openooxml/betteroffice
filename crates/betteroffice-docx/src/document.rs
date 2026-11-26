@@ -576,6 +576,18 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
+        let unstamped = !options.update_modified_date && options.modified_by.is_none();
+        if self.dirty == Dirty::Clean && unstamped {
+            SerializerDeterminism {
+                seed: self.seed.clone(),
+                now: options.now,
+            }
+            .validate()?;
+            return Ok(save_report(
+                self.source.to_vec(),
+                &mut S13SaveReport::default(),
+            ));
+        }
         self.save_report_with_warnings_and_options(options)
             .map(|(report, _)| report)
     }

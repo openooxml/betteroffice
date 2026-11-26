@@ -12,7 +12,7 @@ import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { checkedSaveModel, type SaveModel } from './commentRangeCheck';
 import { crossingWrittenWhole, withCrossingFallback } from './crossStoryComments';
 import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
-import { sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
+import { sessionSourcePackage } from './sessionInternals';
 import { carryGate, refuseUnavailableTables } from './tableUnavailable';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
@@ -167,8 +167,9 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const opened = source && sameBytes(original, source.buffer) ? sessionMaterializedSource(session) : null;
-    const keepNotes = (part: string): boolean => {
+    const sameSource = source !== null && sameBytes(original, source.buffer);
+    const keepNotes = (part: string, opened: Readonly<Document> | null): boolean => {
+      if (!sameSource) return false;
       const kind = part === 'word/footnotes.xml' ? 'footnotes' : part === 'word/endnotes.xml' ? 'endnotes' : undefined;
       const before = kind && opened?.package[kind];
       if (!kind || !before || !before.some(note => note.verbatimXml !== undefined)) return false;

@@ -656,6 +656,8 @@ async function sectionSavePlan(source: Readonly<Document> | null, sections: Retu
   return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits: placed }, lossy: lossy(), strict: structural && !contiguous && edits.some(edit => edit.paragraph !== null) };
 }
 
+type PartSaveFilter = (part: string, openedModel: Readonly<Document> | null) => boolean;
+
 /**
  * Writes `document`, projected from `session` when `capture` was taken, and
  * records the Word paragraph IDs the bytes hold as saved. `patches` selects
@@ -671,9 +673,9 @@ export async function writeSessionSave(
   capture: DocxSessionSave,
   originalBuffer: ArrayBuffer,
   options: DocxSaveOptions = {},
-  patches: (part: string) => boolean = () => true,
+  patches: PartSaveFilter = () => true,
   skipMutations = false,
-  splices: (part: string) => boolean = patches,
+  splices: PartSaveFilter = patches,
   yieldSave?: () => Promise<void>
 ): Promise<DocxSavedDocument> {
   const { saved } = await writeSessionSaveWithWarnings(
@@ -688,9 +690,9 @@ async function writeSessionSaveWithWarnings(
   capture: DocxSessionSave,
   originalBuffer: ArrayBuffer,
   options: DocxSaveOptions,
-  patches: (part: string) => boolean,
+  patches: PartSaveFilter,
   skipMutations = false,
-  splices: (part: string) => boolean = patches,
+  splices: PartSaveFilter = patches,
   yieldSave?: () => Promise<void>
 ): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
   const state = saveStates.get(capture) ?? captureSaveState(session);
@@ -716,7 +718,7 @@ async function writeSessionSaveWithWarnings(
     return sourceSeparators?.[kind] !== separators[kind];
   };
   const unspliced = (capture.plan.splicedParts ?? [])
-    .filter((entry) => !(splices(entry.part) && !rewritten(entry.part)) && (entry.paragraphPatches?.length || entry.legacyParagraphs?.length))
+    .filter((entry) => !(splices(entry.part, openedModel) && !rewritten(entry.part)) && (entry.paragraphPatches?.length || entry.legacyParagraphs?.length))
     .map((entry) => ({ part: entry.part, ordinals: entry.changed }));
   if (unspliced.length) {
     console.debug('DOCX_MINIMAL_PATCH unspliced paragraphs', unspliced);
@@ -724,7 +726,7 @@ async function writeSessionSaveWithWarnings(
   const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(openedModel, state.sections, output, capture, sourceBuffer);
   const splicesFor = (edits: RustParagraphIds['sectionEdits']) =>
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
-      (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
+      (splices(part, openedModel) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   if (yieldSave) await yieldSave();
   engineProgress();
@@ -739,7 +741,7 @@ async function writeSessionSaveWithWarnings(
   const write = async (sectionEdits: RustParagraphIds['sectionEdits']) => {
     const modelBody = (part: string) => sectionPlan !== undefined && !sectionEdits && part === bodyPart;
     const spliced = splicesFor(sectionEdits).filter(({ part }) => !modelBody(part));
-    const whole = (capture.plan.wholeParts ?? []).filter(({ part }) => splices(part) && !rewritten(part) && !(part === bodyPart && (modelBody(part) || sectionEdits)));
+    const whole = (capture.plan.wholeParts ?? []).filter(({ part }) => splices(part, openedModel) && !rewritten(part) && !(part === bodyPart && (modelBody(part) || sectionEdits)));
     const plan: RustParagraphIds = {
       ...(options.commentBaseline ? {
         removedCommentIds: [...new Set([
@@ -751,7 +753,7 @@ async function writeSessionSaveWithWarnings(
       assignments: capture.plan.assignments,
       ...(whole.length ? { wholeParts: whole.map(({ part, sha256, changed }) => ({ part, sha256, changed })) } : {}),
       ...(capture.plan.touchedParts?.length ? { touchedParts: capture.plan.touchedParts } : {}),
-      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
+      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part, openedModel) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
       ...(spliced.length === 0
         ? {}
         : {

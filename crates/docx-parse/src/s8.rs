@@ -243,10 +243,7 @@ pub(crate) fn parse_note_part(
     let Some((path, xml)) = find_part(parts, owner_path) else {
         return Ok(Vec::new());
     };
-    let relationship_path = relationship_part_path(path);
-    let part_relationships = find_part(parts, &relationship_path)
-        .map(|(relationship_path, xml)| parse_relationships(xml, relationship_path, budget))
-        .transpose()?;
+    let part_relationships = note_part_relationships(parts, path, budget)?;
     let relationships = part_relationships
         .as_ref()
         .unwrap_or(document_relationships);
@@ -268,6 +265,17 @@ pub(crate) fn parse_note_part(
         part: path,
     };
     parse_notes(root, footnotes, &mut parser)
+}
+
+pub(crate) fn note_part_relationships(
+    parts: &[(String, Vec<u8>)],
+    path: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Option<RelationshipMap>, ParseError> {
+    let relationship_path = relationship_part_path(path);
+    find_part(parts, &relationship_path)
+        .map(|(path, xml)| parse_relationships(xml, path, budget))
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -2027,24 +2027,27 @@ fn sync_original_formatting(
     keys: &[&str],
     dropped: &[&str],
 ) {
-    let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") else {
-        return;
+    let original = match map.get(txn, "_originalFormatting") {
+        Some(Out::Any(Any::Map(original))) => Some(original),
+        _ => None,
     };
-    let mut original = (*original).clone();
+    let mut direct = original.as_deref().cloned().unwrap_or_default();
     for key in keys {
         match map.get(txn, key) {
             Some(Out::Any(value)) if value != Any::Null => {
-                original.insert((*key).to_owned(), value);
+                direct.insert((*key).to_owned(), value);
             }
             _ => {
-                original.remove(*key);
+                direct.remove(*key);
             }
         }
     }
     for key in dropped {
-        original.remove(*key);
+        direct.remove(*key);
     }
-    map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
+    if original.is_some() || !direct.is_empty() {
+        map.insert(txn, "_originalFormatting", Any::Map(Arc::new(direct)));
+    }
 }
 
 fn paragraph_formatting<T: ReadTxn>(map: &MapRef, txn: &T) -> HashMap<String, Any> {

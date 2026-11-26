@@ -130,7 +130,8 @@ function bodySaveFields({ content, finalSectionProperties, customRootBindings }:
 }
 
 export function saveTreeFingerprint(value: unknown): string {
-  assertSafeSaveTree(value, 'save');
+  const body = (value as { document?: unknown } | null | undefined)?.document;
+  assertSafeSaveTree(value, 'save', undefined, body);
   const hash = new Uint32Array([0x811c9dc5, 0x243f6a88, 0xb7e15162, 0x9e3779b9]);
   const add = (word: number): void => {
     hash[0] = Math.imul(hash[0]! ^ word, 0x01000193);
@@ -150,7 +151,11 @@ export function saveTreeFingerprint(value: unknown): string {
     } else if (field !== null && typeof field === 'object') {
       add(2);
       const object = field as Record<string, unknown>;
-      const keys = Object.keys(object).filter(key => key !== 'sourceOrdinal' && object[key] !== undefined).sort();
+      const linkedImage = object.type === 'image' && typeof object.rId === 'string' && object.rId !== '';
+      const linkedWatermark = object.kind === 'picture' && typeof object.mediaPath === 'string' && object.mediaPath !== '';
+      const keys = Object.keys(object).filter(key => key !== 'sourceOrdinal' && object[key] !== undefined &&
+        !(key === 'sections' && object === body) && !(key === 'src' && linkedImage) &&
+        !(key === 'dataUrl' && linkedWatermark)).sort();
       add(keys.length);
       for (const key of keys) {
         addString(key);
@@ -249,7 +254,11 @@ export async function writeDocumentWithRust(
       return {
         buffer: exactArrayBuffer(bytes),
         determinism: fixed,
-        warnings: [...(document.warnings ?? []), ...baseline.saveWarnings, ...warnings],
+        warnings: [
+          ...(document.warnings ?? []),
+          ...baseline.saveWarnings,
+          ...warnings.filter(warning => warning !== NO_BINDING_CHANGES),
+        ],
       };
     } catch (error) {
       if (String(error).replace(/^Error: /, '') !== 'DOCX_SOURCE_CHANGED') throw error;
@@ -494,7 +503,12 @@ function validateDeterminism(value: RustSaveDeterminism): void {
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** @internal */
-export function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
+export function assertSafeSaveTree(
+  value: unknown,
+  path: string,
+  active = new WeakSet<object>(),
+  body?: unknown
+): void {
   const segments: Array<string | number> = [];
   const currentPath = (): string => {
     let result = path;
@@ -517,6 +531,7 @@ export function assertSafeSaveTree(value: unknown, path: string, active = new We
       }
     } else {
       for (const key of Object.keys(value)) {
+        if (key === 'sections' && value === body) continue;
         if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
         segments.push(key);
         visit((value as Record<string, unknown>)[key]);

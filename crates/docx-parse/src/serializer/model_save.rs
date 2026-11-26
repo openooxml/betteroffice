@@ -4,14 +4,17 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::block::StoryParser;
 use crate::document::DocumentBody;
 use crate::header_footer::HeaderFooter;
 use crate::notes::Note;
-use crate::numbering::NumberingDefinitions;
+use crate::numbering::{NumberingDefinitions, NumberingMap};
+use crate::paragraph::HexIdAllocator;
 use crate::relationships::{
     Relationship, RelationshipMap, RelationshipTarget, parse_relationships, relationship_part_path,
     relationship_types, resolve_relationship_target,
 };
+use crate::s8::note_part_relationships;
 use crate::s9::{S9PackageWire, S9ParseOptions, parse_save_source};
 use crate::xml::{ParseBudget, ParseError, ParseLimits};
 
@@ -147,12 +150,14 @@ pub(crate) fn write_json(
         return Err("styleLanguages requires a session save plan".to_owned());
     }
     if wire.fresh_package || request.paragraph_ids.is_some() || request.selective.is_some() {
+        let localize_row_namespaces = request.paragraph_ids.is_some();
         return write_parts(
             request,
             &parts,
             Some(original_docx),
             WriteSettings {
                 style_languages: wire.style_languages.as_ref(),
+                localize_row_namespaces,
                 product_save: wire.fresh_package,
                 ..WriteSettings::default()
             },
@@ -230,7 +235,15 @@ fn write_model(
     source_digest: Option<String>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     if request.paragraph_ids.is_some() || request.selective.is_some() {
-        return write_parts(request, parts, Some(bytes), WriteSettings::default());
+        return write_parts(
+            request,
+            parts,
+            Some(bytes),
+            WriteSettings {
+                legacy_diagnostics: false,
+                ..WriteSettings::default()
+            },
+        );
     }
     request.determinism.validate()?;
     let parse_options = S9ParseOptions {
@@ -242,7 +255,9 @@ fn write_model(
         determinism_seed: source_digest,
         ..S9ParseOptions::default()
     };
-    let (body_path, source) = match parse_save_source(bytes, parts, parse_options, limits) {
+    let unchanged_body = coverage.unchanged_body && !coverage.rewrite_body;
+    let source = parse_save_source(bytes, parts, parse_options, limits, unchanged_body);
+    let (body_path, source) = match source {
         Ok(source) => source,
         Err(error) => {
             if let Some(requested) = &request.numbering
@@ -306,11 +321,11 @@ fn write_model(
         );
     }
     let mut changed = BTreeSet::new();
-    let reuse_document_root =
-        request.document.custom_root_bindings == source.document.custom_root_bindings;
+    let reuse_document_root = unchanged_body
+        || request.document.custom_root_bindings == source.document.custom_root_bindings;
     if coverage.rewrite_body
         || !reuse_document_root
-        || (!coverage.unchanged_body
+        || (!unchanged_body
             && (!same_model(&request.document.content, &source.document.content)
                 || request.document.final_section_properties
                     != source.document.final_section_properties))
@@ -382,7 +397,7 @@ fn write_model(
     let mut empty_notes = [false; 2];
     for (index, notes) in note_parts.into_iter().enumerate() {
         if changed.contains(notes.path) {
-            notes.prepare(limits)?;
+            notes.prepare(parts, &source, limits)?;
             empty_notes[index] = true;
         }
     }
@@ -467,6 +482,7 @@ fn write_fallback(
         Some(bytes),
         WriteSettings {
             empty_notes,
+            legacy_diagnostics: false,
             product_save: true,
             ..WriteSettings::default()
         },
@@ -860,7 +876,12 @@ impl NotePart<'_> {
             || (self.separators_read && !same_notes(self.separators, self.source_separators))
     }
 
-    fn prepare(self, limits: &ParseLimits) -> Result<(), ParseError> {
+    fn prepare(
+        self,
+        parts: &[(String, Vec<u8>)],
+        source: &S9PackageWire,
+        limits: &ParseLimits,
+    ) -> Result<(), ParseError> {
         if !self.notes_read {
             self.notes.extend_from_slice(self.source_notes);
         }
@@ -880,6 +901,44 @@ impl NotePart<'_> {
             .filter_map(|note| note.verbatim_xml.as_deref())
             .collect();
         let mut budget = ParseBudget::new(limits);
+        budget.compare_media_from(parts);
+        let relationships = note_part_relationships(parts, self.path, &mut budget)?
+            .unwrap_or_else(|| source.relationship_entries.iter().cloned().collect());
+        let styles = source
+            .styles
+            .iter()
+            .flat_map(|definitions| &definitions.styles)
+            .map(|style| (style.style_id.clone(), style.clone()))
+            .collect();
+        let doc_defaults = source
+            .styles
+            .as_ref()
+            .and_then(|definitions| definitions.doc_defaults.as_ref());
+        let numbering = NumberingMap {
+            definitions: source.numbering.clone(),
+        };
+        let media = crate::media::build_save_media_map(parts);
+        let charts = source.chart_entries.iter().cloned().collect();
+        let diagram_parts = parts
+            .iter()
+            .filter(|(path, _)| path.to_ascii_lowercase().starts_with("word/diagrams/"))
+            .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
+            .collect();
+        let mut smart_art = crate::smart_art::create_smart_art_context(&diagram_parts);
+        let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64))?;
+        let mut parser = StoryParser {
+            relationships: Some(&relationships),
+            theme: Some(&source.theme),
+            styles: Some(&styles),
+            doc_defaults,
+            numbering: Some(&numbering),
+            media: &media,
+            charts: &charts,
+            smart_art: &mut smart_art,
+            budget: &mut budget,
+            ids: &mut ids,
+            part: self.path,
+        };
         for (notes, supplied) in [
             (self.notes, self.notes_read),
             (self.separators, self.separators_read),
@@ -890,7 +949,7 @@ impl NotePart<'_> {
                         .get(&note_key(note))
                         .map(Vec::as_slice)
                         .unwrap_or_default();
-                    clear_stale_note_xml(note, originals, &source_xml, self.path, &mut budget)?;
+                    clear_stale_note_xml(note, originals, &source_xml, &mut parser)?;
                 }
             }
         }
@@ -902,9 +961,9 @@ fn clear_stale_note_xml(
     note: &mut Note,
     originals: &[&Note],
     source_xml: &BTreeSet<&str>,
-    path: &str,
-    budget: &mut ParseBudget<'_>,
+    parser: &mut StoryParser<'_, '_>,
 ) -> Result<(), ParseError> {
+    let path = parser.part;
     let Some(xml) = note.verbatim_xml.as_deref() else {
         note.source_ordinal = None;
         return Ok(());
@@ -918,20 +977,20 @@ fn clear_stale_note_xml(
         return Ok(());
     }
     if source_xml.contains(xml)
-        || (originals.is_empty() && verbatim_note_has_other_id(xml, note, path, budget))
+        || (originals.is_empty() && verbatim_note_has_other_id(xml, note, path, parser.budget))
     {
         note.verbatim_xml = None;
         note.source_ordinal = None;
         return Ok(());
     }
-    let consistent = parse_verbatim_note(xml, note, path, budget).is_some_and(|edited| {
+    let consistent = parse_verbatim_note(xml, note, parser).is_some_and(|edited| {
         if same_model(&edited, &note.content) {
             return true;
         }
         matching
             .and_then(|original| original.verbatim_xml.as_deref())
-            .and_then(|source| parse_verbatim_note(source, note, path, budget))
-            .is_some_and(|source| same_verbatim_note_content(&edited, &source, path, budget))
+            .and_then(|source| parse_verbatim_note(source, note, parser))
+            .is_some_and(|source| same_verbatim_note_content(&edited, &source, path, parser.budget))
     });
     if !consistent {
         return Err(save_error(format!(
@@ -965,16 +1024,16 @@ fn verbatim_note_has_other_id(
 fn parse_verbatim_note(
     xml: &str,
     note: &Note,
-    path: &str,
-    budget: &mut ParseBudget<'_>,
+    parser: &mut StoryParser<'_, '_>,
 ) -> Option<Vec<crate::block::BlockContent>> {
+    let path = parser.part;
     let expected = if path.eq_ignore_ascii_case(FOOTNOTES) {
         "footnote"
     } else {
         "endnote"
     };
     super::raw::validate_raw_subtree(xml, "w", expected).ok()?;
-    let parsed = crate::xml::parse_xml_strict(xml.as_bytes(), path, budget).ok()?;
+    let parsed = crate::xml::parse_xml_strict(xml.as_bytes(), path, parser.budget).ok()?;
     let [element] = parsed.roots.as_slice() else {
         return None;
     };
@@ -990,21 +1049,7 @@ fn parse_verbatim_note(
     {
         return None;
     }
-    crate::block::StoryParser {
-        relationships: None,
-        theme: None,
-        styles: None,
-        doc_defaults: None,
-        numbering: None,
-        media: &Default::default(),
-        charts: &Default::default(),
-        smart_art: &mut Default::default(),
-        budget,
-        ids: &mut crate::paragraph::HexIdAllocator::from_sha256(&"0".repeat(64)).ok()?,
-        part: path,
-    }
-    .parse_blocks(element, 0, false)
-    .ok()
+    parser.parse_blocks(element, 0, false).ok()
 }
 
 fn same_verbatim_note_content(

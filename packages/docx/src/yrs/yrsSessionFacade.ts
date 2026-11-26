@@ -1,4 +1,4 @@
-import { rememberHostEnvelope, rememberProjectionFormatEdit } from './saveProjection';
+import { clearProjectionFormatEdits, rememberHostEnvelope, rememberProjectionFormatEdit } from './saveProjection';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
@@ -499,6 +499,7 @@ export function wrapSession(
       } catch (error) {
         throw normalizeSeedError(error);
       }
+      clearProjectionFormatEdits(facade);
       forgetSavedListDefinitions(facade);
       proposals.reset();
       return opened;
@@ -853,6 +854,7 @@ export function wrapSession(
         } catch (error) {
           throw peerMetadataFailure(error);
         }
+        clearProjectionFormatEdits(facade);
         forgetSavedListDefinitions(facade);
         session.set_media_tokens(options.mediaTokens === true);
         markDirty('all');
@@ -1013,13 +1015,19 @@ export function wrapSession(
     undo: () =>
       mutate(() => {
         const applied = session.undo();
-        if (applied) markDirty(session.history_stories());
+        if (applied) {
+          clearProjectionFormatEdits(facade);
+          markDirty(session.history_stories());
+        }
         return applied;
       }),
     redo: () =>
       mutate(() => {
         const applied = session.redo();
-        if (applied) markDirty(session.history_stories());
+        if (applied) {
+          clearProjectionFormatEdits(facade);
+          markDirty(session.history_stories());
+        }
         return applied;
       }),
     canUndo: () => session.can_undo(),
@@ -1377,8 +1385,7 @@ export function wrapSession(
         ? Object.entries({ indentLeft: attrs.indentLeft, indentRight: attrs.indentRight, spaceAfter: attrs.spaceAfter, spaceBefore: attrs.spaceBefore })
           .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
         : [];
-      const previousVersion = direct.length ? facade.version() : '';
-      mutate(() =>
+      mutate(() => {
         session.set_paragraph_attrs(
           range.story,
           range.start.paraId,
@@ -1388,15 +1395,15 @@ export function wrapSession(
           JSON.stringify(attrs),
           suggesting?.name,
           suggesting?.date
-        )
-      );
-      if (direct.length) {
-        rememberProjectionFormatEdit(facade, previousVersion, {
-          start: range.start.paraId,
-          end: range.end.paraId,
-          values: Object.fromEntries(direct),
-        });
-      }
+        );
+        if (direct.length) {
+          rememberProjectionFormatEdit(facade, {
+            start: range.start.paraId,
+            end: range.end.paraId,
+            values: Object.fromEntries(direct),
+          });
+        }
+      });
     },
     insertImage: (at, image, suggesting) => {
       ensureUndo(at.story);
@@ -1837,6 +1844,7 @@ export function wrapSession(
       pngExporter?.dispose();
       invalidateReadCaches();
       residentFonts.length = 0;
+      clearProjectionFormatEdits(facade);
       forgetMaterializedSource(session);
       docxSource = null;
       docxSourceDigest = undefined;
@@ -1887,6 +1895,7 @@ export function wrapSession(
       const json = mutate(() => {
         forgetMaterializedSource(session);
         const compared = session.compare_docx_json(original, revised, options);
+        clearProjectionFormatEdits(facade);
         forgetSavedListDefinitions(facade);
         proposals.reset();
         return compared;

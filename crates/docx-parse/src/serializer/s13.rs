@@ -190,6 +190,7 @@ pub(super) struct WriteSettings<'a> {
     pub empty_notes: [bool; 2],
     pub wire: Option<&'a mut Vec<String>>,
     pub legacy_diagnostics: bool,
+    pub localize_row_namespaces: bool,
     pub product_save: bool,
 }
 
@@ -201,6 +202,7 @@ impl Default for WriteSettings<'_> {
             empty_notes: [false; 2],
             wire: None,
             legacy_diagnostics: true,
+            localize_row_namespaces: false,
             product_save: false,
         }
     }
@@ -218,6 +220,7 @@ pub(super) fn write_parts(
         empty_notes,
         wire,
         legacy_diagnostics,
+        localize_row_namespaces,
         product_save,
     } = settings;
     request.determinism.validate()?;
@@ -617,7 +620,8 @@ pub(super) fn write_parts(
         } else {
             document_xml
         };
-        let document_xml = if product_save && spliced.contains_key(&package.document_path) {
+        let spliced_document = spliced.contains_key(&package.document_path);
+        let document_xml = if localize_row_namespaces && spliced_document {
             localize_table_row_namespaces(&document_xml).unwrap_or(document_xml)
         } else {
             document_xml
@@ -761,16 +765,11 @@ pub(super) fn write_parts(
         let updated = package
             .refs()
             .into_iter()
-            .filter(|(path, bytes)| {
-                parts.contains(path)
-                    && (!product_save
-                        || bytes
-                            .windows(b"comment".len())
-                            .any(|window| window == b"comment"))
-            })
-            .map(|(path, bytes)| {
+            .filter(|(path, _)| parts.contains(path))
+            .filter_map(|(path, bytes)| {
                 clean_deleted_comment_markers(bytes, &removed_comments, product_save)
-                    .map(|cleaned| (path, cleaned))
+                    .map(|cleaned| cleaned.map(|cleaned| (path, cleaned)))
+                    .transpose()
             })
             .collect::<Result<Vec<_>, ParseError>>()?;
         for (path, xml) in updated {
@@ -877,36 +876,65 @@ fn clean_deleted_comment_markers(
     bytes: &[u8],
     removed: &HashSet<String>,
     product_save: bool,
-) -> Result<Vec<u8>, ParseError> {
+) -> Result<Option<Vec<u8>>, ParseError> {
+    use quick_xml::encoding::{
+        DetectedEncoding::{Utf16BeBom, Utf16BeLike, Utf16LeBom, Utf16LeLike},
+        decode, detect_encoding,
+    };
+
     let remove = |xml: &str| {
         super::splice::remove_comment_markers(xml, removed)
             .ok_or_else(|| save_error("deleted comment markers could not be removed"))
     };
-    match std::str::from_utf8(bytes) {
-        Ok(xml) => remove(xml).map(String::into_bytes),
-        Err(error) if !product_save => Err(save_error(error.to_string())),
-        Err(_) => {
-            let mut reader = quick_xml::Reader::from_reader(bytes);
-            reader
-                .read_event()
-                .map_err(|error| save_error(error.to_string()))?;
-            let decoder = reader.decoder();
-            let xml = decoder
-                .decode(bytes)
-                .map_err(|error| save_error(error.to_string()))?;
-            let cleaned = remove(&xml)?;
-            if cleaned == xml {
-                return Ok(bytes.to_vec());
-            }
-            let (encoded, _, unmappable) = decoder.encoding().encode(&cleaned);
-            if unmappable {
-                return Err(save_error(
-                    "comment marker cleanup could not preserve the source encoding",
-                ));
-            }
-            Ok(encoded.into_owned())
-        }
+    if !product_save {
+        let xml = std::str::from_utf8(bytes).map_err(|error| save_error(error.to_string()))?;
+        return remove(xml).map(|cleaned| Some(cleaned.into_bytes()));
     }
+
+    if let Some(detected @ (Utf16LeBom | Utf16LeLike | Utf16BeBom | Utf16BeLike)) =
+        detect_encoding(bytes)
+    {
+        let encode: fn(u16) -> [u8; 2] = if matches!(detected, Utf16LeBom | Utf16LeLike) {
+            u16::to_le_bytes
+        } else {
+            u16::to_be_bytes
+        };
+        let (bom, source) = bytes.split_at(detected.bom_len());
+        let xml =
+            decode(source, detected.encoding()).map_err(|error| save_error(error.to_string()))?;
+        let cleaned = remove(&xml)?;
+        return Ok((cleaned != xml).then(|| {
+            let mut encoded = bom.to_vec();
+            encoded.extend(cleaned.encode_utf16().flat_map(encode));
+            encoded
+        }));
+    }
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    reader
+        .read_event()
+        .map_err(|error| save_error(error.to_string()))?;
+    let decoder = reader.decoder();
+    let encoding = decoder.encoding();
+    let xml = decoder
+        .decode(bytes)
+        .map_err(|error| save_error(error.to_string()))?;
+    if xml.contains('\0') {
+        return Err(save_error("comment marker cleanup found unsupported XML bytes"));
+    }
+    if encoding.name() == "UTF-8" && !xml.contains("comment") {
+        return Ok(None);
+    }
+    let cleaned = remove(&xml)?;
+    if cleaned == xml {
+        return Ok(None);
+    }
+    let (encoded, actual, unmappable) = encoding.encode(&cleaned);
+    if unmappable || actual != encoding {
+        return Err(save_error(
+            "comment marker cleanup could not preserve the source encoding",
+        ));
+    }
+    Ok(Some(encoded.into_owned()))
 }
 
 fn collect_save_warnings(

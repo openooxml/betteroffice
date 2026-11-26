@@ -224,12 +224,22 @@ pub(crate) fn parse_save_source(
     parts: &[(String, Vec<u8>)],
     options: S9ParseOptions,
     limits: &ParseLimits,
+    skip_body: bool,
 ) -> Result<(String, S9PackageWire), ParseError> {
     let document_path =
         crate::relationships::office_document_path(parts, &mut ParseBudget::new(limits))?;
-    let (envelope, _) =
-        parse_s9_package_impl(parts, data, options, limits, None, None, true, None, true)?
-            .expect("a whole body is never refused");
+    let (envelope, _) = parse_s9_package_impl(
+        parts,
+        data,
+        options,
+        limits,
+        None,
+        None,
+        true,
+        None,
+        ParsePurpose::SaveComparison { skip_body },
+    )?
+    .expect("a whole body is never refused");
     Ok((document_path, envelope.document.package))
 }
 
@@ -337,7 +347,7 @@ pub fn parse_docx_s9_preview_from_parts_with_budget(
         None,
         true,
         paragraph_budget,
-        false,
+        ParsePurpose::Read,
     )
 }
 
@@ -374,7 +384,7 @@ pub fn parse_docx_s9_preview_from_parts_full_dom_with_budget(
         None,
         false,
         paragraph_budget,
-        false,
+        ParsePurpose::Read,
     )
 }
 
@@ -415,7 +425,7 @@ pub fn parse_docx_s9_preview_with_media_table_with_budget(
         Some(table),
         true,
         paragraph_budget,
-        false,
+        ParsePurpose::Read,
     )
 }
 
@@ -438,7 +448,7 @@ fn parse_s9_package(
         media_table,
         true,
         None,
-        false,
+        ParsePurpose::Read,
     )
     .map(|preview| preview.map(|(envelope, _)| envelope))
 }
@@ -461,6 +471,12 @@ fn validate_main_root(name: &str, namespace: Option<&str>, path: &str) -> Result
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ParsePurpose {
+    Read,
+    SaveComparison { skip_body: bool },
+}
+
 fn parse_s9_package_impl(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
@@ -470,8 +486,9 @@ fn parse_s9_package_impl(
     media_table: Option<&MediaTable>,
     prefix_preview: bool,
     paragraph_budget: Option<usize>,
-    save_comparison: bool,
+    purpose: ParsePurpose,
 ) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    let save_comparison = matches!(purpose, ParsePurpose::SaveComparison { .. });
     if media_table.is_some() && options.include_canonical {
         return Err(ParseError::Canonical(
             "a canonical envelope needs the media inflated".to_owned(),
@@ -560,6 +577,9 @@ fn parse_s9_package_impl(
         crate::package_integrity::package_warnings(parts, media_table, limits)
     };
     let (mut body, budget_stopped) = match document_part {
+        Some(_) if matches!(purpose, ParsePurpose::SaveComparison { skip_body: true }) => {
+            (DocumentBody::default(), false)
+        }
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
                 .filter(|_| prefix_preview)
@@ -653,7 +673,7 @@ fn parse_s9_package_impl(
                                 media_table,
                                 false,
                                 paragraph_budget,
-                                save_comparison,
+                                purpose,
                             );
                         }
                         (body, budget_stopped)
