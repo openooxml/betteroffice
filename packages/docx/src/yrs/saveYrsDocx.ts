@@ -19,7 +19,7 @@ import { checkedProjection } from './commentRangeCheck';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
-import { sectionSavePlanTestSeam } from './sectionSavePlanTestSeam';
+import { sectionSavePlanTestSeam, type SectionPlanInputObserver } from './sectionSavePlanTestSeam';
 import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
 import { refuseUnavailableTables } from './tableUnavailable';
 import type {
@@ -468,9 +468,15 @@ function sectionsModeled(xml: string): boolean {
  * paragraphs the model does not list, which the ordinary save would rewrite.
  * Undefined when the session changed no section.
  */
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
+async function sectionSavePlan(
+  session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer,
+  observeInput?: SectionPlanInputObserver
+): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
   const source = sessionMaterializedSource(session);
-  if (!source) return undefined;
+  if (!source) {
+    observeInput?.(source);
+    return undefined;
+  }
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
   const sourceParagraphs: Paragraph[] = [];
   const outputParagraphs: Paragraph[] = [];
@@ -494,7 +500,10 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
       : byOrdinal.get(originalByKey.get(section.closingParagraphId) ?? -1)?.sectionProperties;
     return !sectionPropertiesEqual(before, section.authored);
   });
-  if (!sectionChanges) return undefined;
+  if (!sectionChanges) {
+    observeInput?.(source);
+    return undefined;
+  }
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
   const bodyParagraphs = output.package.document.content.filter(block => block.type === 'paragraph');
   const sourcePositions = new Map<object, number>();
@@ -504,6 +513,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
   await preloadOpcWasm();
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
+  observeInput?.(source, bytes);
   const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
   const ordinary = (message: string) => {
     if (lossy()) throw new DocxSectionError('unsupported', message);

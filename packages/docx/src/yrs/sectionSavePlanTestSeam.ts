@@ -4,14 +4,16 @@ import type { YrsSession } from './index';
 import type { DocxSessionSave } from './saveYrsDocx';
 import type { EditSession } from './wasm/index';
 
-type Plan = (
-  session: YrsSession, output: Document, capture: DocxSessionSave, sourceBuffer: ArrayBuffer
-) => Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined>;
+export type SectionPlanInputObserver = (source: Readonly<Document> | null, sourcePart?: Uint8Array) => void;
+
+type PlanArgs = [session: YrsSession, output: Document, capture: DocxSessionSave, sourceBuffer: ArrayBuffer];
+type Plan = (...args: [...PlanArgs, observeInput?: SectionPlanInputObserver]) =>
+  Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined>;
 
 export const sectionSavePlanTestSeam: {
   hook?: {
     attach: (session: YrsSession, raw: EditSession) => void;
-    check: (...args: [...Parameters<Plan>, useLocalProvenance: boolean]) => ReturnType<Plan>;
+    check: (...args: [...PlanArgs, useLocalProvenance: boolean]) => ReturnType<Plan>;
   };
   reference?: {
     plan: Plan;
