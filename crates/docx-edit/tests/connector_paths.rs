@@ -89,39 +89,121 @@ fn connector_engine(preview: bool) -> EngineSession {
     }
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let request = fixture::region_request(&engine, &bytes, font);
+    draw_connector(&engine, &request.to_string());
     engine
-        .layout_document_with_regions_retained_json(&request.to_string())
+}
+
+fn draw_connector(engine: &EngineSession, request: &str) {
+    engine
+        .layout_document_with_regions_retained_json(request)
         .unwrap();
     engine.build_display_list_frame("{}", 0).unwrap();
-    engine
+}
+
+fn painted_connector(engine: &EngineSession) -> Value {
+    let display = engine
+        .with_display_list(|display| serde_json::to_value(display).unwrap())
+        .unwrap();
+    display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape")
+        .unwrap()
+        .clone()
+}
+
+fn assert_authored_connector_path(engine: &EngineSession, context: &str) {
+    let shape = painted_connector(engine);
+    let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| shape[key].as_f64().unwrap());
+    assert_eq!(
+        shape["geometryPath"],
+        json!([
+            {"type": "move", "x": px(x), "y": px(y)},
+            {"type": "line", "x": px(x + w * 1.5), "y": px(y)},
+            {"type": "line", "x": px(x + w * 1.5), "y": px(y - h * 0.25)},
+            {"type": "line", "x": px(x + w), "y": px(y - h * 0.25)},
+            {"type": "line", "x": px(x + w), "y": px(y + h)}
+        ]),
+        "{context}"
+    );
 }
 
 #[test]
 fn connector_display_list_uses_the_authored_guides() {
     for preview in [false, true] {
         let engine = connector_engine(preview);
-        let display = engine
-            .with_display_list(|display| serde_json::to_value(display).unwrap())
-            .unwrap();
-        let shape = display["pages"][0]["primitives"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|primitive| primitive["kind"] == "shape")
-            .unwrap();
-        let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| shape[key].as_f64().unwrap());
-        assert_eq!(
-            shape["geometryPath"],
-            json!([
-                {"type": "move", "x": px(x), "y": px(y)},
-                {"type": "line", "x": px(x + w * 1.5), "y": px(y)},
-                {"type": "line", "x": px(x + w * 1.5), "y": px(y - h * 0.25)},
-                {"type": "line", "x": px(x + w), "y": px(y - h * 0.25)},
-                {"type": "line", "x": px(x + w), "y": px(y + h)}
-            ]),
-            "preview={preview}"
-        );
+        assert_authored_connector_path(&engine, &format!("preview={preview}"));
     }
+}
+
+#[test]
+fn state_only_connector_replica_draws_the_released_path_and_saves_identical_parts() {
+    let bytes = connector_package();
+    let source = EngineSession::new(1);
+    seed_from_docx(source.doc(), &bytes).unwrap();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let request = fixture::region_request(&source, &bytes, font).to_string();
+    draw_connector(&source, &request);
+
+    let replica = EngineSession::new(2);
+    replica
+        .doc()
+        .apply_update_v1(&source.doc().encode_state_as_update_v1())
+        .unwrap();
+    draw_connector(&replica, &request);
+
+    assert_authored_connector_path(&source, "source session");
+    let shape = painted_connector(&replica);
+    let [x, y, w, h] = ["x", "y", "w", "h"].map(|key| shape[key].as_f64().unwrap());
+    assert_eq!(
+        shape["geometryPath"],
+        json!([
+            {"type": "move", "x": px(x), "y": px(y)},
+            {"type": "line", "x": px(x + w), "y": px(y)},
+            {"type": "line", "x": px(x + w * 0.25), "y": px(y + h * 0.5)},
+            {"type": "line", "x": px(x + w * 0.75), "y": px(y + h * 0.5)},
+            {"type": "line", "x": px(x + w), "y": px(y + h)}
+        ]),
+        "state-only replica"
+    );
+
+    replica.doc().retain_source_docx(bytes.clone());
+    let package = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let save = |engine: &EngineSession| {
+        let plan = engine.doc().paragraph_save_plan();
+        let request = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": package.document.content, "comments": package.document.comments},
+            "relationshipEntries": package.relationship_entries,
+            "headerEntries": package.header_entries.as_deref().unwrap_or_default(),
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {
+                "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
+                    json!({"part": part, "ordinal": ordinal, "paraId": para_id})
+                }).collect::<Vec<_>>(),
+                "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
+                    json!({"part": part, "paraIds": para_ids})
+                }).collect::<Vec<_>>()
+            }
+        }))
+        .unwrap();
+        let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
+        ooxml_opc::unzip_parts(&saved)
+            .unwrap()
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(save(&source), save(&replica));
 }
 
 #[test]
