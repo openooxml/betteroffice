@@ -1,19 +1,245 @@
 use super::*;
+use docx_parse::write_docx_s13;
+use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 use serde_json::json;
 
 const FIRST: u64 = (1 << 53) - 1;
 const SECOND: u64 = 1 << 40;
+const DOCUMENT: &str = "word/document.xml";
 
 fn request(content: Value) -> S13SaveRequest {
     serde_json::from_value(json!({
-        "determinism": {"seed": "", "now": ""},
-        "document": {"content": content}
+        "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
+        "document": {"content": content},
+        "options": {"updateModifiedDate": false}
     }))
     .unwrap()
 }
 
 fn change(id: u64) -> Value {
     json!({"type": "insertion", "info": {"id": id, "author": "Reviewer"}, "content": []})
+}
+
+fn document_ids(request: S13SaveRequest) -> BTreeMap<(String, String), usize> {
+    let source = ooxml_opc::rezip_parts(&[
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            DOCUMENT.to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>"#.to_vec(),
+        ),
+    ])
+    .unwrap();
+    let saved = write_docx_s13(request, &source).unwrap();
+    let (_, document) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(part, _)| part == DOCUMENT)
+        .unwrap();
+    let limits = ParseLimits::default();
+    let document = parse_xml(&document, DOCUMENT, &mut ParseBudget::new(&limits)).unwrap();
+    let mut pending = vec![document.root().unwrap()];
+    let mut ids = BTreeMap::new();
+    while let Some(element) = pending.pop() {
+        if let Some(id) = element.attributes.get("w:id") {
+            *ids.entry((element.name.clone(), id.clone())).or_default() += 1;
+        }
+        pending.extend(element.child_elements());
+    }
+    ids
+}
+
+fn assert_assignment(
+    original: S13SaveRequest,
+    sites: &[(&str, u64, u32, &str)],
+    source_ids: &[(&str, u64)],
+) {
+    let mut expected = serde_json::to_value(&original).unwrap();
+    let mut assignments = BTreeMap::new();
+    let mut written = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    for &(element, id) in source_ids {
+        used.insert(id);
+        *written.entry((element.to_owned(), id.to_string())).or_default() += 1;
+    }
+    for &(path, placeholder, assigned, element) in sites {
+        let value = expected.pointer_mut(path).unwrap();
+        assert_eq!(value.as_f64(), Some(placeholder as f64), "{path}");
+        *value = json!(f64::from(assigned));
+        assert!((1..MAX_ID).contains(&assigned));
+        if let Some(prior) = assignments.insert(placeholder, assigned) {
+            assert_eq!(prior, assigned, "{path}");
+        } else {
+            assert!(used.insert(u64::from(assigned)), "reused ID at {path}");
+        }
+        *written
+            .entry((element.to_owned(), assigned.to_string()))
+            .or_default() += 1;
+    }
+    let expected: S13SaveRequest = serde_json::from_value(expected).unwrap();
+    let session = assignments.keys().copied().collect();
+    for _ in 0..2 {
+        let mut actual = original.clone();
+        assert_eq!(
+            assign_session_revision_ids(&mut actual, &session).unwrap(),
+            assignments
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(document_ids(actual), written);
+    }
+}
+
+#[test]
+fn keeps_out_of_range_source_revision_ids_without_raising_the_base() {
+    let limit = u64::from(MAX_ID);
+    let large = 4_294_967_296u64;
+    let huge = 1_000_000_000_000_000u64;
+    let info = |id| json!({"id": id, "author": "Source"});
+    let original = request(json!([
+        {
+            "type": "paragraph",
+            "propertyChanges": [{"type": "paragraphPropertyChange", "info": info(13)}],
+            "content": [
+                {"type": "insertion", "info": info(limit), "content": []},
+                {"type": "deletion", "info": info(large), "content": []},
+                {"type": "moveFrom", "info": info(huge), "content": []},
+                {"type": "moveTo", "info": info(11), "content": []},
+                {"type": "run", "propertyChanges": [
+                    {"type": "runPropertyChange", "info": info(12)}
+                ], "content": [{"type": "text", "text": "Source"}]},
+                {"type": "bookmarkStart", "id": 14, "name": "SourceBookmark"},
+                change(FIRST),
+                {"type": "deletion", "info": {"id": FIRST, "author": "Reviewer"}, "content": []},
+                {"type": "bookmarkEnd", "id": 14}
+            ]
+        },
+        {
+            "type": "table",
+            "columnWidths": [2000],
+            "propertyChanges": [{"type": "tablePropertyChange", "info": info(15)}],
+            "rows": [{
+                "type": "tableRow",
+                "propertyChanges": [{"type": "tableRowPropertyChange", "info": info(16)}],
+                "structuralChange": {"type": "tableRowInsertion", "info": info(17)},
+                "cells": [{
+                    "type": "tableCell",
+                    "propertyChanges": [{"type": "tableCellPropertyChange", "info": info(18)}],
+                    "structuralChange": {"type": "tableCellInsertion", "info": info(19)},
+                    "content": [{"type": "paragraph", "content": [change(SECOND)]}]
+                }]
+            }]
+        }
+    ]));
+    assert_assignment(
+        original,
+        &[
+            ("/document/content/0/content/6/info/id", FIRST, 20, "w:ins"),
+            ("/document/content/0/content/7/info/id", FIRST, 20, "w:del"),
+            (
+                "/document/content/1/rows/0/cells/0/content/0/content/0/info/id",
+                SECOND,
+                21,
+                "w:ins",
+            ),
+        ],
+        &[
+            ("w:ins", limit),
+            ("w:del", large),
+            ("w:moveFrom", huge),
+            ("w:moveTo", 11),
+            ("w:rPrChange", 12),
+            ("w:pPrChange", 13),
+            ("w:bookmarkStart", 14),
+            ("w:bookmarkEnd", 14),
+            ("w:tblPrChange", 15),
+            ("w:trPrChange", 16),
+            ("w:ins", 17),
+            ("w:tcPrChange", 18),
+            ("w:cellIns", 19),
+        ],
+    );
+}
+
+#[test]
+fn bases_assignments_on_kept_raw_xml_and_starts_at_one_without_reservations() {
+    for (raw, source_ids, first) in [
+        (None, &[][..], 1),
+        (
+            Some(json!({"type": "rawXml", "xml": "<w:customXml w:id='40'/>"})),
+            &[("w:customXml", 40)][..],
+            41,
+        ),
+    ] {
+        let mut content = vec![json!({
+            "type": "paragraph",
+            "content": [change(FIRST), change(SECOND), change(FIRST)]
+        })];
+        content.extend(raw);
+        assert_assignment(
+            request(json!(content)),
+            &[
+                ("/document/content/0/content/0/info/id", FIRST, first, "w:ins"),
+                (
+                    "/document/content/0/content/1/info/id",
+                    SECOND,
+                    first + 1,
+                    "w:ins",
+                ),
+                ("/document/content/0/content/2/info/id", FIRST, first, "w:ins"),
+            ],
+            source_ids,
+        );
+    }
+}
+
+#[test]
+fn assigns_inline_revisions_before_paragraph_marks_and_properties() {
+    let mark = FIRST - 1;
+    let deleted_mark = FIRST - 2;
+    let properties = FIRST - 3;
+    for shared in [false, true] {
+        let mut content = vec![change(FIRST), change(SECOND)];
+        let mut sites = vec![
+            ("/document/content/0/content/0/info/id", FIRST, 8, "w:ins"),
+            ("/document/content/0/content/1/info/id", SECOND, 9, "w:ins"),
+            ("/document/content/0/pPrIns/id", mark, 10, "w:ins"),
+            ("/document/content/0/pPrDel/id", deleted_mark, 11, "w:del"),
+            (
+                "/document/content/0/propertyChanges/0/info/id",
+                properties,
+                12,
+                "w:pPrChange",
+            ),
+        ];
+        if shared {
+            content.push(change(mark));
+            sites.push(("/document/content/0/content/2/info/id", mark, 10, "w:ins"));
+        }
+        content.extend([
+            json!({"type": "bookmarkStart", "id": 7, "name": "SourceBookmark"}),
+            json!({"type": "bookmarkEnd", "id": 7}),
+        ]);
+        let original = request(json!([{
+            "type": "paragraph",
+            "pPrIns": {"id": mark, "author": "Reviewer"},
+            "pPrDel": {"id": deleted_mark, "author": "Reviewer"},
+            "propertyChanges": [{
+                "type": "paragraphPropertyChange", "info": {"id": properties, "author": "Reviewer"}
+            }],
+            "content": content
+        }]));
+        assert_assignment(
+            original,
+            &sites,
+            &[("w:bookmarkStart", 7), ("w:bookmarkEnd", 7)],
+        );
+    }
 }
 
 #[test]

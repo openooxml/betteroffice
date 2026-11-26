@@ -46,6 +46,9 @@ impl ser::Error for RevisionIdsError {
     }
 }
 
+/// Assigns revision IDs in a typed save request in each container's projection order.
+/// `session` holds the placeholders minted by the projection for session revisions.
+/// `session` must be disjoint from every non-session revision ID in the request.
 pub fn assign_session_revision_ids(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
@@ -105,6 +108,15 @@ pub fn assign_session_revision_ids(
         return Err(RevisionIdsError::Unassigned(id));
     }
     Ok(ids)
+}
+
+#[doc(hidden)]
+pub fn session_revision_id_reservations(
+    request: &S13SaveRequest,
+    session: &BTreeSet<u64>,
+) -> Result<(BTreeSet<u32>, u32), RevisionIdsError> {
+    let found = collect(request, session)?;
+    Ok((found.used, found.max))
 }
 
 fn next_id(next: &mut u32, max: u32, used: &BTreeSet<u32>) -> Result<u32, RevisionIdsError> {
