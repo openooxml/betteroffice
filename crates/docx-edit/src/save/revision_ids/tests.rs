@@ -197,14 +197,24 @@ fn bases_assignments_on_kept_raw_xml_and_starts_at_one_without_reservations() {
         assert_assignment(
             request(json!(content)),
             &[
-                ("/document/content/0/content/0/info/id", FIRST, first, "p/ins"),
+                (
+                    "/document/content/0/content/0/info/id",
+                    FIRST,
+                    first,
+                    "p/ins",
+                ),
                 (
                     "/document/content/0/content/1/info/id",
                     SECOND,
                     first + 1,
                     "p/ins",
                 ),
-                ("/document/content/0/content/2/info/id", FIRST, first, "p/ins"),
+                (
+                    "/document/content/0/content/2/info/id",
+                    FIRST,
+                    first,
+                    "p/ins",
+                ),
             ],
             source_ids,
         );
@@ -269,7 +279,12 @@ fn assigns_inline_revisions_before_paragraph_marks_and_properties() {
             ("/document/content/0/content/0/info/id", FIRST, 8, "p/ins"),
             ("/document/content/0/content/1/info/id", SECOND, 9, "p/ins"),
             ("/document/content/0/pPrIns/id", mark, 10, "p/pPr/rPr/ins"),
-            ("/document/content/0/pPrDel/id", deleted_mark, 11, "p/pPr/rPr/del"),
+            (
+                "/document/content/0/pPrDel/id",
+                deleted_mark,
+                11,
+                "p/pPr/rPr/del",
+            ),
             (
                 "/document/content/0/propertyChanges/0/info/id",
                 properties,
@@ -421,8 +436,14 @@ fn assigns_in_site_order_and_shares_one_id_across_info_types() {
     let result = serde_json::to_value(&request).unwrap();
     let content = &result["document"]["content"][1]["content"];
     assert_eq!(content[0]["info"]["id"].as_f64(), Some(42.0));
-    assert_eq!(content[1]["propertyChanges"][0]["info"]["id"].as_f64(), Some(43.0));
-    assert_eq!(content[1]["propertyChanges"][1]["info"]["id"].as_f64(), Some(42.0));
+    assert_eq!(
+        content[1]["propertyChanges"][0]["info"]["id"].as_f64(),
+        Some(43.0)
+    );
+    assert_eq!(
+        content[1]["propertyChanges"][1]["info"]["id"].as_f64(),
+        Some(42.0)
+    );
     assert_eq!(content[2]["info"]["id"].as_f64(), Some(42.0));
     assert_eq!(content[3]["info"]["id"].as_f64(), Some(11.0));
 }
@@ -460,7 +481,8 @@ fn assigns_after_content_in_projected_paragraph_and_table_order() {
             }]
         }
     ]));
-    let assigned = assign_session_revision_ids(&mut request, &ids.iter().copied().collect()).unwrap();
+    let assigned =
+        assign_session_revision_ids(&mut request, &ids.iter().copied().collect()).unwrap();
     assert_eq!(assigned, ids.into_iter().zip(1..=11).collect());
 }
 
@@ -488,7 +510,11 @@ fn leaves_request_with_no_session_sites_unchanged() {
     let mut request = request(json!([{"type": "paragraph", "content": [change(9)]}]));
     let original = request.clone();
     for session in [BTreeSet::new(), BTreeSet::from([FIRST])] {
-        assert!(assign_session_revision_ids(&mut request, &session).unwrap().is_empty());
+        assert!(
+            assign_session_revision_ids(&mut request, &session)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(request, original);
     }
 }

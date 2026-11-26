@@ -241,11 +241,12 @@ fn revision_ids_parity() {
     let mut paths = Vec::new();
     if let Some(root) = std::env::var_os("DOCX_REVISION_IDS_DIR").filter(|root| !root.is_empty()) {
         match fs::read_dir(root) {
-            Ok(entries) => paths.extend(
-                entries
-                    .map(|entry| entry.unwrap().path())
-                    .filter(|path| path.extension().is_some_and(|extension| extension == "json")),
-            ),
+            Ok(entries) => {
+                paths.extend(entries.map(|entry| entry.unwrap().path()).filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "json")
+                }))
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => panic!("reading DOCX_REVISION_IDS_DIR: {error}"),
         }
@@ -257,7 +258,9 @@ fn revision_ids_parity() {
     for path in paths {
         let result = read_case(&path).and_then(|case| {
             let census = docs.entry(case.document.clone()).or_default();
-            census.out_of_range.extend(case.out_of_range.iter().cloned());
+            census
+                .out_of_range
+                .extend(case.out_of_range.iter().cloned());
             check_case(&case, census)
         });
         if let Err(error) = result {
@@ -283,6 +286,9 @@ fn revision_ids_parity() {
     .unwrap();
     assert!(count > 0, "no DOCX revision ID cases were recorded");
     if !census_only {
-        assert_eq!(failed, 0, "{failed} of {count} DOCX revision ID cases failed");
+        assert_eq!(
+            failed, 0,
+            "{failed} of {count} DOCX revision ID cases failed"
+        );
     }
 }

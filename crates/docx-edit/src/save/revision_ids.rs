@@ -163,7 +163,10 @@ impl Collected {
             let id = id as u32;
             self.used.insert(id);
             if let Some(pointer) = pointer {
-                *self.reservations.entry((pointer.to_owned(), id)).or_default() += 1;
+                *self
+                    .reservations
+                    .entry((pointer.to_owned(), id))
+                    .or_default() += 1;
             }
             if raises_base {
                 self.max = self.max.max(id);
@@ -938,13 +941,14 @@ impl<'a> SiteWalker<'a, '_> {
                     Some("tableCell") => &["content", "structuralChange", "propertyChanges"],
                     Some("insertion" | "deletion" | "moveFrom" | "moveTo") => &["info", "content"],
                     Some("run") => {
-                        let drawing = record
-                            .get("content")
-                            .and_then(Value::as_array)
-                            .and_then(|content| match content.as_slice() {
-                                [child] => child.get("type").and_then(Value::as_str),
-                                _ => None,
-                            });
+                        let drawing =
+                            record
+                                .get("content")
+                                .and_then(Value::as_array)
+                                .and_then(|content| match content.as_slice() {
+                                    [child] => child.get("type").and_then(Value::as_str),
+                                    _ => None,
+                                });
                         if matches!(drawing, Some("shape" | "opaqueDrawing")) {
                             &["content", "propertyChanges"]
                         } else {
