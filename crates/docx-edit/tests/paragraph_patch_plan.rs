@@ -593,7 +593,8 @@ fn recorded_replacements_use_each_runs_properties() {
 #[test]
 fn recorded_splices_remove_emptied_runs_and_preserve_surrounding_xml() {
     let run = |text: &str| format!("<w:r><w:rPr/><w:t>{text}</w:t></w:r>");
-    let value = |text: &str| format!(r#"<w:r><w:rPr/><w:t xml:space="preserve">{text}</w:t></w:r>"#);
+    let value =
+        |text: &str| format!(r#"<w:r><w:rPr/><w:t xml:space="preserve">{text}</w:t></w:r>"#);
     let italic = |text: &str| format!("<w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r>");
     let middle = run("MRID") + &value(" xxxxxxxx");
     let replaced = run("MRID") + &value(" 12345678");
@@ -630,7 +631,10 @@ fn recorded_splices_remove_emptied_runs_and_preserve_surrounding_xml() {
         replace(&doc, start, start + 1, "");
         let (saved, warnings) = save_paragraph(&doc, &source, |_| {});
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert!(saved.contains(&format!("<w:pPr/>{expected}</w:p>")), "{saved}");
+        assert!(
+            saved.contains(&format!("<w:pPr/>{expected}</w:p>")),
+            "{saved}"
+        );
     }
 }
 
@@ -3289,7 +3293,8 @@ fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
         draft.set_direct_batches(direct);
         let history = UndoSession::new();
         let para_id = draft.paragraphs("body").unwrap()[0].para_id.clone();
-        for (from, to, text) in [(9, 14, "Γάμμα 😀"), (5, 9, "B"), (0, 5, "A longer alpha")] {
+        for (from, to, text) in [(9, 14, "Γάμμα 😀"), (5, 9, "B"), (0, 5, "A longer alpha")]
+        {
             let position = |offset| TextPosition {
                 para_id: para_id.clone(),
                 offset,
@@ -3309,7 +3314,13 @@ fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
                     runs: None,
                 })],
             };
-            assert!(draft.apply_edits(&request, &history).unwrap().unwrap().applied);
+            assert!(
+                draft
+                    .apply_edits(&request, &history)
+                    .unwrap()
+                    .unwrap()
+                    .applied
+            );
         }
         assert_eq!(draft.direct_batches_applied(), if direct { 3 } else { 0 });
         let (update, sidecar) = transfer(&draft, &owner.encode_state_vector_v1());
@@ -3318,7 +3329,11 @@ fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
             .unwrap();
         assert_splices(
             &owner,
-            &[(0, 5, 0, "A longer alpha"), (5, 9, 5, "B"), (9, 14, 9, "Γάμμα 😀")],
+            &[
+                (0, 5, 0, "A longer alpha"),
+                (5, 9, 5, "B"),
+                (9, 14, 9, "Γάμμα 😀"),
+            ],
         );
         let (saved, warnings) = save_paragraph(&owner, source, |_| {});
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -3482,7 +3497,11 @@ fn undo_to_source_formatting_preserves_the_paragraph() {
         assert!(history.undo());
         let plan = doc.paragraph_save_plan();
         assert!(body_plan(&plan).changed.is_empty());
-        assert!(plan.patched_parts.iter().any(|(part, _)| part == "word/document.xml"));
+        assert!(
+            plan.patched_parts
+                .iter()
+                .any(|(part, _)| part == "word/document.xml")
+        );
     }
 }
 
@@ -3551,7 +3570,11 @@ fn inserting_or_deleting_a_complete_paragraph_does_not_mark_its_neighbor() {
         let plan = doc.paragraph_save_plan();
         let body = body_plan(&plan);
         assert_eq!(body.changed, [1]);
-        assert!(body.legacy_paragraphs.is_empty(), "{:?}", body.legacy_paragraphs);
+        assert!(
+            body.legacy_paragraphs.is_empty(),
+            "{:?}",
+            body.legacy_paragraphs
+        );
         assert_eq!(body.paragraph_patches[0].ordinal, 1);
     }
 }
@@ -3567,8 +3590,7 @@ fn deleting_a_table_row_leaves_the_body_paragraphs_unchanged() {
     );
     let doc = open(content);
     let row = TableRange::cell(CellLoc::new("body", 0, 0, 0));
-    doc.delete_row(&ctx(), &row)
-        .unwrap();
+    doc.delete_row(&ctx(), &row).unwrap();
     let plan = doc.paragraph_save_plan();
     let body = body_plan(&plan);
     assert_eq!(body.removed, [1]);
@@ -3636,12 +3658,18 @@ fn a_projected_seed_without_item_ids_uses_alignment_for_local_text_edits() {
         .open_docx(&source, false, Some("projected".to_owned()), None)
         .unwrap();
     projected.load(&sender.encode_state_as_update_v1()).unwrap();
-    projected.insert_text("body", "00000001", 1, "X", None, None).unwrap();
+    projected
+        .insert_text("body", "00000001", 1, "X", None, None)
+        .unwrap();
 
     let plan: serde_json::Value =
         serde_json::from_str(&projected.paragraph_save_plan().unwrap()).unwrap();
-    let body = plan["splicedParts"].as_array().unwrap().iter()
-        .find(|part| part["part"] == "word/document.xml").unwrap();
+    let body = plan["splicedParts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["part"] == "word/document.xml")
+        .unwrap();
     assert_eq!(body["changed"], json!([0]));
     assert_eq!(body["paragraphPatches"].as_array().unwrap().len(), 1);
 }
@@ -3657,7 +3685,9 @@ fn a_projected_sender_without_seed_identities_cannot_certify_a_transfer() {
     projected
         .open_docx(&source, false, Some("projected".to_owned()), None)
         .unwrap();
-    projected.load(&receiver.encode_state_as_update_v1()).unwrap();
+    projected
+        .load(&receiver.encode_state_as_update_v1())
+        .unwrap();
     projected
         .replace_range("body", "00000001", 0, "00000001", 3, "X", None, None)
         .unwrap();
@@ -3675,9 +3705,8 @@ fn a_projected_sender_without_seed_identities_cannot_certify_a_transfer() {
 
 #[test]
 fn editor_save_uses_alignment_for_ambiguous_single_typing() {
-    let source = package(
-        r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#,
-    );
+    let source =
+        package(r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#);
     let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
     let session = EditSessionCore::new(71, host);
     session.open_docx(&source, true, None, None).unwrap();
@@ -3702,7 +3731,8 @@ fn a_pending_update_does_not_invalidate_records_in_another_paragraph() {
     );
     let doc = open(&content);
     let peer = EditingDoc::new(72);
-    peer.apply_update_v1(&doc.encode_state_as_update_v1()).unwrap();
+    peer.apply_update_v1(&doc.encode_state_as_update_v1())
+        .unwrap();
     replace(&doc, 1, 2, "X");
 
     peer.insert_text(&ctx(), Position::new("body", 5), "Y", FormatPolicy::Inherit)
@@ -3710,7 +3740,8 @@ fn a_pending_update_does_not_invalidate_records_in_another_paragraph() {
     let base = peer.encode_state_vector_v1();
     peer.insert_text(&ctx(), Position::new("body", 6), "Z", FormatPolicy::Inherit)
         .unwrap();
-    doc.apply_update_v1(&peer.encode_diff_v1(&base).unwrap()).unwrap();
+    doc.apply_update_v1(&peer.encode_diff_v1(&base).unwrap())
+        .unwrap();
     assert_eq!(doc.paragraphs("body").unwrap()[1].text, "def");
     assert_splices(&doc, &[(1, 2, 1, "X")]);
 }
@@ -4055,13 +4086,8 @@ fn insertion_abutting_a_deletion_keeps_the_occurrence_unproven() {
 #[test]
 fn replacement_conflicts_with_an_abutting_insertion_donated_by_removed_text() {
     let doc = open(ADJACENT_SOURCE);
-    doc.insert_text(
-        &ctx(),
-        Position::new("body", 3),
-        "X",
-        FormatPolicy::Inherit,
-    )
-    .unwrap();
+    doc.insert_text(&ctx(), Position::new("body", 3), "X", FormatPolicy::Inherit)
+        .unwrap();
     assert_splices(&doc, &[(3, 3, 2, "X")]);
     replace(&doc, 0, 3, "ABC");
     assert_unproven(&doc);
@@ -4148,7 +4174,10 @@ fn session_body_plan(session: &EditSessionCore) -> serde_json::Value {
     session_body_plan_with_provenance(session, true)
 }
 
-fn session_body_plan_with_provenance(session: &EditSessionCore, enabled: bool) -> serde_json::Value {
+fn session_body_plan_with_provenance(
+    session: &EditSessionCore,
+    enabled: bool,
+) -> serde_json::Value {
     let plan: serde_json::Value = serde_json::from_str(
         &session
             .paragraph_save_plan_with_local_provenance(enabled)
@@ -4291,10 +4320,16 @@ fn editor_save_plans_agree_after_unpaired_text_updates() {
     peer.apply_update(&update).unwrap();
 
     let local = author.paragraph_save_plan().unwrap();
-    let editor = author.paragraph_save_plan_with_local_provenance(false).unwrap();
+    let editor = author
+        .paragraph_save_plan_with_local_provenance(false)
+        .unwrap();
     assert_eq!(local, editor);
     assert_eq!(editor, peer.paragraph_save_plan().unwrap());
-    assert_eq!(editor, peer.paragraph_save_plan_with_local_provenance(false).unwrap());
+    assert_eq!(
+        editor,
+        peer.paragraph_save_plan_with_local_provenance(false)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -4308,7 +4343,11 @@ fn bootstrap_sidecar_rejects_state_from_another_moment_or_document() {
     let state = sender.encode_state_as_update_v1();
     let sidecar = sender.encode_edit_provenance_for_transfer(&state, None);
     assert!(!sidecar.is_empty());
-    assert!(sender.encode_edit_provenance_for_transfer(&earlier, None).is_empty());
+    assert!(
+        sender
+            .encode_edit_provenance_for_transfer(&earlier, None)
+            .is_empty()
+    );
 
     let other = EditingDoc::new(71);
     seed_from_docx_with_generation(&other, &source, "other").unwrap();

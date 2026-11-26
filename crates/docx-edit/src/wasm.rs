@@ -2978,7 +2978,10 @@ impl EditSession {
     /// "changed":[ordinal],"inserted":[{"before"|"after":ordinal}],"removed":[ordinal]}]`,
     /// whose session keys the caller resolves to the model paragraphs it marks
     /// with their ordinals.
-    pub fn paragraph_save_plan(&self, use_local_provenance: Option<bool>) -> Result<String, JsValue> {
+    pub fn paragraph_save_plan(
+        &self,
+        use_local_provenance: Option<bool>,
+    ) -> Result<String, JsValue> {
         self.core
             .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))
             .map_err(JsValue::from)

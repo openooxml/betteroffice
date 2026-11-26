@@ -2556,7 +2556,11 @@ impl EditSession {
     }
 
     #[napi(catch_unwind, js_name = "paragraph_save_plan")]
-    pub fn paragraph_save_plan(&self, env: Env, use_local_provenance: Option<bool>) -> Result<String> {
+    pub fn paragraph_save_plan(
+        &self,
+        env: Env,
+        use_local_provenance: Option<bool>,
+    ) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
             .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))

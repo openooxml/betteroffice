@@ -364,7 +364,11 @@ impl EditSessionCore {
     }
 
     #[doc(hidden)]
-    pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
+    pub fn encode_edit_provenance_for_transfer(
+        &self,
+        bytes: &[u8],
+        base: Option<&[u8]>,
+    ) -> Vec<u8> {
         self.engine
             .doc()
             .encode_edit_provenance_for_transfer(bytes, base)

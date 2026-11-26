@@ -3713,7 +3713,9 @@ impl EditingDoc {
             && plan.steps.iter().all(|step| {
                 matches!(
                     step.effect,
-                    None | Some(Effect::Insert { .. } | Effect::Replace { .. } | Effect::Delete { .. })
+                    None | Some(
+                        Effect::Insert { .. } | Effect::Replace { .. } | Effect::Delete { .. }
+                    )
                 )
             })
             && self.stage_text_provenance(&stage);

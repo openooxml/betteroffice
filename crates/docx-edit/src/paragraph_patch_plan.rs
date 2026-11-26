@@ -1487,7 +1487,8 @@ fn recorded_pairs(
         let old_end = donors.offsets.binary_search(&edit.to).ok()?;
         let new_start = live.offsets.binary_search(&edit.live_from).ok()?;
         let new_end = live.offsets.binary_search(&edit.live_to).ok()?;
-        if old_end < old_start || new_end < new_start
+        if old_end < old_start
+            || new_end < new_start
             || (old_start == old_end && new_start == new_end)
         {
             return None;
@@ -1683,13 +1684,15 @@ fn plan_paragraph(
     let new_inherit = inherited_runs(&context, &after.properties, &new);
     let align = || match alignment(&old, &new, &context) {
         Ok(retained) => Ok(retained),
-        Err(detail @ "ambiguous: nonunique content alignment") => drawing_text_alignment(&old, &new)
-            .or_else(|| {
-                patchable_restyle
-                    .then(|| single_run_insertion_alignment(&before, &after))
-                    .flatten()
-            })
-            .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+        Err(detail @ "ambiguous: nonunique content alignment") => {
+            drawing_text_alignment(&old, &new)
+                .or_else(|| {
+                    patchable_restyle
+                        .then(|| single_run_insertion_alignment(&before, &after))
+                        .flatten()
+                })
+                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))
+        }
         Err(detail) => Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
     };
     let (retained, recorded, donors) = if let Some(proof) = proof {
@@ -1726,9 +1729,11 @@ fn plan_paragraph(
             } else {
                 (i, j, None)
             };
-            let removed = old.get(previous.0..i)
+            let removed = old
+                .get(previous.0..i)
                 .ok_or_else(|| unproven_paragraph(context.ordinal))?;
-            let inserted = new.get(previous.1..j)
+            let inserted = new
+                .get(previous.1..j)
                 .ok_or_else(|| unproven_paragraph(context.ordinal))?;
             if removed.iter().chain(inserted).any(complex_field) {
                 return Err(context.legacy(
@@ -2328,7 +2333,8 @@ mod tests {
                 donor: DonorV1::At { at: 0 },
             }],
         };
-        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
+        let error =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
         assert_eq!(error, unproven_paragraph(0));
     }
 
@@ -2355,7 +2361,8 @@ mod tests {
         let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
         assert_eq!(base.run_edits.len(), 1);
         assert_eq!(base.text_edits.len(), 1);
-        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
+        let error =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
         assert_eq!(error, unproven_paragraph(0));
     }
 

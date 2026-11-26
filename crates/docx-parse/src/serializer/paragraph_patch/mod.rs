@@ -294,7 +294,7 @@ impl Preview {
                     && candidate.to == to
                     && source[before.xml.nodes[run.node].span.clone()]
                         == output[after.xml.nodes[candidate.node].span.clone()])
-                    .then_some((original, at))
+                .then_some((original, at))
             })
             .collect();
         Self {

@@ -721,7 +721,9 @@ impl Touched {
         {
             return;
         }
-        self.bytes = self.bytes.saturating_add(encoded_entry_size(key, &Entry::Unproven));
+        self.bytes = self
+            .bytes
+            .saturating_add(encoded_entry_size(key, &Entry::Unproven));
         if self.bytes > OPENING_BYTES {
             self.overflowed = true;
             self.keys.clear();
@@ -860,7 +862,9 @@ impl Watch {
         };
         let removed = txn.get_map(crate::REMOVED_STORIES);
         let marks = txn.get_map(crate::RAW_INLINES);
-        let comments = txn.get_map(crate::COMMENTS).filter(|_| !recorded.is_empty());
+        let comments = txn
+            .get_map(crate::COMMENTS)
+            .filter(|_| !recorded.is_empty());
         let comment_anchors = comments
             .as_ref()
             .map(|_| crate::canonical::comment_anchors_by_story(&txn));
@@ -1055,8 +1059,7 @@ fn collect_touched(
                 {
                     touched.add(key);
                 }
-                if pilcrow && let Some(key) = crate::map_string(event.target(), txn, PARA_ID)
-                {
+                if pilcrow && let Some(key) = crate::map_string(event.target(), txn, PARA_ID) {
                     if old.iter().any(|bounds| bounds.para_id == key) {
                         touched.add(&key);
                     }
@@ -1122,9 +1125,9 @@ fn collect_text_touches(
                         deleted.insert(bounds.para_id.as_str());
                     }
                 }
-                if overlapping(old, was, was).any(|bounds| {
-                    bounds.pilcrow < end && !before.block_only(bounds.start, was)
-                }) {
+                if overlapping(old, was, was)
+                    .any(|bounds| bounds.pilcrow < end && !before.block_only(bounds.start, was))
+                {
                     touched.range(now, is, is);
                 }
                 was = end;
@@ -1294,7 +1297,11 @@ impl EditingDoc {
 
     /// Encodes provenance bound to a diff or full bootstrap state.
     #[doc(hidden)]
-    pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
+    pub fn encode_edit_provenance_for_transfer(
+        &self,
+        bytes: &[u8],
+        base: Option<&[u8]>,
+    ) -> Vec<u8> {
         if !self.can_certify_edit_provenance() {
             return Vec::new();
         }
@@ -1403,7 +1410,11 @@ fn encode_sidecar(
     let Some(generation) = generation(txn).filter(|value| value.len() <= OPENING_BYTES) else {
         return Vec::new();
     };
-    if proof.generation.as_ref().is_some_and(|recorded| recorded != &generation) {
+    if proof
+        .generation
+        .as_ref()
+        .is_some_and(|recorded| recorded != &generation)
+    {
         return Vec::new();
     }
     let encode = |entries: &BTreeMap<String, Entry>, overflowed| {
@@ -1498,10 +1509,16 @@ mod tests {
             "generation".to_owned(),
             "paragraph".to_owned(),
             "body".to_owned(),
-            Span { first: UnitId(1, 0), len: 1 },
+            Span {
+                first: UnitId(1, 0),
+                len: 1,
+            },
             Splice {
                 left: None,
-                removed: Some(Span { first: UnitId(1, 0), len: 1 }),
+                removed: Some(Span {
+                    first: UnitId(1, 0),
+                    len: 1,
+                }),
                 inserted: Vec::new(),
                 donor: DonorV1::At { at: 0 },
             },

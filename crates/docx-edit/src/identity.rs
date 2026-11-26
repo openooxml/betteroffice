@@ -4398,7 +4398,10 @@ impl EditingDoc {
                 && was.same_projection(now)
                 && let Some(proof) = provenance.prove(self, &txn, story, key)
             {
-                equal_output.entry(index).or_default().push((ordinal, proof));
+                equal_output
+                    .entry(index)
+                    .or_default()
+                    .push((ordinal, proof));
             }
         }
         let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
@@ -4412,7 +4415,8 @@ impl EditingDoc {
                 continue;
             }
             let mut patched_equal = Vec::new();
-            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key) {
+            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            {
                 let same_stories = part_stories(seeded, part)
                     .keys()
                     .eq(part_stories(&live, part).keys());
@@ -4420,16 +4424,17 @@ impl EditingDoc {
                     let inline_tail = ends_with_inline_tail(seeded, part);
                     let patch_source = OnceCell::new();
                     let mut part_provenance_net = 0;
-                    let equal = equal_output
-                        .get(&index)
-                        .into_iter()
-                        .flatten()
-                        .filter(|(ordinal, _)| {
-                            spliced
-                                .paragraphs
-                                .binary_search_by_key(ordinal, |(at, _)| *at)
-                                .is_ok()
-                        });
+                    let equal =
+                        equal_output
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                            .filter(|(ordinal, _)| {
+                                spliced
+                                    .paragraphs
+                                    .binary_search_by_key(ordinal, |(at, _)| *at)
+                                    .is_ok()
+                            });
                     let mut equal_patches = Vec::new();
                     for (ordinal, equal) in spliced
                         .changed
@@ -4439,12 +4444,13 @@ impl EditingDoc {
                     {
                         let mut unavailable = || {
                             if equal.is_none() {
-                                spliced.legacy_paragraphs.push(
-                                    crate::paragraph_patch_plan::unproven_paragraph(ordinal),
-                                );
+                                spliced
+                                    .legacy_paragraphs
+                                    .push(crate::paragraph_patch_plan::unproven_paragraph(ordinal));
                             }
                         };
-                        let Some(key) = part.backed.get(&ordinal).and_then(|keys| keys.first()) else {
+                        let Some(key) = part.backed.get(&ordinal).and_then(|keys| keys.first())
+                        else {
                             unavailable();
                             continue;
                         };
@@ -4479,9 +4485,9 @@ impl EditingDoc {
                             source_paragraph: Some(&source_paragraph),
                             source: Some(&source),
                             stale_inheritance: stale.iter().any(|cell| {
-                                story.strip_prefix(cell.as_str()).is_some_and(|rest| {
-                                    rest.is_empty() || rest.starts_with(':')
-                                })
+                                story
+                                    .strip_prefix(cell.as_str())
+                                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
                             }),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
@@ -4500,7 +4506,11 @@ impl EditingDoc {
                         };
                         let recorded_patch = equal.or(checked.as_ref()).and_then(|proof| {
                             crate::paragraph_patch_plan::diff_recorded_paragraph(
-                                seeded, live, context, proof, || {
+                                seeded,
+                                live,
+                                context,
+                                proof,
+                                || {
                                     let start = part.occurrence(ordinal)?.tag.start;
                                     let source = patch_source
                                         .get_or_init(|| {
@@ -4530,9 +4540,9 @@ impl EditingDoc {
                                 Ok(patch)
                             }
                             None if equal.is_some() => continue,
-                            None => {
-                                crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
-                            }
+                            None => crate::paragraph_patch_plan::diff_paragraph_v1(
+                                seeded, live, context,
+                            ),
                         };
                         match patch {
                             Ok(patch) => {
@@ -4580,7 +4590,9 @@ impl EditingDoc {
                         }
                         if !patched_equal.is_empty() {
                             spliced.changed.sort_unstable();
-                            spliced.paragraph_patches.sort_unstable_by_key(|patch| patch.ordinal);
+                            spliced
+                                .paragraph_patches
+                                .sort_unstable_by_key(|patch| patch.ordinal);
                         }
                         *provenance_net += part_provenance_net;
                         plan.spliced_parts.push(spliced);
