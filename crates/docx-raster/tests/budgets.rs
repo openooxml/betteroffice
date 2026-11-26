@@ -371,28 +371,39 @@ fn a_dashed_line_past_the_work_budget_is_refused_before_it_expands() {
     );
 }
 
-/// A shape stroke dashes an arbitrary geometry path, so its length has to be
-/// charged the same way a line's is.
+/// Clipping a shape stroke still leaves its visible dash expansion to charge.
 #[test]
 fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
     let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
     let resources = RenderResources::new(&fonts, &chains, &images);
-    let scene = list(
-        64.0,
-        64.0,
-        vec![json!({
-            "kind": "shape",
-            "x": 0,
-            "y": 0,
-            "w": 64,
-            "h": 64,
-            "geometryPath": [
-                {"type": "move", "x": 0, "y": 32},
-                {"type": "line", "x": 4_000_000, "y": 32}
-            ],
-            "strokePaint": {"color": "#000000", "width": 0.5, "dash": "dash"}
-        })],
-    );
+    let scene = |geometry_path: Vec<Value>| {
+        list(
+            8_192.0,
+            8.0,
+            vec![json!({
+                "kind": "shape",
+                "x": 0,
+                "y": 0,
+                "w": 8_192,
+                "h": 8,
+                "geometryPath": geometry_path,
+                "strokePaint": {"color": "#000000", "width": 0.5, "dash": "dash"}
+            })],
+        )
+    };
+    let mut geometry_path = vec![
+        json!({"type": "move", "x": -4_000_000, "y": 2}),
+        json!({"type": "line", "x": 8, "y": 2}),
+    ];
+    render_png(&scene(geometry_path.clone()), 0, &resources)
+        .expect("the mostly off-page dash fits after clipping");
+
+    geometry_path.extend((1..=512).map(|step| {
+        let x = if step % 2 == 0 { 8 } else { 8_184 };
+        let y = 2.0 + f64::from(step) / 128.0;
+        json!({"type": "line", "x": x, "y": y})
+    }));
+    let scene = scene(geometry_path);
     let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
     assert_eq!(
         result.unwrap_err(),
