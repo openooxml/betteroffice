@@ -1,5 +1,11 @@
 import type { BundledFontFace } from './manifest';
 
+export class HttpFontError extends Error {
+  constructor(file: string, readonly status: number) {
+    super(`Failed to fetch bundled font ${file}: HTTP ${status}`);
+  }
+}
+
 interface NodeFsLike {
   readFileSync(path: string): Uint8Array;
 }
@@ -83,7 +89,7 @@ export async function readFontBytes(
         },
   );
   if (!response.ok) {
-    throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+    throw new HttpFontError(file, response.status);
   }
   return response.arrayBuffer();
 }
