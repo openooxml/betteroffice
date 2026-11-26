@@ -1119,7 +1119,7 @@ describe('release wiring', () => {
       expect(paths).toEqual(publisherPaths);
     });
 
-    test.each(['full', 'shallow'])('compares the release SHA with current origin/main in a %s checkout', (checkout) => {
+    test.each(['full', 'shallow'])('compares the release SHA with current main in a %s checkout', (checkout) => {
       const directory = mkdtempSync(join(tmpdir(), 'publisher-files-'));
       fixtureDirectories.push(directory);
       const origin = join(directory, 'origin');
@@ -1150,9 +1150,18 @@ describe('release wiring', () => {
       commit('initial commit');
       for (const path of publisherPaths) write(path.endsWith('/') ? `${path}example/action.yml` : path, 'original\n');
       commit('release');
-      git(directory, 'clone', ...(checkout === 'shallow' ? ['--depth=1'] : []), pathToFileURL(origin).href, repo);
+      const sha = git(origin, 'rev-parse', 'HEAD');
+      const remote = pathToFileURL(origin).href;
+      if (checkout === 'shallow') {
+        git(directory, 'init', repo);
+        git(repo, 'remote', 'add', 'origin', remote);
+        git(repo, 'config', '--unset', 'remote.origin.fetch');
+        git(repo, 'fetch', '--no-tags', '--depth=1', 'origin', sha);
+        git(repo, 'checkout', '--detach', 'FETCH_HEAD');
+      } else {
+        git(directory, 'clone', remote, repo);
+      }
       expect(git(repo, 'rev-parse', '--is-shallow-repository')).toBe(String(checkout === 'shallow'));
-      const sha = git(repo, 'rev-parse', 'HEAD');
       const check = () => spawnSync('bash', [guard], { cwd: repo, env: { ...env, GITHUB_SHA: sha }, encoding: 'utf8' });
 
       const identical = check();
@@ -1168,6 +1177,15 @@ describe('release wiring', () => {
       const publisherChange = check();
       expect(publisherChange.status).toBe(1);
       expect(publisherChange.stdout + publisherChange.stderr).toContain(`::error::Publisher file differs from main: ${publisher}`);
+
+      if (checkout === 'shallow') {
+        expect(git(repo, 'for-each-ref', 'refs/remotes')).toBe('');
+        git(repo, 'checkout', '--detach', 'FETCH_HEAD');
+        expect(git(repo, 'rev-parse', 'HEAD')).not.toBe(sha);
+        const movedHead = check();
+        expect(movedHead.status).toBe(1);
+        expect(movedHead.stdout + movedHead.stderr).toContain(`::error::Publisher file differs from main: ${publisher}`);
+      }
     });
   });
 

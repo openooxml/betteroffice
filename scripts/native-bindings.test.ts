@@ -249,13 +249,14 @@ describe('native package release wiring', () => {
   ) as any;
   const sha = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
   const runIds = NATIVE_FORMATS.map((_, index) => 4200 + index);
+  const pendingCall = 'pending ["--pending"]';
   const post = (name: string) =>
     `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-native.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${sha} -F inputs[dry_run]=false --jq .workflow_run_id`;
   const watchRun = (id: number) => `run watch ${id} --exit-status`;
 
   function dispatch({
-    publish = JSON.stringify(NATIVE_FORMATS), pending = publish, failCheckAt = 0, dispatchStatus
-  }: { publish?: string; pending?: string; failCheckAt?: number; dispatchStatus?: number } = {}) {
+    publish = JSON.stringify(NATIVE_FORMATS), pending = publish, pendingStatus = 0, failCheckAt = 0, dispatchStatus
+  }: { publish?: string; pending?: string; pendingStatus?: number; failCheckAt?: number; dispatchStatus?: number } = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
     try {
       const log = join(directory, 'gh.log');
@@ -281,7 +282,12 @@ describe('native package release wiring', () => {
         `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
       ].join('\n'));
       const bindings = join(directory, 'native-bindings.mjs');
-      writeFileSync(bindings, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, 'pending\\n');\nconsole.log(${JSON.stringify(pending)});\n`);
+      writeFileSync(bindings, [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(log)}, 'pending ' + JSON.stringify(process.argv.slice(2)) + '\\n');`,
+        `console.log(${JSON.stringify(pending)});`,
+        `process.exitCode = ${pendingStatus};`
+      ].join('\n'));
       const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
         cwd: fileURLToPath(new URL('..', import.meta.url)),
         encoding: 'utf8',
@@ -388,7 +394,7 @@ describe('native package release wiring', () => {
   test('checks publisher files before each native dispatch and watches every run', () => {
     const result = dispatch();
     expect(result.status, result.stderr).toBe(0);
-    const calls = ['pending', ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
+    const calls = [pendingCall, ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
     expect(result.log.slice(0, calls.length)).toEqual(calls);
     expect(result.log.slice(calls.length).sort()).toEqual(runIds.map(watchRun));
   });
@@ -396,7 +402,7 @@ describe('native package release wiring', () => {
   test('a native version published since the plan is not dispatched again', () => {
     const result = dispatch({ pending: JSON.stringify(NATIVE_FORMATS.slice(1)) });
     expect(result.status, result.stderr).toBe(0);
-    const calls = ['pending', ...NATIVE_FORMATS.slice(1).flatMap((name) => ['check-publisher-files', post(name)])];
+    const calls = [pendingCall, ...NATIVE_FORMATS.slice(1).flatMap((name) => ['check-publisher-files', post(name)])];
     expect(result.log.slice(0, calls.length)).toEqual(calls);
     expect(result.log).not.toContain(post(NATIVE_FORMATS[0]!));
   });
@@ -413,12 +419,31 @@ describe('native package release wiring', () => {
     expect(result.log).toEqual([]);
   });
 
+  test('an empty fresh pending list runs no check and dispatches nothing', () => {
+    const result = dispatch({ pending: '[]' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([pendingCall]);
+  });
+
+  test('a failed pending lookup fails before checking publisher files or dispatching', () => {
+    const result = dispatch({ pendingStatus: 2 });
+    expect(result.status).toBe(2);
+    expect(result.log).toEqual([pendingCall]);
+  });
+
+  test('a failed publisher file check for the first native binding dispatches and watches nothing', () => {
+    const result = dispatch({ failCheckAt: 1 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[0]}-native failed.`);
+    expect(result.log).toEqual([pendingCall, 'check-publisher-files']);
+  });
+
   test('a failed publisher file check stops native dispatches and still watches the first run', () => {
     const result = dispatch({ failCheckAt: 2 });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
     expect(result.log).toEqual([
-      'pending', 'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
+      pendingCall, 'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
     ]);
   });
 
@@ -427,7 +452,7 @@ describe('native package release wiring', () => {
       const result = dispatch({ dispatchStatus });
       expect(result.status).toBe(1);
       expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
-      const calls = ['pending', ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
+      const calls = [pendingCall, ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
       expect(result.log.slice(0, calls.length)).toEqual(calls);
       expect(result.log.slice(calls.length).sort()).toEqual(runIds.filter((_, index) => index !== 1).map(watchRun));
     }

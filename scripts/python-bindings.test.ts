@@ -482,9 +482,10 @@ globalThis.fetch = async (url) => {
   });
 
   test.each([
-    ['font pack', 1],
-    ['format binding', FONT_PACK_NAMES.length + 1]
-  ] as const)('a failed publisher file check for a %s stops dispatching and waits for earlier runs', (_, failedIndex) => {
+    ['first font pack', 0],
+    ['second font pack', 1],
+    ['second format binding', FONT_PACK_NAMES.length + 1]
+  ] as const)('a failed publisher file check for the %s stops dispatching and watches any earlier runs', (_, failedIndex) => {
     const result = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failCheckAt: failedIndex + 1 });
     expect(result.status).toBe(1);
     expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${ALL_NAMES[failedIndex]} failed.`);
