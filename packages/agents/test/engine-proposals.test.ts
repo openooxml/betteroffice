@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import JSZip from 'jszip';
-import type { DocxProposalSnapshot } from '@betteroffice/docx/yrs';
+import { proposalRevisionPreview, type DocxProposalSnapshot } from '@betteroffice/docx/yrs';
 import { AcceptDateUnsupportedError, attachDocx, attachXlsx, DocumentToolError, openDocx, openXlsx, ProposalDecidedInEditorError } from '../src';
 import { editFixture, fixture } from './fixture';
 import { xlsxFixture } from './format-fixtures';
@@ -988,6 +988,127 @@ async function proposalRaceFixture(text = 'alpha beta gamma gamma') {
   const xml = await zip.file('word/document.xml')!.async('string');
   zip.file('word/document.xml', xml.replace('Executive summary', text));
   return openDocx(await zip.generateAsync({ type: 'uint8array' }));
+}
+
+for (const peer of [false, true]) {
+  test(`attached DOCX accepts every record of one split edit, peer=${peer}`, async () => {
+    const original = 'red KEEP cyan STAY gold';
+    const replacement = 'INDIGO KEEP BLUE STAY TAN';
+    const owner = await proposalRaceFixture(original);
+    const decisions: Array<DocxProposalSnapshot['proposals']> = [];
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) {
+        const result = owner.session.setProposalStates(request);
+        if (result.ok) decisions.push(result.snapshot.proposals);
+        return result;
+      },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const [hit] = doc.grep({ query: original }).matches;
+      const input = { author: 'Agent', edits: [{ match: hit.match, newText: replacement }] };
+      const proposal = peer ? await doc.proposeAsync(input) : doc.propose(input);
+      const records = owner.session.getProposals().proposals.map(({ id, state }) => ({ id, state }));
+      expect(records).toHaveLength(3);
+      const [prefix] = records[0].id.split(':');
+      expect(prefix).toBeTruthy();
+      expect(proposal.id).toMatch(/^proposal\d+$/);
+      expect(records).toEqual([0, 1, 2].map(index => ({ id: `${prefix}:${proposal.id}:${index}`, state: 'proposed' })));
+      expect(doc.read(hit.ref).text).toBe(original);
+
+      expect(await doc.accept(proposal.id)).toEqual({ id: proposal.id, status: 'accepted', tracked: false, changes: 1 });
+
+      const accepted = records.map(({ id }) => ({ id, state: 'accepted' }));
+      if (peer) expect(decisions.map(batch => batch.map(({ id, state }) => ({ id, state })))).toEqual([accepted]);
+      expect(owner.session.getProposals().proposals).toEqual([]);
+      expect(owner.session.listRevisions()).toEqual([]);
+      expect(doc.review(proposal.id)).toMatchObject({ status: 'accepted', records: accepted });
+      expect(doc.read(hit.ref).text).toBe(replacement);
+    } finally { doc.close(); owner.close(); }
+  });
+
+  test(`attached DOCX leaves every split record pending when the target is stale, peer=${peer}`, async () => {
+    const original = 'alpha guard center guard omega';
+    const owner = await proposalRaceFixture(original);
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const [hit] = doc.grep({ query: original }).matches;
+      const propose = (match: string, newText: string) => {
+        const input = { author: 'Agent', edits: [{ match, newText }] };
+        return peer ? doc.proposeAsync(input) : doc.propose(input);
+      };
+      const split = await propose(hit.match, 'ALPHA guard center guard OMEGA');
+      const edit = await propose(doc.grep({ query: 'center' }).matches[0].match, 'core');
+      await doc.accept(edit.id);
+      const beforeText = doc.read(hit.ref).text;
+      const before = owner.session.getProposals();
+      const beforeState = owner.session.encodeState();
+      const records = before.proposals.map(({ id, state }) => ({ id, state }));
+      expect(beforeText).toBe('alpha guard core guard omega');
+      expect(records.map(({ state }) => state)).toEqual(['proposed', 'proposed']);
+      expect(doc.review(split.id)).toMatchObject({ status: 'pending', staleRefs: [hit.ref], records });
+
+      await expect(doc.accept(split.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { refs: [hit.ref] } });
+
+      expect(doc.read(hit.ref).text).toBe(beforeText);
+      expect(owner.session.getProposals()).toEqual(before);
+      expect(owner.session.encodeState()).toEqual(beforeState);
+      expect(doc.review(split.id)).toMatchObject({ status: 'pending', records });
+    } finally { doc.close(); owner.close(); }
+  });
+
+  test(`attached DOCX editor accepts one split record and leaves the rest as suggestions, peer=${peer}`, async () => {
+    const original = 'red KEEP cyan STAY gold';
+    const replacement = 'INDIGO KEEP BLUE STAY TAN';
+    const owner = await proposalRaceFixture(original);
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    try {
+      const [hit] = doc.grep({ query: original }).matches;
+      const input = { author: 'Agent', edits: [{ match: hit.match, newText: replacement }] };
+      const proposal = peer ? await doc.proposeAsync(input) : doc.propose(input);
+      const { version, previewVersion, proposals } = owner.session.getProposals();
+      expect(proposals.map(({ state }) => state)).toEqual(['proposed', 'proposed', 'proposed']);
+      const [, middle] = proposals;
+      expect(middle.revisionIds.length).toBeGreaterThan(0);
+      expect(owner.session.setProposalStates({ expectVersion: version, expectPreviewVersion: previewVersion,
+        changes: [{ id: middle.id, state: 'accepted' }],
+      })).toMatchObject({ ok: true });
+      const partial = owner.session.getProposals();
+      const beforeState = owner.session.encodeState();
+      const records = proposals.map(({ id }) => ({ id, state: id === middle.id ? 'accepted' : 'proposed' }));
+      expect(partial.proposals.map(({ id, state }) => ({ id, state }))).toEqual(records);
+      expect(proposalRevisionPreview(partial)).toEqual(Object.fromEntries(middle.revisionIds.map(id => [id, 'accepted'])));
+      expect(doc.review(proposal.id)).toMatchObject({ status: 'pending', records });
+      expect(doc.listProposals()).toMatchObject([{ id: proposal.id, status: 'pending', records }]);
+      const beforeText = doc.read(hit.ref).text;
+      expect(beforeText).toBe('red KEEP BLUE STAY gold');
+
+      await expect(doc.accept(proposal.id)).rejects.toMatchObject({
+        code: 'PROPOSAL_DECIDED_IN_EDITOR', details: { records: [{ id: middle.id, state: 'accepted' }] },
+      });
+      expect(doc.read(hit.ref).text).toBe(beforeText);
+      expect(owner.session.getProposals()).toEqual(partial);
+      expect(owner.session.encodeState()).toEqual(beforeState);
+
+      const reopened = await openDocx(await owner.export());
+      try {
+        const originalView = reopened.session.readParagraphs({ story: 'body', view: 'original' });
+        expect(originalView.ok && originalView.paragraphs[0].text).toMatch(/^red KEEP (cyan|BLUE) STAY gold$/);
+        const acceptedView = reopened.session.readParagraphs({ story: 'body', view: 'accepted' });
+        expect(acceptedView.ok && acceptedView.paragraphs[0].text).toBe(replacement);
+      } finally { reopened.close(); }
+      expect(owner.session.getProposals()).toEqual(partial);
+    } finally { doc.close(); owner.close(); }
+  });
 }
 
 test('attached DOCX collapses 129 word replacements in one change', async () => {
