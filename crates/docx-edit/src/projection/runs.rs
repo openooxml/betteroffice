@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::paragraph::{good, non_null, same, same_option, set};
-use super::{Attrs, ProjectionContext, StoryState, decode, json_value};
+use super::{Attrs, ProjectionContext, ProjectionError, StoryState, decode, json_value};
 
 const ON_OFF: &[&str] = &[
     "bold", "italic", "allCaps", "smallCaps", "strike", "doubleStrike", "outline", "shadow",
@@ -44,22 +44,23 @@ pub(super) fn lower_plain(
     items: &[(&str, &Attrs)],
     source: Option<&Paragraph>,
     allow_mark_fallback: bool,
-) -> Vec<ParagraphContent> {
+) -> Result<Vec<ParagraphContent>, ProjectionError> {
     let boundaries: Vec<OriginalBoundary> = decode(
-        paragraph_attrs.get("_originalRunBoundaries").map(json_value).as_ref(),
-    ).unwrap_or_default();
+        paragraph_attrs.get("_originalRunBoundaries").map(json_value).transpose()?.as_ref(),
+    )?.unwrap_or_default();
     let live: String = items.iter().map(|(text, _)| *text).collect();
-    let mark_fallback = (allow_mark_fallback && source.is_none() && boundaries.is_empty())
-        .then(|| {
-            decode::<ParagraphFormatting>(paragraph_attrs.get("_originalFormatting").map(json_value).as_ref())
-                .and_then(|formatting| formatting.run_properties)
-                .map(|mark| TextFormatting {
-                    font_family: mark.font_family,
-                    language: mark.language,
-                    ..TextFormatting::default()
-                })
-        })
-        .flatten();
+    let mark_fallback = if allow_mark_fallback && source.is_none() && boundaries.is_empty() {
+        let original = paragraph_attrs.get("_originalFormatting").map(json_value).transpose()?;
+        decode::<Option<ParagraphFormatting>>(original.as_ref())?.flatten()
+            .and_then(|formatting| formatting.run_properties)
+            .map(|mark| TextFormatting {
+                font_family: mark.font_family,
+                language: mark.language,
+                ..TextFormatting::default()
+            })
+    } else {
+        None
+    };
     let mut sources = source.and_then(plain_source)
         .unwrap_or_else(|| boundaries.iter().map(|boundary| {
             (boundary.text.clone(), boundary.formatting.as_ref())
@@ -67,9 +68,9 @@ pub(super) fn lower_plain(
     if let Some(mark) = &mark_fallback {
         sources.push((live.clone(), Some(mark)));
     }
-    let live_attrs: Vec<_> = items.iter().map(|(_, attrs)| attributes(attrs)).collect();
-    if let Some(content) = restore(&boundaries, &sources, &live, items, &live_attrs) {
-        return content;
+    let live_attrs: Vec<_> = items.iter().map(|(_, attrs)| attributes(attrs)).collect::<Result<_, _>>()?;
+    if let Some(content) = restore(&boundaries, &sources, &live, items, &live_attrs)? {
+        return Ok(content);
     }
 
     let source_text: String = sources.iter().map(|(text, _)| text.as_str()).collect();
@@ -95,13 +96,13 @@ pub(super) fn lower_plain(
             let next = span.map_or(end, |span| span.range.end.min(end));
             let text: String = live_chars[offset..next].iter().collect();
             let source = span.and_then(|span| sources[span.index].1);
-            let run = make_run(context, state, paragraph_attrs, &text, &attrs, source);
+            let run = make_run(context, state, paragraph_attrs, &text, &attrs, source)?;
             let mut key = attrs.clone();
             for name in ["hyperlink", "ins", "del"] {
                 key.remove(name);
             }
             if let Some(source) = source {
-                let mut authored = properties(source);
+                let mut authored = properties(source)?;
                 authored.retain(|name, _| SOURCE_PROPERTIES.contains(&name.as_str()));
                 key.insert("_sourceRunFormatting".to_owned(), Value::Object(authored));
             } else if !sources.is_empty() {
@@ -143,7 +144,7 @@ pub(super) fn lower_plain(
     if let Some((run, _, _)) = current {
         projected.push(inline(run));
     }
-    projected
+    Ok(projected)
 }
 
 pub(super) fn make_run(
@@ -153,7 +154,7 @@ pub(super) fn make_run(
     text: &str,
     attrs: &Properties,
     source: Option<&TextFormatting>,
-) -> Run {
+) -> Result<Run, ProjectionError> {
     let style = attrs.get("runStyle").and_then(|style| style.get("styleId")).and_then(Value::as_str);
     let paragraph_style = super::attr_string(paragraph_attrs, "pStyle");
     let inherited = match &state.table_run_formatting {
@@ -162,28 +163,28 @@ pub(super) fn make_run(
     };
     let inherited = direct(&inherited.into_iter().collect());
     let live = direct(attrs);
-    let formatting = relative(attrs, &live, &inherited, source, context.theme);
-    Run {
+    let formatting = relative(attrs, &live, &inherited, source, context.theme)?;
+    Ok(Run {
         node_type: RunType::Run,
         formatting,
         property_changes: None,
         content: run_content(text, &live),
-        direction_scopes: decode(attrs.get("directionScopes")).unwrap_or_default(),
-    }
+        direction_scopes: decode(attrs.get("directionScopes"))?.unwrap_or_default(),
+    })
 }
 
 pub(super) fn inline(run: Run) -> ParagraphContent {
     ParagraphContent::Inline(InlineNode::Run(run))
 }
 
-pub(super) fn attributes(attrs: &Attrs) -> Properties {
+pub(super) fn attributes(attrs: &Attrs) -> Result<Properties, ProjectionError> {
     properties(attrs)
 }
 
-fn properties<T: serde::Serialize>(input: &T) -> Properties {
-    match json_value(input) {
-        Value::Object(values) => values,
-        _ => Properties::new(),
+fn properties<T: serde::Serialize>(input: &T) -> Result<Properties, ProjectionError> {
+    match json_value(input)? {
+        Value::Object(values) => Ok(values),
+        _ => Err(ProjectionError::InvalidInput("expected a formatting object".to_owned())),
     }
 }
 
@@ -285,8 +286,8 @@ fn relative(
     inherited: &Properties,
     source: Option<&TextFormatting>,
     theme: &Theme,
-) -> Option<TextFormatting> {
-    let source = source.map(properties).unwrap_or_default();
+) -> Result<Option<TextFormatting>, ProjectionError> {
+    let source = source.map(properties).transpose()?.unwrap_or_default();
     let mut result = Properties::new();
     for key in live.keys().chain(inherited.keys()) {
         let key = key.as_str();
@@ -331,7 +332,7 @@ fn relative(
     if let Some(language) = attrs.get("language") {
         set(&mut result, "language", live_language(source.get("language"), language).as_ref());
     }
-    if result.is_empty() { None } else { decode(Some(&Value::Object(result))) }
+    if result.is_empty() { Ok(None) } else { decode(Some(&Value::Object(result))) }
 }
 
 fn relative_fonts(live: Option<&Value>, inherited: Option<&Value>, source: Option<&Value>, theme: &Theme) -> Option<Value> {
@@ -378,11 +379,24 @@ fn plain_source(paragraph: &Paragraph) -> Option<Vec<(String, Option<&TextFormat
     }).collect()
 }
 
-fn marks_key(key: Option<&str>) -> Option<Properties> {
+fn marks_key(key: Option<&str>) -> Result<Properties, ProjectionError> {
     let mut attrs = Properties::new();
-    for mark in key.unwrap_or_default().split('|').filter(|mark| !mark.is_empty()) {
-        let (name, value) = mark.split_once(':')?;
-        let value: Properties = serde_json::from_str(value).ok()?;
+    let mut remaining = key.unwrap_or_default().trim_start_matches('|');
+    while !remaining.is_empty() {
+        let (name, json) = remaining.split_once(':')
+            .filter(|(name, _)| !name.is_empty() && !name.contains('|'))
+            .ok_or_else(|| ProjectionError::InvalidInput("invalid original run mark".to_owned()))?;
+        let (value, rest) = crate::json_tree::parse_prefix(json).map_err(ProjectionError::InvalidInput)?;
+        let Value::Object(value) = value.into_value().map_err(ProjectionError::InvalidInput)? else {
+            return Err(ProjectionError::InvalidInput("original run mark must be an object".to_owned()));
+        };
+        let rest = rest.trim_start_matches([' ', '\t', '\r', '\n']);
+        remaining = if rest.is_empty() {
+            rest
+        } else {
+            rest.strip_prefix('|').map(|rest| rest.trim_start_matches('|'))
+                .ok_or_else(|| ProjectionError::InvalidInput("invalid original run mark separator".to_owned()))?
+        };
         match name {
             "comment" | "footnoteRef" => continue,
             name if BOOLEAN_MARKS.contains(&name) => set(&mut attrs, name, Some(&Value::Bool(true))),
@@ -397,7 +411,7 @@ fn marks_key(key: Option<&str>) -> Option<Properties> {
             }
         }
     }
-    Some(attrs)
+    Ok(attrs)
 }
 
 fn properties_equal(left: &Properties, right: &Properties) -> bool {
@@ -410,12 +424,12 @@ fn restore(
     text: &str,
     items: &[(&str, &Attrs)],
     attrs: &[Properties],
-) -> Option<Vec<ParagraphContent>> {
+) -> Result<Option<Vec<ParagraphContent>>, ProjectionError> {
     if boundaries.is_empty() || boundaries.iter().any(|boundary| {
         boundary.breaks.as_ref().is_some_and(|breaks| !breaks.is_empty())
             || boundary.note_marks.as_ref().is_some_and(|marks| !marks.is_empty())
     }) || text != boundaries.iter().map(|boundary| boundary.text.as_str()).collect::<String>() {
-        return None;
+        return Ok(None);
     }
     let source_matches = sources.len() == boundaries.len()
         && sources.iter().zip(boundaries).all(|((text, _), boundary)| text == &boundary.text);
@@ -426,12 +440,12 @@ fn restore(
         let expected = marks_key(boundary.marks_key.as_deref())?;
         let mut remaining = boundary.text.encode_utf16().count();
         while remaining != 0 {
-            let ((text, _), attrs) = current.peek()?;
+            let Some(((text, _), attrs)) = current.peek() else { return Ok(None) };
             let filtered: Properties = attrs.iter().filter(|(key, _)| {
                 !matches!(key.as_str(), "hyperlink" | "ins" | "del")
             }).map(|(key, value)| (key.clone(), value.clone())).collect();
             if !properties_equal(&expected, &filtered) {
-                return None;
+                return Ok(None);
             }
             let len = text.encode_utf16().count();
             let used = remaining.min(len - consumed);
@@ -453,10 +467,10 @@ fn restore(
             formatting: (formatting != TextFormatting::default()).then_some(formatting),
             property_changes: boundary.property_changes.clone(),
             content: run_content(&boundary.text, &direct(&expected)),
-            direction_scopes: decode(expected.get("directionScopes")).unwrap_or_default(),
+            direction_scopes: decode(expected.get("directionScopes"))?.unwrap_or_default(),
         }));
     }
-    current.next().is_none().then_some(result)
+    Ok(current.next().is_none().then_some(result))
 }
 
 struct SourceSpan {

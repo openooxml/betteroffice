@@ -92,6 +92,7 @@ pub enum ProjectionError {
     SourceParse(String),
     StoryRead { story_id: String, error: EditError },
     InvalidInput(String),
+    Json(serde_json::Error),
 }
 
 impl std::fmt::Display for ProjectionError {
@@ -101,11 +102,18 @@ impl std::fmt::Display for ProjectionError {
             Self::SourceParse(error) => write!(f, "could not parse the retained DOCX source: {error}"),
             Self::StoryRead { story_id, error } => write!(f, "could not read projection story {story_id}: {error}"),
             Self::InvalidInput(error) => write!(f, "invalid projection input: {error}"),
+            Self::Json(error) => write!(f, "invalid projection data: {error}"),
         }
     }
 }
 
 impl std::error::Error for ProjectionError {}
+
+impl From<serde_json::Error> for ProjectionError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Json(error)
+    }
+}
 
 pub struct ProjectionOutput {
     pub document: docx_parse::S9DocumentWire,
@@ -319,32 +327,44 @@ impl SourceStory {
         }
     }
 
-    fn child(&self, id: &str) -> Option<Arc<Self>> {
+    fn child(&self, id: &str) -> Result<Option<Arc<Self>>, ProjectionError> {
         let mut children = self.children.lock().unwrap();
         if let Some(child) = children.get(id) {
-            return Some(Arc::clone(child));
+            return Ok(Some(Arc::clone(child)));
         }
         let blocks = if let Some(BlockContent::BlockSdt(source)) = self.containers.get(id) {
             &source.content
         } else {
-            let table_id = crate::structured::source::cell_table(id)?;
-            let BlockContent::Table(table) = self.containers.get(table_id)? else { return None };
-            let (row, cell) = id.get(table_id.len() + 2..)?.split_once('c')?;
-            let row: usize = row.parse().ok()?;
-            let cell: usize = cell.parse().ok()?;
+            let Some((table_id, table, row, cell)) = self.cell_location(id) else {
+                return Ok(None);
+            };
             let mut table_cells = self.table_cells.lock().unwrap();
-            let cells = table_cells.entry(table_id.to_owned())
-                .or_insert_with(|| crate::seed::source_cells(&json_value(table)));
-            let source_cell = *cells.get(row)?.get(cell)?;
-            &table.rows.get(row)?.cells.get(source_cell)?.content
+            let cells = match table_cells.entry(table_id.to_owned()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(crate::seed::source_cells(&json_value(table)?))
+                }
+            };
+            let Some(cell) = cells.get(row).and_then(|cells| cells.get(cell))
+                .and_then(|&cell| table.rows.get(row)?.cells.get(cell))
+            else {
+                return Ok(None);
+            };
+            &cell.content
         };
         let mut child = Self { blocks: blocks.clone(), ..Self::default() };
         child.index(id);
         let child = Arc::new(child);
         children.insert(id.to_owned(), Arc::clone(&child));
-        Some(child)
+        Ok(Some(child))
     }
 
+    fn cell_location<'a>(&self, id: &'a str) -> Option<(&'a str, &docx_parse::table::Table, usize, usize)> {
+        let table_id = crate::structured::source::cell_table(id)?;
+        let BlockContent::Table(table) = self.containers.get(table_id)? else { return None };
+        let (row, cell) = id.get(table_id.len() + 2..)?.split_once('c')?;
+        Some((table_id, table, row.parse().ok()?, cell.parse().ok()?))
+    }
 }
 
 #[derive(Default)]
@@ -440,7 +460,7 @@ impl ProjectionContext<'_, '_> {
         if !self.visiting.insert(id.to_owned()) {
             return Err(ProjectionError::InvalidInput(format!("cyclic story {id}")));
         }
-        let source = self.source.child(id);
+        let source = self.source.child(id)?;
         let empty = SourceStory::default();
         let mut child = ProjectionContext {
             doc: self.doc,
@@ -517,8 +537,14 @@ impl LoweringInput<'_> {
         crate::target::drawing_from_payload(&payload, image)
     }
 
-    fn payload_json(&self, key: &str) -> Option<Value> {
-        attr_string(self.payload, key).and_then(crate::read_types::payload_json)
+    fn payload_json(&self, key: &str) -> Result<Option<Value>, ProjectionError> {
+        self.payload.get(key).map(|value| {
+            let Any::String(json) = value else {
+                return Err(ProjectionError::InvalidInput(format!("{key} must be a JSON string")));
+            };
+            crate::json_tree::parse(json).and_then(crate::json_tree::OrderedValue::into_value)
+                .map_err(ProjectionError::InvalidInput)
+        }).transpose()
     }
 }
 
@@ -610,35 +636,29 @@ fn attr_string<'a>(attrs: &'a Attrs, key: &str) -> Option<&'a str> {
     crate::read_types::payload_str(attrs.get(key))
 }
 
-fn json_value<T: Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).unwrap_or_default()
+fn json_value<T: Serialize>(value: &T) -> Result<Value, ProjectionError> {
+    Ok(serde_json::to_value(value)?)
 }
 
-fn decode<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Option<T> {
-    serde_json::from_value(value?.clone()).ok()
+fn decode<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Result<Option<T>, ProjectionError> {
+    value.map(|value| T::deserialize(value).map_err(ProjectionError::from)).transpose()
 }
 
 fn materialize<T: Clone + Serialize + serde::de::DeserializeOwned>(
     value: &T,
     table: &docx_parse::media::MediaTable,
 ) -> Result<T, ProjectionError> {
-    fn replace(
-        value: &mut Value,
-        table: &docx_parse::media::MediaTable,
-        urls: &mut BTreeMap<usize, String>,
-    ) -> Result<bool, ProjectionError> {
-        let mut changed = false;
+    let mut wire = json_value(value)?;
+    let mut pending = vec![&mut wire];
+    let mut urls = BTreeMap::new();
+    let mut changed = false;
+    while let Some(value) = pending.pop() {
         match value {
-            Value::Array(values) => {
-                for value in values {
-                    changed |= replace(value, table, urls)?;
-                }
-            }
+            Value::Array(values) => pending.extend(values.iter_mut()),
             Value::Object(fields) => {
                 for (key, value) in fields {
                     if matches!(key.as_str(), "src" | "dataUrl")
                         && let Some(index) = value.as_str().and_then(docx_parse::media::media_token_index)
-                        && index < table.len()
                     {
                         let url = match urls.entry(index) {
                             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -649,18 +669,15 @@ fn materialize<T: Clone + Serialize + serde::de::DeserializeOwned>(
                         *value = Value::String(url.clone());
                         changed = true;
                     } else {
-                        changed |= replace(value, table, urls)?;
+                        pending.push(value);
                     }
                 }
             }
             _ => {}
         }
-        Ok(changed)
     }
-
-    let mut wire = serde_json::to_value(value).map_err(|error| ProjectionError::SourceParse(error.to_string()))?;
-    if replace(&mut wire, table, &mut BTreeMap::new())? {
-        serde_json::from_value(wire).map_err(|error| ProjectionError::SourceParse(error.to_string()))
+    if changed {
+        Ok(serde_json::from_value(wire)?)
     } else {
         Ok(value.clone())
     }
@@ -803,7 +820,7 @@ impl EditingDoc {
                     metadata.projection_inheritance()
                 } else {
                     let definitions = input.host.styles.as_ref().unwrap_or(&package.styles)
-                        .as_ref().map(json_value);
+                        .as_ref().map(json_value).transpose()?;
                     RunInheritance::new(definitions.as_ref())
                 };
                 cache.styles = Some((input.host.styles.clone(), inheritance));
@@ -848,8 +865,8 @@ impl EditingDoc {
         self.projection.lock().unwrap().source().is_ok_and(|source| source.stories.contains_key(story_id))
     }
 
-    #[cfg(feature = "wasm")]
-    pub(crate) fn projection_document_json(&self, input_json: &str) -> Result<String, String> {
+    #[doc(hidden)]
+    pub fn project_document_json(&self, input_json: &str) -> Result<String, ProjectionError> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct WireOutput {
@@ -862,10 +879,9 @@ impl EditingDoc {
         }
 
         let input = projection_input_json(input_json)?;
-        let output = self.project_document(&input).map_err(|error| error.to_string())?;
-        let source = Arc::clone(&self.projection.lock().unwrap().source()
-            .map_err(|error| error.to_string())?.envelope);
-        serde_json::to_string(&WireOutput {
+        let output = self.project_document(&input)?;
+        let source = Arc::clone(&self.projection.lock().unwrap().source()?.envelope);
+        Ok(serde_json::to_string(&WireOutput {
             envelope: S9WireEnvelope {
                 wire_version: source.wire_version,
                 document: output.document,
@@ -878,21 +894,22 @@ impl EditingDoc {
             session_revision_placeholders: output.session_revision_placeholders,
             created_list_sites: output.created_list_sites,
             deferred: output.deferred,
-        }).map_err(|error| error.to_string())
+        })?)
     }
 
-    #[cfg(feature = "wasm")]
-    pub(crate) fn projection_story_json(&self, story_id: &str, input_json: &str) -> Result<String, String> {
+    #[doc(hidden)]
+    pub fn project_story_json(&self, story_id: &str, input_json: &str) -> Result<String, ProjectionError> {
         let input = projection_input_json(input_json)?;
-        let story = self.project_story(story_id, &input).map_err(|error| error.to_string())?;
-        serde_json::to_string(&story).map_err(|error| error.to_string())
+        let story = self.project_story(story_id, &input)?;
+        Ok(serde_json::to_string(&story)?)
     }
 }
 
-#[cfg(feature = "wasm")]
-fn projection_input_json(input_json: &str) -> Result<ProjectionInput, String> {
-    serde_json::from_str(input_json)
-        .map_err(|error| ProjectionError::InvalidInput(error.to_string()).to_string())
+fn projection_input_json(input_json: &str) -> Result<ProjectionInput, ProjectionError> {
+    let input = crate::json_tree::parse(input_json).and_then(crate::json_tree::OrderedValue::into_value)
+        .map_err(ProjectionError::InvalidInput)?;
+    serde_json::from_value(input)
+        .map_err(|error| ProjectionError::InvalidInput(error.to_string()))
 }
 
 fn projection_generation(txn: &Transaction<'_>) -> Option<String> {

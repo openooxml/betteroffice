@@ -984,8 +984,8 @@ impl EditSession {
         self.core
             .engine
             .doc()
-            .projection_document_json(input_json)
-            .map_err(JsValue::from)
+            .project_document_json(input_json)
+            .map_err(js_err)
     }
 
     /// @internal
@@ -993,8 +993,8 @@ impl EditSession {
         self.core
             .engine
             .doc()
-            .projection_story_json(story_id, input_json)
-            .map_err(JsValue::from)
+            .project_story_json(story_id, input_json)
+            .map_err(js_err)
     }
 
     /// The bytes a `media:{n}` image source displays, as the part's

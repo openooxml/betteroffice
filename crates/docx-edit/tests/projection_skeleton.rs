@@ -18,6 +18,18 @@ fn seeded_with_parts(
     relationships: &str,
     extra: &[(&str, String)],
 ) -> EditingDoc {
+    let bytes = package_with_parts(body, overrides, relationships, extra);
+    let doc = EditingDoc::new(41);
+    seed_from_docx(&doc, &bytes).unwrap();
+    doc
+}
+
+fn package_with_parts(
+    body: &str,
+    overrides: &str,
+    relationships: &str,
+    extra: &[(&str, String)],
+) -> Vec<u8> {
     let mut parts = [
         ("[Content_Types].xml", format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>{overrides}</Types>"#)),
         ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
@@ -30,10 +42,7 @@ fn seeded_with_parts(
         )),
     ].into_iter().map(|(path, xml)| (path.to_owned(), xml.into_bytes())).collect::<Vec<_>>();
     parts.extend(extra.iter().map(|(path, xml)| ((*path).to_owned(), xml.as_bytes().to_vec())));
-    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
-    let doc = EditingDoc::new(41);
-    seed_from_docx(&doc, &bytes).unwrap();
-    doc
+    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 fn body(projection: &ProjectionOutput) -> &[BlockContent] {
@@ -182,6 +191,126 @@ fn carries_a_deferred_table_without_projecting_its_paragraph_keys() {
         deferral.family == ProjectionFamily::Tables && deferral.kind == "table"
             && deferral.story_id == "body" && deferral.paragraph == Some(1)
     }));
+}
+
+const DEEP_MARKER: &str = "innermost-projection-depth-marker";
+
+fn nested_tables(levels: usize) -> String {
+    let open = r#"<w:tbl><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid><w:tr><w:tc>"#;
+    let close = "</w:tc></w:tr></w:tbl>";
+    let field = r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>field result</w:t></w:r></w:fldSimple></w:p>"#;
+    format!(
+        "{field}{}<w:p><w:r><w:t>{DEEP_MARKER}</w:t></w:r></w:p>{}<w:p/>",
+        open.repeat(levels),
+        close.repeat(levels),
+    )
+}
+
+fn json_nesting(json: &str) -> usize {
+    let (mut depth, mut maximum) = (0, 0);
+    let (mut quoted, mut escaped) = (false, false);
+    for byte in json.bytes() {
+        if escaped {
+            escaped = false;
+        } else if quoted {
+            escaped = byte == b'\\';
+            quoted = byte != b'"';
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'[' | b'{' => {
+                    depth += 1;
+                    maximum = maximum.max(depth);
+                }
+                b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(depth, 0);
+    maximum
+}
+
+#[test]
+fn projects_the_deepest_tables_the_parser_accepts() {
+    let levels = docx_parse::MAX_NESTING_DEPTH;
+    let too_deep = package_with_parts(&nested_tables(levels + 1), "", "", &[]);
+    assert!(matches!(
+        docx_parse::parse_docx_s9_wire(&too_deep, Default::default()),
+        Err(docx_parse::ParseError::ResourceLimit { kind: "nestingDepth", .. })
+    ));
+    let doc = seeded(&nested_tables(levels));
+    let document = doc.project_document_json("{}").unwrap();
+    let story = doc.project_story_json("body", "{}").unwrap();
+    for json in [&document, &story] {
+        assert!(json.contains(DEEP_MARKER));
+        assert!(json_nesting(json) > 128);
+    }
+    assert_eq!(json_nesting(&document), 6 * levels + 10);
+    assert_eq!(json_nesting(&story), 6 * levels + 7);
+
+    let typed = doc.project_document(&ProjectionInput::default()).unwrap();
+    let mut blocks = body(&typed);
+    for level in 0..levels {
+        let table = blocks.iter().find_map(|block| match block {
+            BlockContent::Table(table) => Some(table),
+            _ => None,
+        }).unwrap_or_else(|| panic!("missing table level {}", level + 1));
+        blocks = &table.rows[0].cells[0].content;
+    }
+    let [inner] = blocks else { panic!("expected the innermost paragraph") };
+    assert_eq!(text(paragraph(inner)), DEEP_MARKER);
+
+    let overrides = serde_json::json!({
+        "host": { "comments": [{
+            "id": 1, "author": "Ada", "content": [], "blockContent": body(&typed),
+        }] },
+    }).to_string();
+    assert!(json_nesting(&overrides) > 128);
+    assert_eq!(
+        doc.project_document_json(&overrides).unwrap().matches(DEEP_MARKER).count(),
+        2,
+    );
+}
+
+#[test]
+fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
+    for levels in [1, 260] {
+        let doc = seeded("<w:p/>");
+        let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
+        let mut story = "body".to_owned();
+        let mut owners = Vec::new();
+        for _ in 0..levels {
+            let receipt = doc.insert_table(&ctx, Position::new(&story, 0), 1, 1).unwrap();
+            owners.push(story);
+            story = receipt.created_story_ids.into_iter().next().unwrap();
+        }
+        doc.insert_text(&ctx, Position::new(&story, 0), DEEP_MARKER, FormatPolicy::Inherit).unwrap();
+        for json in [
+            doc.project_document_json("{}").unwrap(),
+            doc.project_story_json("body", "{}").unwrap(),
+        ] {
+            let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let tables: Vec<_> = wire["deferred"].as_array().unwrap().iter()
+                .filter(|entry| entry["family"] == "tables")
+                .map(|entry| {
+                    assert_eq!(entry["kind"], "table");
+                    assert_eq!(entry["paragraph"], 0);
+                    entry["storyId"].as_str().unwrap()
+                }).collect();
+            assert!(tables.iter().copied().eq(owners.iter().map(String::as_str)));
+        }
+    }
+}
+
+#[test]
+fn rejects_malformed_and_over_budget_projection_input() {
+    let doc = seeded("<w:p/>");
+    let error = doc.project_story_json("body", r#"{"host":{"styles":false}}"#).unwrap_err();
+    assert!(matches!(error, ProjectionError::InvalidInput(_)));
+    let input = format!("{}0{}", "[".repeat(1025), "]".repeat(1025));
+    let error = doc.project_document_json(&input).unwrap_err();
+    assert!(error.to_string().contains("JSON nesting exceeds 1024"));
 }
 
 fn seeded_with_auxiliary_stories() -> EditingDoc {

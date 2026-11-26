@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use docx_parse::BlockContent;
@@ -36,6 +36,7 @@ pub(super) fn project(
     let segments = tabs_as_embeds(segments);
     let mut items = Vec::new();
     let mut raw_blocks = RawBlocks::new(&context.source.blocks);
+    let mut deferred_stories = BTreeSet::from([id.to_owned()]);
     for segment in segments {
         match &segment.content {
             SegmentContent::Text(text) => {
@@ -66,6 +67,7 @@ pub(super) fn project(
                 let mut lowered = hook.lower(context, &mut story, LoweringInput { kind, payload, segment: &segment })?;
                 if matches!(lowered, Lowered::Deferred) {
                     story.result.defer(hook.family(), kind, id, Some(story.state.paragraph_index));
+                    defer_descendant_containers(context, &mut story.result, kind, payload, &mut deferred_stories)?;
                     if let Some(source) = source_id.and_then(|id| context.source.containers.get(&id)) {
                         lowered = Lowered::Blocks(StoryProjection { blocks: vec![source.clone()], ..StoryProjection::default() });
                     }
@@ -166,15 +168,62 @@ fn container_id(story: &mut StoryPosition<'_>, kind: &str, payload: &Attrs) -> O
 }
 
 fn first_table_cell(payload: &Attrs) -> Option<&str> {
-    let Any::Array(rows) = payload.get("rows")? else { return None };
-    rows.iter().find_map(|row| {
-        let Any::Map(row) = row else { return None };
-        let Any::Array(cells) = row.get("cells")? else { return None };
-        cells.iter().find_map(|cell| {
-            let Any::Map(cell) = cell else { return None };
-            crate::read_types::payload_str(cell.get("story"))
-        })
+    table_cell_stories(payload).next()
+}
+
+fn table_cell_stories(payload: &Attrs) -> impl DoubleEndedIterator<Item = &str> {
+    fn array(value: Option<&Any>) -> &[Any] {
+        match value {
+            Some(Any::Array(values)) => values,
+            _ => &[],
+        }
+    }
+
+    array(payload.get("rows")).iter().flat_map(|row| {
+        if let Any::Map(row) = row { array(row.get("cells")) } else { &[] }
+    }).filter_map(|cell| match cell {
+        Any::Map(cell) => crate::read_types::payload_str(cell.get("story")),
+        _ => None,
     })
+}
+
+fn push_child_stories(pending: &mut Vec<String>, kind: &str, payload: &Attrs) {
+    if kind == "table" {
+        pending.extend(table_cell_stories(payload).rev().map(str::to_owned));
+    } else if kind == "blockSdt" && let Some(id) = attr_string(payload, "story") {
+        pending.push(id.to_owned());
+    }
+}
+
+fn defer_descendant_containers(
+    context: &ProjectionContext<'_, '_>,
+    result: &mut StoryProjection,
+    kind: &str,
+    payload: &Attrs,
+    visited: &mut BTreeSet<String>,
+) -> Result<(), ProjectionError> {
+    let mut pending = Vec::new();
+    push_child_stories(&mut pending, kind, payload);
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let segments = context.doc.story_segments_in(context.txn, &id)
+            .map_err(|error| ProjectionError::StoryRead { story_id: id.clone(), error })?;
+        let mut paragraph = 0;
+        for segment in segments {
+            match segment.content {
+                SegmentContent::Pilcrow(_) => paragraph += 1,
+                SegmentContent::OtherEmbed { kind, payload } if container(&kind, &payload) => {
+                    let family = embed_hook(&kind, &payload).family();
+                    result.defer(family, &kind, &id, Some(paragraph));
+                    push_child_stories(&mut pending, &kind, &payload);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn finish_paragraph(
@@ -199,9 +248,9 @@ fn finish_paragraph(
     if let Some(source) = source {
         carry_side_markers(&mut content, &source.content);
     }
-    let formatting = properties.and_then(|properties| {
+    let formatting = properties.map(|properties| {
         paragraph::formatting(context, story.id, &story.state, properties, source)
-    });
+    }).transpose()?.flatten();
     let mut paragraph = paragraph::new(source, saved_id, formatting, content);
     for hook in HOOKS {
         hook.finish_paragraph(context, story, properties, source, &mut paragraph)?;
@@ -224,7 +273,7 @@ fn lower_items(
                 .any(|kind| has_mark(&item.segment, kind))
     };
     if items.iter().all(plain) {
-        return Ok(runs::lower_plain(context, &story.state, attrs, &text_items(items), source, true));
+        return runs::lower_plain(context, &story.state, attrs, &text_items(items), source, true);
     }
 
     let mut fallback = SourceInlines::new(source);
@@ -243,14 +292,14 @@ fn lower_items(
         if plain(placed) {
             let end = items[index..].iter().position(|item| !plain(item)).map_or(items.len(), |count| index + count);
             let text = text_items(&items[index..end]);
-            content.extend(runs::lower_plain(context, &story.state, attrs, &text, None, false));
+            content.extend(runs::lower_plain(context, &story.state, attrs, &text, None, false)?);
             index = end;
             continue;
         }
         let mut lowered = match &item.content {
             SegmentContent::Text(text) => {
-                let mark = runs::attributes(&item.attributes);
-                let run = runs::make_run(context, &story.state, attrs, text, &mark, None);
+                let mark = runs::attributes(&item.attributes)?;
+                let run = runs::make_run(context, &story.state, attrs, text, &mark, None)?;
                 let kind = ["del", "ins", "hyperlink", "rPrChange"].into_iter().find(|kind| has_mark(item, kind));
                 let mut lowered = Lowered::Deferred;
                 for mark in fields_dispatch::MARKS.iter().copied().filter(|mark| has_mark(item, mark)) {
@@ -418,11 +467,17 @@ impl SourceInlines {
 }
 
 fn inline_text(content: &[InlineNode]) -> String {
-    content.iter().filter_map(|content| match content {
-        InlineNode::Run(run) => Some(run_text(run)),
-        InlineNode::Hyperlink(link) => Some(inline_text(&link.children)),
-        _ => None,
-    }).collect()
+    let mut text = String::new();
+    let mut pending = vec![content.iter()];
+    while let Some(nodes) = pending.last_mut() {
+        match nodes.next() {
+            Some(InlineNode::Run(run)) => text.push_str(&run_text(run)),
+            Some(InlineNode::Hyperlink(link)) => pending.push(link.children.iter()),
+            Some(_) => {}
+            None => { pending.pop(); }
+        }
+    }
+    text
 }
 
 fn run_text(run: &Run) -> String {

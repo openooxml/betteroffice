@@ -2,7 +2,7 @@ use docx_parse::formatting::ParagraphFormatting;
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use serde_json::{Map, Value};
 
-use super::{Attrs, ProjectionContext, StoryState, attr_string, decode, json_value, runs};
+use super::{Attrs, ProjectionContext, ProjectionError, StoryState, attr_string, decode, json_value, runs};
 use crate::ParagraphProperties;
 
 const TRUTHY_PROPERTIES: &[&str] = &[
@@ -52,8 +52,8 @@ pub(super) fn formatting(
     story: &StoryState,
     properties: &ParagraphProperties,
     source: Option<&Paragraph>,
-) -> Option<ParagraphFormatting> {
-    let mut attrs = json_value(&properties.values).as_object().cloned()?;
+) -> Result<Option<ParagraphFormatting>, ProjectionError> {
+    let mut attrs = runs::attributes(&properties.values)?;
     if let Some(style) = attrs.remove("pStyle").filter(|style| !style.is_null()) {
         attrs.insert("styleId".to_owned(), style);
     } else {
@@ -74,7 +74,11 @@ pub(super) fn formatting(
             resolved.remove("indentRight");
         }
     }
-    let original = attrs.get("_originalFormatting").and_then(Value::as_object);
+    let original = non_null(&attrs, "_originalFormatting").map(|value| {
+        value.as_object().ok_or_else(|| ProjectionError::InvalidInput(
+            "original paragraph formatting must be an object".to_owned()
+        ))
+    }).transpose()?;
     let style_numbering = attrs.get("numPrFromStyle")
         .or_else(|| original.and_then(|original| original.get("numPrFromStyle")));
     let style_sourced = numbering.is_some_and(|numbering| {
@@ -101,7 +105,7 @@ pub(super) fn formatting(
         if let Some(cnf) = non_null(&attrs, "cnfStyle") {
             set(&mut result, "cnfStyle", Some(cnf));
         }
-        paragraph_mark(&mut result, &properties.values, source);
+        paragraph_mark(&mut result, &properties.values, source)?;
         return decode(Some(&Value::Object(result)));
     }
 
@@ -111,7 +115,7 @@ pub(super) fn formatting(
         non_null(&attrs, key).map(|value| ((*key).to_owned(), value.clone()))
     })).collect();
     if result.is_empty() && numbering.is_none() {
-        return None;
+        return Ok(None);
     }
     if !style_sourced {
         set(&mut result, "numPr", numbering);
@@ -133,28 +137,37 @@ pub(super) fn formatting(
                 || !same_option(Some(value), inherited.get(key))
         });
         if result.is_empty() {
-            return None;
+            return Ok(None);
         }
     }
     decode(Some(&Value::Object(result)))
 }
 
-fn paragraph_mark(result: &mut Map<String, Value>, attrs: &Attrs, source: Option<&Paragraph>) {
+fn paragraph_mark(
+    result: &mut Map<String, Value>,
+    attrs: &Attrs,
+    source: Option<&Paragraph>,
+) -> Result<(), ProjectionError> {
     let mark = source.map(|source| source.formatting.as_ref().and_then(|format| format.run_properties.as_ref()));
     if !result.contains_key("runProperties") && mark.flatten().is_none() && !attrs.contains_key("language") {
-        return;
+        return Ok(());
     }
-    let mut run = result.remove("runProperties").and_then(|value| value.as_object().cloned()).unwrap_or_default();
+    let mut run = match result.remove("runProperties") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(run)) => run,
+        Some(_) => return Err(ProjectionError::InvalidInput("paragraph mark formatting must be an object".to_owned())),
+    };
     if let Some(mark) = mark {
-        set(&mut run, "fontFamily", mark.and_then(|mark| mark.font_family.as_ref()).map(json_value).as_ref());
-        set(&mut run, "language", mark.and_then(|mark| mark.language.as_ref()).map(json_value).as_ref());
+        set(&mut run, "fontFamily", mark.and_then(|mark| mark.font_family.as_ref()).map(json_value).transpose()?.as_ref());
+        set(&mut run, "language", mark.and_then(|mark| mark.language.as_ref()).map(json_value).transpose()?.as_ref());
     }
     if let Some(language) = attrs.get("language") {
-        let patch = json_value(language);
+        let patch = json_value(language)?;
         let language = runs::live_language(run.get("language"), &patch);
         set(&mut run, "language", language.as_ref());
     }
     result.insert("runProperties".to_owned(), Value::Object(run));
+    Ok(())
 }
 
 fn inherits_value(attrs: &Map<String, Value>, inherited: Option<&Map<String, Value>>, key: &str) -> bool {
@@ -193,12 +206,23 @@ pub(super) fn same_option(left: Option<&Value>, right: Option<&Value>) -> bool {
 }
 
 pub(super) fn same(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Number(left), Value::Number(right)) => left.as_f64() == right.as_f64(),
-        (Value::Array(left), Value::Array(right)) => left.len() == right.len()
-            && left.iter().zip(right).all(|(left, right)| same(left, right)),
-        (Value::Object(left), Value::Object(right)) => left.len() == right.len()
-            && left.iter().all(|(key, left)| right.get(key).is_some_and(|right| same(left, right))),
-        _ => left == right,
+    let mut pending = vec![(left, right)];
+    while let Some((left, right)) = pending.pop() {
+        match (left, right) {
+            (Value::Number(left), Value::Number(right)) if left.as_f64() == right.as_f64() => {}
+            (Value::Array(left), Value::Array(right)) if left.len() == right.len() => {
+                pending.extend(left.iter().zip(right));
+            }
+            (Value::Object(left), Value::Object(right)) if left.len() == right.len() => {
+                for (key, value) in left {
+                    let Some(other) = right.get(key) else { return false };
+                    pending.push((value, other));
+                }
+            }
+            (Value::Array(_) | Value::Object(_), _) => return false,
+            _ if left == right => {}
+            _ => return false,
+        }
     }
+    true
 }

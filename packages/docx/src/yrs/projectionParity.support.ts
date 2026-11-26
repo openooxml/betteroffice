@@ -109,6 +109,10 @@ export function buildFixtureDocx(name: string): Uint8Array {
       authored.set(part, new Uint8Array(bytes));
     }
   }
+  return buildDocxFromParts(authored);
+}
+
+export function buildDocxFromParts(authored: PartsMap): Uint8Array {
   if (!authored.has('word/styles.xml')) authored.set('word/styles.xml', toBytes(DEFAULT_STYLES));
   if (!authored.has('_rels/.rels')) authored.set('_rels/.rels', toBytes(PACKAGE_RELS));
 

@@ -433,24 +433,34 @@ function decodeRelationship(value: unknown, path: string, mapId: string): Relati
 
 /** @internal */
 export function assertSafeTree(value: unknown, path: string, active = new WeakSet<object>()): void {
-  const segments: string[] = [];
-  const currentPath = (): string => path + (segments.length ? `.${segments.join('.')}` : '');
-  const visit = (value: unknown): void => {
-    if (value === null || typeof value !== 'object') return;
-    if (active.has(value)) throw new TypeError(`${currentPath()} contains a cycle`);
+  const stack: { value: Record<string, unknown>; keys: string[]; index: number; key?: string }[] = [];
+  const currentPath = (): string =>
+    [path, ...stack.flatMap(({ key }) => key === undefined ? [] : [key])].join('.');
+  const enter = (value: object, key?: string): void => {
+    stack.push({ value: value as Record<string, unknown>, keys: Object.keys(value), index: 0, key });
     active.add(value);
-    try {
-      for (const key of Object.keys(value)) {
-        if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
-        segments.push(key);
-        visit((value as Record<string, unknown>)[key]);
-        segments.pop();
-      }
-    } finally {
-      active.delete(value);
-    }
   };
-  visit(value);
+  if (value === null || typeof value !== 'object') return;
+  if (active.has(value)) throw new TypeError(`${path} contains a cycle`);
+  enter(value);
+  try {
+    while (stack.length) {
+      const frame = stack[stack.length - 1]!;
+      const key = frame.keys[frame.index++];
+      if (key === undefined) {
+        active.delete(frame.value);
+        stack.pop();
+        continue;
+      }
+      if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
+      const child = frame.value[key];
+      if (child === null || typeof child !== 'object') continue;
+      if (active.has(child)) throw new TypeError(`${currentPath()}.${key} contains a cycle`);
+      enter(child, key);
+    }
+  } finally {
+    for (const frame of stack) active.delete(frame.value);
+  }
 }
 
 function objectAt(value: unknown, path: string): Record<string, unknown> {

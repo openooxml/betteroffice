@@ -18,6 +18,7 @@ use crate::identity::{
     OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex,
     SourcePackage, SourcePartInput, SourceStoryKind,
 };
+use crate::json_tree::{self, OrderedValue};
 use crate::script_fonts::ScriptFontUse;
 use crate::structured::source::{
     CellLayout, CommentWrites, InlineRecord, InlineSource, Pin, Provenance, RawSource, ReadSource,
@@ -170,7 +171,7 @@ fn names_sequence(text: &str) -> bool {
     if !text.contains("\"sourceRunXml\"") {
         return true;
     }
-    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+    let Ok(mut value) = json_tree::parse(text).and_then(OrderedValue::into_value) else {
         return true;
     };
     drop_field_runs(&mut value);
@@ -922,15 +923,6 @@ fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
         .unwrap_or(12)
 }
 
-enum OrderedValue {
-    Null,
-    Bool(bool),
-    Number(serde_json::Number),
-    String(String),
-    Array(Vec<OrderedValue>),
-    Object(Vec<(String, OrderedValue)>),
-}
-
 struct OrderedValueVisitor;
 
 impl<'de> Visitor<'de> for OrderedValueVisitor {
@@ -1279,19 +1271,16 @@ fn js_json_into(value: &Value, out: &mut String) {
 }
 
 impl OrderedValue {
-    fn value(&self) -> Value {
+    fn strip_source_ordinals(&mut self) {
         match self {
-            Self::Null => Value::Null,
-            Self::Bool(value) => Value::Bool(*value),
-            Self::Number(value) => Value::Number(value.clone()),
-            Self::String(value) => Value::String(value.clone()),
-            Self::Array(values) => Value::Array(values.iter().map(Self::value).collect()),
-            Self::Object(entries) => Value::Object(
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.value()))
-                    .collect(),
-            ),
+            Self::Array(values) => values.iter_mut().for_each(Self::strip_source_ordinals),
+            Self::Object(entries) => {
+                entries.retain(|(key, _)| key != SOURCE_ORDINAL);
+                for (_, value) in entries {
+                    value.strip_source_ordinals();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -5997,12 +5986,13 @@ impl BlockCursor {
 }
 
 /// A field embed's data when it may span paragraphs.
-fn spanning_field_data(payload: &JsonObject) -> Option<Value> {
+fn spanning_field_data(payload: &JsonObject) -> Result<Option<Value>, String> {
     payload
         .get("fieldData")
         .and_then(Value::as_str)
         .filter(|data| data.contains("\"block"))
-        .and_then(|data| serde_json::from_str(data).ok())
+        .map(|data| json_tree::parse(data).and_then(OrderedValue::into_value))
+        .transpose()
 }
 
 /// How many story blocks a field's structured code or result spans after the field's paragraph:
@@ -6038,7 +6028,7 @@ fn field_spans(data: &Value, blocks: &[Value], owner: usize) -> Option<(usize, u
 }
 
 /// The sequences of SEQ fields in the story blocks the fields of a paragraph span.
-fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) -> Vec<String> {
+fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for unit in units {
         let UnitContent::Embed { kind, payload } = &unit.content else {
@@ -6048,7 +6038,7 @@ fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) 
             continue;
         }
         let Some((code, result)) =
-            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+            spanning_field_data(payload)?.and_then(|data| field_spans(&data, blocks, owner))
         else {
             continue;
         };
@@ -6056,7 +6046,7 @@ fn spanned_sequence_names(units: &[InlineUnit], blocks: &[Value], owner: usize) 
             names.extend(nested_sequence_names(block));
         }
     }
-    names
+    Ok(names)
 }
 
 /// Where the story blocks a suppressed field's cached result spans start, and how many it spans.
@@ -6077,7 +6067,7 @@ fn bind_field_result_blocks(
     owner: usize,
     after_owner: BlockCursor,
     table_ids: &mut BTreeMap<usize, String>,
-) {
+) -> Result<(), String> {
     for unit in units {
         let UnitContent::Embed { kind, payload } = &mut unit.content else {
             continue;
@@ -6093,7 +6083,7 @@ fn bind_field_result_blocks(
         {
             continue;
         }
-        let Some((start, count)) = spanning_field_data(payload)
+        let Some((start, count)) = spanning_field_data(payload)?
             .and_then(|data| cached_result_blocks(&data, blocks, owner))
         else {
             continue;
@@ -6116,6 +6106,7 @@ fn bind_field_result_blocks(
         }
         payload.insert("fieldResultBlocks".to_owned(), Value::Array(ids));
     }
+    Ok(())
 }
 
 /// Binds each field whose code runs past its paragraph's mark to the paragraph that paragraph
@@ -6130,7 +6121,7 @@ fn bind_field_code_blocks(
     blocks: &[Value],
     owner: usize,
     after_owner: BlockCursor,
-) {
+) -> Result<(), String> {
     for unit in units {
         let UnitContent::Embed { kind, payload } = &mut unit.content else {
             continue;
@@ -6139,7 +6130,7 @@ fn bind_field_code_blocks(
             continue;
         }
         let Some((code, result)) =
-            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+            spanning_field_data(payload)?.and_then(|data| field_spans(&data, blocks, owner))
         else {
             continue;
         };
@@ -6190,6 +6181,7 @@ fn bind_field_code_blocks(
         payload.insert("fieldCodeTarget".to_owned(), target);
         payload.insert("fieldCodeFields".to_owned(), Value::Array(fields));
     }
+    Ok(())
 }
 
 /// Records, for each spanning field, the ids of the story blocks its span covers, raw blocks
@@ -6200,7 +6192,7 @@ fn record_field_span_blocks(
     blocks: &[Value],
     owner: usize,
     after_owner: BlockCursor,
-) {
+) -> Result<(), String> {
     for unit in units {
         let UnitContent::Embed { kind, payload } = &mut unit.content else {
             continue;
@@ -6209,7 +6201,7 @@ fn record_field_span_blocks(
             continue;
         }
         let Some((code, result)) =
-            spanning_field_data(payload).and_then(|data| field_spans(&data, blocks, owner))
+            spanning_field_data(payload)?.and_then(|data| field_spans(&data, blocks, owner))
         else {
             continue;
         };
@@ -6223,6 +6215,7 @@ fn record_field_span_blocks(
             payload.insert("fieldSpanBlocks".to_owned(), Value::Array(ids));
         }
     }
+    Ok(())
 }
 
 /// Whether a paragraph holds, outside any field of its own, the separator of a field that began
@@ -6502,7 +6495,7 @@ fn visit_story(
     story_id: String,
     source_blocks: &[Value],
     options: StoryOptions,
-) {
+) -> Result<(), String> {
     if context.styles.table_paragraph_formatting.is_some()
         || context.styles.table_run_formatting.is_some()
     {
@@ -6680,7 +6673,7 @@ fn visit_story(
                     &units,
                     blocks,
                     block_index,
-                ));
+                )?);
                 bind_field_result_blocks(
                     &mut units,
                     &story_id,
@@ -6688,9 +6681,9 @@ fn visit_story(
                     block_index,
                     cursor,
                     &mut result_table_ids,
-                );
-                bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor);
-                record_field_span_blocks(&mut units, &story_id, blocks, block_index, cursor);
+                )?;
+                bind_field_code_blocks(&mut units, &story_id, blocks, block_index, cursor)?;
+                record_field_span_blocks(&mut units, &story_id, blocks, block_index, cursor)?;
                 let unit_base = context.plans[plan_index].units.len();
                 context.plans[plan_index]
                     .comment_marks
@@ -6852,7 +6845,7 @@ fn visit_story(
                                 append_body_tail: false,
                                 seed_comments: options.seed_comments,
                             },
-                        );
+                        )?;
                     }
                 }
                 context
@@ -6885,7 +6878,7 @@ fn visit_story(
                         append_body_tail: false,
                         seed_comments: options.seed_comments,
                     },
-                );
+                )?;
                 last_kind = Some("blockSdt");
             }
         }
@@ -6930,6 +6923,7 @@ fn visit_story(
     if options.seed_comments {
         add_comment_coverage(&mut context.plans[plan_index]);
     }
+    Ok(())
 }
 
 fn collect_font_entry(key: &str, value: &Value, fonts: &mut BTreeSet<String>) {
@@ -7376,8 +7370,8 @@ fn lower_docx_with(
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
             serde_json::to_string(&envelope.document).map_err(|error| error.to_string())?;
-        let mut ordered: OrderedValue =
-            serde_json::from_str(&serialized).map_err(|error| error.to_string())?;
+        let mut ordered = json_tree::parse(&serialized)?;
+        ordered.strip_source_ordinals();
         resolve_seed_ordered_fonts(&mut ordered, &envelope.document.package.theme);
         let mut values = BTreeMap::new();
         ordered.collect_source_json(&mut values);
@@ -7389,13 +7383,13 @@ fn lower_docx_with(
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
-    let (mut context, roots) = lower_package(package, source_json);
+    let (mut context, roots) = lower_package(package, source_json)?;
     let shape_styles = crate::shape_styles::for_package(package, &context.styles);
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
     if let Some(parts) = parts {
-        let comment_raw = comment_raw_sources(&context.styles, &read);
+        let comment_raw = comment_raw_sources(&context.styles, &read)?;
         let represented = represented_controls(&context.plans, &read);
         read.resolve_sources(parts, comment_raw, &represented);
     }
@@ -7569,16 +7563,16 @@ fn seed_lowered(
 
 /// Where the raw XML blocks of every source comment body sit in the comments part, as lowering
 /// the body into a story of its own records them.
-fn comment_raw_sources(styles: &StyleResolver, read: &ReadSource) -> Vec<RawSource> {
+fn comment_raw_sources(styles: &StyleResolver, read: &ReadSource) -> Result<Vec<RawSource>, String> {
     let mut context = scratch_context(styles.clone());
     for comment in &read.comments {
         let story = format!("comment:{}", comment.id);
         context
             .locators
             .insert(story.clone(), vec![Step::Comment(comment.id.clone())]);
-        visit_story(&mut context, story, &comment.body, scratch_options());
+        visit_story(&mut context, story, &comment.body, scratch_options())?;
     }
-    context.provenance.raw_sources
+    Ok(context.provenance.raw_sources)
 }
 
 fn scratch_context(styles: StyleResolver) -> LoweringContext {
@@ -7683,7 +7677,7 @@ pub(crate) fn seed_blocks(
             .unwrap_or_default(),
     );
     for (story, blocks) in stories {
-        visit_story(&mut context, story.clone(), blocks, scratch_options());
+        visit_story(&mut context, story.clone(), blocks, scratch_options())?;
     }
     doc.create_empty_stories(
         &context
@@ -7752,7 +7746,7 @@ pub(crate) fn replica_source(
 fn lower_package(
     package: &Value,
     source_json: BTreeMap<String, String>,
-) -> (LoweringContext, Vec<SourceRoot>) {
+) -> Result<(LoweringContext, Vec<SourceRoot>), String> {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
@@ -7777,7 +7771,7 @@ fn lower_package(
             append_body_tail: true,
             seed_comments: true,
         },
-    );
+    )?;
     for (key, kind) in [
         ("headerEntries", SourceStoryKind::Header),
         ("footerEntries", SourceStoryKind::Footer),
@@ -7802,7 +7796,7 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
-            );
+            )?;
         }
     }
     for (key, prefix, element, kind) in [
@@ -7828,10 +7822,10 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
-            );
+            )?;
         }
     }
-    (context, roots)
+    Ok((context, roots))
 }
 
 const COMMENT_COMPANIONS: [&str; 2] = ["word/commentsExtended.xml", "word/commentsIds.xml"];
@@ -8790,7 +8784,7 @@ mod tests {
                 append_body_tail: false,
                 seed_comments: false,
             },
-        );
+        ).unwrap();
         let document = EditingDoc::new(74101);
         document
             .create_empty_stories(
@@ -9216,7 +9210,7 @@ mod tests {
             json!({"type":"paragraph","paraId":"code","content":[run("Code")]}),
             json!({"type":"paragraph","paraId":"result","content":[run("Result")]}),
         ];
-        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default()).unwrap();
         let UnitContent::Embed { payload, .. } = &units[0].content else {
             panic!("the field is an embed");
         };
@@ -9477,7 +9471,7 @@ mod tests {
         let data = Value::String(data.to_string());
         let payload = JsonObject::from([("fieldData".to_owned(), data)]);
         let mut units = [embed_unit("field", payload, &[], 1)];
-        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default());
+        bind_field_code_blocks(&mut units, "body", &blocks, 0, BlockCursor::default()).unwrap();
         let UnitContent::Embed { payload, .. } = &units[0].content else {
             panic!("the field is an embed");
         };
@@ -10639,7 +10633,7 @@ mod tests {
                 append_body_tail: true,
                 seed_comments: true,
             },
-        );
+        ).unwrap();
         assert_eq!(context.plans.len(), 1);
         assert_eq!(context.plans[0].units.len(), 2);
         assert!(context.plans[0].units.iter().all(
@@ -11365,7 +11359,7 @@ mod tests {
             let package = json!({ "document": { "content": [
                 table, continuation, { "type": "table", "rows": [] }
             ] } });
-            let (context, _) = lower_package(&package, BTreeMap::new());
+            let (context, _) = lower_package(&package, BTreeMap::new()).unwrap();
             assert_eq!(
                 context
                     .plans
@@ -11467,7 +11461,7 @@ mod tests {
             let expected = batches(context);
             for _ in 0..2 {
                 assert_eq!(
-                    batches(lower_package(&package, BTreeMap::new()).0),
+                    batches(lower_package(&package, BTreeMap::new()).unwrap().0),
                     expected
                 );
             }
@@ -12689,7 +12683,7 @@ mod tests {
                 append_body_tail: false,
                 seed_comments: true,
             },
-        );
+        ).unwrap();
         assert_eq!(context.plans.len(), 1);
         assert_eq!(
             context.plans[0].comment_coverage,
