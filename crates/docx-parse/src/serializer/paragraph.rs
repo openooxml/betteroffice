@@ -54,7 +54,7 @@ pub fn serialize_paragraph(
     let result = serialize_paragraph_inner(
         paragraph,
         plan.as_ref().and_then(|plan| plan.closing.as_deref()).unwrap_or(&paragraph.content),
-        plan.and_then(|plan| plan.opening),
+        plan.as_ref().and_then(|plan| plan.opening),
         context,
     );
     context.direction = enclosing;
@@ -385,11 +385,11 @@ fn upcoming_scopes<'a, N: Borrow<InlineNode>>(
 /// The scopes the first paragraph content with width from each index on keeps open where it
 /// starts, written `within`, found in one pass from the end; `None` where a reference run is
 /// written before it or none follows.
-fn upcoming_paragraph_scopes(
+fn upcoming_paragraph_scopes<'a>(
     paragraph: &Paragraph,
-    contents: &[ParagraphContent],
+    contents: &'a [ParagraphContent],
     within: Within,
-) -> Vec<Option<&[DirectionScope]>> {
+) -> Vec<Option<&'a [DirectionScope]>> {
     let revision = Within {
         revision: true,
         ..within

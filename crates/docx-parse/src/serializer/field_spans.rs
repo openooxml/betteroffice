@@ -46,7 +46,8 @@ impl Closing<'_> {
     }
 
     fn separate_revision(&self) -> bool {
-        self.revision.is_none_or(|revision| revision.child_elements().count() == 1)
+        self.revision
+            .is_none_or(|revision| revision.child_elements().count() == 1)
     }
 
     fn standalone(&self) -> bool {
@@ -65,7 +66,8 @@ impl Closing<'_> {
                     "w:del" => "deletion",
                     "w:moveFrom" => "moveFrom",
                     _ => "moveTo",
-                }.to_owned(),
+                }
+                .to_owned(),
                 info: parse_tracked_change_info(revision),
                 content: vec![run],
             }),
@@ -124,8 +126,17 @@ impl<'a> SourceParagraph<'a> {
         revision: Option<&'a XmlElement>,
         revision_offset: usize,
     ) {
-        let own_run = run.child_elements().filter(|child| child.name != "w:rPr").nth(1).is_none();
-        if !own_run && run.child_elements().filter(|item| item.name == "w:fldChar").count() > 1
+        let own_run = run
+            .child_elements()
+            .filter(|child| child.name != "w:rPr")
+            .nth(1)
+            .is_none();
+        if !own_run
+            && run
+                .child_elements()
+                .filter(|item| item.name == "w:fldChar")
+                .count()
+                > 1
         {
             self.openings.clear();
             self.closings.push(None);
@@ -182,30 +193,34 @@ impl<'a> SourceParagraph<'a> {
 }
 
 fn append_text(node: &InlineNode, text: &mut String) {
-        match node {
-            InlineNode::Run(run) => {
-                for item in &run.content {
-                    match item {
-                        RunContent::Text { text: value, .. } => text.push_str(value),
-                        RunContent::Tab => text.push('\t'),
-                        _ => {}
-                    }
+    match node {
+        InlineNode::Run(run) => {
+            for item in &run.content {
+                match item {
+                    RunContent::Text { text: value, .. } => text.push_str(value),
+                    RunContent::Tab => text.push('\t'),
+                    _ => {}
                 }
             }
-            InlineNode::Hyperlink(link) => {
-                for child in link.structured_children.as_ref().unwrap_or(&link.children) {
+        }
+        InlineNode::Hyperlink(link) => {
+            for child in link.structured_children.as_ref().unwrap_or(&link.children) {
+                append_text(child, text);
+            }
+        }
+        InlineNode::ComplexField(field) => {
+            if let Some(nodes) = field
+                .structured_result
+                .as_ref()
+                .and_then(|part| part.inline.as_ref())
+            {
+                for child in nodes {
                     append_text(child, text);
                 }
             }
-            InlineNode::ComplexField(field) => {
-                if let Some(nodes) = field.structured_result.as_ref().and_then(|part| part.inline.as_ref()) {
-                    for child in nodes {
-                        append_text(child, text);
-                    }
-                }
-            }
-            _ => {}
         }
+        _ => {}
+    }
 }
 
 fn append_content_text(content: &ParagraphContent, text: &mut String) {
@@ -228,10 +243,18 @@ fn visible_text(paragraph: &Paragraph) -> String {
     text
 }
 
-fn unique<K: std::hash::Hash + Eq>(keys: impl Iterator<Item = Option<K>>) -> HashMap<K, Option<usize>> {
+fn unique<K: std::hash::Hash + Eq>(
+    keys: impl Iterator<Item = Option<K>>,
+) -> HashMap<K, Option<usize>> {
     let mut indices = HashMap::new();
-    for (index, key) in keys.enumerate().filter_map(|(index, key)| Some((index, key?))) {
-        indices.entry(key).and_modify(|entry| *entry = None).or_insert(Some(index));
+    for (index, key) in keys
+        .enumerate()
+        .filter_map(|(index, key)| Some((index, key?)))
+    {
+        indices
+            .entry(key)
+            .and_modify(|entry| *entry = None)
+            .or_insert(Some(index));
     }
     indices
 }
@@ -244,33 +267,53 @@ fn project_paragraphs(
 ) -> Vec<Option<usize>> {
     let ordinal = unique(model.iter().map(|block| paragraph(block)?.source_ordinal));
     let ids = unique(
-        model.iter().map(|block| parse_paragraph_id(paragraph(block)?.para_id.as_deref()?)),
+        model
+            .iter()
+            .map(|block| parse_paragraph_id(paragraph(block)?.para_id.as_deref()?)),
     );
     let source_ids = unique(source.iter().map(|(_, element)| source_id(element)));
-    let mut matches: Vec<_> = source.iter().enumerate().map(|(index, (_, element))| {
-        if removed.contains(&element.paragraph_ordinal?) {
-            return None;
-        }
-        ordinal.get(&element.paragraph_ordinal?).copied().flatten().or_else(|| {
-            let id = source_id(element)?;
-            if source_ids.get(&id) == Some(&Some(index)) {
-                ids.get(&id).copied().flatten()
-            } else {
-                None
+    let mut matches: Vec<_> = source
+        .iter()
+        .enumerate()
+        .map(|(index, (_, element))| {
+            if removed.contains(&element.paragraph_ordinal?) {
+                return None;
             }
+            ordinal
+                .get(&element.paragraph_ordinal?)
+                .copied()
+                .flatten()
+                .or_else(|| {
+                    let id = source_id(element)?;
+                    if source_ids.get(&id) == Some(&Some(index)) {
+                        ids.get(&id).copied().flatten()
+                    } else {
+                        None
+                    }
+                })
         })
-    }).collect();
+        .collect();
     let mut used: HashSet<_> = matches.iter().flatten().copied().collect();
     if source.len() != model.len() {
-        let source_text = unique(paragraphs.iter().map(|p| p.as_ref().map(|p| &p.text).filter(|text| !text.is_empty())));
-        let texts: Vec<_> = model.iter().map(|block| paragraph(block).map(visible_text)).collect();
+        let source_text = unique(
+            paragraphs
+                .iter()
+                .map(|p| p.as_ref().map(|p| &p.text).filter(|text| !text.is_empty())),
+        );
+        let texts: Vec<_> = model
+            .iter()
+            .map(|block| paragraph(block).map(visible_text))
+            .collect();
         let live_text = unique(texts.iter().map(Option::as_ref));
         for (text, index) in source_text {
             let (Some(index), Some(live)) = (index, live_text.get(text).copied().flatten()) else {
                 continue;
             };
             if matches[index].is_none()
-                && !source[index].1.paragraph_ordinal.is_some_and(|ordinal| removed.contains(&ordinal))
+                && !source[index]
+                    .1
+                    .paragraph_ordinal
+                    .is_some_and(|ordinal| removed.contains(&ordinal))
                 && used.insert(live)
             {
                 matches[index] = Some(live);
@@ -278,16 +321,24 @@ fn project_paragraphs(
         }
     }
     let mut prior = (0, 0);
-    for (next_source, next_model) in matches.clone().into_iter().enumerate()
+    for (next_source, next_model) in matches
+        .clone()
+        .into_iter()
+        .enumerate()
         .filter_map(|(index, projected)| Some((index, projected?)))
         .chain(std::iter::once((source.len(), model.len())))
     {
-        if next_source >= prior.0 && next_model >= prior.1
+        if next_source >= prior.0
+            && next_model >= prior.1
             && next_source - prior.0 == next_model - prior.1
         {
             for (index, live) in (prior.0..next_source).zip(prior.1..next_model) {
-                if paragraphs[index].is_some() && paragraph(&model[live]).is_some()
-                    && !source[index].1.paragraph_ordinal.is_some_and(|ordinal| removed.contains(&ordinal))
+                if paragraphs[index].is_some()
+                    && paragraph(&model[live]).is_some()
+                    && !source[index]
+                        .1
+                        .paragraph_ordinal
+                        .is_some_and(|ordinal| removed.contains(&ordinal))
                     && used.insert(live)
                 {
                     matches[index] = Some(live);
@@ -317,7 +368,10 @@ fn anchored_offset(before: &str, after: &str, current: &str) -> Option<usize> {
     if after.is_empty() {
         return Some(current.len());
     }
-    if before.len() + after.len() == current.len() && current.starts_with(before) && current.ends_with(after) {
+    if before.len() + after.len() == current.len()
+        && current.starts_with(before)
+        && current.ends_with(after)
+    {
         return Some(before.len());
     }
     let unique_offset = |needle: &str| {
@@ -325,10 +379,19 @@ fn anchored_offset(before: &str, after: &str, current: &str) -> Option<usize> {
         let (offset, _) = matches.next()?;
         matches.next().is_none().then_some(offset)
     };
-    let left = before.char_indices().rev().take(64)
-        .filter_map(|(index, _)| unique_offset(&before[index..]).map(|at| at + before.len() - index))
+    let left = before
+        .char_indices()
+        .rev()
+        .take(64)
+        .filter_map(|(index, _)| {
+            unique_offset(&before[index..]).map(|at| at + before.len() - index)
+        })
         .last();
-    let right = after.char_indices().skip(1).take(63).map(|(index, _)| index)
+    let right = after
+        .char_indices()
+        .skip(1)
+        .take(63)
+        .map(|(index, _)| index)
         .chain(std::iter::once(after.len()))
         .filter_map(|end| unique_offset(&after[..end]))
         .last();
@@ -365,22 +428,36 @@ fn place(
                 _ => 0,
             };
             if let Some((end, prefer_previous)) = &shared_run_end
-                && width > 0 && (offset < width || (offset == width && *prefer_previous))
+                && width > 0
+                && (offset < width || (offset == width && *prefer_previous))
             {
                 if offset == 0 || offset == width {
                     run.content.insert(at + usize::from(offset != 0), end.clone());
                 } else {
-                    let RunContent::Text { text, preserve_space } = &mut run.content[at] else { return None };
+                    let RunContent::Text {
+                        text,
+                        preserve_space,
+                    } = &mut run.content[at]
+                    else {
+                        return None;
+                    };
                     if !text.is_char_boundary(offset) {
                         return None;
                     }
-                    let tail = RunContent::Text { text: text.split_off(offset), preserve_space: *preserve_space };
+                    let tail = RunContent::Text {
+                        text: text.split_off(offset),
+                        preserve_space: *preserve_space,
+                    };
                     run.content.splice(at + 1..at + 1, [end.clone(), tail]);
                 }
                 return Some(content);
             }
             if offset < width {
-                let RunContent::Text { text, preserve_space } = &mut run.content[at] else {
+                let RunContent::Text {
+                    text,
+                    preserve_space,
+                } = &mut run.content[at]
+                else {
                     return None;
                 };
                 if !text.is_char_boundary(offset) {
@@ -390,7 +467,10 @@ fn place(
                 let preserve_space = *preserve_space;
                 let mut tail = run.clone();
                 tail.content.drain(..at);
-                tail.content[0] = RunContent::Text { text: suffix, preserve_space };
+                tail.content[0] = RunContent::Text {
+                    text: suffix,
+                    preserve_space,
+                };
                 let prefix_len = at + usize::from(offset != 0);
                 run.content.truncate(prefix_len);
                 let tail = ParagraphContent::Inline(InlineNode::Run(tail));
@@ -422,17 +502,27 @@ fn place_closing(
             ParagraphContent::Tracked(revision) => revision.content.first_mut()?,
             _ => return None,
         };
-        let InlineNode::Run(run) = node else { return None };
-        let prefer_previous = closing.run.child_elements()
+        let InlineNode::Run(run) = node else {
+            return None;
+        };
+        let prefer_previous = closing
+            .run
+            .child_elements()
             .take_while(|child| child.name != "w:fldChar")
             .any(|child| matches!(child.name.as_str(), "w:t" | "w:delText" | "w:tab"));
         Some((run.content.pop()?, prefer_previous))
     };
     if closing.revision.is_some() && !closing.standalone() {
-        let ParagraphContent::Tracked(marker) = marker else { return None };
+        let ParagraphContent::Tracked(marker) = marker else {
+            return None;
+        };
         let mut content = paragraph.content.clone();
         let revision = content.iter_mut().find_map(|child| match child {
-            ParagraphContent::Tracked(change) if change.node_type == marker.node_type && change.info == marker.info => Some(change),
+            ParagraphContent::Tracked(change)
+                if change.node_type == marker.node_type && change.info == marker.info =>
+            {
+                Some(change)
+            }
             _ => None,
         })?;
         let mut live = String::new();
@@ -440,15 +530,24 @@ fn place_closing(
             append_text(node, &mut live);
         }
         let revision_source = SourceParagraph::read(0, closing.revision?);
-        let (before, after) = revision_source.text.split_at_checked(closing.offset - closing.revision_offset)?;
+        let (before, after) = revision_source
+            .text
+            .split_at_checked(closing.offset - closing.revision_offset)?;
         let offset = anchored_offset(before, after, &live)?;
         let marker = ParagraphContent::Inline(marker.content.into_iter().next()?);
         let nodes = std::mem::take(&mut revision.content);
-        revision.content = place(nodes.into_iter().map(ParagraphContent::Inline).collect(), offset, marker, shared_run_end)?
-            .into_iter().filter_map(|child| match child {
-                ParagraphContent::Inline(node) => Some(node),
-                _ => None,
-            }).collect();
+        revision.content = place(
+            nodes.into_iter().map(ParagraphContent::Inline).collect(),
+            offset,
+            marker,
+            shared_run_end,
+        )?
+        .into_iter()
+        .filter_map(|child| match child {
+            ParagraphContent::Inline(node) => Some(node),
+            _ => None,
+        })
+        .collect();
         return Some(content);
     }
     let live = visible_text(paragraph);
@@ -472,11 +571,18 @@ impl FieldSpans {
             return Self::default();
         }
         let limits = ParseLimits::default();
-        let Ok(xml) = parse_xml(source.as_bytes(), "word/document.xml", &mut ParseBudget::new(&limits)) else {
+        let Ok(xml) = parse_xml(
+            source.as_bytes(),
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        ) else {
             return Self::default();
         };
-        xml.root().and_then(|root| root.child("w", "body"))
-            .map_or_else(Self::default, |body| Self::from_body(body, model, removed, selected))
+        xml.root()
+            .and_then(|root| root.child("w", "body"))
+            .map_or_else(Self::default, |body| {
+                Self::from_body(body, model, removed, selected)
+            })
     }
 
     pub(super) fn from_body(
@@ -486,9 +592,13 @@ impl FieldSpans {
         selected: impl Fn(usize, &Paragraph) -> bool,
     ) -> Self {
         let source = story_block_elements(body);
-        let mut paragraphs: Vec<_> = source.iter().enumerate().map(|(index, (_, element))| {
-            (element.name == "w:p").then(|| SourceParagraph::read(index, element))
-        }).collect();
+        let mut paragraphs: Vec<_> = source
+            .iter()
+            .enumerate()
+            .map(|(index, (_, element))| {
+                (element.name == "w:p").then(|| SourceParagraph::read(index, element))
+            })
+            .collect();
         if !paragraphs.iter().flatten().any(|entry| {
             matches!(entry.openings.as_slice(), [opening] if opening.direct && opening.separated)
         }) {
@@ -502,10 +612,13 @@ impl FieldSpans {
             following[index] = next;
             next = matched.or(next);
         }
-        let model_groups: Vec<_> = model.iter().scan(0usize, |group, block| {
-            *group += usize::from(paragraph(block).is_none());
-            Some(*group)
-        }).collect();
+        let model_groups: Vec<_> = model
+            .iter()
+            .scan(0usize, |group, block| {
+                *group += usize::from(paragraph(block).is_none());
+                Some(*group)
+            })
+            .collect();
         let mut plan = Self::default();
         let mut pending = None;
         for (end, entry) in paragraphs.iter_mut().enumerate() {
@@ -514,18 +627,38 @@ impl FieldSpans {
                 continue;
             };
             if !entry.closings.is_empty() {
-                if let (Some(opening), [Some(closing)]) = (pending.take(), entry.closings.as_slice()) {
-                    let deleted = source[end].1.paragraph_ordinal.is_some_and(|id| removed.contains(&id));
-                    let next = following[end].or_else(|| (end + 1 == matches.len()).then_some(model.len()));
-                    plan.pair(opening, closing, end, &entry.text, model, &matches, &source, deleted, next, &model_groups, &selected);
+                if let (Some(opening), [Some(closing)]) =
+                    (pending.take(), entry.closings.as_slice())
+                {
+                    let deleted = source[end]
+                        .1
+                        .paragraph_ordinal
+                        .is_some_and(|id| removed.contains(&id));
+                    let next = following[end]
+                        .or_else(|| (end + 1 == matches.len()).then_some(model.len()));
+                    plan.pair(
+                        opening,
+                        closing,
+                        end,
+                        &entry.text,
+                        model,
+                        &matches,
+                        &source,
+                        deleted,
+                        next,
+                        &model_groups,
+                        &selected,
+                    );
                 }
             }
             if !entry.openings.is_empty() {
                 pending = match entry.openings.as_mut_slice() {
-                    [opening] if pending.is_none() && opening.direct && opening.separated => Some(Opening {
-                        instruction: std::mem::take(&mut opening.instruction),
-                        ..*opening
-                    }),
+                    [opening] if pending.is_none() && opening.direct && opening.separated => {
+                        Some(Opening {
+                            instruction: std::mem::take(&mut opening.instruction),
+                            ..*opening
+                        })
+                    }
                     _ => None,
                 };
             }
@@ -548,25 +681,44 @@ impl FieldSpans {
         model_groups: &[usize],
         selected: &impl Fn(usize, &Paragraph) -> bool,
     ) {
-        let Some(owner) = matches[opening.block] else { return };
-        let Some(opener) = paragraph(&model[owner]) else { return };
-        let Some(field) = opener.content.iter().rposition(|child| matches!(child,
-            ParagraphContent::Inline(InlineNode::ComplexField(field))
-                if field.instruction.trim() == opening.instruction.trim()
-                    && [field.structured_code.as_ref(), field.structured_result.as_ref()]
-                        .into_iter().flatten().any(|part| part.spans_paragraphs())))
-        else { return };
+        let Some(owner) = matches[opening.block] else {
+            return;
+        };
+        let Some(opener) = paragraph(&model[owner]) else {
+            return;
+        };
+        let Some(field) = opener.content.iter().rposition(|child| {
+            matches!(
+                child,
+                ParagraphContent::Inline(InlineNode::ComplexField(field))
+                    if field.instruction.trim() == opening.instruction.trim()
+                        && [field.structured_code.as_ref(), field.structured_result.as_ref()]
+                            .into_iter()
+                            .flatten()
+                            .any(|part| part.spans_paragraphs())
+            )
+        }) else {
+            return;
+        };
         let (target_source, target, removed) = match matches[end] {
             Some(target) if target > owner => (end, target, false),
             Some(_) => return,
             None if closing.standalone() => {
                 let Some(next) = next else { return };
-                let Some((index, target)) = matches[opening.block..end].iter().enumerate().rev()
+                let Some((index, target)) = matches[opening.block..end]
+                    .iter()
+                    .enumerate()
+                    .rev()
                     .find_map(|(index, matched)| Some((opening.block + index, (*matched)?)))
                     .filter(|&(_, block)| block >= owner && block < next)
-                else { return };
+                else {
+                    return;
+                };
                 if (!deleted && target + 1 != next)
-                    || matches[opening.block..end].iter().flatten().any(|&block| block > target)
+                    || matches[opening.block..end]
+                        .iter()
+                        .flatten()
+                        .any(|&block| block > target)
                 {
                     return;
                 }
@@ -577,31 +729,49 @@ impl FieldSpans {
         if model_groups[owner] != model_groups[target] {
             return;
         }
-        let Some(closer) = paragraph(&model[target]) else { return };
+        let Some(closer) = paragraph(&model[target]) else {
+            return;
+        };
         let writes_opener = selected(opening.block, opener);
         let writes_closer = selected(end, closer);
         if !removed && !writes_opener && !writes_closer {
             return;
         }
         if removed || (writes_closer && !has_end(closer)) {
-            let Some(content) = place_closing(closer, closing, text, removed) else { return };
+            let Some(content) = place_closing(closer, closing, text, removed) else {
+                return;
+            };
             let entry = self.paragraphs.entry(paragraph_key(closer)).or_default();
             if entry.closing.is_some() {
                 return;
             }
             entry.closing = Some(content);
-            if removed && let Some(ordinal) = closer.source_ordinal.or(source[target_source].1.paragraph_ordinal) {
+            if removed
+                && let Some(ordinal) = closer
+                    .source_ordinal
+                    .or(source[target_source].1.paragraph_ordinal)
+            {
                 self.carried.insert(ordinal);
             }
         }
-        self.paired.extend([source[opening.block].1.paragraph_ordinal, source[end].1.paragraph_ordinal].into_iter().flatten());
+        self.paired.extend(
+            [
+                source[opening.block].1.paragraph_ordinal,
+                source[end].1.paragraph_ordinal,
+            ]
+            .into_iter()
+            .flatten(),
+        );
         if removed && let Some(ordinal) = source[end].1.paragraph_ordinal {
             self.moved.insert(ordinal);
         }
         if writes_opener {
-            let field = opener.content[..field].iter().filter(|child| {
-                matches!(child, ParagraphContent::Inline(InlineNode::ComplexField(_)))
-            }).count();
+            let field = opener.content[..field]
+                .iter()
+                .filter(|child| {
+                    matches!(child, ParagraphContent::Inline(InlineNode::ComplexField(_)))
+                })
+                .count();
             self.paragraphs.entry(paragraph_key(opener)).or_default().opening = Some(field);
         }
     }
