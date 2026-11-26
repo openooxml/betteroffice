@@ -1,3 +1,4 @@
+import { rememberHostEnvelope } from './saveProjection';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
@@ -505,6 +506,7 @@ export function wrapSession(
       mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
     }
     withHostMedia(host);
+    rememberHostEnvelope(host.document);
     docxSource = source;
     docxSourceDigest = hostPackageDigests.get(host);
     docxSourceKeys = editorSaveKeys(host.document);
@@ -860,7 +862,9 @@ export function wrapSession(
         partialDocument = false;
         proposals.reset();
       });
-      return withHostMedia(host);
+      withHostMedia(host);
+      rememberHostEnvelope(host.document);
+      return host;
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
@@ -1900,5 +1904,6 @@ export function wrapOpenedEditSession(
     openedSources.set(buffer, exact);
   }
   const host = decodeDocxHost(hostJson, exact);
+  rememberHostEnvelope(host.document);
   return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

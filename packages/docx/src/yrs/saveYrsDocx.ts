@@ -9,7 +9,7 @@ import {
   isWrittenByCanonical,
   markHeaderFooterAlias,
 } from '../docx/headerFooterAliasProjection';
-import { type RustParagraphIds, writeDocumentWithRust } from '../docx/rustSaveFacade';
+import { type RustParagraphIds, sameSaveTree, writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { parseDocumentWithRust } from '../docx/rustParseFacade';
 import { preloadParseWasm } from '../docx/parseWasm';
 import type { Comment, Paragraph } from '../types/content';
@@ -619,8 +619,7 @@ async function writeSessionSaveWithWarnings(
   const opened = sessionSourcePackage(session);
   const openedModel = sessionMaterializedSource(session);
   const openedNumbering = openedModel?.package.numbering;
-  const sourceSeparators = (document.package.footnotes || document.package.endnotes)
-    ? sessionSourceNoteSeparators(session) : undefined;
+  const sourceSeparators = sessionSourceNoteSeparators(session);
   refuseUnavailableTables(session, document);
   engineProgress();
   const output = withoutSyntheticParagraphs(document, capture.identities);
@@ -633,7 +632,7 @@ async function writeSessionSaveWithWarnings(
   const rewritten = (part: string): boolean => {
     if (options.commentDeletion) return false;
     const kind = (['footnotes', 'endnotes'] as const).find(
-      (name) => part.replace(/^\//, '') === `word/${name}.xml`
+      (name) => part.replace(/^\//, '').toLowerCase() === `word/${name}.xml`
     );
     if (!kind) return false;
     return sourceSeparators?.[kind] !== separators[kind];
@@ -715,6 +714,7 @@ async function writeSessionSaveWithWarnings(
     let structure = 0;
     const keptParagraphs: DocxKeptParagraph[] = [];
     const structureDropped: DocxDroppedStructure[] = [];
+    const publicWarnings: string[] = [];
     for (const warning of warnings) {
       if (warning.startsWith(KEPT_UNCHANGED)) {
         for (const count of Object.values(JSON.parse(warning.slice(KEPT_UNCHANGED.length)) as Record<string, number>)) structure += count;
@@ -727,11 +727,12 @@ async function writeSessionSaveWithWarnings(
         }
       } else if (warning.startsWith('DOCX_MINIMAL_PATCH replace counts')) {
         console.debug(warning);
-      } else if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) {
-        console.warn(warning);
+      } else {
+        if (warning.startsWith('SmartArt ') || warning.startsWith('Drawing run ')) console.warn(warning);
+        publicWarnings.push(warning);
       }
     }
-    return { buffer, warnings, plan, structure, keptParagraphs, structureDropped, lists, listPlan };
+    return { buffer, warnings: publicWarnings, plan, structure, keptParagraphs, structureDropped, lists, listPlan };
   };
   let sectionEdits = sectionPlan?.plan;
   if (sectionEdits && !sectionEdits.onlySections && !splicesFor(sectionEdits).some(({ part }) => part === bodyPart)) {
@@ -808,9 +809,39 @@ export async function saveYrsDocx(
   return saved;
 }
 
+function needsProjectedBody(
+  source: readonly BlockContent[],
+  projected: readonly BlockContent[],
+  identities: DocxParagraphIdentitySnapshot
+): boolean {
+  const originalFormatting = new Map(source.flatMap(block =>
+    block.type === 'paragraph' && block.sourceOrdinal !== undefined
+      ? [[block.sourceOrdinal, block.formatting] as const] : []
+  ));
+  const sourceOrdinals = new Map(identities.paragraphs.flatMap(({ session, source }) =>
+    session?.story === 'body' && source ? [[session.paraId, source.paragraphOrdinal] as const] : []
+  ));
+  const needsWrite = (blocks: readonly BlockContent[]): boolean => blocks.some(block => {
+    if (block.type === 'paragraph') {
+      const ordinal = sourceOrdinals.get(projectedSessionKey(block) ?? '');
+      return ordinal !== undefined && originalFormatting.has(ordinal) &&
+        !sameSaveTree(originalFormatting.get(ordinal), block.formatting);
+    }
+    if (block.type === 'table') {
+      return block.rows.some(row =>
+        row.extraAttributes?.some(attribute => attribute.name.startsWith('xmlns:')) ||
+        row.cells.some(cell => needsWrite(cell.content))
+      );
+    }
+    return block.type === 'blockSdt' && needsWrite(block.content);
+  });
+  return needsWrite(projected);
+}
+
 export async function saveYrsDocxWithWarnings(
   session: YrsSession,
-  options: DocxSaveOptions
+  options: DocxSaveOptions,
+  useProjectedFormatting = false
 ): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
   if (options.commentBaseline) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   let base = session.materializeDocx();
@@ -856,12 +887,18 @@ export async function saveYrsDocxWithWarnings(
   const document = checkedProjection(session, () =>
     yrsToDocument(session, projectionBase, { commentIds: comments.sessionIds })
   );
+  const bodyPart = capture.identities.paragraphs
+    .find(({ session: anchor, source }) => anchor?.story === 'body' && source)
+    ?.source?.partUri.slice(1) ?? 'word/document.xml';
+  const rewriteBody = useProjectedFormatting && !sameSaveTree(
+    base.package.document.content, document.package.document.content
+  ) && needsProjectedBody(base.package.document.content, document.package.document.content, capture.identities);
   return writeSessionSaveWithWarnings(
     session,
     document,
     capture,
     base.originalBuffer!,
     options,
-    (part) => !comments.changed || part !== COMMENTS_PART
+    (part) => (!comments.changed || part !== COMMENTS_PART) && (!rewriteBody || part.toLowerCase() !== bodyPart.toLowerCase())
   );
 }

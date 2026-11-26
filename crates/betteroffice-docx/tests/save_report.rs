@@ -174,7 +174,9 @@ fn a_model_edit_that_drops_a_smart_tag_does_not_report_nothing_dropped() {
     assert!(saved.contains("Delta edited."), "{saved}");
     assert!(!saved.contains("<w:smartTag"), "{saved}");
     assert_smart_tag_dropped(&report);
-    assert!(report.warnings.iter().any(|warning| warning.starts_with("DOCX_PART_REWRITTEN word/document.xml ")));
+    let (_, warnings) = document.save_report_with_warnings().unwrap();
+    assert!(warnings.iter().any(|warning| warning.starts_with("DOCX_PART_REWRITTEN word/document.xml ")));
+    assert!(!warnings.iter().any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED ")));
 }
 
 #[test]

@@ -11,6 +11,8 @@ const ANNOTATIONS = new Set([
   'moveToRangeStart',
   'moveToRangeEnd',
 ]);
+const NON_STORY_FIELDS = new Set(['media', 'numbering', 'styles', 'theme', 'fontTable', 'charts',
+  'relationships', 'relationshipEntries']);
 const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 
 const sessionInfos = new WeakMap<object, unknown>();
@@ -42,7 +44,7 @@ function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number>
   };
   const visit = (value: unknown, holder: Site['holder'], key: string | number): void => {
     if (typeof value === 'string') {
-      if (value.includes('w:id')) for (const [, id] of value.matchAll(XML_ID)) note(Number(id));
+      if (!value.startsWith('data:') && value.includes('w:id')) for (const [, id] of value.matchAll(XML_ID)) note(Number(id));
       return;
     }
     if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return;
@@ -66,7 +68,9 @@ function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number>
     } else if (typeof record.type === 'string' && ANNOTATIONS.has(record.type)) {
       note(record.id, !COMMENT_MARKERS.has(record.type));
     }
-    for (const child of Object.keys(record)) visit(record[child], record, child);
+    for (const child of Object.keys(record)) {
+      if (!NON_STORY_FIELDS.has(child)) visit(record[child], record, child);
+    }
   };
   visit(tree, {}, '');
   let next = max;
@@ -113,7 +117,6 @@ export function materializeSessionRevisionIds<T extends object>(
     const key = sessionInfos.get(info);
     const copy = { ...info, id: ids.get(key) };
     copies.set(info, copy);
-    sessionInfos.set(copy, key);
   }
   const replace = (value: unknown): unknown => {
     if (value === null || typeof value !== 'object' ||
@@ -130,6 +133,7 @@ export function materializeSessionRevisionIds<T extends object>(
       }
     } else {
       for (const [key, child] of Object.entries(value)) {
+        if (NON_STORY_FIELDS.has(key)) continue;
         const next = replace(child);
         if (next === child) continue;
         if (clone === value) clone = Array.isArray(value) ? value.slice() : { ...value };

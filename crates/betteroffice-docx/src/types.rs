@@ -68,8 +68,6 @@ impl Default for SaveOptions {
 #[derive(Clone, Debug)]
 pub struct SaveReport {
     pub bytes: Vec<u8>,
-    /// Non-fatal save diagnostics.
-    pub warnings: Vec<String>,
     pub kept_unchanged: Option<KeptUnchanged>,
     /// Structure the save dropped from the body, header, footer and note parts it wrote whole,
     /// part by part; comment parts are not checked. `None` means none was found only when

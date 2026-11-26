@@ -13,7 +13,8 @@ use docx_edit::content_controls::{
     find_package_content_controls, list_package_content_controls,
 };
 use docx_edit::save::session_paragraph_ids;
-use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_report};
+use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_body_policy};
+use docx_parse::serializer::s13::save_core_only;
 use docx_edit::structured::{
     DocxStructuredContent, ExportOptions, MarkdownContent, MarkdownOptions,
     export_package_structured,
@@ -575,24 +576,25 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
+        self.save_report_with_warnings_and_options(options).map(|(report, _)| report)
+    }
+
+    /// Returns the save report and non-fatal warnings.
+    pub fn save_report_with_warnings(&self) -> Result<(SaveReport, Vec<String>)> {
+        self.save_report_with_warnings_and_options(SaveOptions::default())
+    }
+
+    /// Returns the save report and non-fatal warnings using the supplied options.
+    pub fn save_report_with_warnings_and_options(
+        &self,
+        options: SaveOptions,
+    ) -> Result<(SaveReport, Vec<String>)> {
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
         };
-        if self.dirty == Dirty::Clean
-            && !options.update_modified_date
-            && options.modified_by.is_none()
-        {
-            determinism.validate()?;
-            return Ok(SaveReport {
-                bytes: self.source.clone(),
-                warnings: Vec::new(),
-                kept_unchanged: None,
-                structure_dropped: None,
-                whole_model_write: false,
-            });
-        }
         let paragraph_ids = self.session_save_plan()?;
+        let rewrite_body = self.dirty == Dirty::LoggedEdits && paragraph_ids.is_none();
         let request = S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
@@ -611,15 +613,22 @@ impl Document {
             selective: None,
             paragraph_ids,
         };
-        #[cfg(test)]
-        session_save_tests::count_package_write();
-        let (bytes, report) = write_model_with_report(
-            request,
-            &self.source,
-            &self.original_parts,
-            &self.parse_limits,
-        )?;
-        Ok(save_report(bytes, report))
+        let (bytes, report) = if self.dirty == Dirty::Clean {
+            let path = docx_parse::relationships::office_document_path(
+                &self.original_parts,
+                &mut docx_parse::xml::ParseBudget::new(&self.parse_limits),
+            )?;
+            save_core_only(&request, &path, &self.original_parts, &self.source)?
+        } else {
+            #[cfg(test)]
+            session_save_tests::count_package_write();
+            write_model_with_body_policy(
+                request, &self.source, &self.original_parts, &self.parse_limits, rewrite_body,
+            )?
+        };
+        let mut report = report;
+        let saved = save_report(bytes, &mut report);
+        Ok((saved, report.warnings))
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1316,7 +1325,7 @@ fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
 }
 
-fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
+fn save_report(bytes: Vec<u8>, report: &mut S13SaveReport) -> SaveReport {
     let structure = report
         .kept_unchanged
         .values()
@@ -1324,13 +1333,12 @@ fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
     SaveReport {
         bytes,
         whole_model_write: report.warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)),
-        warnings: report.warnings,
         kept_unchanged: (structure > 0).then_some(KeptUnchanged {
             structure,
-            paragraphs: report.kept_paragraphs,
+            paragraphs: std::mem::take(&mut report.kept_paragraphs),
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
-            .then_some(report.structure_dropped),
+            .then(|| std::mem::take(&mut report.structure_dropped)),
     }
 }
 
@@ -1365,7 +1373,7 @@ mod save_report_tests {
     fn kept_counts_of_every_part_are_summed_and_paragraphs_keep_their_order() {
         let report = save_report(
             vec![1, 2, 3],
-            S13SaveReport {
+            &mut S13SaveReport {
                 warnings: vec!["ignored".to_owned()],
                 kept_unchanged: BTreeMap::from([
                     ("word/document.xml".to_owned(), 3),
@@ -1408,7 +1416,7 @@ mod save_report_tests {
     fn nothing_kept_or_dropped_is_none() {
         let report = save_report(
             Vec::new(),
-            S13SaveReport {
+            &mut S13SaveReport {
                 kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
                 ..S13SaveReport::default()
             },
@@ -1681,9 +1689,9 @@ mod session_save_tests {
         let source = package(&source());
         let mut document = Document::open(&source).unwrap();
         document.model_mut();
-        let report = document.save_report().unwrap();
+        let (report, warnings) = document.save_report_with_warnings().unwrap();
         assert_eq!(report.bytes, source);
-        assert!(report.warnings.is_empty());
+        assert!(warnings.is_empty());
         assert!(!report.whole_model_write);
     }
 
@@ -1733,11 +1741,11 @@ mod session_save_tests {
         document.replace_paragraph_text("0000000B", "Budget edit").unwrap();
         document.model_mut();
         document.parse_limits.max_xml_bytes = 128;
-        let report = document.save_report().unwrap();
+        let (report, warnings) = document.save_report_with_warnings().unwrap();
         assert!(report.whole_model_write);
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
-        assert!(report.warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)));
+        assert!(warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)));
         let reopened = Document::open(&report.bytes).unwrap();
         assert_eq!(get_paragraph_text(reopened.paragraph("0000000B").unwrap()), "Budget edit");
     }

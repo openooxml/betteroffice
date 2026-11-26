@@ -395,7 +395,7 @@ pub fn paragraph_patch_writer_version() -> u32 {
 }
 
 pub fn write_docx_s13_json(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, String> {
-    serializer::model_save::write_json(request_json, original_docx).map(|(bytes, _)| bytes)
+    serializer::model_save::write_json(request_json, original_docx, None).map(|(bytes, _)| bytes)
 }
 
 /// Writes a DOCX from a typed model and original package.
@@ -409,7 +409,9 @@ pub fn write_docx_s13_with_warnings_json(
     request_json: &str,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, String> {
-    let (bytes, report) = serializer::model_save::write_json(request_json, original_docx)?;
+    let mut wire = Vec::new();
+    let (bytes, mut report) = serializer::model_save::write_json(request_json, original_docx, Some(&mut wire))?;
+    report.warnings.extend(wire);
     let warnings = serde_json::to_vec(&report.warnings).map_err(|error| error.to_string())?;
     let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
     framed.extend_from_slice(&warnings);

@@ -10,7 +10,7 @@
 
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
-import { saveCurrentProjection } from '../yrs/saveProjection';
+import { isModelProjection, saveCurrentProjection } from '../yrs/saveProjection';
 import type { RawDocxContent } from './unzip';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
@@ -71,7 +71,7 @@ export async function repackDocxWithWarnings(
     );
   }
   const result = await saveCurrentProjection(doc, options)
-    ?? await writeDocumentWithRust(doc, doc.originalBuffer, options);
+    ?? await writeRepackedModel(doc, doc.originalBuffer, options);
   return { buffer: result.buffer, warnings: result.warnings };
 }
 
@@ -80,8 +80,15 @@ export async function repackDocxFromRaw(
   rawContent: RawDocxContent,
   options: RepackOptions = {}
 ): Promise<ArrayBuffer> {
-  if (doc.originalBuffer === rawContent.originalBuffer) return repackDocx(doc, options);
-  return repackDocx({ ...doc, originalBuffer: rawContent.originalBuffer }, options);
+  const source = rawContent.originalBuffer;
+  const written = await saveCurrentProjection(doc, options, source)
+    ?? await writeRepackedModel(doc, source, options);
+  return written.buffer;
+}
+
+function writeRepackedModel(doc: Document, originalBuffer: ArrayBuffer, options: RepackOptions) {
+  return writeDocumentWithRust(doc, originalBuffer, options, undefined, undefined, undefined,
+    false, undefined, undefined, isModelProjection(doc) ? 'projected' : undefined);
 }
 
 function loadParts(originalBuffer: ArrayBuffer): PartsMap {
@@ -272,7 +279,9 @@ export function isDocxBuffer(buffer: ArrayBuffer): boolean {
 
 export async function createDocx(doc: Document): Promise<ArrayBuffer> {
   if (doc.originalBuffer) return repackDocx(doc);
-  return repackDocx({ ...doc, originalBuffer: await createEmptyDocx() });
+  const originalBuffer = await createEmptyDocx();
+  return (await writeDocumentWithRust({ ...doc, originalBuffer }, originalBuffer, {},
+    undefined, undefined, undefined, false, undefined, undefined, 'fresh')).buffer;
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

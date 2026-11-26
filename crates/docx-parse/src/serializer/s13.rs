@@ -160,8 +160,17 @@ pub fn write_docx_s13_with_warnings(
     original_docx: &[u8],
 ) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))
-        .map(|(bytes, report)| (bytes, report.warnings))
+    let mut wire = Vec::new();
+    let (bytes, mut report) = if request.paragraph_ids.is_some() {
+        write_parts(request, &original_parts, Some(original_docx), WriteSettings {
+            wire: Some(&mut wire),
+            ..WriteSettings::default()
+        })?
+    } else {
+        write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))?
+    };
+    report.warnings.extend(wire);
+    Ok((bytes, report.warnings))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
@@ -181,21 +190,58 @@ pub fn write_docx_s13_parts_with_report(
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
-    write_parts(request, original_parts, source, None, true)
+    match source {
+        Some(bytes) => super::model_save::write_model_with_report(
+            request, bytes, original_parts, &crate::xml::ParseLimits::default(),
+        ),
+        None => {
+            let mut wire = Vec::new();
+            let settings = WriteSettings {
+                wire: request.paragraph_ids.as_ref().map(|_| &mut wire),
+                ..WriteSettings::default()
+            };
+            let (bytes, mut report) = write_parts(request, original_parts, None, settings)?;
+            report.warnings.extend(wire);
+            Ok((bytes, report))
+        }
+    }
+}
+
+pub(super) struct WriteSettings<'a> {
+    pub style_languages: Option<&'a serde_json::Value>,
+    pub reuse_document_root: bool,
+    pub empty_notes: [bool; 2],
+    pub wire: Option<&'a mut Vec<String>>,
+    pub report_bindings: bool,
+}
+
+impl Default for WriteSettings<'_> {
+    fn default() -> Self {
+        Self {
+            style_languages: None,
+            reuse_document_root: true,
+            empty_notes: [false; 2],
+            wire: None,
+            report_bindings: false,
+        }
+    }
 }
 
 pub(super) fn write_parts(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
     source: Option<&[u8]>,
-    style_languages: Option<&serde_json::Value>,
-    reuse_document_root: bool,
+    settings: WriteSettings<'_>,
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
+    let WriteSettings {
+        style_languages, reuse_document_root, empty_notes, wire, report_bindings,
+    } = settings;
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
     let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
+    let comments_path = package.resolve_path(COMMENTS_PART).to_owned();
     if let Some(languages) = style_languages {
         let path = "word/styles.xml";
         let styles = package
@@ -205,7 +251,6 @@ pub(super) fn write_parts(
             .map_err(save_error)?;
         package.set_text(path, xml);
     }
-    let comments_path = package.resolve_path(COMMENTS_PART).to_owned();
     let mut removed_comments = match (
         package.original_bytes(COMMENTS_PART),
         request.document.comments.as_deref(),
@@ -232,10 +277,10 @@ pub(super) fn write_parts(
         ids.spliced_parts.retain(|part| {
             part.table_patches.is_empty()
                 || (request.selective.is_none()
-                    && part.part != COMMENTS_PART
+                    && package.resolve_path(&part.part) != comments_path
                     && !patched_parts
                         .iter()
-                        .any(|patched| patched.part == part.part)
+                        .any(|patched| package.resolve_path(&patched.part) == package.resolve_path(&part.part))
                     && package
                         .original_bytes(package.resolve_path(&part.part))
                         .is_some_and(|original| {
@@ -277,9 +322,9 @@ pub(super) fn write_parts(
             if ids
                 .patched_parts
                 .iter()
-                .any(|patched| patched.part == part.part)
+                .any(|patched| package.resolve_path(&patched.part) == package.resolve_path(&part.part))
                 || request.selective.is_some()
-                || part.part == COMMENTS_PART
+                || package.resolve_path(&part.part) == comments_path
             {
                 return Err(error(
                     PatchErrorCode::InvalidPlan,
@@ -331,7 +376,7 @@ pub(super) fn write_parts(
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
-        return Ok((bytes, context.take_report()));
+        return Ok((bytes, context.take_report(wire)));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let reports_dropped = request.paragraph_ids.is_some();
@@ -358,7 +403,12 @@ pub(super) fn write_parts(
             return Ok((rezip_package(&package, source)?, S13SaveReport::default()));
         }
     }
-    apply_paragraph_id_assignments(&mut request, &paragraph_ids, &relationships, &package)?;
+    let assignments: HashMap<String, BTreeMap<u32, String>> = paragraph_ids
+        .assignments_by_part()
+        .into_iter()
+        .map(|(part, ids)| (package.resolve_path(part).to_owned(), ids))
+        .collect();
+    apply_paragraph_id_assignments(&mut request, &assignments, &relationships, &package)?;
     let patched: HashMap<String, &[(u32, String)]> = paragraph_ids
         .patched_parts
         .iter()
@@ -382,22 +432,21 @@ pub(super) fn write_parts(
         })
         .collect();
 
-    let assignments: HashMap<String, BTreeMap<u32, String>> = paragraph_ids
-        .assignments_by_part()
-        .into_iter()
-        .map(|(part, ids)| (package.resolve_path(part).to_owned(), ids))
-        .collect();
     let spliced: HashMap<String, &S13SplicedPart> = paragraph_ids
         .spliced_parts
         .iter()
-        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
-        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .filter_map(|part| {
+            let path = package.resolve_path(&part.part);
+            (path != comments_path && !patched.contains_key(path)).then(|| (path.to_owned(), part))
+        })
         .collect();
     let whole: HashMap<String, &S13WholePart> = paragraph_ids
         .whole_parts
         .iter()
-        .filter(|part| part.part != COMMENTS_PART && !patched.contains_key(part.part.as_str()))
-        .map(|part| (package.resolve_path(&part.part).to_owned(), part))
+        .filter_map(|part| {
+            let path = package.resolve_path(&part.part);
+            (path != comments_path && !patched.contains_key(path)).then(|| (path.to_owned(), part))
+        })
         .collect();
     let touched: HashMap<String, &S13TouchedPart> = paragraph_ids
         .touched_parts
@@ -484,72 +533,75 @@ pub(super) fn write_parts(
         }
     });
 
+    let mut bound_relationships = false;
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
     } else {
-        process_new_images(&mut request, &relationships, &mut package)?;
-        process_new_watermark_images(&mut request, &relationships, &mut package)?;
-        process_new_hyperlinks(&mut request, &relationships, &mut package)?;
+        bound_relationships |= process_new_images(&mut request, &relationships, &mut package, &kept_as_source)?;
+        bound_relationships |= process_new_watermark_images(&mut request, &relationships, &mut package, &kept_as_source)?;
+        bound_relationships |= process_new_hyperlinks(&mut request, &relationships, &mut package, &kept_as_source)?;
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    if reuse_document_root {
-        context.set_document_source(
-            package
-                .original_bytes(&package.document_path)
-                .and_then(|bytes| std::str::from_utf8(bytes).ok()),
-        );
-    }
-    context.set_chart_drawings(chart_drawings_in_part(
-        &package.text(&package.document_path).unwrap_or_default(),
-    ));
-    context.set_group_drawings(group_drawings_in_part(
-        &package.text(&package.document_path).unwrap_or_default(),
-    ));
-    let document_xml = if let Some(patched) = patched_parts.remove(&package.document_path) {
-        String::from_utf8(patched).map_err(|error| save_error(error.to_string()))?
-    } else if let Some(selective) = request.selective.as_ref() {
-        let original = package
-            .text("word/document.xml")
-            .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
-        match build_selective_document_xml(
-            &request.document,
-            &original,
-            &selective.changed_para_ids,
-            &mut context,
-        )? {
-            Some(patched) => patched,
-            None => {
-                context.begin_form_data_tokens(&original);
-                let serialized = serialize_document_part(&request.document, &mut context);
-                let deferred = context.end_form_data_tokens();
-                let patched = build_patched_document_xml(
-                    &original,
-                    &serialized?,
-                    &selective.changed_para_ids,
-                )
-                .ok_or_else(|| save_error("selective document patch is unsafe"))?;
-                super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
-                patched
-            }
+    if let Some(bytes) = patched_parts.remove(&package.document_path) {
+        package.set("word/document.xml", bytes);
+    } else {
+        if reuse_document_root {
+            context.set_document_source(
+                package
+                    .original_bytes(&package.document_path)
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok()),
+            );
         }
-    } else {
-        let path = package.document_path.clone();
-        stories.write(&package, &path, &mut context, |context| {
-            serialize_document_part(&request.document, context)
-        })?
-    };
-    let document_xml = if let Some(sections) = &paragraph_ids.section_edits {
-        let original = package
-            .original_bytes(&package.document_path)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .ok_or_else(|| save_error("section source XML unavailable"))?;
-        super::section_patch::patch_sections(original, &document_xml, &sections.edits)
-            .ok_or_else(|| save_error("unsafe section XML patch"))?
-    } else {
-        document_xml
-    };
-    package.set_text("word/document.xml", document_xml);
+        context.set_chart_drawings(chart_drawings_in_part(
+            &package.text(&package.document_path).unwrap_or_default(),
+        ));
+        context.set_group_drawings(group_drawings_in_part(
+            &package.text(&package.document_path).unwrap_or_default(),
+        ));
+        let document_xml = if let Some(selective) = request.selective.as_ref() {
+            let original = package
+                .text("word/document.xml")
+                .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
+            match build_selective_document_xml(
+                &request.document,
+                &original,
+                &selective.changed_para_ids,
+                &mut context,
+            )? {
+                Some(patched) => patched,
+                None => {
+                    context.begin_form_data_tokens(&original);
+                    let serialized = serialize_document_part(&request.document, &mut context);
+                    let deferred = context.end_form_data_tokens();
+                    let patched = build_patched_document_xml(
+                        &original,
+                        &serialized?,
+                        &selective.changed_para_ids,
+                    )
+                    .ok_or_else(|| save_error("selective document patch is unsafe"))?;
+                    super::paragraph::reject_form_data_tokens(&patched, &deferred)?;
+                    patched
+                }
+            }
+        } else {
+            let path = package.document_path.clone();
+            stories.write(&package, &path, &mut context, |context| {
+                serialize_document_part(&request.document, context)
+            })?
+        };
+        let document_xml = if let Some(sections) = &paragraph_ids.section_edits {
+            let original = package
+                .original_bytes(&package.document_path)
+                .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                .ok_or_else(|| save_error("section source XML unavailable"))?;
+            super::section_patch::patch_sections(original, &document_xml, &sections.edits)
+                .ok_or_else(|| save_error("unsafe section XML patch"))?
+        } else {
+            document_xml
+        };
+        package.set_text("word/document.xml", document_xml);
+    }
 
     serialize_header_footer_parts(
         &request.header_entries,
@@ -579,7 +631,7 @@ pub(super) fn write_parts(
     }
 
     if request.selective.is_none() {
-        ensure_header_footer_parts(&relationships, &mut package)?;
+        ensure_header_footer_parts(&relationships, &mut package, &kept_as_source)?;
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
@@ -620,48 +672,14 @@ pub(super) fn write_parts(
         )?;
     }
 
-    let document_rels = package
-        .text(&package.document_relationships_path)
-        .unwrap_or_default();
-    warn_about_dangling_opaque_refs(
-        &request.document.content,
-        &document_rels,
-        &package.document_relationships_path,
-        &mut context,
-    );
-    for entries in [&request.header_entries, &request.footer_entries] {
-        for (relationship_id, story) in entries {
-            let Some(relationship) = relationships.get(relationship_id) else {
-                continue;
-            };
-            let Ok(rels_path) = owner_relationships_path(&package, &relationship.target) else {
-                continue;
-            };
-            let rels_xml = package.text(&rels_path).unwrap_or_default();
-            warn_about_dangling_opaque_refs(&story.content, &rels_xml, &rels_path, &mut context);
-        }
-    }
-    for (notes, rels_path) in [
-        (
-            &request.footnote_separators,
-            "word/_rels/footnotes.xml.rels",
-        ),
-        (&request.footnotes, "word/_rels/footnotes.xml.rels"),
-        (&request.endnote_separators, "word/_rels/endnotes.xml.rels"),
-        (&request.endnotes, "word/_rels/endnotes.xml.rels"),
-    ] {
-        let rels_xml = package.text(rels_path).unwrap_or_default();
-        for note in notes {
-            warn_about_dangling_opaque_refs(&note.content, &rels_xml, rels_path, &mut context);
-        }
-    }
+    collect_save_warnings(&request, &package, &mut context);
 
     if request.selective.is_none() {
         let mut footnotes = request.footnote_separators;
         footnotes.extend(request.footnotes);
         if let Some(bytes) = patched_parts.remove(package.resolve_path("word/footnotes.xml")) {
             package.set("word/footnotes.xml", bytes);
-        } else if !footnotes.is_empty() {
+        } else if !footnotes.is_empty() || empty_notes[0] {
             let xml = stories.write(&package, package.resolve_path("word/footnotes.xml"), &mut context, |context| {
                 serialize_footnotes_part(&footnotes, context)
             })?;
@@ -671,7 +689,7 @@ pub(super) fn write_parts(
         endnotes.extend(request.endnotes);
         if let Some(bytes) = patched_parts.remove(package.resolve_path("word/endnotes.xml")) {
             package.set("word/endnotes.xml", bytes);
-        } else if !endnotes.is_empty() {
+        } else if !endnotes.is_empty() || empty_notes[1] {
             let xml = stories.write(&package, package.resolve_path("word/endnotes.xml"), &mut context, |context| {
                 serialize_endnotes_part(&endnotes, context)
             })?;
@@ -698,23 +716,25 @@ pub(super) fn write_parts(
     if !removed_comments.is_empty() {
         let mut parts = HashSet::from([package.document_path.clone()]);
         for relationship in relationships.values() {
-            if matches!(
-                relationship.relationship_type.as_str(),
-                relationship_types::HEADER
-                    | relationship_types::FOOTER
-                    | relationship_types::FOOTNOTES
-                    | relationship_types::ENDNOTES
-            ) {
-                parts.insert(resolve_relative_path(
-                    &package.document_path,
-                    &relationship.target,
-                )?);
+            if relationship.target_mode != Some(TargetMode::External)
+                && matches!(
+                    relationship.relationship_type.as_str(),
+                    relationship_types::HEADER
+                        | relationship_types::FOOTER
+                        | relationship_types::FOOTNOTES
+                        | relationship_types::ENDNOTES
+                )
+            {
+                let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+                parts.insert(package.resolve_path(&path).to_owned());
             }
         }
         let updated = package
             .refs()
             .into_iter()
-            .filter(|(path, _)| parts.contains(path))
+            .filter(|(path, bytes)| {
+                parts.contains(path) && bytes.windows(b"comment".len()).any(|window| window == b"comment")
+            })
             .map(|(path, bytes)| {
                 let xml =
                     std::str::from_utf8(bytes).map_err(|error| save_error(error.to_string()))?;
@@ -729,7 +749,62 @@ pub(super) fn write_parts(
     }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
-    Ok((bytes, context.take_report()))
+    let report = if report_bindings {
+        if let Some(wire) = wire {
+            if !bound_relationships {
+                wire.push(super::model_save::NO_BINDING_CHANGES.to_owned());
+            }
+        }
+        context.take_report(None)
+    } else {
+        context.take_report(wire)
+    };
+    Ok((bytes, report))
+}
+
+fn collect_save_warnings(
+    request: &S13SaveRequest,
+    package: &Package<'_>,
+    context: &mut SerializerContext,
+) {
+    let relationships: HashMap<_, _> = request.relationship_entries.iter()
+        .map(|(id, relationship)| (id.as_str(), relationship))
+        .collect();
+    let document_rels = package
+        .text(&package.document_relationships_path)
+        .unwrap_or_default();
+    warn_about_dangling_opaque_refs(
+        &request.document.content,
+        &document_rels,
+        &package.document_relationships_path,
+        context,
+    );
+    for entries in [&request.header_entries, &request.footer_entries] {
+        for (relationship_id, story) in entries {
+            let Some(relationship) = relationships.get(relationship_id.as_str()) else {
+                continue;
+            };
+            let Ok(rels_path) = owner_relationships_path(package, &relationship.target) else {
+                continue;
+            };
+            let rels_xml = package.text(&rels_path).unwrap_or_default();
+            warn_about_dangling_opaque_refs(&story.content, &rels_xml, &rels_path, context);
+        }
+    }
+    for (notes, rels_path) in [
+        (
+            &request.footnote_separators,
+            "word/_rels/footnotes.xml.rels",
+        ),
+        (&request.footnotes, "word/_rels/footnotes.xml.rels"),
+        (&request.endnote_separators, "word/_rels/endnotes.xml.rels"),
+        (&request.endnotes, "word/_rels/endnotes.xml.rels"),
+    ] {
+        let rels_xml = package.text(rels_path).unwrap_or_default();
+        for note in notes {
+            warn_about_dangling_opaque_refs(&note.content, &rels_xml, rels_path, context);
+        }
+    }
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
@@ -972,20 +1047,23 @@ fn prefixed_tag<'a>(xml: &'a str, open: &str) -> Option<&'a str> {
     None
 }
 
-pub(super) fn save_core_only(
+#[doc(hidden)]
+pub fn save_core_only(
     request: &S13SaveRequest,
     document_path: &str,
     parts: &[(String, Vec<u8>)],
     source: &[u8],
 ) -> Result<(Vec<u8>, S13SaveReport), ParseError> {
     let mut package = Package::new(parts, document_path.to_owned());
+    let mut context = SerializerContext::new(&request.determinism)?;
+    collect_save_warnings(request, &package, &mut context);
     update_core_part(&request.options, &mut package, &request.determinism.now);
     let bytes = if package.overrides.is_empty() {
         source.to_vec()
     } else {
         rezip_package(&package, Some(source))?
     };
-    Ok((bytes, S13SaveReport::default()))
+    Ok((bytes, context.take_report(None)))
 }
 
 fn update_core_part(options: &S13SaveOptions, package: &mut Package, now: &str) {
@@ -1044,10 +1122,12 @@ impl<'a> Package<'a> {
     }
 
     fn resolve_path<'b>(&'b self, path: &'b str) -> &'b str {
-        let path = match path {
-            "word/document.xml" => &self.document_path,
-            "word/_rels/document.xml.rels" => &self.document_relationships_path,
-            _ => path,
+        let path = if path.eq_ignore_ascii_case("word/document.xml") {
+            &self.document_path
+        } else if path.eq_ignore_ascii_case("word/_rels/document.xml.rels") {
+            &self.document_relationships_path
+        } else {
+            path
         };
         self.positions.get(&path.to_ascii_lowercase())
             .map_or(path, |&index| {
@@ -1225,11 +1305,10 @@ fn normalize_saved_comment_references(
 
 fn apply_paragraph_id_assignments(
     request: &mut S13SaveRequest,
-    paragraph_ids: &S13ParagraphIds,
+    parts: &HashMap<String, BTreeMap<u32, String>>,
     relationships: &IndexMap<String, Relationship>,
     package: &Package,
 ) -> Result<(), ParseError> {
-    let parts = paragraph_ids.assignments_by_part();
     if parts.is_empty() {
         return Ok(());
     }
@@ -1239,7 +1318,7 @@ fn apply_paragraph_id_assignments(
         request.document.comments = comments;
     }
     if let (Some(ids), Some(comments)) =
-        (parts.get(COMMENTS_PART), request.document.comments.as_mut())
+        (parts.get(package.resolve_path(COMMENTS_PART)), request.document.comments.as_mut())
     {
         apply_assignments(comments, ids)?;
     }
@@ -1251,7 +1330,7 @@ fn apply_paragraph_id_assignments(
                 .and_then(|relationship| {
                     resolve_relative_path(&package.document_path, &relationship.target).ok()
                 });
-            if let Some(ids) = path.as_deref().and_then(|path| parts.get(path)) {
+            if let Some(ids) = path.as_deref().and_then(|path| parts.get(package.resolve_path(path))) {
                 apply_assignments(story, ids)?;
             }
         }
@@ -1262,7 +1341,7 @@ fn apply_paragraph_id_assignments(
         ("word/endnotes.xml", &mut request.endnotes),
         ("word/endnotes.xml", &mut request.endnote_separators),
     ] {
-        if let Some(ids) = parts.get(path) {
+        if let Some(ids) = parts.get(package.resolve_path(path)) {
             apply_assignments(notes, ids)?;
         }
     }
@@ -2112,6 +2191,7 @@ fn serialize_header_footer_parts(
 fn ensure_header_footer_parts(
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
+    preserved: &HashSet<String>,
 ) -> Result<(), ParseError> {
     let mut parts = Vec::new();
     for (relationship_id, relationship) in relationships {
@@ -2141,10 +2221,12 @@ fn ensure_header_footer_parts(
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
         for (_, _, target, content_type) in &parts {
-            let part_name = format!(
-                "/{}",
-                package.resolve_path(&resolve_relative_path(&package.document_path, target)?)
-            );
+            let path = resolve_relative_path(&package.document_path, target)?;
+            let path = package.resolve_path(&path);
+            if preserved.contains(path) {
+                continue;
+            }
+            let part_name = format!("/{path}");
             if !has_xml_attribute(&content_types, "Override", "PartName", &part_name) {
                 let entry =
                     format!("<Override PartName=\"{part_name}\" ContentType=\"{content_type}\"/>");
@@ -2779,39 +2861,53 @@ fn process_new_images(
     request: &mut S13SaveRequest,
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
-) -> Result<(), ParseError> {
+    preserved: &HashSet<String>,
+) -> Result<bool, ParseError> {
+    let mut bound = false;
     let mut image_number = find_max_image_number(package);
     let mut extensions = HashSet::new();
 
-    process_image_part(
-        package,
-        "word/_rels/document.xml.rels",
-        std::iter::once(&mut request.document.content),
-        &mut image_number,
-        &mut extensions,
-    )?;
-    process_image_part(
-        package,
-        "word/_rels/footnotes.xml.rels",
-        request
-            .footnote_separators
-            .iter_mut()
-            .chain(request.footnotes.iter_mut())
-            .map(|note| &mut note.content),
-        &mut image_number,
-        &mut extensions,
-    )?;
-    process_image_part(
-        package,
-        "word/_rels/endnotes.xml.rels",
-        request
-            .endnote_separators
-            .iter_mut()
-            .chain(request.endnotes.iter_mut())
-            .map(|note| &mut note.content),
-        &mut image_number,
-        &mut extensions,
-    )?;
+    let path = package.resolve_path("word/document.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_image_part(
+            package,
+            &rels_path,
+            std::iter::once(&mut request.document.content),
+            &mut image_number,
+            &mut extensions,
+        )?;
+    }
+    let path = package.resolve_path("word/footnotes.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_image_part(
+            package,
+            &rels_path,
+            request
+                .footnote_separators
+                .iter_mut()
+                .chain(request.footnotes.iter_mut())
+                .map(|note| &mut note.content),
+            &mut image_number,
+            &mut extensions,
+        )?;
+    }
+    let path = package.resolve_path("word/endnotes.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_image_part(
+            package,
+            &rels_path,
+            request
+                .endnote_separators
+                .iter_mut()
+                .chain(request.endnotes.iter_mut())
+                .map(|note| &mut note.content),
+            &mut image_number,
+            &mut extensions,
+        )?;
+    }
 
     for (entries, relationship_type) in [
         (&mut request.header_entries, relationship_types::HEADER),
@@ -2826,9 +2922,15 @@ fn process_new_images(
             {
                 continue;
             }
-            process_image_part(
+            let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+            let path = package.resolve_path(&path);
+            if preserved.contains(path) {
+                continue;
+            }
+            let rels_path = relationship_part_path(path);
+            bound |= process_image_part(
                 package,
-                &owner_relationships_path(package, &relationship.target)?,
+                &rels_path,
                 std::iter::once(&mut story.content),
                 &mut image_number,
                 &mut extensions,
@@ -2837,7 +2939,7 @@ fn process_new_images(
     }
 
     register_image_extensions(package, &extensions);
-    Ok(())
+    Ok(bound)
 }
 
 fn process_image_part<'a>(
@@ -2846,7 +2948,7 @@ fn process_image_part<'a>(
     stories: impl Iterator<Item = &'a mut Vec<BlockContent>>,
     image_number: &mut u64,
     extensions: &mut HashSet<String>,
-) -> Result<(), ParseError> {
+) -> Result<bool, ParseError> {
     let mut relationships =
         RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path));
     for blocks in stories {
@@ -2876,8 +2978,9 @@ fn process_image_part<'a>(
     }
     if let Some(updated) = relationships.serialize() {
         package.set_text(relationships_path, updated);
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 fn run_has_drawing_image(run: &Run) -> bool {
@@ -3167,14 +3270,16 @@ fn image_content_type(extension: &str) -> &'static str {
 
 fn owner_relationships_path(package: &Package, target: &str) -> Result<String, ParseError> {
     let path = resolve_relative_path(&package.document_path, target)?;
-    Ok(relationship_part_path(&path))
+    Ok(relationship_part_path(package.resolve_path(&path)))
 }
 
 fn process_new_watermark_images(
     request: &mut S13SaveRequest,
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
-) -> Result<(), ParseError> {
+    preserved: &HashSet<String>,
+) -> Result<bool, ParseError> {
+    let mut bound = false;
     let mut image_number = find_max_image_number(package);
     let mut extensions = HashSet::new();
     let mut written_media = HashMap::<String, String>::new();
@@ -3197,7 +3302,11 @@ fn process_new_watermark_images(
             continue;
         }
         let story_path = resolve_relative_path(&package.document_path, &relationship.target)?;
-        let relationships_path = relationship_part_path(&story_path);
+        let story_path = package.resolve_path(&story_path);
+        if preserved.contains(story_path) {
+            continue;
+        }
+        let relationships_path = relationship_part_path(story_path);
         let rels = rels_parts
             .entry(relationships_path.clone())
             .or_insert_with(|| {
@@ -3239,6 +3348,7 @@ fn process_new_watermark_images(
 
         if let Some(existing) = rels.id_for_target(&target) {
             *watermark_relationship_id = Some(existing);
+            bound = true;
             continue;
         }
 
@@ -3251,11 +3361,12 @@ fn process_new_watermark_images(
         ) {
             package.set_text(&relationships_path, updated);
             *watermark_relationship_id = Some(new_relationship_id);
+            bound = true;
         }
     }
 
     register_image_extensions(package, &extensions);
-    Ok(())
+    Ok(bound)
 }
 
 fn normalize_media_target(target: &str) -> &str {
@@ -3286,6 +3397,7 @@ fn has_xml_attribute(xml: &str, element: &str, attribute: &str, expected: &str) 
 fn xml_tags<'a>(xml: &'a str, name: &'a str) -> impl Iterator<Item = &'a str> {
     use quick_xml::events::Event;
 
+    let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
     let mut reader = quick_xml::Reader::from_str(xml);
     std::iter::from_fn(move || loop {
         let start = reader.buffer_position() as usize;
@@ -3325,30 +3437,44 @@ fn process_new_hyperlinks(
     request: &mut S13SaveRequest,
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
-) -> Result<(), ParseError> {
-    process_hyperlink_part(
-        package,
-        "word/_rels/document.xml.rels",
-        std::iter::once(&mut request.document.content),
-    );
-    process_hyperlink_part(
-        package,
-        "word/_rels/footnotes.xml.rels",
-        request
-            .footnote_separators
-            .iter_mut()
-            .chain(request.footnotes.iter_mut())
-            .map(|note| &mut note.content),
-    );
-    process_hyperlink_part(
-        package,
-        "word/_rels/endnotes.xml.rels",
-        request
-            .endnote_separators
-            .iter_mut()
-            .chain(request.endnotes.iter_mut())
-            .map(|note| &mut note.content),
-    );
+    preserved: &HashSet<String>,
+) -> Result<bool, ParseError> {
+    let mut bound = false;
+    let path = package.resolve_path("word/document.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_hyperlink_part(
+            package,
+            &rels_path,
+            std::iter::once(&mut request.document.content),
+        );
+    }
+    let path = package.resolve_path("word/footnotes.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_hyperlink_part(
+            package,
+            &rels_path,
+            request
+                .footnote_separators
+                .iter_mut()
+                .chain(request.footnotes.iter_mut())
+                .map(|note| &mut note.content),
+        );
+    }
+    let path = package.resolve_path("word/endnotes.xml");
+    if !preserved.contains(path) {
+        let rels_path = relationship_part_path(path);
+        bound |= process_hyperlink_part(
+            package,
+            &rels_path,
+            request
+                .endnote_separators
+                .iter_mut()
+                .chain(request.endnotes.iter_mut())
+                .map(|note| &mut note.content),
+        );
+    }
     for (entries, relationship_type) in [
         (&mut request.header_entries, relationship_types::HEADER),
         (&mut request.footer_entries, relationship_types::FOOTER),
@@ -3362,21 +3488,28 @@ fn process_new_hyperlinks(
             {
                 continue;
             }
-            process_hyperlink_part(
+            let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+            let path = package.resolve_path(&path);
+            if preserved.contains(path) {
+                continue;
+            }
+            let rels_path = relationship_part_path(path);
+            bound |= process_hyperlink_part(
                 package,
-                &owner_relationships_path(package, &relationship.target)?,
+                &rels_path,
                 std::iter::once(&mut story.content),
             );
         }
     }
-    Ok(())
+    Ok(bound)
 }
 
 fn process_hyperlink_part<'a>(
     package: &mut Package,
     relationships_path: &str,
     stories: impl Iterator<Item = &'a mut Vec<BlockContent>>,
-) {
+) -> bool {
+    let mut bound = false;
     let mut relationships =
         RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path));
     for blocks in stories {
@@ -3398,7 +3531,7 @@ fn process_hyperlink_part<'a>(
                 .map(|position| *relationships.entry(position));
             let Some(href) = hyperlink.href.as_deref().filter(|href| !href.is_empty()) else {
                 if current.is_none() {
-                    hyperlink.relationship_id = None;
+                    bound |= hyperlink.relationship_id.take().is_some();
                 }
                 return;
             };
@@ -3411,6 +3544,7 @@ fn process_hyperlink_part<'a>(
             }
             if let Some(existing) = relationships.external_hyperlink_id(href) {
                 hyperlink.relationship_id = Some(existing);
+                bound = true;
                 return;
             }
 
@@ -3422,11 +3556,13 @@ fn process_hyperlink_part<'a>(
                 Some("External"),
             );
             hyperlink.relationship_id = Some(new_relationship_id);
+            bound = true;
         });
     }
     if let Some(updated) = relationships.serialize() {
         package.set_text(relationships_path, updated);
     }
+    bound
 }
 
 fn block_has_hyperlink(block: &BlockContent) -> bool {

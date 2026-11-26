@@ -59,7 +59,7 @@ test('native model writers preserve an unedited archive and reopen a model edit'
   const { document: { package: pkg } } = JSON.parse(parse_docx_s9(source, ''));
   const request = {
     determinism: { seed: '0'.repeat(64), now: '2030-01-02T03:04:05.006Z' },
-    document: pkg.document,
+    document: { ...pkg.document, sections: undefined },
     headerEntries: pkg.headerEntries,
     relationshipEntries: pkg.relationshipEntries,
     options: { updateModifiedDate: false },

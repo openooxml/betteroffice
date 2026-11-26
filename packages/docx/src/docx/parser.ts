@@ -19,6 +19,7 @@ import {
   type RustS9ParseOptions,
   type RustS9Result,
 } from './rustParseFacade';
+import { rememberParsedModel } from './rustSaveFacade';
 
 export type ProgressCallback = (stage: string, percent: number) => void;
 
@@ -38,6 +39,7 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
   try {
     onProgress('Extracting DOCX...', 0);
     const parsed = parseDocumentWithRust(buffer, rustOptions(options));
+    rememberParsedModel(parsed.document);
     emitProgress(options, onProgress);
     await loadHostFonts(parsed, options.preloadFonts ?? true, onProgress);
     onProgress('Assembling document...', 95);

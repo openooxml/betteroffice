@@ -528,7 +528,7 @@ fn parse_s9_package_impl(
     };
     let (media, media_warnings) = match media_table {
         Some(table) => (table.media_map(), table.warnings().to_vec()),
-        None if save_comparison => build_save_media_map(parts),
+        None if save_comparison => (build_save_media_map(parts), Vec::new()),
         None => build_media_map_with_warnings(parts),
     };
     let all_xml: IndexMap<_, _> = parts

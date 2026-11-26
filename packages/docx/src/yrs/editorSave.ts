@@ -1,5 +1,6 @@
 /** The editor's save: the session projected with its host's metadata and comments. @internal */
 
+import { sameSaveTree } from '../docx/rustSaveFacade';
 import { engineProgress } from '../utils/engineProgress';
 import { createDocx, repackDocx } from '../docx/rezip';
 import { injectReplyRangeMarkers, injectTCReplyRangeMarkers } from '../docx/injectReplyRangeMarkers';
@@ -11,7 +12,7 @@ import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { checkedSaveModel, type SaveModel } from './commentRangeCheck';
 import { crossingWrittenWhole, withCrossingFallback } from './crossStoryComments';
 import { captureSessionSave, writeSessionSave, type DocxSavedDocument, type DocxSessionSave } from './saveYrsDocx';
-import { sessionSourcePackage } from './sessionInternals';
+import { sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
 import { carryGate, refuseUnavailableTables } from './tableUnavailable';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
@@ -166,7 +167,20 @@ async function writeEditorDocument(
     (original !== saves.saved && !sameBytes(original, source.buffer))
   ) {
     saves.full = true;
-    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(session, document, capture, original, {}, () => false, false, () => false, yieldSave);
+    const opened = source && sameBytes(original, source.buffer) ? sessionMaterializedSource(session) : null;
+    const keepNotes = (part: string) => {
+      switch (part.toLowerCase()) {
+        case 'word/footnotes.xml':
+          return !!opened && sameSaveTree(opened.package.footnotes, document.package.footnotes);
+        case 'word/endnotes.xml':
+          return !!opened && sameSaveTree(opened.package.endnotes, document.package.endnotes);
+        default:
+          return false;
+      }
+    };
+    const { bytes, keptUnchanged, structureDropped } = await writeSessionSave(
+      session, document, capture, original, {}, keepNotes, false, () => false, yieldSave
+    );
     saves.keptUnchanged = keptUnchanged;
     saves.structureDropped = structureDropped;
     return bytes.buffer as ArrayBuffer;

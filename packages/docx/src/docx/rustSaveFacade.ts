@@ -111,6 +111,67 @@ export function modelSaveFields(document: Document) {
   };
 }
 
+const NO_BINDING_CHANGES = 'DOCX_SAVE_BINDINGS 0';
+
+const parsedModels = new WeakMap<Document, {
+  fields: ReturnType<typeof modelSaveFields>;
+  source: Promise<string | undefined>;
+}>();
+
+export function snapshotSaveTree<T>(value: T): T {
+  const copies = new WeakMap<object, object>();
+  const clone = (field: unknown): unknown => {
+    if (!field || typeof field !== 'object') return field;
+    const existing = copies.get(field);
+    if (existing) return existing;
+    if (Array.isArray(field)) {
+      const array: unknown[] = [];
+      copies.set(field, array);
+      for (const child of field) array.push(clone(child));
+      return array;
+    }
+    const object: Record<string, unknown> = Object.create(null);
+    copies.set(field, object);
+    for (const [key, child] of Object.entries(field)) object[key] = clone(child);
+    return object;
+  };
+  return clone(value) as T;
+}
+
+export function sameSaveTree(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!sameSaveTree(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  const a = left as Record<string, unknown>;
+  const b = right as Record<string, unknown>;
+  const keys = (value: Record<string, unknown>) =>
+    Object.keys(value).filter(key => key !== 'sourceOrdinal' && value[key] !== undefined);
+  const fields = keys(a);
+  return fields.length === keys(b).length &&
+    fields.every(key => Object.hasOwn(b, key) && sameSaveTree(a[key], b[key]));
+}
+
+export function rememberParsedModel(document: Document): void {
+  if (!document.originalBuffer) return;
+  parsedModels.set(document, {
+    fields: snapshotSaveTree(modelSaveFields(document)),
+    source: typeof globalThis.crypto?.subtle !== 'undefined'
+      ? sha256Hex(new Uint8Array(document.originalBuffer)).catch(() => undefined)
+      : Promise.resolve(undefined),
+  });
+}
+
+export function parsedModelUnchanged(document: Document): ReturnType<typeof parsedModels.get> {
+  const baseline = parsedModels.get(document);
+  return baseline && sameSaveTree(modelSaveFields(document), baseline.fields) ? baseline : undefined;
+}
+
 /** Encode the public Document through the inverse allowlisted package wire. */
 export async function writeDocumentWithRust(
   document: Document,
@@ -121,9 +182,10 @@ export async function writeDocumentWithRust(
   paragraphIds?: RustParagraphIds,
   skipMutations = false,
   yieldSave?: () => Promise<void>,
-  styleLanguages?: Readonly<Record<string, unknown>>
+  styleLanguages?: Readonly<Record<string, unknown>>,
+  modelMode?: 'fresh' | 'projected'
 ): Promise<RustSaveResult> {
-  const guarded = paragraphIds === undefined && selective === undefined;
+  const guarded = modelMode !== 'fresh' && paragraphIds === undefined && selective === undefined;
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
@@ -143,8 +205,14 @@ export async function writeDocumentWithRust(
   validateDeterminism(fixed);
   if (yieldSave) await yieldSave();
 
+  const baseline = guarded && modelMode === undefined ? parsedModels.get(document) : undefined;
+  const sourceDigest = await baseline?.source;
   const request = {
     ...modelSaveFields(document),
+    ...(modelMode === 'fresh' ? { freshPackage: true } : {}),
+    ...(modelMode === 'projected' ? { rewriteBody: true } : {}),
+    ...(sourceDigest === fixed.seed && parsedModelUnchanged(document)
+      ? { unchangedSourceSha256: sourceDigest } : {}),
     determinism: fixed,
     ...(styleLanguages === undefined ? {} : { styleLanguages }),
     ...(!guarded && {
@@ -177,8 +245,15 @@ export async function writeDocumentWithRust(
   engineProgress();
   const buffer = exactArrayBuffer(bytes);
   if (yieldSave) await yieldSave();
-  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
-  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
+  const unchangedBindings = warnings.includes(NO_BINDING_CHANGES);
+  if (!selective && !skipMutations && !unchangedBindings) {
+    applyRustSaveMutations(document, originalBuffer, buffer);
+  }
+  return {
+    buffer,
+    determinism: fixed,
+    warnings: [...(document.warnings ?? []), ...warnings.filter(warning => warning !== NO_BINDING_CHANGES)],
+  };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */
@@ -189,10 +264,16 @@ function applyRustSaveMutations(
 ): void {
   const originalParts = unzipContainer(new Uint8Array(originalBuffer));
   const savedParts = unzipContainer(new Uint8Array(savedBuffer));
+  const foldedParts = (parts: typeof originalParts) => new Map(
+    Object.entries(parts).map(([path, bytes]) => [path.toLowerCase(), bytes])
+  );
+  const originalByPath = foldedParts(originalParts);
+  const savedByPath = foldedParts(savedParts);
 
   for (const part of collectParts(document)) {
-    const originalRelationships = partText(originalParts[part.relsPath]) ?? '';
-    const savedRelationships = partText(savedParts[part.relsPath]) ?? '';
+    const path = part.relsPath.toLowerCase();
+    const originalRelationships = partText(originalByPath.get(path)) ?? '';
+    const savedRelationships = partText(savedByPath.get(path)) ?? '';
     const originalIds = new Set(
       relationshipTags(originalRelationships).map((tag) => relationshipAttribute(tag, 'Id'))
     );
@@ -239,7 +320,7 @@ function applyRustSaveMutations(
     if (!owner?.target) continue;
     const filename = headerFooterFilename(owner.target).replace(/^word\//, '');
     const relsPath = `word/_rels/${filename}.rels`;
-    const savedRelationships = partText(savedParts[relsPath]) ?? '';
+    const savedRelationships = partText(savedByPath.get(relsPath.toLowerCase())) ?? '';
     if (relationshipForId(savedRelationships, watermark.relId)) continue;
     const mediaFilename = watermark.mediaPath?.split('/').pop();
     const match = relationshipTags(savedRelationships).find((tag) => {

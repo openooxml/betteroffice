@@ -8,7 +8,7 @@ use docx_parse::relationships::{
 use docx_parse::s9::{S9ParseOptions, parse_docx_s9_wire};
 use docx_parse::serializer::{
     S13SaveOptions, S13SaveRequest, SerializerContext, SerializerDeterminism,
-    serialize_comments_part, write_docx_s13,
+    serialize_comments_part, write_docx_s13, write_docx_s13_parts,
 };
 use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
 use serde_json::json;
@@ -684,7 +684,8 @@ fn adding_a_comment_with_a_non_utf8_source_declaration_saves_its_text() {
 fn invalid_source_comment_paragraph_id_uses_the_writer_part() {
     let invalid = PLAIN_COMMENT.replace("10000004", "1000000&quot;");
     let source = fixture_with_comment_parts(&invalid, &[]);
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    let parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let saved = write_docx_s13_parts(save_request(&source), &parts, None).unwrap();
     assert_comment_companion_ids(&saved);
     let limits = ParseLimits::default();
     for path in ["word/commentsExtended.xml", "word/commentsIds.xml"] {
@@ -971,7 +972,8 @@ fn invalid_earlier_comment_paragraph_ids_use_the_writer_part() {
 fn noncanonical_comment_id_saves_one_canonical_comment() {
     let plain = PLAIN_COMMENT.replace("w:id=\"1\"", "w:id=\"1tail\"");
     let source = fixture_with_comment_parts(&format!("{RICH_COMMENT}\n{plain}"), &[]);
-    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    let parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let saved = write_docx_s13_parts(save_request(&source), &parts, None).unwrap();
     assert_comment_companion_ids(&saved);
     let xml = part(&saved, "word/comments.xml");
     assert!(!std::str::from_utf8(&xml).unwrap().contains("1tail"));
@@ -1454,4 +1456,23 @@ fn replying_to_a_parent_with_a_trailing_table_preserves_it_across_resolution() {
         save_request(&resolved).document.comments.unwrap()[2].parent_id,
         Some(0.0)
     );
+}
+
+#[test]
+fn typed_model_save_keeps_unmodeled_body_xml() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    let (_, bytes) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    *bytes = std::str::from_utf8(bytes)
+        .unwrap()
+        .replace(
+            "</w:p>",
+            r#"<w:smartTag w:uri="urn:test" w:element="probe"><w:r><w:t>Probe</w:t></w:r></w:smartTag></w:p>"#,
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let saved = write_docx_s13(save_request(&source), &source).unwrap();
+    assert_eq!(saved, source);
 }

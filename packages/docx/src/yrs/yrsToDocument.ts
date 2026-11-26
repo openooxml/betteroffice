@@ -7,13 +7,15 @@ import { resolveThemeFont } from '../utils/fontResolver';
 import { mergeFontFamily } from '../utils/fontFamilyMerge';
 import { engineProgressTick } from '../utils/engineProgress';
 import { serializeRun } from '../docx/serializer';
+import { sameSaveTree } from '../docx/rustSaveFacade';
 import { headerFooterAliasOf, markHeaderFooterAlias } from '../docx/headerFooterAliasProjection';
 import { markRevisionInfo, materializeSessionRevisionIds } from '../docx/sessionRevisionIds';
 import { headerFooterStory, sessionMaterializedSource, sessionSourcePackage } from './sessionInternals';
-import { rememberSaveProjection } from './saveProjection';
+import { isHostEnvelope, rememberSaveProjection } from './saveProjection';
 import {
   crossingFallback,
   crossStoryComments,
+  crossingWrittenWhole,
   holdsCommentMark,
   noteWrittenWhole,
   type CommentMarkKind,
@@ -78,7 +80,7 @@ import type {
   SectionProperties,
 } from '../types/document';
 import type { YrsRawMark, YrsRunInheritance, YrsSession, YrsStorySegment, YrsTableInheritance } from './index';
-import { isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
+import { carryGate, isUnavailableTablePayload, markGated, refuseUnavailableTables, tableUnavailableError } from './tableUnavailable';
 
 type Attrs = Record<string, unknown>;
 
@@ -3336,7 +3338,7 @@ const openedCrossings = new WeakMap<object, ReadonlyMap<number, CrossingComment>
  * opened document; for a session seeded without one, in `base`, scanned once per base document.
  */
 function openedCrossingComments(session: YrsSession, base: Document): ReadonlyMap<number, CrossingComment> {
-  const opened = sessionMaterializedSource(session);
+  const opened = isHostEnvelope(base) ? null : sessionMaterializedSource(session);
   const key: object = opened ?? base;
   let crossing = openedCrossings.get(key);
   if (!crossing) {
@@ -4960,7 +4962,7 @@ export function yrsToDocument(
 ): Document {
   let projection = projectDocument(session, base, options);
   if (options.commentIds === undefined) {
-    projection = materializeSessionRevisionIds(projection, (source, clone) => {
+    const materialized = materializeSessionRevisionIds(projection, (source, clone) => {
       const block = projectedBlocks.get(source as BlockContent);
       if (block) projectedBlocks.set(clone as BlockContent, block);
       const cells = projectedTableCells.get(source as Table);
@@ -4968,6 +4970,11 @@ export function yrsToDocument(
       const alias = headerFooterAliasOf(source as HeaderFooter);
       if (alias !== undefined) markHeaderFooterAlias(clone as HeaderFooter, alias);
     });
+    if (materialized !== projection) {
+      carryGate(projection, materialized);
+      noteWrittenWhole(materialized, crossingWrittenWhole(projection));
+      projection = materialized;
+    }
   }
   if (options.storyIds === undefined && options.commentIds === undefined) {
     rememberSaveProjection(session, base, projection);
@@ -5095,7 +5102,7 @@ function projectStories(
       const storyId = `${prefix}${note.id}`;
       if (!context.storyIds.has(storyId) || !shouldProject(storyId)) return note;
       const content = restoreNoteMarks(context.storyToBlocks(storyId), note.content);
-      return sameJson(content, note.content) ? note : { ...note, content, verbatimXml: undefined };
+      return sameSaveTree(content, note.content) ? note : { ...note, content, verbatimXml: undefined };
     });
   };
   const footnotes = projectNotes(base.package.footnotes, 'fn:');

@@ -29,7 +29,7 @@ try {
 }
 ```
 
-For document-model workflows, `parseDocx` followed by `repackDocx` uses the same save engine.
+For document-model workflows, `parseDocx` followed by `repackDocx` uses the same save engine. The body paragraphs and tables are in `document.package.document.content`.
 
 ## Entry points
 

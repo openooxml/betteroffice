@@ -985,10 +985,10 @@ pub struct PySaveReport {
 }
 
 impl PySaveReport {
-    fn from_core(report: SaveReport) -> Self {
+    fn from_core(report: SaveReport, warnings: Vec<String>) -> Self {
         Self {
             data: report.bytes,
-            warnings: report.warnings,
+            warnings,
             kept_unchanged: report.kept_unchanged.map(PyKeptUnchanged::from_core),
             structure_dropped: report.structure_dropped.map(|structures| {
                 structures
@@ -1688,10 +1688,10 @@ impl PyDocument {
         modified_by: Option<String>,
     ) -> PyResult<PySaveReport> {
         let options = self.save_options(now, update_modified_date, modified_by);
-        let report = py
-            .detach(|| self.inner.save_report_with_options(options))
+        let (report, warnings) = py
+            .detach(|| self.inner.save_report_with_warnings_and_options(options))
             .map_err(map_error)?;
-        Ok(PySaveReport::from_core(report))
+        Ok(PySaveReport::from_core(report, warnings))
     }
 
     #[pyo3(signature = (path, *, now = None, update_modified_date = false, modified_by = None))]

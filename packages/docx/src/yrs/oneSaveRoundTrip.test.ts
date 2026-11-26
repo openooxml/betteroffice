@@ -806,3 +806,145 @@ it('keeps bookmarked notes and valid revision IDs when saving a cloned projectio
     expect(decodePart(savedParts[BODY])).toContain('new revision');
   });
 });
+
+it('keeps the fresh create path when the model has unrelated relationship IDs', async () => {
+  const document = await parseDocx(fixture.bytes, { preloadFonts: false });
+  document.originalBuffer = undefined;
+  document.package.relationships = new Map([
+    ['rId1', { id: 'rId1', type: `${NS.r}/numbering`, target: 'numbering.xml' }],
+  ]);
+  document.package.document = { content: [{
+    type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Fresh text' }] }],
+  }] };
+  const saved = unzipContainer(new Uint8Array(await createDocx(document)));
+  expect(decodePart(saved[BODY])).toContain('Fresh text');
+});
+
+it('keeps the original Windows-1252 body bytes when only a header changes', async () => {
+  const body = `<?xml version="1.0" encoding="windows-1252"?><w:document xmlns:w="${NS.w}"><w:body><w:p><w:r><w:t>Café</w:t></w:r></w:p></w:body></w:document>`;
+  const parts = { ...sourceParts, [BODY]: Uint8Array.from(body, char => char.charCodeAt(0)) };
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  firstText(document.package.headers!.get('rIdHeader')!.content).text = 'Header edit';
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  expect(saved[BODY]).toEqual(parts[BODY]);
+});
+
+it('keeps BOM-prefixed relationships and content types after a body edit', async () => {
+  const parts = { ...sourceParts };
+  for (const part of [TYPES, DOCUMENT_RELS]) changedPart(parts, part, xml => `\uFEFF${xml}`);
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  firstText(document.package.document.content, EDIT_PARAGRAPH_ID).text = 'Body edit';
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  for (const part of [TYPES, DOCUMENT_RELS]) expect(saved[part]).toEqual(parts[part]);
+});
+
+it('empties a note part when the model explicitly removes its last note', async () => {
+  const source = bookmarkedNotePackage();
+  const document = await parseDocx(source, { preloadFonts: false });
+  document.package.footnotes = [];
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  const saved = unzipContainer(new Uint8Array(buffer));
+  expect(saved[BODY]).toEqual(unzipContainer(source)[BODY]);
+  expect(decodePart(saved[FOOTNOTES])).toContain('</w:footnotes>');
+  expect(decodePart(saved[FOOTNOTES])).not.toContain('<w:footnote ');
+  expect(warnings.some(warning => warning.startsWith(`DOCX_PART_REWRITTEN ${FOOTNOTES} `))).toBe(true);
+  expect(warnings.some(warning => warning.startsWith('DOCX_WHOLE_MODEL_WRITE '))).toBe(false);
+});
+
+it('keeps an explicit raw bookmark attribute on a note with unchanged text', async () => {
+  const document = await parseDocx(bookmarkedNotePackage(), { preloadFonts: false });
+  const note = document.package.footnotes![0]!;
+  note.verbatimXml = note.verbatimXml!.replace('w:name="note"', 'w:name="note" w:displacedByCustomXml="next"');
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  expect(decodePart(saved[FOOTNOTES])).toContain('w:displacedByCustomXml="next"');
+});
+
+it('cleans deleted comment markers from headers with mixed-case archive names', async () => {
+  const parts = { ...sourceParts };
+  const original = await parseDocx(fixture.bytes, { preloadFonts: false });
+  const id = original.package.document.comments![0]!.id;
+  changedPart(parts, HEADER, xml => xml.replace(/<w:p(?:\s[^>]*)?>/, tag =>
+    `${tag}<w:commentRangeStart w:id="${id}"/>`).replace('</w:p>',
+    `<w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p>`));
+  parts['word/Header1.xml'] = parts[HEADER];
+  delete parts[HEADER];
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  document.package.document.comments = [];
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  expect(decodePart(saved['word/Header1.xml'])).not.toMatch(/<w:comment(?:RangeStart|RangeEnd|Reference)\b/);
+});
+
+it('saves a current projection of a thin host envelope with source numbering', async () => {
+  const source = rezipContainer({
+    ...sourceParts,
+    'word/numbering.xml': encodePart(`<w:numbering xmlns:w="${NS.w}"><w:abstractNum w:abstractNumId="2"/><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>`),
+  });
+  const session = await createYrsSession();
+  try {
+    const host = session.seedFromDocx(source);
+    editBody(session, EDIT);
+    const projection = yrsToDocument(session, host.document);
+    const { buffer, warnings } = await repackDocxWithWarnings(projection, noStamp);
+    const saved = unzipContainer(new Uint8Array(buffer));
+    expect(decodePart(saved[BODY])).toContain(EDIT);
+    expect(saved['word/numbering.xml']).toEqual(unzipContainer(source)['word/numbering.xml']);
+    expect(warnings.some(w => /^DOCX_(?:KEPT_|STRUCTURE_DROPPED|MINIMAL_PATCH replace counts)/.test(w))).toBe(false);
+  } finally {
+    session.destroy();
+  }
+});
+
+it('keeps an explicitly changed revision ID on a public session projection', () =>
+  withSession(fixture.bytes, async session => {
+    const result = session.applyEdits({
+      expectVersion: session.version(),
+      steps: [{ op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: EDIT_PARAGRAPH_ID },
+        at: 'end', text: ' New revision', suggest: { author: 'Editor', date: '2026-01-02T03:04:05Z' } }],
+    });
+    expect(result.ok).toBe(true);
+    const projection = yrsToDocument(session, session.materializeDocx()!);
+    for (const block of projection.package.document.content) {
+      if (block.type !== 'paragraph') continue;
+      for (const inline of block.content) {
+        if (inline.type === 'insertion' && inline.info.author === 'Editor') inline.info.id = 12345;
+      }
+    }
+    const saved = unzipContainer(new Uint8Array(await repackDocx(projection, noStamp)));
+    expect(decodePart(saved[BODY])).toMatch(/<w:ins\b[^>]*w:id="12345"[^>]*w:author="Editor"/);
+  })
+);
+
+it('does not create a relationship part for a preserved header using the main relationships', async () => {
+  const parts = { ...sourceParts };
+  delete parts['word/_rels/header1.xml.rels'];
+  changedPart(parts, DOCUMENT_RELS, xml => xml.replace('</Relationships>',
+    `<Relationship Id="rIdSharedLink" Type="${NS.r}/hyperlink" Target="https://example.test" TargetMode="External"/></Relationships>`));
+  changedPart(parts, HEADER, xml => xml.replace('</w:p>',
+    '<w:hyperlink r:id="rIdSharedLink"><w:r><w:t>Link</w:t></w:r></w:hyperlink></w:p>'));
+  const document = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  firstText(document.package.document.content, EDIT_PARAGRAPH_ID).text = 'Body edit';
+  const saved = unzipContainer(new Uint8Array(await repackDocx(document, noStamp)));
+  expect(saved[HEADER]).toEqual(parts[HEADER]);
+  expect(saved['word/_rels/header1.xml.rels']).toBeUndefined();
+});
+
+it('does not report a rewrite when setting empty comments on a package without comments', async () => {
+  const parts = { ...sourceParts };
+  for (const path of ['word/comments.xml', ...EXTENDED_COMMENT_PARTS]) delete parts[path];
+  const source = rezipContainer(parts);
+  const document = await parseDocx(source, { preloadFonts: false });
+  document.package.document.comments = [];
+  const { buffer, warnings } = await repackDocxWithWarnings(document, noStamp);
+  expect(new Uint8Array(buffer)).toEqual(source);
+  expect(warnings.some(warning => warning.startsWith('DOCX_PART_REWRITTEN '))).toBe(false);
+});
+
+it('uses the session save plan with a separate byte-identical raw buffer', () =>
+  withSession(fixture.bytes, async session => {
+    editBody(session, EDIT);
+    const projection = yrsToDocument(session, session.materializeDocx()!);
+    const raw = { originalBuffer: Uint8Array.from(fixture.bytes).buffer } as RawDocxContent;
+    const saved = await repackDocxFromRaw(projection, raw, noStamp);
+    expect(unzipContainer(new Uint8Array(saved))).toEqual(unzipContainer((await saveYrsDocx(session, noStamp)).bytes));
+  })
+);
