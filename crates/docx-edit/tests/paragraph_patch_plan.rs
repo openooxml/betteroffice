@@ -10,11 +10,12 @@ use docx_edit::{
     seed_from_docx, seed_from_docx_with_generation,
 };
 use docx_parse::paragraph_patch::{
-    Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256, unit_sha256,
+    Attrs, DonorV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode, SlotV1, TextEditV1, UnitV1,
+    result_sha256, unit_sha256,
 };
 use docx_parse::serializer::{
-    S13SaveRequest, SerializerContext, SerializerDeterminism, element_span, serialize_paragraph,
-    write_docx_s13_with_warnings,
+    ParagraphPatchSource, S13SaveRequest, SerializerContext, SerializerDeterminism, element_span,
+    serialize_paragraph, write_docx_s13_with_warnings,
 };
 use serde_json::json;
 use yrs::Any;
@@ -35,10 +36,13 @@ fn package(content: &str) -> Vec<u8> {
     package_with_styles(content, None)
 }
 
-fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
-    let document = format!(
+fn document_xml(content: &str) -> String {
+    format!(
         r#"<w:document {NS}><w:body><w:p w14:paraId="00000001">{content}</w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#
-    );
+    )
+}
+
+fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
     let styles = format!(
         r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style></w:styles>"#
     );
@@ -59,7 +63,7 @@ fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
             "word/_rels/document.xml.rels",
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_owned(),
         ),
-        ("word/document.xml", document),
+        ("word/document.xml", document_xml(content)),
         ("word/styles.xml", styles),
         ("word/header1.xml", header),
     ];
@@ -2394,8 +2398,7 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
                 )
             })
             .collect();
-        assert_eq!(splice_summary(patch), owned_splices(&exact), "{case_info}");
-        assert!(patch.run_edits.is_empty(), "{case_info}");
+        assert_recorded_or_preserving_base(patch, &content, &exact, &case_info);
         minimal += 1;
 
         let (saved, _) = save_paragraph(&doc, &content, |_| {});
@@ -3129,6 +3132,60 @@ fn assert_splices(doc: &EditingDoc, expected: &[(u32, u32, u32, &str)]) {
     assert!(patch.run_edits.is_empty());
 }
 
+fn assert_recorded_or_preserving_base(
+    patch: &ParagraphPatchV1,
+    content: &str,
+    expected: &[(u32, u32, u32, &str)],
+    case_info: &str,
+) {
+    let actual = splice_summary(patch);
+    let expected_splices = owned_splices(expected);
+    if actual == expected_splices && patch.run_edits.is_empty() && patch.para_deltas.is_empty() {
+        return;
+    }
+
+    let mut recorded = patch.clone();
+    recorded.run_edits.clear();
+    recorded.para_deltas.clear();
+    recorded.text_edits = expected
+        .iter()
+        .map(|&(from, to, at, value)| {
+            let mut end = 0;
+            let (index, attrs) = patch
+                .seed
+                .units
+                .iter()
+                .enumerate()
+                .find_map(|(index, unit)| {
+                    let UnitV1::Text { text, attrs } = unit else {
+                        panic!("expected a text-only seed\n{case_info}");
+                    };
+                    end += text.encode_utf16().count() as u32;
+                    (at < end).then_some((index, attrs))
+                })
+                .unwrap_or_else(|| panic!("missing seed donor at {at}\n{case_info}"));
+            TextEditV1 {
+                from,
+                to,
+                donor: DonorV1::At { at },
+                insert: vec![InsertedTextV1 {
+                    text: value.to_owned(),
+                    attrs: attrs.clone(),
+                    inherit: patch.seed.inherit.runs[index].clone(),
+                }],
+            }
+        })
+        .collect();
+    let source = document_xml(content);
+    let start = element_span(&source, &[0, 0]).unwrap().start;
+    assert!(
+        ParagraphPatchSource::new(source)
+            .base_preserving_more_runs(start, patch, &recorded)
+            .is_some(),
+        "patch {actual:?} does not preserve more runs than {expected_splices:?} with the same result\n{case_info}"
+    );
+}
+
 fn body_plan(plan: &docx_edit::ParagraphSavePlan) -> &docx_edit::SplicedPart {
     plan.spliced_parts
         .iter()
@@ -3140,6 +3197,44 @@ fn provenance_state(doc: &EditingDoc) -> serde_json::Value {
     let state = doc.encode_state_as_update_v1();
     let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
     serde_json::from_slice(&sidecar[1..sidecar.len() - 32]).unwrap()
+}
+
+fn assert_recorded_replacements(doc: &EditingDoc, expected: &[(u32, u32, u32, &str)]) {
+    let key = &doc.paragraphs("body").unwrap()[0].para_id;
+    let state = provenance_state(doc);
+    let recorded = &state["entries"][key.as_str()]["recorded"];
+    let seed_clock = recorded["seed"]["first"][1].as_u64().unwrap();
+    let mut actual = recorded["splices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|splice| {
+            let removed = &splice["removed"];
+            let from = removed["first"][1].as_u64().unwrap() - seed_clock;
+            let to = from + removed["len"].as_u64().unwrap();
+            let donor: DonorV1 = serde_json::from_value(splice["donor"].clone()).unwrap();
+            let width: u64 = splice["inserted"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|span| span["len"].as_u64().unwrap())
+                .sum();
+            (from, to, donor, width)
+        })
+        .collect::<Vec<_>>();
+    actual.sort_unstable_by_key(|(from, ..)| *from);
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|&(from, to, at, value)| {
+            (
+                u64::from(from),
+                u64::from(to),
+                DonorV1::At { at },
+                value.encode_utf16().count() as u64,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
 }
 
 fn assert_unproven(doc: &EditingDoc) {
@@ -3281,10 +3376,12 @@ fn swapping_equal_text_keeps_each_source_donor() {
     let doc = open(content);
     replace(&doc, 4, 8, "echo");
     replace(&doc, 0, 4, "echo");
-    assert_splices(&doc, &[(0, 4, 0, "echo"), (4, 8, 4, "echo")]);
+    let expected = [(0, 4, 0, "echo"), (4, 8, 4, "echo")];
+    assert_recorded_replacements(&doc, &expected);
+    assert_recorded_or_preserving_base(&patch(&doc), content, &expected, content);
     let (saved, warnings) = save_paragraph(&doc, content, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert!(saved.contains(content), "{saved}");
+    assert_eq!(saved, document_xml(content));
 }
 
 #[test]
@@ -3317,13 +3414,24 @@ fn redoing_a_deletion_saves_the_updated_text() {
 
 #[test]
 fn undo_of_equal_output_is_checked_before_the_digest_gate() {
-    let doc = open(&text("abc"));
+    let content = text("abc");
+    let doc = open(&content);
     let mut history = doc.undo_manager();
     replace(&doc, 1, 2, "b");
-    assert_splices(&doc, &[(1, 2, 1, "b")]);
+    let expected = [(1, 2, 1, "b")];
+    assert_recorded_replacements(&doc, &expected);
+    assert_recorded_or_preserving_base(&patch(&doc), &content, &expected, &content);
+    let source = document_xml(&content);
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(saved, source);
+
     assert!(history.undo());
     assert_unproven(&doc);
     assert!(body_plan(&doc.paragraph_save_plan()).changed.is_empty());
+    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(saved, source);
 }
 
 #[test]
