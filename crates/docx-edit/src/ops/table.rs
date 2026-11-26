@@ -20,7 +20,7 @@ use yrs::{
 
 use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
-use crate::ops::paragraph_content_before;
+use crate::ops::{paragraph_content_before, utf16_len};
 use crate::seed::border_side_sources;
 use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{
@@ -890,24 +890,28 @@ fn validate_fragment_segment(
                     .ok_or_else(|| invalid(format!("{detail} format must be an object")))?;
                 let delta = crate::format::parse_inline_format_delta(map)
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
-                let lowered = delta
+                let mut lowered = delta
                     .to_attrs()
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
-                let merge_font = matches!(delta.font_family, crate::Patch::Set(_))
-                    && !delta.other.contains_key("fontFamily");
+                if matches!(delta.font_family, crate::Patch::Set(_))
+                    && !delta.other.contains_key("fontFamily")
+                    && let Some(fonts) = lowered.get("fontFamily")
+                {
+                    let fonts = crate::format::merge_font_family(
+                        merged.get("fontFamily"),
+                        fonts,
+                        lowered
+                            .get("complexScript")
+                            .or_else(|| merged.get("complexScript")),
+                        text,
+                        (0, utf16_len(text)),
+                    );
+                    lowered.insert(Arc::from("fontFamily"), fonts);
+                }
                 for (key, entry) in lowered {
                     if entry == Any::Null {
                         merged.remove(&key);
                     } else {
-                        let entry = if merge_font && key.as_ref() == "fontFamily" {
-                            crate::format::merge_font_family(
-                                merged.get(&key),
-                                &entry,
-                                crate::format::has_east_asian_font_pick_text(text),
-                            )
-                        } else {
-                            entry
-                        };
                         merged.insert(key, entry);
                     }
                 }
@@ -4510,6 +4514,47 @@ mod tests {
         assert_eq!(receipt.after.offset, 1);
         let paragraphs = doc.paragraphs("body").unwrap();
         assert_eq!(receipt.after.para_id, paragraphs[0].para_id);
+    }
+
+    #[test]
+    fn fragment_font_pick_uses_run_font_slot_flags() {
+        for (text, complex_script, east_asia) in [
+            ("abc", false, "SimSun"),
+            ("中文", false, "Georgia"),
+            ("é", false, "Georgia"),
+            ("中文", true, "SimSun"),
+        ] {
+            let doc = fragment_doc();
+            let fragment = fragment_table(vec![serde_json::json!({
+                "tcPr": {},
+                "content": [
+                    {
+                        "kind": "text",
+                        "text": text,
+                        "attributes": {
+                            "complexScript": complex_script,
+                            "fontFamily": {
+                                "ascii": "Calibri", "hAnsi": "Calibri",
+                                "eastAsia": "SimSun", "hint": "eastAsia"
+                            }
+                        },
+                        "format": {"fontFamily": {"ascii": "Georgia"}}
+                    },
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}}
+                ]
+            })]);
+            let receipt = doc
+                .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+                .unwrap();
+            let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
+            assert_eq!(segments.len(), 2);
+            let Some(Any::Map(fonts)) = segments[0].attributes.get("fontFamily") else {
+                panic!("fontFamily");
+            };
+            assert_eq!(fonts["ascii"], Any::from("Georgia"));
+            assert_eq!(fonts["hAnsi"], Any::from("Georgia"));
+            assert_eq!(fonts["eastAsia"], Any::from(east_asia), "{text}");
+        }
     }
 
     #[test]

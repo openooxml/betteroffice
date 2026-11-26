@@ -187,7 +187,13 @@ pub(crate) fn merge_language(previous: Option<&Any>, patch: &Any) -> Any {
     Any::Map(Arc::new(slots))
 }
 
-pub(crate) fn merge_font_family(previous: Option<&Any>, patch: &Any, east_asian: bool) -> Any {
+pub(crate) fn merge_font_family(
+    previous: Option<&Any>,
+    patch: &Any,
+    complex_script: Option<&Any>,
+    text: &str,
+    part: (u32, u32),
+) -> Any {
     let Any::Map(patch) = patch else {
         return patch.clone();
     };
@@ -203,9 +209,12 @@ pub(crate) fn merge_font_family(previous: Option<&Any>, patch: &Any, east_asian:
     fonts.remove("asciiTheme");
     fonts.remove("hAnsiTheme");
 
-    let east_asia = patch
-        .get("eastAsia")
-        .or_else(|| patch.get("ascii").filter(|_| east_asian));
+    let east_asia = patch.get("eastAsia").or_else(|| {
+        patch.get("ascii").filter(|_| {
+            let flags = run_font_slot_flags(complex_script, previous);
+            uses_east_asian_slot(text, flags, part)
+        })
+    });
     if let Some(east_asia) = east_asia {
         fonts.insert("eastAsia".to_owned(), east_asia.clone());
         fonts.remove("eastAsiaTheme");
@@ -227,53 +236,25 @@ pub(crate) fn run_font_slot_flags(
     (complex_script, hint)
 }
 
-fn font_pick_characters(
+fn uses_east_asian_slot(
     text: &str,
     (complex_script, hint): (bool, bool),
-) -> impl Iterator<Item = (char, bool)> + '_ {
-    ooxml_text::font_slot_characters(text, complex_script, hint).map(move |(ch, slot)| {
-        let east_asian = slot == 2
-            || !complex_script
-                && matches!(
-                    ch as u32,
-                    0x16fe0..=0x18dff | 0x1aff0..=0x1b2ff | 0x1f200..=0x1f2ff | 0x20000..=0x3ffff
-                );
-        (ch, east_asian)
-    })
-}
-
-pub(crate) fn has_east_asian_font_pick_text(text: &str) -> bool {
-    !text.is_ascii() && font_pick_characters(text, (false, false)).any(|(_, east_asian)| east_asian)
-}
-
-fn font_pick_segments(
-    text: &str,
-    from: u32,
-    to: u32,
-    flags: (bool, bool),
-) -> impl Iterator<Item = (u32, u32, bool)> + '_ {
-    let unsegmented = flags.0 || text.is_ascii();
-    let mut single = Some((from, to, false));
+    (from, to): (u32, u32),
+) -> bool {
+    if complex_script || text.is_ascii() {
+        return false;
+    }
     let mut offset = 0;
-    let mut characters = font_pick_characters(text, flags)
-        .map(move |(ch, east_asian)| {
-            let start = offset;
-            offset += ch.len_utf16() as u32;
-            (start, offset, east_asian)
-        })
-        .skip_while(move |&(_, end, _)| end <= from)
-        .take_while(move |&(start, _, _)| start < to)
-        .peekable();
-    std::iter::from_fn(move || {
-        if unsegmented {
-            return single.take();
+    for (character, slot) in ooxml_text::font_slot_characters(text, complex_script, hint) {
+        if offset >= to {
+            break;
         }
-        let (start, mut end, east_asian) = characters.next()?;
-        while let Some((_, next_end, _)) = characters.next_if(|&(_, _, ea)| ea == east_asian) {
-            end = next_end;
+        offset += character.len_utf16() as u32;
+        if offset > from && slot == 2 {
+            return true;
         }
-        Some((start.max(from), end.min(to), east_asian))
-    })
+    }
+    false
 }
 
 /// Tri-state inline formatting patch.
@@ -1236,7 +1217,7 @@ fn attrs_change_chunk(
     pilcrow: bool,
     font_merge: Option<FontMerge<'_>>,
     text: &str,
-    (from, to): (u32, u32),
+    part: (u32, u32),
 ) -> bool {
     attrs.iter().any(|(key, value)| {
         let previous = current.and_then(|current| current.get(key));
@@ -1247,49 +1228,52 @@ fn attrs_change_chunk(
         if let Some(font_merge) = font_merge
             && key.as_ref() == "fontFamily"
         {
-            let (base, flags) = font_merge.chunk_fonts(
-                Some(previous),
-                current.and_then(|attrs| attrs.get("complexScript")),
-            );
-            font_pick_segments(text, from, to, flags).any(|(_, _, east_asian)| {
-                *previous != merge_font_family(Some(base), value, east_asian)
-            })
+            let complex_script = attrs
+                .get("complexScript")
+                .or_else(|| current.and_then(|attrs| attrs.get("complexScript")));
+            *previous
+                != merge_font_family(
+                    font_merge.base(Some(previous)),
+                    value,
+                    complex_script,
+                    text,
+                    part,
+                )
         } else {
             previous != value
         }
     })
 }
 
-fn merge_chunk_language(patch: &mut Attrs, previous: Option<&Any>, write_language: bool) {
+fn merge_chunk_format<'a>(
+    patch: &mut Attrs,
+    previous: impl Fn(&str) -> Option<&'a Any>,
+    write_language: bool,
+    font_merge: Option<FontMerge<'_>>,
+    text: &str,
+    part: (u32, u32),
+) {
     if let Some(language @ Any::Map(_)) = patch.get_mut("language") {
         if write_language {
-            *language = merge_language(previous, language);
+            *language = merge_language(previous("language"), language);
         } else {
             patch.remove("language");
         }
     }
-}
-
-fn chunk_format_pieces<'a>(
-    patch: Attrs,
-    fonts: Option<(&'a Any, (bool, bool))>,
-    text: &'a str,
-    chunk_start: u32,
-    (start, end): (u32, u32),
-) -> impl Iterator<Item = (u32, u32, Attrs)> + 'a {
-    let (previous, flags) = fonts.unwrap_or((&Any::Null, (false, false)));
-    let text = if fonts.is_some() { text } else { "" };
-    font_pick_segments(text, start - chunk_start, end - chunk_start, flags).map(
-        move |(from, to, east_asian)| {
-            let mut attrs = patch.clone();
-            if fonts.is_some()
-                && let Some(fonts) = attrs.get_mut("fontFamily")
-            {
-                *fonts = merge_font_family(Some(previous), fonts, east_asian);
-            }
-            (chunk_start + from, chunk_start + to, attrs)
-        },
-    )
+    if let Some(merge) = font_merge
+        && let Some(fonts) = patch.get("fontFamily")
+    {
+        let fonts = merge_font_family(
+            merge.base(previous("fontFamily")),
+            fonts,
+            patch
+                .get("complexScript")
+                .or_else(|| previous("complexScript")),
+            text,
+            part,
+        );
+        patch.insert(Arc::from("fontFamily"), fonts);
+    }
 }
 
 fn push_format_retain(
@@ -1417,16 +1401,11 @@ enum FontMerge<'a> {
 }
 
 impl<'a> FontMerge<'a> {
-    fn chunk_fonts(
-        self,
-        current: Option<&'a Any>,
-        complex_script: Option<&Any>,
-    ) -> (&'a Any, (bool, bool)) {
-        let base = match self {
-            Self::Existing => current.unwrap_or(&Any::Null),
-            Self::Reset(reset) => reset,
-        };
-        (base, run_font_slot_flags(complex_script, current))
+    fn base(self, current: Option<&'a Any>) -> Option<&'a Any> {
+        match self {
+            Self::Existing => current,
+            Self::Reset(reset) => Some(reset),
+        }
     }
 }
 
@@ -2147,21 +2126,15 @@ impl EditingDoc {
                     let start = chunk.start.max(at);
                     let end = chunk.end.min(at + len);
                     let mut patch = attrs.clone();
-                    let previous =
-                        |key: &str| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key));
-                    merge_chunk_language(&mut patch, previous("language"), chunk.text);
-                    let fonts = font_merge.map(|merge| {
-                        merge.chunk_fonts(previous("fontFamily"), previous("complexScript"))
-                    });
-                    for (from, to, patch) in chunk_format_pieces(
-                        patch,
-                        fonts,
+                    merge_chunk_format(
+                        &mut patch,
+                        |key| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key)),
+                        chunk.text,
+                        font_merge,
                         chunk.font_text.as_deref().unwrap_or_default(),
-                        chunk.start,
-                        (start, end),
-                    ) {
-                        push_format_retain(&mut deltas, &mut cursor, from, to, patch);
-                    }
+                        (start - chunk.start, end - chunk.start),
+                    );
+                    push_format_retain(&mut deltas, &mut cursor, start, end, patch);
                 }
             } else {
                 push_format_retain(&mut deltas, &mut cursor, at, at + len, attrs);
@@ -2200,78 +2173,74 @@ impl EditingDoc {
                 continue;
             }
             let mut patch = delta.clone();
-            merge_chunk_language(&mut patch, chunk.attrs.get("language"), true);
             let text = match &chunk.kind {
                 crate::ops::ChunkKind::Text(text) => text.as_str(),
                 _ => "",
             };
-            let fonts = font_merge.map(|merge| {
-                merge.chunk_fonts(
-                    chunk.attrs.get("fontFamily"),
-                    chunk.attrs.get("complexScript"),
-                )
-            });
-            let pieces = chunk_format_pieces(patch, fonts, text, chunk.start, (start, end));
-            for (start, end, mut patch) in pieces {
-                let mut current = chunk.attrs.clone();
-                for (key, value) in &patch {
-                    if *value == Any::Null {
-                        current.remove(key.as_ref());
-                    } else {
-                        current.insert(key.to_string(), value.clone());
-                    }
+            merge_chunk_format(
+                &mut patch,
+                |key| chunk.attrs.get(key),
+                true,
+                font_merge,
+                text,
+                (start - chunk.start, end - chunk.start),
+            );
+            let mut current = chunk.attrs.clone();
+            for (key, value) in &patch {
+                if *value == Any::Null {
+                    current.remove(key.as_ref());
+                } else {
+                    current.insert(key.to_string(), value.clone());
                 }
-                if current == chunk.attrs {
-                    continue;
-                }
-                let mut changes = match chunk.attrs.get(RPR_CHANGE) {
-                    Some(Any::Array(changes)) => changes.to_vec(),
-                    _ => Vec::new(),
-                };
-                if changes.is_empty() {
-                    let id = new_id.get_or_insert_with(|| self.next_id(txn));
-                    let previous: HashMap<_, _> = chunk
-                        .attrs
-                        .iter()
-                        .filter(|(key, _)| {
-                            !matches!(key.as_str(), INS | DEL | HYPERLINK | RPR_CHANGE)
-                        })
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect();
-                    changes.push(Any::Map(Arc::new(HashMap::from([
-                        ("type".to_owned(), Any::from("runPropertyChange")),
-                        (
-                            "info".to_owned(),
-                            crate::revision_value(id, &ctx.revision_author()),
-                        ),
-                        (
-                            "previousFormatting".to_owned(),
-                            crate::seed::mark_run_formatting(previous.iter()).unwrap_or(Any::Null),
-                        ),
-                        (
-                            "previousAttributes".to_owned(),
-                            Any::Map(Arc::new(previous)),
-                        ),
-                    ]))));
-                }
-                for change in &mut changes {
-                    if let Some((id, ..)) = crate::queries::revision_parts(change)
-                        && !revision_ids.contains(&id)
-                    {
-                        revision_ids.push(id);
-                    }
-                    if let Any::Map(values) = change {
-                        let mut values = values.as_ref().clone();
-                        values.insert(
-                            "currentFormatting".to_owned(),
-                            crate::seed::mark_run_formatting(current.iter()).unwrap_or(Any::Null),
-                        );
-                        *change = Any::Map(Arc::new(values));
-                    }
-                }
-                patch.insert(Arc::from(RPR_CHANGE), Any::Array(Arc::from(changes)));
-                push_format_retain(&mut deltas, &mut cursor, start, end, patch);
             }
+            if current == chunk.attrs {
+                continue;
+            }
+            let mut changes = match chunk.attrs.get(RPR_CHANGE) {
+                Some(Any::Array(changes)) => changes.to_vec(),
+                _ => Vec::new(),
+            };
+            if changes.is_empty() {
+                let id = new_id.get_or_insert_with(|| self.next_id(txn));
+                let previous: HashMap<_, _> = chunk
+                    .attrs
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), INS | DEL | HYPERLINK | RPR_CHANGE))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                changes.push(Any::Map(Arc::new(HashMap::from([
+                    ("type".to_owned(), Any::from("runPropertyChange")),
+                    (
+                        "info".to_owned(),
+                        crate::revision_value(id, &ctx.revision_author()),
+                    ),
+                    (
+                        "previousFormatting".to_owned(),
+                        crate::seed::mark_run_formatting(previous.iter()).unwrap_or(Any::Null),
+                    ),
+                    (
+                        "previousAttributes".to_owned(),
+                        Any::Map(Arc::new(previous)),
+                    ),
+                ]))));
+            }
+            for change in &mut changes {
+                if let Some((id, ..)) = crate::queries::revision_parts(change)
+                    && !revision_ids.contains(&id)
+                {
+                    revision_ids.push(id);
+                }
+                if let Any::Map(values) = change {
+                    let mut values = values.as_ref().clone();
+                    values.insert(
+                        "currentFormatting".to_owned(),
+                        crate::seed::mark_run_formatting(current.iter()).unwrap_or(Any::Null),
+                    );
+                    *change = Any::Map(Arc::new(values));
+                }
+            }
+            patch.insert(Arc::from(RPR_CHANGE), Any::Array(Arc::from(changes)));
+            push_format_retain(&mut deltas, &mut cursor, start, end, patch);
         }
         apply_format_retains(story, txn, deltas);
         Ok(revision_ids)
