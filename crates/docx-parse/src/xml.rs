@@ -151,8 +151,7 @@ impl<'a> ParseBudget<'a> {
         guides: crate::s9::PreviewConnectorGuides,
     ) {
         if !guides.is_empty()
-            && let (Some(sources), Some(story)) =
-                (&self.preview_connectors, &self.connector_story)
+            && let (Some(sources), Some(story)) = (&self.preview_connectors, &self.connector_story)
         {
             sources
                 .lock()

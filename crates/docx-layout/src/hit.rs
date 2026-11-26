@@ -964,7 +964,9 @@ fn over_selectable_image<'a>(
                 (x >= ix && x <= ix + iw && y >= iy && y <= iy + ih)
                     .then_some(img.attrs.doc_start.is_some())
             }
-            Primitive::Shape(shape) if shape_can_hit(shape) && shape_contains_point(shape, x, y) => {
+            Primitive::Shape(shape)
+                if shape_can_hit(shape) && shape_contains_point(shape, x, y) =>
+            {
                 shape_doc_start(&prims[..index], shape).map(|_| true)
             }
             _ => None,
@@ -1053,7 +1055,10 @@ fn resolve_point_in<'a>(
     // outranks text for the CURSOR only: the pointer path selects an image
     // before it asks for a position, so position resolution keeps its own order
     let image_target = over_selectable_image(prims, candidates.clone(), x, y);
-    let hits: Vec<_> = candidates.clone().filter_map(|(_, p)| text_hit(p)).collect();
+    let hits: Vec<_> = candidates
+        .clone()
+        .filter_map(|(_, p)| text_hit(p))
+        .collect();
     // What the point earns once no run claims it. An area with no positionable
     // text is not typeable whatever it encloses: such a click is answered with
     // the document's end.
@@ -1321,7 +1326,8 @@ fn painted_body_hit_at(primitive: &Primitive, preceding: &[Primitive], x: f64, y
     if let Primitive::Shape(shape) = primitive
         && is_connector(shape)
     {
-        return connector::contains(shape, x, y, 0.0) && shape_doc_start(preceding, shape).is_some();
+        return connector::contains(shape, x, y, 0.0)
+            && shape_doc_start(preceding, shape).is_some();
     }
     let Some(attrs) = doc_attrs(primitive) else {
         return false;
