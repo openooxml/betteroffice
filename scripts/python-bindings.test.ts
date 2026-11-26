@@ -14,6 +14,7 @@ import {
   fontPackVersion,
   pendingPublishNames
 } from './python-bindings.mjs';
+import { NATIVE_FORMATS } from './native-bindings.mjs';
 
 const script = fileURLToPath(new URL('./python-bindings.mjs', import.meta.url));
 const repository = fileURLToPath(new URL('..', import.meta.url));
@@ -35,46 +36,63 @@ const publish = Bun.YAML.parse(readFileSync(publishWorkflow, 'utf8')) as any;
 const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
 
 const SHA = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
-const dispatchStep = release.jobs['python-pypi'].steps[0];
+const dispatchStep = release.jobs['python-pypi'].steps.find(
+  (step: any) => step.name === 'Dispatch a publish per binding, then wait for each'
+);
 const RUN_IDS = PYTHON_PUBLISH_NAMES.map((_, index) => 4200 + index);
 const ALL_NAMES = [...FONT_PACK_NAMES, ...PYTHON_PUBLISH_NAMES];
 const ALL_RUN_IDS = ALL_NAMES.map((_, index) => 4300 + index);
+const post = (name: string) =>
+  `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`;
+const watchRun = (id: number) => `run watch ${id} --exit-status`;
 
-/** The dispatch step against a `gh` that dispatches (returning a run id) and watches. */
-function dispatch({ dispatchStatus = 0, failing = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
+function dispatch({ failDispatchAt = 0, failing = 0, timedOut = 0, failCheckAt = 0, names = PYTHON_PUBLISH_NAMES, runIds = RUN_IDS } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'dispatch-'));
-  const log = join(directory, 'gh.log');
-  const ids = names.map(
-    (name, index) => `    *"inputs[binding]=${name}"*) echo ${runIds[index]} ;;`
-  );
-  writeFileSync(
-    join(directory, 'gh'),
-    [
-      '#!/bin/sh',
-      `echo "$@" >> "${log}"`,
-      'case "$1 $2" in',
-      `  "api --method") [ ${dispatchStatus} -ne 0 ] && exit ${dispatchStatus}; case "$*" in`,
-      ...ids,
-      '    esac ;;',
-      `  "run watch") [ "$3" = "${failing}" ] && exit 1 ;;`,
-      'esac',
-      'exit 0'
-    ].join('\n'),
-    { mode: 0o755 }
-  );
-  const path = join(directory, 'dispatch.sh');
-  writeFileSync(path, dispatchStep.run);
-  const result = spawnSync('bash', ['-e', path], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      PATH: `${directory}:${process.env.PATH}`,
-      GH_REPO: 'openooxml/betteroffice',
-      PUBLISH: JSON.stringify(names),
-      SHA
-    }
-  });
-  return { ...result, log: readFileSync(log, 'utf8').trim().split('\n') };
+  try {
+    const log = join(directory, 'gh.log');
+    writeFileSync(log, '');
+    const ids = names.map((name, index) => {
+      const response = index + 1 === failDispatchAt ? 'exit 1' : `echo ${runIds[index]}`;
+      return `    *"inputs[binding]=${name}"*) ${response} ;;`;
+    });
+    writeFileSync(
+      join(directory, 'gh'),
+      [
+        '#!/bin/sh',
+        `echo "$@" >> "${log}"`,
+        'case "$1 $2" in',
+        '  "api --method") case "$*" in',
+        ...ids,
+        '    esac ;;',
+        `  "run watch") [ "$3" = "${timedOut}" ] && exit 124; [ "$3" = "${failing}" ] && exit 1 ;;`,
+        'esac',
+        'exit 0'
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+    writeFileSync(join(directory, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n', { mode: 0o755 });
+    const check = join(directory, 'check-publisher-files.sh');
+    writeFileSync(check, [
+      `echo check-publisher-files >> "${log}"`,
+      `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
+    ].join('\n'));
+    const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
+      cwd: repository,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${directory}:${process.env.PATH}`,
+        GH_REPO: 'openooxml/betteroffice',
+        PUBLISH: JSON.stringify(names),
+        SHA,
+        GITHUB_SERVER_URL: 'https://github.com',
+        CHECK_PUBLISHER_FILES: check
+      }
+    });
+    return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 describe('registry', () => {
@@ -127,9 +145,12 @@ describe('registry', () => {
 });
 
 describe('release wiring', () => {
-  test('the registry step computes the publish list from PyPI state', () => {
-    const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
+  const step = release.jobs.plan.steps.find((s: any) => s.id === 'bindings');
+
+  test('the plan selects unpublished versions from both registries', () => {
+    expect(step.run).toContain('scripts/native-bindings.mjs --pending');
     expect(step.run).toContain('scripts/python-bindings.mjs --pending');
+    expect(step.run).not.toContain(',,}');
 
     const directory = mkdtempSync(join(tmpdir(), 'registry-'));
     const outputs = join(directory, 'outputs');
@@ -143,17 +164,22 @@ describe('release wiring', () => {
       pypi,
       `const served = ${JSON.stringify(releases)};
 globalThis.fetch = async (url) => {
+  if (new URL(url).host === 'registry.npmjs.org') return Response.json({ versions: {} });
   const releases = served[String(url).match(/\\/pypi\\/([^/]+)\\/json$/)?.[1]];
   return releases ? Response.json({ releases }) : new Response(null, { status: 404 });
 };
 `
     );
     writeFileSync(path, step.run);
-    const result = spawnSync('bash', ['-e', path], {
+    const result = spawnSync('bash', ['-eo', 'pipefail', path], {
       encoding: 'utf8',
       cwd: repository,
       env: {
         ...process.env,
+        REHEARSE: 'false',
+        PUBLISHING: 'true',
+        RELEASE_SKIP_NATIVE: '',
+        RELEASE_SKIP_PYTHON: 'false',
         GITHUB_OUTPUT: outputs,
         NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(pypi).href}`
       }
@@ -161,12 +187,59 @@ globalThis.fetch = async (url) => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(readFileSync(outputs, 'utf8')).toBe(
-      `publish=${JSON.stringify([...FONT_PACK_NAMES, ...unserved])}\n`
+      `native=${JSON.stringify(NATIVE_FORMATS)}\npython=${JSON.stringify([...FONT_PACK_NAMES, ...unserved])}\nskip_native=false\nskip_python=false\n`
     );
   });
 
+  test.each([
+    ['TrUe', 'false', 'true', 'false'],
+    ['false', 'TRUE', 'false', 'true'],
+    ['TRUE', 'True', 'true', 'true']
+  ] as const)('the release plan bypasses pending lookups with native=%s and python=%s', (native, python, skipNative, skipPython) => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-plan-'));
+    try {
+      const outputs = join(directory, 'outputs');
+      writeFileSync(join(directory, 'node'), [
+        '#!/bin/sh',
+        'printf "%s\\n" "$*" >&2',
+        'case "$*" in',
+        '  "scripts/native-bindings.mjs --pending") echo \'["native"]\' ;;',
+        '  "scripts/python-bindings.mjs --pending") echo \'["python"]\' ;;',
+        '  *) exit 1 ;;',
+        'esac',
+        ''
+      ].join('\n'), { mode: 0o755 });
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        cwd: repository,
+        env: {
+          ...process.env,
+          REHEARSE: 'false',
+          PUBLISHING: 'true',
+          RELEASE_SKIP_NATIVE: native,
+          RELEASE_SKIP_PYTHON: python,
+          PATH: `${directory}:${process.env.PATH}`,
+          GITHUB_OUTPUT: outputs
+        }
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe([
+        skipNative === 'false' ? 'scripts/native-bindings.mjs --pending\n' : '',
+        skipPython === 'false' ? 'scripts/python-bindings.mjs --pending\n' : ''
+      ].join(''));
+      expect(readFileSync(outputs, 'utf8')).toBe([
+        `native=${skipNative === 'true' ? '[]' : '["native"]'}`,
+        `python=${skipPython === 'true' ? '[]' : '["python"]'}`,
+        `skip_native=${skipNative}`,
+        `skip_python=${skipPython}`,
+        ''
+      ].join('\n'));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   test('a registry lookup failure fails the step instead of publishing nothing', () => {
-    const step = release.jobs['python-bindings'].steps.find((s: any) => s.id === 'registry');
     const directory = mkdtempSync(join(tmpdir(), 'registry-fail-'));
     writeFileSync(join(directory, 'node'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const path = join(directory, 'registry.sh');
@@ -176,6 +249,10 @@ globalThis.fetch = async (url) => {
       cwd: repository,
       env: {
         ...process.env,
+        REHEARSE: 'false',
+        PUBLISHING: 'true',
+        RELEASE_SKIP_NATIVE: 'false',
+        RELEASE_SKIP_PYTHON: 'false',
         PATH: `${directory}:${process.env.PATH}`,
         GITHUB_OUTPUT: join(directory, 'outputs')
       }
@@ -184,10 +261,75 @@ globalThis.fetch = async (url) => {
     expect(result.status).not.toBe(0);
   });
 
-  test('the release train exposes the publish list', () => {
-    expect(release.jobs['python-bindings'].outputs).toEqual({
-      publish: '${{ steps.registry.outputs.publish }}'
+  test.each([
+    ['false', [], [], 'true'],
+    ['true', NATIVE_FORMATS, [...FONT_PACK_NAMES, ...PYTHON_BINDING_NAMES], 'false']
+  ] as const)('plans the release PR or rehearsal with REHEARSE=%s', (rehearse, native, python, skip) => {
+    const directory = mkdtempSync(join(tmpdir(), 'release-plan-'));
+    try {
+      const outputs = join(directory, 'outputs');
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        cwd: repository,
+        env: {
+          ...process.env,
+          REHEARSE: rehearse,
+          PUBLISHING: 'false',
+          RELEASE_SKIP_NATIVE: 'TRUE',
+          RELEASE_SKIP_PYTHON: 'True',
+          GITHUB_OUTPUT: outputs
+        }
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(outputs, 'utf8')).toBe(
+        `native=${JSON.stringify(native)}\npython=${JSON.stringify(python)}\nskip_native=${skip}\nskip_python=${skip}\n`
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('release gates publishing on the Python build matrix for this commit', () => {
+    const job = release.jobs['python-build'];
+    expect(job.needs).toBe('plan');
+    expect(job.if).toBe(
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.python != '[]' && needs.plan.outputs.skip_python != 'true'"
+    );
+    expect(job.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { binding: '${{ fromJSON(needs.plan.outputs.python) }}' }
     });
+    expect(job.uses).toBe('./.github/workflows/python-dist.yml');
+    expect(job.with).toEqual({ binding: '${{ matrix.binding }}', sha: '${{ github.sha }}' });
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job['continue-on-error']).toBeUndefined();
+  });
+
+  test('release retries the whole Python build matrix once after failure or cancellation', () => {
+    const job = release.jobs['python-build'];
+    const retry = release.jobs['python-build-retry'];
+    expect(retry.needs).toEqual(['plan', 'python-build']);
+    expect(retry.if).toBe("${{ !cancelled() && (needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') }}");
+    for (const key of ['strategy', 'uses', 'with', 'permissions', 'secrets']) {
+      expect(retry[key]).toEqual(job[key]);
+    }
+    expect(retry['continue-on-error']).toBeUndefined();
+  });
+
+  test('the release train exposes the publish list after the Python gate passes', () => {
+    const job = release.jobs['python-bindings'];
+    expect(job.needs).toEqual(['plan', 'release', 'python-build', 'python-build-retry']);
+    expect(job.if).toBe([
+      "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&",
+      "needs.plan.outputs.skip_python != 'true' &&",
+      "(needs.python-build.result == 'success' ||",
+      "((needs.python-build.result == 'failure' || needs.python-build.result == 'cancelled') && needs.python-build-retry.result == 'success') ||",
+      "(needs.python-build.result == 'skipped' && needs.plan.outputs.python == '[]')) }}"
+    ].join(' '));
+    expect(job.outputs).toEqual({
+      publish: '${{ needs.release.outputs.python }}'
+    });
+    expect(release.jobs.release.outputs.python).toBe('${{ needs.plan.outputs.python }}');
   });
 
   test('the release publishes nothing to PyPI itself', () => {
@@ -195,47 +337,32 @@ globalThis.fetch = async (url) => {
     const runs = JSON.stringify(release.jobs['python-pypi']);
     expect(runs).not.toContain('pypa/gh-action-pypi-publish');
     expect(runs).not.toContain('PYPI_API_TOKEN');
-    expect(release.jobs['python-pypi'].permissions).toEqual({ actions: 'write' });
+    expect(release.jobs['python-pypi'].permissions).toEqual({ contents: 'read', actions: 'write' });
   });
 
   test('a dispatch fans out only over the opted-in bindings, at the commit that triggered it', () => {
-    expect(release.jobs['python-pypi'].needs).toBe('python-bindings');
-    expect(release.jobs['python-pypi'].if).toContain(
+    expect(release.jobs['python-pypi'].needs).toEqual(['release', 'python-bindings']);
+    expect(release.jobs['python-pypi'].if).toBe([
+      "!cancelled() && needs.release.result == 'success' &&",
+      "needs.python-bindings.result == 'success' &&",
       "needs.python-bindings.outputs.publish != '[]'"
-    );
+    ].join(' '));
     expect(dispatchStep.env.PUBLISH).toBe('${{ needs.python-bindings.outputs.publish }}');
     expect(dispatchStep.env.SHA).toBe('${{ github.sha }}');
+    expect(dispatchStep.env.CHECK_PUBLISHER_FILES).toBe('scripts/check-publisher-files.sh');
 
     const result = dispatch();
 
-    expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toEqual(
-      PYTHON_PUBLISH_NAMES.map(
-        (name) =>
-          `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-python-binding.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${SHA} -F inputs[dry_run]=false --jq .workflow_run_id`
-      )
-    );
+    expect(result.status, result.stderr).toBe(0);
+    const calls = PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', post(name)]);
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(RUN_IDS.map(watchRun));
   });
 
-  test('the wait watches exactly the runs the dispatch created', () => {
-    const result = dispatch();
-
-    expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('run watch'))).toEqual(
-      RUN_IDS.map((id) => `run watch ${id} --exit-status`)
-    );
-    expect(publish['run-name']).toBe(
-      'Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}'
-    );
-  });
-
-  test('the release ends only once every dispatched run has', () => {
-    const result = dispatch();
-
-    expect(result.status).toBe(0);
-    expect(result.log.filter((line) => line.startsWith('run watch'))).toHaveLength(
-      PYTHON_PUBLISH_NAMES.length
-    );
+  test('an empty publish list runs no check and dispatches nothing', () => {
+    const result = dispatch({ names: [] });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([]);
   });
 
   test('a dispatched run that fails fails the release', () => {
@@ -246,20 +373,39 @@ globalThis.fetch = async (url) => {
     expect(result.log.filter((line) => line.startsWith('run watch'))).toHaveLength(
       PYTHON_PUBLISH_NAMES.length
     );
+    expect(result.log.some((line) => line.startsWith('run cancel'))).toBe(false);
+  });
+
+  test('watch bounds fit the job deadline and a timeout cancels the stalled child', () => {
+    const job = release.jobs['python-pypi'];
+    const packs = Number(dispatchStep.run.match(/dispatch-publishers\.sh publish-python-binding\.yml (\d+) betteroffice-%s \$packs/)?.[1]);
+    const formats = Number(dispatchStep.run.match(/dispatch-publishers\.sh publish-python-binding\.yml (\d+) betteroffice-%s \$formats/)?.[1]);
+    const wheelAndLoad = dist.jobs.wheels['timeout-minutes'] + dist.jobs.load['timeout-minutes'];
+    const sdist = dist.jobs.sdist['timeout-minutes'];
+    const fontPack = dist.jobs['font-pack']['timeout-minutes'];
+    const afterBuild = dist.jobs.built['timeout-minutes'] + publish.jobs.publish['timeout-minutes'] + 20;
+    expect(packs).toBeGreaterThanOrEqual(fontPack + afterBuild);
+    expect(formats).toBeGreaterThanOrEqual(Math.max(wheelAndLoad, sdist) + afterBuild);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(packs + formats + 10);
+    const result = dispatch({ timedOut: RUN_IDS[0]! });
+    expect(result.status).toBe(1);
+    expect(result.log.filter((line) => line.startsWith('run cancel'))).toEqual([`run cancel ${RUN_IDS[0]}`]);
+    expect(result.stdout).toContain(`::error::betteroffice-${PYTHON_PUBLISH_NAMES[0]} did not publish: https://github.com/openooxml/betteroffice/actions/runs/${RUN_IDS[0]}`);
   });
 
   test('one failed dispatch fails the job without skipping the rest', () => {
-    const result = dispatch({ dispatchStatus: 1 });
+    const result = dispatch({ failDispatchAt: 2 });
 
     expect(result.status).toBe(1);
-    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toHaveLength(
-      PYTHON_PUBLISH_NAMES.length
-    );
-    expect(result.log.some((line) => line.startsWith('run watch'))).toBe(false);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${PYTHON_PUBLISH_NAMES[1]} failed.`);
+    const calls = PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', post(name)]);
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(RUN_IDS.filter((_, index) => index !== 1).map(watchRun));
   });
 
   test('the dispatched workflow is the one PyPI trusts', () => {
     expect(Object.keys(publish.on)).toEqual(['workflow_dispatch']);
+    expect(publish['run-name']).toBe('Publish betteroffice-${{ inputs.binding }} @ ${{ inputs.sha }}');
     expect(Object.keys(publish.on.workflow_dispatch.inputs)).toEqual(['binding', 'sha', 'dry_run']);
     expect(publish.on.workflow_dispatch.inputs.sha.required).toBe(true);
     expect(publish.jobs.publish.environment).toBe('pypi-${{ inputs.binding }}');
@@ -273,8 +419,19 @@ globalThis.fetch = async (url) => {
     const checkouts = Object.values(dist.jobs).flatMap((job: any) =>
       (job.steps ?? []).filter((step: any) => String(step.uses ?? '').startsWith('actions/checkout'))
     );
-    expect(checkouts).toHaveLength(3);
+    expect(checkouts).toHaveLength(4);
     for (const step of checkouts) expect(step.with.ref).toBe('${{ inputs.sha }}');
+  });
+
+  test('every Python dist upload can replace the first attempt artifact', () => {
+    const uploads = Object.values(dist.jobs).flatMap((job: any) =>
+      (job.steps ?? []).filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'))
+    );
+    expect(uploads).toHaveLength(4);
+    for (const upload of uploads) {
+      expect(upload.uses).toBe('actions/upload-artifact@v7');
+      expect(upload.with.overwrite).toBe(true);
+    }
   });
 
   test('CI installs and tests every binding, publishable or not', () => {
@@ -296,38 +453,132 @@ globalThis.fetch = async (url) => {
   test('font packs publish first, and a failed pack dispatches no format binding', () => {
     const ok = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS });
     expect(ok.status, ok.stdout).toBe(0);
-    const order = ok.log
-      .filter((line) => line.startsWith('api --method POST') || line.startsWith('run watch'))
-      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1] ?? line);
-    expect(order).toEqual([
-      ...FONT_PACK_NAMES,
-      ...ALL_RUN_IDS.slice(0, FONT_PACK_NAMES.length).map((id) => `run watch ${id} --exit-status`),
-      ...PYTHON_PUBLISH_NAMES,
-      ...ALL_RUN_IDS.slice(FONT_PACK_NAMES.length).map((id) => `run watch ${id} --exit-status`)
-    ]);
+    const order = ok.log.map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1] ?? line);
+    const packs = FONT_PACK_NAMES.length;
+    const formatDispatches = 3 * packs;
+    const formatWatches = formatDispatches + 2 * PYTHON_PUBLISH_NAMES.length;
+    expect(order.slice(0, 2 * packs)).toEqual(
+      FONT_PACK_NAMES.flatMap((name) => ['check-publisher-files', name])
+    );
+    expect(order.slice(2 * packs, formatDispatches).sort()).toEqual(
+      ALL_RUN_IDS.slice(0, packs).map((id) => `run watch ${id} --exit-status`)
+    );
+    expect(order.slice(formatDispatches, formatWatches)).toEqual(
+      PYTHON_PUBLISH_NAMES.flatMap((name) => ['check-publisher-files', name])
+    );
+    expect(order.slice(formatWatches).sort()).toEqual(
+      ALL_RUN_IDS.slice(packs).map((id) => `run watch ${id} --exit-status`)
+    );
 
     const failed = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failing: ALL_RUN_IDS[1]! });
     expect(failed.status).toBe(1);
     expect(failed.stdout).toContain(`::error::betteroffice-${FONT_PACK_NAMES[1]} did not publish`);
     expect(failed.stdout).toContain('no format binding was dispatched');
+    expect(failed.stdout).toContain('A missing PyPI project needs its pending publisher');
     const dispatched = failed.log
       .filter((line) => line.startsWith('api --method POST'))
       .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
     expect(dispatched).toEqual(FONT_PACK_NAMES);
   });
 
-  test('a font pack builds one pure wheel from the committed assets, and no Rust', () => {
+  test.each([
+    ['first font pack', 0],
+    ['second font pack', 1],
+    ['second format binding', FONT_PACK_NAMES.length + 1]
+  ] as const)('a failed publisher file check for the %s stops dispatching and watches any earlier runs', (_, failedIndex) => {
+    const result = dispatch({ names: ALL_NAMES, runIds: ALL_RUN_IDS, failCheckAt: failedIndex + 1 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of betteroffice-${ALL_NAMES[failedIndex]} failed.`);
+    expect(result.stdout.includes('no format binding was dispatched')).toBe(failedIndex < FONT_PACK_NAMES.length);
+    const dispatched = result.log
+      .filter((line) => line.startsWith('api --method POST'))
+      .map((line) => line.match(/inputs\[binding\]=(\S+)/)?.[1]);
+    expect(dispatched).toEqual(ALL_NAMES.slice(0, failedIndex));
+    expect(result.log.filter((line) => line === 'check-publisher-files')).toHaveLength(failedIndex + 1);
+    expect(result.log.filter((line) => line.startsWith('run watch')).sort()).toEqual(ALL_RUN_IDS.slice(0, failedIndex).map(watchRun));
+  });
+
+  test('a font pack builds and checks one pure wheel from the committed assets, and no Rust', () => {
     for (const job of ['wheels', 'sdist']) {
       expect(dist.jobs[job].if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
     }
     const pack = dist.jobs['font-pack'];
     expect(pack.if).toBe("${{ startsWith(inputs.binding, 'fonts-') }}");
-    const run = pack.steps.map((step: any) => step.run ?? '').join('\n');
-    expect(run).toContain('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
+    expect(pack['continue-on-error']).toBeUndefined();
+    const build = pack.steps.find((step: any) => step.name === 'Build the wheel');
+    expect(build.run).toBe('python -I scripts/python_font_packs.py --out dist --pack "${BINDING#fonts-}"');
+    const smoke = pack.steps[pack.steps.indexOf(build) + 1];
+    expect(smoke.name).toBe('Test the installed font pack');
+    expect(smoke.if).toBeUndefined();
+    expect(smoke['continue-on-error']).toBeUndefined();
+    expect(smoke.env).toEqual({ BINDING: '${{ inputs.binding }}' });
+    expect(smoke.run).toBe([
+      'python -m pip install --no-index --only-binary :all: dist/*.whl',
+      'python -I - "$BINDING" <<\'PY\'',
+      'import json',
+      'import sys',
+      'from importlib.resources import files',
+      'from pathlib import Path',
+      '',
+      'source = Path("packages", sys.argv[1], "assets", "manifest.json")',
+      'data = json.loads(source.read_text(encoding="utf-8"))',
+      'pack = files("betteroffice_fonts_packs").joinpath(data["pack"], data["version"])',
+      'for name in ["manifest.json", *(face["file"] for face in data["faces"])]:',
+      '    assert pack.joinpath(name).is_file(), name',
+      'PY',
+      ''
+    ].join('\n'));
     const upload = pack.steps.find((step: any) => String(step.uses).startsWith('actions/upload-artifact'));
+    expect(pack.steps.indexOf(upload)).toBeGreaterThan(pack.steps.indexOf(smoke));
     expect(upload.with.name).toBe('python-${{ inputs.binding }}.wheel');
-    expect(dist.jobs.built.needs).toEqual(['wheels', 'sdist', 'font-pack']);
+    expect(dist.jobs.built.needs).toEqual(['wheels', 'sdist', 'font-pack', 'load']);
     expect(dist.jobs.built.if).toContain("!contains(needs.*.result, 'failure')");
+    expect(dist.jobs.built.if).toContain("needs.font-pack.result == 'success'");
+  });
+
+  test('loads each native wheel from its exact artifact and tests the installed binding', () => {
+    const load = dist.jobs.load;
+    expect(load.needs).toBe('wheels');
+    expect(load.if).toBe("${{ !startsWith(inputs.binding, 'fonts-') }}");
+    expect(load['continue-on-error']).toBeUndefined();
+    expect(load['runs-on']).toBe('${{ matrix.platform.os }}');
+    expect(load.defaults.run.shell).toBe('bash');
+    expect(load.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { platform: [
+        { os: 'ubuntu-24.04', artifact: 'ubuntu-latest.x86_64' },
+        { os: 'ubuntu-24.04-arm', artifact: 'ubuntu-latest.aarch64' },
+        { os: 'macos-latest', artifact: 'macos-latest.aarch64' },
+        { os: 'macos-15-intel', artifact: 'macos-latest.x86_64' },
+        { os: 'windows-latest', artifact: 'windows-latest.x64' }
+      ] }
+    });
+    const wheels = dist.jobs.wheels;
+    const upload = wheels.steps.find((step: any) => step.uses === 'actions/upload-artifact@v7');
+    expect(upload.with.name).toBe('python-${{ inputs.binding }}.${{ matrix.platform.os }}.${{ matrix.platform.target }}');
+    const wheelArtifacts = wheels.strategy.matrix.platform.map(
+      (platform: any) => `${platform.os}.${platform.target}`
+    );
+    const loadArtifacts = load.strategy.matrix.platform.map((platform: any) => platform.artifact);
+    expect(loadArtifacts.sort()).toEqual(wheelArtifacts.sort());
+    for (const step of load.steps) expect(step.if).toBeUndefined();
+    const [lineEndings, checkout, python, download, install, pytest] = load.steps;
+    expect(lineEndings.run).toBe('git config --global core.autocrlf false');
+    expect(checkout.uses).toBe('actions/checkout@v7.0.1');
+    expect(python.uses).toBe('actions/setup-python@v7.1.0');
+    expect(python.with['python-version']).toBe('3.13');
+    expect(download.uses).toBe('actions/download-artifact@v8');
+    expect(download.with).toEqual({ name: 'python-${{ inputs.binding }}.${{ matrix.platform.artifact }}', path: 'wheel' });
+    expect(install['continue-on-error']).toBeUndefined();
+    expect(install.run).toContain('python -I scripts/python_font_packs.py --out font-packs');
+    expect(install.run).toContain('python -m pip install --only-binary :all: --find-links font-packs wheel/*.whl');
+    expect(pytest['continue-on-error']).toBeUndefined();
+    expect(pytest['working-directory']).toBe('${{ runner.temp }}');
+    expect(pytest.env).toEqual({ BINDING: '${{ inputs.binding }}', PYTHONUTF8: '1' });
+    expect(pytest.run).toBe('python -m pytest -q "$GITHUB_WORKSPACE/bindings/python-$BINDING/tests"');
+    expect(dist.jobs.built.if).toBe(
+      "${{ !cancelled() && !contains(needs.*.result, 'failure') && (needs.font-pack.result == 'success' || needs.wheels.result == 'success' && needs.sdist.result == 'success' && needs.load.result == 'success') }}"
+    );
   });
 });
 
@@ -550,20 +801,30 @@ describe('pending publish selection', () => {
   });
 
   test('an unreadable PyPI fails the run instead of skipping a publish', async () => {
-    const fetchImpl = async () => ({ status: 503, ok: false }) as Response;
+    let calls = 0;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response('unavailable', { status: 503 });
+    };
     await expect(
       pendingPublishNames({ fetchImpl, attempts: 2, retryDelayMs: 0 })
     ).rejects.toThrow('cannot read PyPI');
+    expect(calls).toBe(2);
   });
 
-  test('a transient error is retried', async () => {
-    let calls = 0;
-    const good = pypi(live()).fetchImpl;
+  test.each(['HTTP 503', 'connection reset'])('retries a transient PyPI %s', async (failure) => {
+    const requested: string[] = [];
+    const { fetchImpl: good } = pypi(live());
     const fetchImpl = async (url: string) => {
-      calls += 1;
-      if (calls === 1) throw new Error('reset');
+      requested.push(url);
+      if (requested.length === 1) {
+        if (failure === 'connection reset') throw new Error('reset');
+        return new Response('unavailable', { status: 503 });
+      }
       return good(url);
     };
     expect(await pendingPublishNames({ fetchImpl, retryDelayMs: 0 })).toEqual([]);
+    expect(requested[1]).toBe(requested[0]);
+    expect(requested).toHaveLength(ALL_NAMES.length + 1);
   });
 });
