@@ -1,5 +1,5 @@
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
-use docx_parse::{S9ParseOptions, parse_docx_s5_projection, parse_docx_s9_wire};
+use docx_parse::{BlockContent, InlineNode, ParagraphContent, S9ParseOptions, parse_docx_s9_wire};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::error::Error;
@@ -19,6 +19,7 @@ const ROOT_RELS: &str = concat!(
 );
 const DOCUMENT_PART: &str = "word/document.xml";
 const BEGIN: &str = r#"w:fldCharType="begin""#;
+const SEPARATE: &str = r#"w:fldCharType="separate""#;
 const END: &str = r#"w:fldCharType="end""#;
 const BODY_NEXT: &str = "BODYNEXT";
 const INSERTED: &str = "INSERTED";
@@ -234,18 +235,33 @@ fn save(source: &[u8], edit: Edit) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(write_docx_s13(request, source)?)
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct FieldSpan {
     begin: usize,
     end: Option<usize>,
-    outer: bool,
+    separates: Vec<usize>,
+    instructions: Vec<String>,
+    result: String,
+    parent: Option<usize>,
 }
 
-fn field_diagnostics(xml: &str) -> (Option<usize>, String, String) {
-    let mut fields = Vec::new();
-    let mut open = Vec::new();
-    let mut instrs = Vec::new();
-    let mut end_para = None;
-    for (index, paragraph) in xml.split("</w:p>").enumerate() {
+#[derive(Debug, PartialEq, Eq, Default)]
+struct Story {
+    paragraphs: Vec<String>,
+    fields: Vec<FieldSpan>,
+    instructions: Vec<String>,
+    ends: usize,
+}
+
+fn inspect(xml: &str) -> Story {
+    let mut story = Story::default();
+    let mut open = Vec::<usize>::new();
+    for (index, paragraph) in xml
+        .split("</w:p>")
+        .filter(|paragraph| paragraph.contains("<w:p>") || paragraph.contains("<w:p "))
+        .enumerate()
+    {
+        let mut visible = String::new();
         for tag in paragraph.split("<w:").skip(1) {
             let Some((opening, content)) = tag.split_once('>') else {
                 continue;
@@ -255,284 +271,161 @@ fn field_diagnostics(xml: &str) -> (Option<usize>, String, String) {
                 .next();
             match name {
                 Some("fldChar") if opening.contains(BEGIN) => {
-                    open.push(fields.len());
-                    fields.push(FieldSpan {
+                    story.fields.push(FieldSpan {
                         begin: index,
                         end: None,
-                        outer: false,
+                        separates: Vec::new(),
+                        instructions: Vec::new(),
+                        result: String::new(),
+                        parent: open.last().copied(),
                     });
+                    open.push(story.fields.len() - 1);
+                }
+                Some("fldChar") if opening.contains(SEPARATE) => {
+                    let field = *open.last().expect("field separator without a begin");
+                    story.fields[field].separates.push(index);
                 }
                 Some("fldChar") if opening.contains(END) => {
-                    if let Some(field) = open.pop() {
-                        fields[field].end = Some(index);
-                        if fields[field].outer {
-                            end_para.get_or_insert(index);
-                        }
-                    }
+                    story.ends += 1;
+                    let field = open.pop().expect("field end without a begin");
+                    story.fields[field].end = Some(index);
                 }
-                Some("instrText") => {
+                Some("instrText" | "t") => {
                     let raw = if opening.ends_with('/') {
                         ""
                     } else {
                         content.split('<').next().unwrap_or_default()
                     };
-                    let code = quick_xml::escape::unescape(raw).unwrap_or_else(|_| raw.into());
-                    if matches!(code.split_whitespace().next(), Some("QUOTE" | "TOC"))
-                        && let Some(&field) = open.last()
-                    {
-                        fields[field].outer = true;
+                    let text = quick_xml::escape::unescape(raw).expect("valid XML text");
+                    if name == Some("instrText") {
+                        let code = text.into_owned();
+                        let field = *open.last().expect("field instruction without a begin");
+                        assert!(
+                            story.fields[field].separates.is_empty(),
+                            "instruction after separator"
+                        );
+                        story.fields[field].instructions.push(code.clone());
+                        story.instructions.push(code);
+                    } else {
+                        visible.push_str(&text);
+                        for &field in &open {
+                            if !story.fields[field].separates.is_empty() {
+                                story.fields[field].result.push_str(&text);
+                            }
+                        }
                     }
-                    instrs.push(code.trim().to_owned());
                 }
                 _ => {}
             }
         }
+        story.paragraphs.push(visible);
     }
-    let fields = fields
-        .iter()
-        .map(|field| {
-            let end = field
-                .end
-                .map_or_else(|| "?".to_owned(), |index| index.to_string());
-            format!("b{}-e{end}", field.begin)
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    (end_para, instrs.join(";"), fields)
+    assert!(open.is_empty(), "fields without ends: {open:?}");
+    assert_eq!(story.fields.len(), story.ends);
+    story
 }
 
-fn error_message(error: &dyn Error) -> String {
-    let message = error.to_string();
-    let mut message = message.split('<').next().unwrap_or_default();
-    if let Some((prefix, _)) = message.split_once("&lt;") {
-        message = prefix;
-    }
-    let mut message = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    for marker in [
-        BODY_NEXT,
-        INSERTED,
-        "SPANSTART",
-        "SPANEND",
-        "AFTERSPAN",
-        "ENTRYONE",
-        ENTRY_TWO,
-        "ENTRYTHREE",
-    ]
-    .into_iter()
-    .chain(PAGE_MARKERS)
-    {
-        message = message
-            .replace(&format!("{marker} edited"), "[redacted]")
-            .replace(marker, "[redacted]");
-    }
-    message.chars().take(120).collect()
-}
+fn assert_save(scenario: &str, edit: Edit) -> Result<(), Box<dyn Error>> {
+    let source = package(&body(scenario))?;
+    let mut expected = inspect(&document_xml(&source)?);
+    let saved = save(&source, edit)?;
+    let actual = inspect(&document_xml(&saved)?);
 
-fn visible(xml: &str) -> String {
-    let mut output = String::new();
-    for piece in xml.split("<w:t").skip(1) {
-        let body = match piece.strip_prefix('>') {
-            Some(body) => body,
-            None => match piece
-                .strip_prefix(' ')
-                .and_then(|rest| rest.split_once('>'))
-            {
-                Some((_, body)) => body,
-                None => continue,
-            },
-        };
-        output.push_str(body.split("</w:t>").next().unwrap_or_default());
-    }
-    output
-}
-
-fn has_marker(value: &Value, marker: &str) -> bool {
-    match value {
-        Value::Object(node) => {
-            (value["type"] == "text"
-                && value["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains(marker)))
-                || node.values().any(|child| has_marker(child, marker))
-        }
-        Value::Array(items) => items.iter().any(|child| has_marker(child, marker)),
-        _ => false,
-    }
-}
-
-fn field_contains_body_next(value: &Value, following: &[Value]) -> bool {
-    match value {
-        Value::Object(node) => {
-            if value["type"] == "complexField" {
-                let result = &value["structuredResult"];
-                let code_blocks = value["structuredCode"]["blockCount"].as_u64().unwrap_or(0);
-                let result_blocks = result["blockCount"].as_u64().unwrap_or(0);
-                if has_marker(result, BODY_NEXT)
-                    || has_marker(&value["fieldResult"], BODY_NEXT)
-                    || following
-                        .iter()
-                        .skip(code_blocks as usize)
-                        .take(result_blocks as usize)
-                        .any(|block| has_marker(block, BODY_NEXT))
-                {
-                    return true;
-                }
+    match edit {
+        Edit::Text(marker) => {
+            let edited = format!("{marker} edited");
+            for text in &mut expected.paragraphs {
+                *text = text.replace(marker, &edited);
             }
-            node.values()
-                .any(|child| field_contains_body_next(child, following))
+            for field in &mut expected.fields {
+                field.result = field.result.replace(marker, &edited);
+            }
         }
-        Value::Array(items) => items
-            .iter()
-            .any(|child| field_contains_body_next(child, following)),
-        _ => false,
+        Edit::Paragraph(ParagraphEdit::InsertAfter(index)) => {
+            expected.paragraphs.insert(index + 1, INSERTED.to_owned());
+            let offset = expected.paragraphs[..=index]
+                .iter()
+                .map(String::len)
+                .sum::<usize>();
+            expected.fields[0].result.insert_str(offset, INSERTED);
+            shift_fields(&mut expected.fields, index, 1);
+        }
+        Edit::Paragraph(ParagraphEdit::Delete(index)) => {
+            let removed = expected.paragraphs.remove(index);
+            let field = expected.fields.remove(index + 1);
+            expected.fields[0].result = expected.fields[0].result.replace(&removed, "");
+            expected.instructions.retain(|code| !field.instructions.contains(code));
+            expected.ends -= 1;
+            shift_fields(&mut expected.fields, index, -1);
+        }
+        Edit::None => {}
     }
-}
 
-fn nested_flags(present: impl Fn(&str) -> bool) -> String {
-    PAGE_MARKERS
-        .iter()
-        .map(|marker| if present(marker) { 'y' } else { 'n' })
-        .collect()
-}
-
-fn reopen(bytes: &[u8]) -> Result<(&'static str, String), Box<dyn Error>> {
-    let projection = parse_docx_s5_projection(bytes)?;
-    projection
-        .xml_parts
-        .iter()
-        .find(|part| part.path == DOCUMENT_PART)
-        .ok_or("missing main part in inline projection")?;
-    let parsed = parse_docx_s9_wire(bytes, S9ParseOptions::default())?;
-    let blocks = parsed
-        .document
-        .package
-        .document
+    assert_eq!(
+        actual.paragraphs, expected.paragraphs,
+        "{scenario} paragraph text"
+    );
+    assert_eq!(
+        actual.instructions, expected.instructions,
+        "{scenario} instructions"
+    );
+    assert_eq!(
+        actual.fields, expected.fields,
+        "{scenario} field markers and results"
+    );
+    let reopened = parse_docx_s9_wire(&saved, S9ParseOptions::default())?;
+    let BlockContent::Paragraph(first) = &reopened.document.package.document.content[0] else {
+        panic!("missing opening paragraph");
+    };
+    let field = first
         .content
         .iter()
-        .map(serde_json::to_value)
-        .collect::<Result<Vec<_>, _>>()?;
-    let swallowed = blocks
-        .iter()
-        .enumerate()
-        .any(|(index, block)| field_contains_body_next(block, &blocks[index + 1..]));
-    let nested = nested_flags(|marker| blocks.iter().any(|block| has_marker(block, marker)));
-    Ok((if swallowed { "swallowed" } else { "ok" }, nested))
-}
-
-#[derive(Debug)]
-struct Measurement {
-    begins: usize,
-    ends: usize,
-    end_para: Option<usize>,
-    text_ok: bool,
-    reopen: &'static str,
-    nested: String,
-    nested_model: String,
-    instrs: String,
-    fields: String,
-    error: Option<String>,
-}
-
-fn edits(scenario: &str) -> &'static [(&'static str, Edit)] {
-    if scenario == "S1" { S1_EDITS } else { TOC_EDITS }
-}
-
-fn measure(scenario: &str, edit: Edit) -> Result<Measurement, Box<dyn Error>> {
-    let source = package(&body(scenario))?;
-    let saved = save(&source, edit)?;
-    let xml = document_xml(&saved)?;
-    let text = visible(&xml);
-    let nested = nested_flags(|target| text.contains(target));
-    let deleted_middle = matches!(edit, Edit::Paragraph(ParagraphEdit::Delete(_)));
-    let inserted_inside = matches!(edit, Edit::Paragraph(ParagraphEdit::InsertAfter(_)));
-    let expected_nested = if deleted_middle { "yny" } else { "yyy" };
-    let text_ok = edits(scenario)
-        .iter()
-        .filter_map(|&(_, edit)| match edit {
-            Edit::Text(target) => Some(target),
+        .find_map(|item| match item {
+            ParagraphContent::Inline(InlineNode::ComplexField(field)) => Some(field),
             _ => None,
         })
-        .filter(|&target| !deleted_middle || target != ENTRY_TWO)
-        .chain((scenario == "S1").then_some("AFTERSPAN"))
-        .chain(inserted_inside.then_some(INSERTED))
-        .all(|target| {
-            if matches!(edit, Edit::Text(marker) if marker == target) {
-                text.contains(&format!("{target} edited"))
-            } else {
-                text.contains(target)
+        .expect("missing spanning field after reopen");
+    let count = field.structured_result.as_ref().and_then(|result| result.block_count);
+    assert_eq!(count, expected.fields[0].end);
+    Ok(())
+}
+
+fn shift_fields(fields: &mut [FieldSpan], after: usize, by: isize) {
+    for field in fields {
+        for index in std::iter::once(&mut field.begin)
+            .chain(field.end.iter_mut())
+            .chain(&mut field.separates)
+        {
+            if *index > after {
+                *index = index.checked_add_signed(by).expect("valid paragraph index");
             }
-        }) && (scenario == "S1" || nested == expected_nested)
-        && (!deleted_middle || !text.contains(ENTRY_TWO));
-    let (end_para, instrs, fields) = field_diagnostics(&xml);
-    let (reopen, nested_model, error) = match reopen(&saved) {
-        Ok((status, nested)) => (status, nested, None),
-        Err(error) => ("err", "nnn".to_owned(), Some(error_message(error.as_ref()))),
-    };
-    Ok(Measurement {
-        begins: xml.matches(BEGIN).count(),
-        ends: xml.matches(END).count(),
-        end_para,
-        text_ok,
-        reopen,
-        nested,
-        nested_model,
-        instrs,
-        fields,
-        error,
-    })
+        }
+    }
 }
 
 #[test]
-#[ignore]
-fn spanning_field_end_probe() {
-    for scenario in ["S1", "TA", "TB"] {
-        for &(name, edit) in edits(scenario) {
-            let measured = measure(scenario, edit).unwrap_or_else(|error| Measurement {
-                begins: 0,
-                ends: 0,
-                end_para: None,
-                text_ok: false,
-                reopen: "err",
-                nested: "nnn".to_owned(),
-                nested_model: "nnn".to_owned(),
-                instrs: String::new(),
-                fields: String::new(),
-                error: Some(error_message(error.as_ref())),
-            });
-            let end_para = measured
-                .end_para
-                .map_or_else(|| "none".to_owned(), |index| index.to_string());
-            let text_ok = if measured.text_ok { "yes" } else { "no" };
-            let error = measured
-                .error
-                .as_deref()
-                .map_or_else(String::new, |message| format!(" | error={message}"));
-            println!(
-                "SPAN facade {scenario} {name} | begins={} ends={} | end_para={end_para} | \
-                 text_ok={text_ok} | reopen={} | nested={} | nested_model={} | route_note=n/a | \
-                 instrs={} | fields={}{error}",
-                measured.begins,
-                measured.ends,
-                measured.reopen,
-                measured.nested,
-                measured.nested_model,
-                measured.instrs,
-                measured.fields
-            );
-        }
+fn single_spanning_field_saves() {
+    for &(name, edit) in S1_EDITS {
+        assert_save("S1", edit).unwrap_or_else(|error| panic!("S1 {name}: {error}"));
+    }
+}
+
+#[test]
+fn toc_ending_in_the_last_entry_saves() {
+    for &(name, edit) in TOC_EDITS {
+        assert_save("TA", edit).unwrap_or_else(|error| panic!("TA {name}: {error}"));
+    }
+}
+
+#[test]
+fn toc_ending_in_its_own_paragraph_saves() {
+    for &(name, edit) in TOC_EDITS {
+        assert_save("TB", edit).unwrap_or_else(|error| panic!("TB {name}: {error}"));
     }
 }
 
 #[test]
 fn a_spanning_field_keeps_its_end_when_its_closing_paragraph_is_edited() {
-    let measured = [
-        ("S1", measure("S1", Edit::Text("SPANEND"))),
-        ("TA", measure("TA", Edit::Text("ENTRYTHREE"))),
-    ];
-    let passes = measured.iter().all(|(_, result)| {
-        result
-            .as_ref()
-            .is_ok_and(|result| result.begins == result.ends && result.reopen == "ok")
-    });
-    assert!(passes, "{measured:#?}");
+    assert_save("S1", Edit::Text("SPANEND")).expect("closing QUOTE paragraph saves");
+    assert_save("TA", Edit::Text("ENTRYTHREE")).expect("closing TOC entry saves");
 }

@@ -1533,13 +1533,13 @@ describe('fields spanning paragraphs', () => {
     });
   };
   const contentsPackage = (): Uint8Array<ArrayBuffer> => sequencePackage([
-    '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+    '<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="0000000A"><w:r><w:fldChar w:fldCharType="begin"/></w:r>',
     '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>',
     '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Entry 1</w:t></w:r></w:p>',
-    '<w:p><w:r><w:t>Entry 2</w:t></w:r></w:p>',
-    '<w:p><w:r><w:t>Entry 3</w:t></w:r></w:p>',
-    '<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
-    '<w:p><w:r><w:t>After</w:t></w:r></w:p>',
+    '<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="0000000B"><w:r><w:t>Entry 2</w:t></w:r></w:p>',
+    '<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="0000000C"><w:r><w:t>Entry 3</w:t></w:r></w:p>',
+    '<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="0000000D"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+    '<w:p xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" w14:paraId="0000000E"><w:r><w:t>After</w:t></w:r></w:p>',
   ].join(''));
   const projectAndSave = async (document: Document, edit?: (session: YrsSession) => void) => {
     const session = await createYrsSession({ clientId: 47103 });
@@ -1629,7 +1629,7 @@ describe('fields spanning paragraphs', () => {
     expect(reloaded.fieldResultBlocks).toBeUndefined();
   });
 
-  it('projects a zero count again after a reload and saves the same bytes', async () => {
+  it('preserves the closing paragraph after a deletion and saves the same bytes again', async () => {
     const parsed = await parseDocx(contentsPackage().buffer, { preloadFonts: false });
     expect(projectedField(parsed).structuredResult?.blockCount).toBe(3);
     const first = await projectAndSave(parsed, (session) => {
@@ -1637,8 +1637,8 @@ describe('fields spanning paragraphs', () => {
       deleteParagraph(session, owner!, removed!);
     });
     const second = await projectAndSave(first.projected);
-    expect(projectedField(first.projected).structuredResult?.blockCount).toBe(0);
-    expect(projectedField(second.projected).structuredResult?.blockCount).toBe(0);
+    expect(projectedField(first.projected).structuredResult?.blockCount).toBe(2);
+    expect(projectedField(second.projected).structuredResult?.blockCount).toBe(2);
     expect(Object.keys(second.saved).sort()).toEqual(Object.keys(first.saved).sort());
     for (const [name, part] of Object.entries(first.saved)) {
       expect({ name, same: Buffer.from(second.saved[name]!).equals(Buffer.from(part)) }).toEqual({ name, same: true });
