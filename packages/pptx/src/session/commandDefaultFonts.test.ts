@@ -333,6 +333,114 @@ test('primary and coverage misses emit one diagnostic per pack in each session',
   }
 });
 
+test.each([403, 404, 410])('an implicit HTTP %s miss settles the preferred Arabic primary', async (status) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const fetch = spyOnFontFetch(async () => new Response(null, { status }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const manager = createCommandDefaultFonts([], () => [{ ...regular, family: 'Simplified Arabic', scripts: ['arabic'] }],
+    () => {}, () => {}, undefined, undefined, () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([]);
+    const requests = fetch.mock.calls.length;
+    expect(requests).toBeGreaterThan(0);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(requests);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('a primary installed with substitute bytes installs the requested face after the CDN recovers', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  let online = false;
+  const fetch = spyOnFontFetch(async (input) => {
+    if (!online && String(input).includes('/fonts-intl@')) throw new TypeError('Offline');
+    return fontAssetResponse(input);
+  });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {}, install,
+    undefined, () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([primary]);
+    expect(install).toHaveBeenCalledTimes(1);
+    advance(59_999);
+    expect(manager.hasPending()).toBe(false);
+    advance(1);
+    expect(await manager.load()).toEqual([]);
+    expect(install).toHaveBeenCalledTimes(1);
+    online = true;
+    advance(60_000);
+    expect(await manager.load()).toEqual([primary]);
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(install.mock.calls[1][0][0].bytes).not.toEqual(install.mock.calls[0][0][0].bytes);
+    expect(manager.hasPending()).toBe(false);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('an implicit HTTP 403 settles other faces in the same pack after the CDN cooldown', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const collect = (slide?: string) => [{ ...regular, scripts: [slide === 'next' ? 'devanagari' : 'thai'] }];
+  const manager = createCommandDefaultFonts([regular], collect, () => {}, () => {}, undefined, undefined,
+    () => commandFontProvider.load(cdn));
+  const nextSession = createCommandDefaultFonts([regular], collect, () => {}, () => {}, undefined, undefined,
+    () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(await manager.load('next')).toEqual([]);
+    expect(manager.hasPending('next')).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveLength(1);
+
+    expect(await nextSession.load('next')).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledTimes(2);
+    expect(diagnostics).toHaveLength(2);
+  } finally {
+    manager.dispose();
+    nextSession.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 const slicedMisses = [403, 404, 410].flatMap<[number, boolean, boolean]>((status) => [
   [status, false, true], [status, false, false], [status, true, false],
 ]);
@@ -577,6 +685,22 @@ test('Arabic requests keep family and traits and install the shared regular face
     expect(fonts.hasPending()).toBe(false);
     expect(await fonts.load()).toEqual([]);
   } finally { fonts.dispose(); }
+});
+
+const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMap<[string, boolean, boolean]>((family) =>
+  [[true, false], [false, true], [true, true]].map(([bold, italic]) => [family, bold, italic]));
+
+test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s, italic: %s)', async (family, bold, italic) => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const source = provider(() => undefined, () => async () => naskh);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const primary = { family, bold, italic };
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {}, install);
+  try {
+    expect(await manager.load()).toContainEqual({ ...primary, ownWeight: true });
+    expect(install).toHaveBeenCalledWith([{ ...primary, bytes: naskh, ownWeight: true }]);
+  } finally { manager.dispose(); }
 });
 
 test.each([false, true])('Simplified Arabic uses its last resort while the Naskh face is unavailable (implicit: %s)', async (implicit) => {
