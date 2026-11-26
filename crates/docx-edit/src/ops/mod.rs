@@ -680,7 +680,7 @@ fn code_point_index(chunks: &[Chunk], index: u32, forward: bool) -> u32 {
     code_point_boundary(chunks, index, forward).0
 }
 
-fn code_point_boundary(chunks: &[Chunk], index: u32, forward: bool) -> (u32, u32) {
+pub(crate) fn code_point_boundary(chunks: &[Chunk], index: u32, forward: bool) -> (u32, u32) {
     let Some(chunk) = chunks
         .partition_point(|chunk| chunk.start < index)
         .checked_sub(1)
