@@ -224,27 +224,17 @@ impl ParagraphPatchSource {
             return Some(base_xml);
         };
         if base.kept.len() <= recorded.kept.len()
-            || !recorded.kept.keys().all(|run| base.kept.contains_key(run))
+            || !base.kept.is_superset(&recorded.kept)
             || base.cell_runs.len() != recorded.cell_runs.len()
         {
             return None;
         }
-        let extra: BTreeSet<_> = base
-            .kept
-            .iter()
-            .filter_map(|(run, &written)| (!recorded.kept.contains_key(run)).then_some(written))
-            .collect();
         let mut previous_pair = None;
         for (&base_run, &recorded_run) in base.cell_runs.iter().zip(&recorded.cell_runs) {
             if previous_pair.replace((base_run, recorded_run)) == Some((base_run, recorded_run)) {
                 continue;
             }
-            let base_raw = &base.run_properties[base_run];
-            let recorded_raw = &recorded.run_properties[recorded_run];
-            if base_raw != recorded_raw
-                && (!extra.contains(&base_run)
-                    || modeled_run_properties(base_raw)? != modeled_run_properties(recorded_raw)?)
-            {
+            if base.run_properties[base_run] != recorded.run_properties[recorded_run] {
                 return None;
             }
         }
@@ -253,17 +243,9 @@ impl ParagraphPatchSource {
 }
 
 struct Preview {
-    kept: BTreeMap<usize, usize>,
+    kept: BTreeSet<usize>,
     cell_runs: Vec<usize>,
     run_properties: Vec<String>,
-}
-
-fn modeled_run_properties(raw: &str) -> Option<Value> {
-    if raw.is_empty() {
-        Some(Value::Null)
-    } else {
-        verify::formatting(raw, false).ok()
-    }
 }
 
 fn preview(
@@ -310,7 +292,7 @@ impl Preview {
                     && candidate.to == to
                     && source[before.xml.nodes[run.node].span.clone()]
                         == output[after.xml.nodes[candidate.node].span.clone()])
-                .then_some((original, at))
+                .then_some(original)
             })
             .collect();
         Self {

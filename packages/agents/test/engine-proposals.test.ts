@@ -991,8 +991,8 @@ async function proposalRaceFixture(text = 'alpha beta gamma gamma') {
 }
 
 test('attached DOCX collapses 129 word replacements in one change', async () => {
-  const oldText = Array(129).fill('a').join(' ');
-  const newText = Array(129).fill('b').join(' ');
+  const oldText = Array(129).fill('a').join(' KEEP ');
+  const newText = Array(129).fill('b').join(' KEEP ');
   const owner = await proposalRaceFixture(oldText);
   const doc = attachDocx(owner.session);
   try {
@@ -1007,7 +1007,7 @@ test('attached DOCX collapses 129 word replacements in one change', async () => 
 test('attached DOCX collapses the largest changes first and breaks ties by input order', async () => {
   const counts = [30, 36, 36, 50, 34];
   const words = ['a', 'b', 'c', 'd', 'e'];
-  const original = counts.map((count, i) => Array(count).fill(words[i]).join(' '));
+  const original = counts.map((count, i) => Array(count).fill(words[i]).join(' KEEP '));
   const owner = await proposalRaceFixture(original.join(' | '));
   const search: string[] = [];
   const doc = attachDocx(owner.session, { editPeer: {
@@ -1098,23 +1098,36 @@ for (const { original, newText, offset } of [
   { original: 'alpha', newText: 'alpha!', offset: 5 },
   { original: 'alpha beta', newText: 'START alpha beta END', offset: 0 },
   { original: 'alpha beta', newText: 'START alpha beta END', offset: 10 },
-]) test(`attached DOCX peer refuses an insertion at ${offset} beside the pending ${JSON.stringify(newText)}`, async () => {
-  const owner = await proposalRaceFixture(original);
-  const doc = attachDocx(owner.session, { editPeer: {
-    async proposeChanges(request) { return owner.session.proposeChanges(request); },
-    async setProposalStates(request) { return owner.session.setProposalStates(request); },
-    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
-  } });
-  try {
-    const p = doc.list({ story: 'body' }).items[0];
-    const pending = await doc.proposeAsync({ author: 'Agent', edits: [{ ...p, oldText: original, newText }] });
-    await expect(doc.proposeAsync({ author: 'Editor', edits: [{ ...p, start: offset, oldText: '', newText: '?' }] }))
-      .rejects.toMatchObject({ code: 'TRACKED_REVISION_CONFLICT' });
-    expect(doc.review(pending.id).staleRefs).toEqual([]);
-    expect(await doc.accept(pending.id)).toMatchObject({ status: 'accepted' });
-    expect(doc.read(p.ref).text).toBe(newText);
-  } finally { doc.close(); owner.close(); }
-});
+]) {
+  for (const [insertionFirst, secondAuthor] of [
+    [false, 'Editor'], [false, 'Agent'], [true, 'Editor'], [true, 'Agent'],
+  ] as const) test(`attached DOCX peer refuses the second proposal for ${JSON.stringify(newText)} and insertion at ${offset} (insertion first=${insertionFirst}, second author=${secondAuthor})`, async () => {
+    const owner = await proposalRaceFixture(original);
+    const outcomes: string[] = [];
+    const doc = attachDocx(owner.session, { editPeer: {
+      async proposeChanges(request) {
+        const result = owner.session.proposeChanges(request);
+        outcomes.push(result.ok ? 'ok' : result.failure.code);
+        return result;
+      },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } });
+    try {
+      const p = doc.list({ story: 'body' }).items[0];
+      const insertion = { ...p, start: offset, oldText: '', newText: '?' };
+      const replacement = { ...p, oldText: original, newText };
+      const [first, second] = insertionFirst ? [insertion, replacement] : [replacement, insertion];
+      const pending = await doc.proposeAsync({ author: 'Agent', edits: [first] });
+      await expect(doc.proposeAsync({ author: secondAuthor, edits: [second] }))
+        .rejects.toMatchObject({ code: 'TRACKED_REVISION_CONFLICT' });
+      expect(outcomes).toEqual(['ok', 'tracked-revision-conflict']);
+      expect(doc.review(pending.id).staleRefs).toEqual([]);
+      expect(await doc.accept(pending.id)).toMatchObject({ status: 'accepted' });
+      expect(doc.read(p.ref).text).toBe(insertionFirst ? `${original.slice(0, offset)}?${original.slice(offset)}` : newText);
+    } finally { doc.close(); owner.close(); }
+  });
+}
 
 test('attached DOCX peer refuses split insertions when an accepted edit changes their retained context', async () => {
   const original = 'alpha guard center guard omega';
@@ -1182,7 +1195,7 @@ test('attached DOCX peer stales an insertion after deleting its context before i
 });
 
 test('attached DOCX retains ownership of more than 256 splice records across delayed decisions', async () => {
-  const words = ['a', 'b', 'c'].map(word => Array(90).fill(word).join(' '));
+  const words = ['a', 'b', 'c'].map(word => Array(90).fill(word).join(' KEEP '));
   const owner = await proposalRaceFixture(words.join(' | '));
   let settled: DocxProposalSnapshot | undefined;
   const session = new Proxy(owner.session, { get(target, key) {

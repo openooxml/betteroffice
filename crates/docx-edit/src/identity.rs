@@ -4517,6 +4517,14 @@ impl EditingDoc {
                             spliced.format_only.push(ordinal);
                         }
                         let patch = match recorded_patch {
+                            Some((patch, _))
+                                if equal.is_some()
+                                    && patch.text_edits.is_empty()
+                                    && patch.run_edits.is_empty()
+                                    && patch.para_deltas.is_empty() =>
+                            {
+                                continue;
+                            }
                             Some((patch, used_base)) => {
                                 part_provenance_net += u32::from(used_base);
                                 Ok(patch)

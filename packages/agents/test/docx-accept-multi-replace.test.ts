@@ -26,7 +26,7 @@ function run(id: number, text: string, italic = false): string {
 const before = `<w:p w:rsidR="98765432">${run(0xa1, 'Keep &#x61;ll bytes.')}</w:p>`;
 const after = `<w:p w:rsidR="12345678">${run(0xa2, 'Keep this paragraph &#x74;oo.')}</w:p>`;
 
-async function fixture(runs: readonly string[], ending = after): Promise<Uint8Array> {
+async function fixture(runs: readonly string[], ending = after, hyperlinkId?: string): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
@@ -34,7 +34,9 @@ async function fixture(runs: readonly string[], ending = after): Promise<Uint8Ar
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     `<Relationship Id="doc" Type="${R}/officeDocument" Target="${DOCUMENT}"/></Relationships>`);
-  zip.file(DOCUMENT, `<w:document xmlns:w="${W}"><w:body>${before}<w:p>${runs.join('')}</w:p>${ending}<w:sectPr/></w:body></w:document>`);
+  if (hyperlinkId) zip.file('word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    `<Relationship Id="${hyperlinkId}" Type="${R}/hyperlink" Target="https://example.invalid/link" TargetMode="External"/></Relationships>`);
+  zip.file(DOCUMENT, `<w:document xmlns:w="${W}"${hyperlinkId ? ` xmlns:r="${R}"` : ''}><w:body>${before}<w:p>${runs.join('')}</w:p>${ending}<w:sectPr/></w:body></w:document>`);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -204,11 +206,19 @@ for (const tail of ['efgh', 'efghk']) {
   }, 30_000);
 }
 
-test('export keeps a source run inside a replaced word when base preserves more', async () => {
-  const untouched = run(2, 'KEEP').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
-  await checkProposal([run(1, 'a'), untouched, run(3, 'z')], [{ query: 'aKEEPz', newText: 'bKEEPy' }],
-    paragraph => expectRuns(paragraph, [untouched], [['b', false], ['KEEP', false], ['y', false]]),
+test('export preserves the middle run when both patches produce the same raw run properties', async () => {
+  const middle = run(2, 'KEEP');
+  await checkProposal([run(1, 'a'), middle, run(3, 'z')], [{ query: 'aKEEPz', newText: 'bKEEPy' }],
+    paragraph => expectRuns(paragraph, [middle], [['b', false], ['KEEP', false], ['y', false]]),
     { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
+}, 30_000);
+
+test('a word replaced as one token takes the replacement formatting through its unchanged middle', async () => {
+  const middle = run(2, 'KEEP').replace('<w:t', '<w:rPr><w:noProof/><w:bdr w:val="single" w:sz="4" w:color="FF0000"/></w:rPr><w:t');
+  await checkProposal([run(1, 'a'), middle, run(3, 'z')], [{ query: 'aKEEPz', newText: 'bKEEPy' }], paragraph => {
+    expectRuns(paragraph, [], [['bKEEPy', false]]);
+    expect(paragraph).not.toContain('<w:rPr');
+  });
 }, 30_000);
 
 test('export preserves a permission range inside a recorded replacement', async () => {
@@ -224,6 +234,23 @@ test('accepts a lone recorded insertion and keeps the untouched run byte-identic
   const untouched = run(2, ' ti').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
   await checkProposal([run(1, 'fi'), untouched], [{ query: 'fi', newText: 'fii' }],
     paragraph => expectRuns(paragraph, [untouched], [['fii', false], [' ti', false]]));
+}, 30_000);
+
+test('headless acceptance merges changes across a space at a hyperlink boundary', async () => {
+  const hyperlink = '<w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink>';
+  const alpha = '<w:r><w:t xml:space="preserve"> alpha</w:t></w:r>';
+  const omega = run(3, ' omega').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+  const doc = await openDocx(await fixture([hyperlink, alpha, omega], after, 'rId1'));
+  try {
+    const [hit] = doc.grep({ query: 'link alpha' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText: 'link! ALPHA BETA' }] });
+    expect(doc['proposals'].get(proposal.id)?.splices).toMatchObject([{ start: 4, oldText: ' alpha', newText: '! ALPHA BETA' }]);
+    expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
+    await checkExport(() => doc.export(), paragraph => {
+      expect(paragraph).toContain(hyperlink);
+      expectRuns(paragraph, [omega], [['link', false], ['! ALPHA BETA', false], [' omega', false]]);
+    });
+  } finally { doc.close(); }
 }, 30_000);
 
 test('acceptance retains a shared suffix run inside a changed token byte-identically', async () => {

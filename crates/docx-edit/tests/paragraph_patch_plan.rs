@@ -3383,17 +3383,33 @@ fn three_adjacent_replacements_keep_their_boundaries_with_only_rsid_differences(
 }
 
 #[test]
+fn a_word_replaced_as_one_token_takes_the_replacement_formatting_through_its_unchanged_middle() {
+    let content = concat!(
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:r><w:rPr><w:noProof/><w:bdr w:val="single" w:sz="4" w:color="FF0000"/></w:rPr><w:t>KEEP</w:t></w:r>"#,
+        "<w:r><w:t>z</w:t></w:r>",
+    );
+    let doc = open(content);
+    replace(&doc, 0, 6, "bKEEPy");
+    assert_splices(&doc, &[(0, 6, 0, "bKEEPy")]);
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(saved.contains("<w:r><w:t>bKEEPy</w:t></w:r>"), "{saved}");
+}
+
+#[test]
 fn swapping_equal_text_keeps_each_source_donor() {
     let content = concat!(
         "<w:r><w:rPr><w:noProof/></w:rPr><w:t>echo</w:t></w:r>",
         "<w:r><w:rPr><w:bCs/></w:rPr><w:t>echo</w:t></w:r>",
     );
     let doc = open(content);
+    let before = doc.paragraph_save_plan();
     replace(&doc, 4, 8, "echo");
     replace(&doc, 0, 4, "echo");
     let expected = [(0, 4, 0, "echo"), (4, 8, 4, "echo")];
     assert_recorded_replacements(&doc, &expected);
-    assert_recorded_or_preserving_base(&patch(&doc), content, &expected, content);
+    assert_eq!(doc.paragraph_save_plan(), before);
     let (saved, warnings) = save_paragraph(&doc, content, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(saved, document_xml(content));
@@ -3428,14 +3444,15 @@ fn redoing_a_deletion_saves_the_updated_text() {
 }
 
 #[test]
-fn undo_of_equal_output_is_checked_before_the_digest_gate() {
+fn an_empty_equal_output_patch_keeps_the_unchanged_save_plan() {
     let content = text("abc");
     let doc = open(&content);
+    let before = doc.paragraph_save_plan();
     let mut history = doc.undo_manager();
     replace(&doc, 1, 2, "b");
     let expected = [(1, 2, 1, "b")];
     assert_recorded_replacements(&doc, &expected);
-    assert_recorded_or_preserving_base(&patch(&doc), &content, &expected, &content);
+    assert_eq!(doc.paragraph_save_plan(), before);
     let source = document_xml(&content);
     let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -3443,7 +3460,7 @@ fn undo_of_equal_output_is_checked_before_the_digest_gate() {
 
     assert!(history.undo());
     assert_unproven(&doc);
-    assert!(body_plan(&doc.paragraph_save_plan()).changed.is_empty());
+    assert_eq!(doc.paragraph_save_plan(), before);
     let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(saved, source);

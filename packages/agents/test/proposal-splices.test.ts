@@ -28,9 +28,9 @@ test('splices weight a whitespace token once regardless of its length', () => {
     .toEqual([change('X', 'Z'), change('', 'tan     ', 2), change('     red', '', 6), change('Y', 'W', 15)]);
 });
 
-test('splices keep shared space between swapped words', () => {
+test('splices merge swapped words across the shared space', () => {
   expect(spliceChange(change('alpha beta', 'BETA ALPHA')))
-    .toEqual([change('alpha', 'BETA'), change('beta', 'ALPHA', 6)]);
+    .toEqual([change('alpha beta', 'BETA ALPHA')]);
   expect(spliceChange(change('a  b', 'A   B'))).toEqual([change('a  b', 'A   B')]);
 });
 
@@ -46,20 +46,21 @@ test('splices keep punctuation inside numbers, dates, IDs and URL components', (
     ['1,234.56', '1,923.56', '234', '923', 4],
     ['2024-01-31', '2024-02-31', '1', '2', 8],
     ['tenant-prod-123', 'tenant-dev-123', 'prod', 'dev', 9],
-    ['alpha.example', 'beta.example', 'alph', 'bet', 2],
   ] as const) {
     expect(spliceChange(change(`x ${oldToken} a`, `y ${newToken} b`)))
       .toEqual([change('x', 'y'), change(oldText, newText, offset), change('a', 'b', oldToken.length + 3)]);
   }
+  expect(spliceChange(change('x alpha.example a', 'y beta.example b')), 'The first gap is just a space and the second contains a.example')
+    .toEqual([change('x alph', 'y bet'), change('a', 'b', 16)]);
   expect(spliceChange(change('x https://alpha.example/path a', 'y https://beta.example/path b')))
     .toEqual([change('x', 'y'), change('alph', 'bet', 10), change('a', 'b', 29)]);
 });
 
 test('splices trim shared text within a changed token', () => {
-  expect(spliceChange(change('u cd.ab v', 'U EF-ab V')))
-    .toEqual([change('u', 'U'), change('cd.', 'EF-', 2), change('v', 'V', 8)]);
-  expect(spliceChange(change('u cd.e\u0301z v', 'U EF-e\u0300z V')))
-    .toEqual([change('u', 'U'), change('cd.e\u0301', 'EF-e\u0300', 2), change('v', 'V', 9)]);
+  expect(spliceChange(change('u cd.ab v', 'U EF-ab V')), 'The first gap is just a space and the second contains ab')
+    .toEqual([change('u cd.', 'U EF-'), change('v', 'V', 8)]);
+  expect(spliceChange(change('u cd.e\u0301z v', 'U EF-e\u0300z V')), 'The first gap is just a space and the second contains z')
+    .toEqual([change('u cd.e\u0301', 'U EF-e\u0300'), change('v', 'V', 9)]);
 });
 
 test('splices retain words between parentheses and other non-joining punctuation', () => {
@@ -103,8 +104,8 @@ test('splices cap the trimmed token alignment table', () => {
     .toEqual([change('!', '?', 1), change(underOld, underNew, 3)]);
 
   const oldWord = 'x'.repeat(1100), newWord = 'y'.repeat(1100);
-  expect(spliceChange(change(`${oldWord} ${oldWord}`, `${newWord} ${newWord}`)))
-    .toEqual([change(oldWord, newWord), change(oldWord, newWord, oldWord.length + 1)]);
+  expect(spliceChange(change(`${oldWord} ${oldWord}`, `${newWord} ${newWord}`)), 'A shared space does not split the long tokens')
+    .toEqual([change(`${oldWord} ${oldWord}`, `${newWord} ${newWord}`)]);
 });
 
 test('splices combine adjacent deletions and insertions and preserve pure edits', () => {

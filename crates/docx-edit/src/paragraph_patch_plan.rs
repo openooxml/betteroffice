@@ -2286,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn base_replaces_a_recorded_whole_word_only_if_the_extra_run_keeps_its_formatting() {
+    fn base_replaces_a_recorded_whole_word_only_if_raw_run_properties_match() {
         let seeded = paragraph("aKEEPz", json!({}));
         let live = paragraph("bKEEPy", json!({}));
         let proof = whole_word_replacement();
@@ -2297,11 +2297,16 @@ mod tests {
         assert_eq!(base.text_edits.len(), 2);
 
         for (kept_property, last_property, uses_base) in [
-            ("<w:noProof/>", "", true),
+            ("", "", true),
+            ("<w:noProof/>", "", false),
             ("<w:rtl/>", "", false),
             ("<w:noProof/>", "<w:rPr><w:noProof/></w:rPr>", false),
         ] {
-            let keep = format!("<w:r><w:rPr>{kept_property}</w:rPr><w:t>KEEP</w:t></w:r>");
+            let keep = if kept_property.is_empty() {
+                "<w:r><w:t>KEEP</w:t></w:r>".to_owned()
+            } else {
+                format!("<w:r><w:rPr>{kept_property}</w:rPr><w:t>KEEP</w:t></w:r>")
+            };
             let source = ParagraphPatchSource::new(format!(
                 "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>a</w:t></w:r>{keep}<w:r>{last_property}<w:t>z</w:t></w:r></w:p>"
             ));
