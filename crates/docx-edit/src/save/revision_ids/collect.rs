@@ -312,16 +312,14 @@ impl Visit for String {
 
 impl<T: Visit> Visit for Option<T> {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        match self {
-            Some(value) => value.visit(collector),
-            None => {}
+        if let Some(value) = self {
+            value.visit(collector);
         }
     }
 
     fn visit_field<const PATHS: bool>(&self, key: &str, collector: &mut Collector<PATHS>) {
-        match self {
-            Some(value) => value.visit_field(key, collector),
-            None => {}
+        if let Some(value) = self {
+            value.visit_field(key, collector);
         }
     }
 }
