@@ -682,6 +682,7 @@ describe('native package release wiring', () => {
     expect(second.if).toBe(
       "matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'"
     );
+    expect(dist.jobs.bindings.env.ZIG_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
     expect(dist.jobs.bindings['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
   });
 
