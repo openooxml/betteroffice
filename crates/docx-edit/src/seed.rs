@@ -10037,6 +10037,62 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_named_default_character_vanish_applies_once() {
+        let result = concat!(
+            r#"<w:r><w:rPr><w:rStyle w:val="DefaultParagraphFont"/></w:rPr><w:t>Hidden</w:t></w:r>"#,
+            r#"<w:r><w:rPr><w:rStyle w:val="DefaultParagraphFont"/><w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>"#,
+        );
+        let inner = quote_field_xml(result, "", "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, DEFAULT_CHARACTER_VANISH);
+        assert_eq!(payload["displayText"], Any::from("Shown"));
+    }
+
+    #[test]
+    fn an_unprojected_owner_keeps_its_flattened_simple_field_runs() {
+        let mut simple_run = run("Simple ");
+        simple_run["formatting"] = json!({"hidden":true});
+        let mut hidden_nested_run = run("Hidden ");
+        hidden_nested_run["formatting"] = json!({"hidden":true});
+        let nested = quote_field(json!([hidden_nested_run, run("Nested")]));
+        let simple = json!({
+            "type":"simpleField", "instruction":"QUOTE", "content":[simple_run],
+            "structuredResult":{"inline":[simple_run,nested]}
+        });
+        let mut owner = quote_field(json!([run("Before "), simple, run(" After")]));
+        owner["fieldResult"] = json!([run("Before "), simple_run, run(" After")]);
+        let paragraph = json!({"content":[{
+            "type":"inlineSdt", "properties":{}, "content":[owner]
+        }]});
+        let styles = StyleResolver::new(None);
+        let units = paragraph_units(&paragraph, &styles, None, &BTreeMap::new()).units;
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("expected content control embed");
+        };
+        let field = &payload["content"][0]["payload"];
+        assert_eq!(field["displayText"], json!("Before Simple Nested After"));
+        assert_eq!(field["hasCachedResult"], json!(true));
+    }
+
+    #[test]
+    fn projected_hyperlinks_keep_nested_field_results_from_skipped_controls() {
+        let cached = format!(
+            "<w:r>{VANISH}<w:t>Hidden</w:t></w:r>{}",
+            fixture::run("Nested")
+        );
+        let nested = quote_field_xml(&cached, "", "");
+        let result = format!(
+            r#"{}<w:hyperlink w:anchor="top">{}<w:sdt><w:sdtPr/><w:sdtContent>{nested}</w:sdtContent></w:sdt></w:hyperlink>{}"#,
+            fixture::run("Before "),
+            fixture::run("Link"),
+            fixture::run(" After"),
+        );
+        let owner = quote_field_xml(&result, "", "");
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Before Nested After"));
+    }
+
+    #[test]
     fn nested_complex_results_do_not_set_the_owner_cache_flag() {
         let inner = quote_field_xml(&fixture::run("Nested"), "", "");
         let owner = quote_field_xml(&inner, "", "");

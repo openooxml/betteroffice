@@ -418,6 +418,7 @@ describe('DOCX engine seeding', () => {
     const nestedField = (document: Document) => {
       const paragraph = document.package.document.content[0] as { content: ParagraphContent[] };
       const owner = paragraph.content.find((child) => child.type === 'complexField');
+      expect(owner?.instruction).toBe('QUOTE');
       return owner?.structuredResult?.inline?.find((child) => child.type === 'complexField');
     };
     const before = nestedField(await parseDocx(bytes.buffer, { preloadFonts: false }));
@@ -505,6 +506,56 @@ describe('DOCX engine seeding', () => {
     const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner, defaultCharacterVanish));
     try {
       for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('applies explicitly named default character vanish once', async () => {
+    const style = '<w:rStyle w:val="DefaultParagraphFont"/>';
+    const hidden = `<w:r><w:rPr>${style}</w:rPr><w:t>Hidden</w:t></w:r>`;
+    const shown = `<w:r><w:rPr>${style}<w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>`;
+    const owner = quoteFieldXml(quoteFieldXml(hidden + shown));
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner, defaultCharacterVanish));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps flattened simple field runs in the label of an owner inside a control', async () => {
+    const nested = quoteFieldXml(textRunXml('Hidden ', true) + textRunXml('Nested'));
+    const simple = `<w:fldSimple w:instr="QUOTE">${textRunXml('Simple ', true)}${nested}</w:fldSimple>`;
+    const owner = quoteFieldXml(textRunXml('Before ') + simple + textRunXml(' After'));
+    const control = `<w:sdt><w:sdtPr/><w:sdtContent>${owner}</w:sdtContent></w:sdt>`;
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(control));
+    try {
+      for (const session of [engine, projected]) {
+        const sdt = session.storySegments('body').find((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'sdt'
+        );
+        expect(sdt).toMatchObject({ payload: { content: [{
+          kind: 'field', payload: { displayText: 'Before Simple Nested After', hasCachedResult: true },
+        }] } });
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps nested field text from controls skipped by hyperlink projection', async () => {
+    const nested = quoteFieldXml(textRunXml('Hidden', true) + textRunXml('Nested'));
+    const link = `<w:hyperlink w:anchor="top">${textRunXml('Link')}<w:sdt><w:sdtPr/><w:sdtContent>${nested}</w:sdtContent></w:sdt></w:hyperlink>`;
+    const owner = quoteFieldXml(textRunXml('Before ') + link + textRunXml(' After'));
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner));
+    try {
+      for (const session of [engine, projected]) {
+        expect(fieldDisplayTexts(session)).toEqual(['Before Nested After']);
+        expect(session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'text' ? [segment.text] : []
+        )).toEqual(['Link']);
+      }
     } finally {
       for (const session of sessions) session.destroy();
     }
@@ -1057,6 +1108,58 @@ describe('DOCX engine seeding', () => {
       expect({ name, same: Buffer.from(flagged[name]).equals(Buffer.from(part)) }).toEqual({ name, same: true });
     }
     expect(new TextDecoder().decode(flagged['word/document.xml'])).toContain('xy');
+  });
+
+  it('concatenates non-string owner text in fields without nested fields', async () => {
+    const field: SimpleField = {
+      type: 'simpleField',
+      fieldType: 'QUOTE',
+      instruction: 'QUOTE',
+      content: [{ type: 'run', content: [{ type: 'text', text: 42 as unknown as string }], formatting: { bold: true } }],
+    };
+    const document: Document = {
+      package: { document: { content: [{ type: 'paragraph', content: [field] }] } },
+    };
+    const session = await createYrsSession({ clientId: 47014 });
+    try {
+      documentToYrs(session, document);
+      const seeded = session.storySegments('body').find((segment) =>
+        segment.kind === 'embed' && segment.embedKind === 'field'
+      );
+      expect(seeded).toMatchObject({
+        attributes: { bold: true },
+        payload: { displayText: '42', hasCachedResult: true, fieldData: JSON.stringify(field) },
+      });
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('tolerates null children in projected complex results', async () => {
+    const run: Run = { type: 'run', content: [{ type: 'text', text: 'Owner' }] };
+    const field: ComplexField = {
+      type: 'complexField',
+      fieldType: 'QUOTE',
+      instruction: 'QUOTE',
+      fieldCode: [],
+      fieldResult: [run],
+      structuredResult: { inline: [null as unknown as Run, { type: 'hyperlink', anchor: 'top', children: [] }, run] },
+    };
+    const document: Document = {
+      package: { document: { content: [{ type: 'paragraph', content: [field] }] } },
+    };
+    const session = await createYrsSession({ clientId: 47014 });
+    try {
+      documentToYrs(session, document);
+      const owner = session.storySegments('body').find((segment) =>
+        segment.kind === 'embed' && segment.embedKind === 'field'
+      );
+      expect(owner).toMatchObject({ payload: {
+        displayText: 'Owner', resultProjection: { children: [{ index: 1, items: [] }] },
+      } });
+    } finally {
+      session.destroy();
+    }
   });
 
   it('tolerates missing arrays and null children in nested hyperlinks', async () => {
