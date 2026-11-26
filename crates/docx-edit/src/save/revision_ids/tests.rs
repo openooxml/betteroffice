@@ -1,4 +1,5 @@
 use super::*;
+use docx_parse::block::BlockSdt;
 use docx_parse::write_docx_s13;
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlDocument, XmlElement, parse_xml};
 use serde_json::json;
@@ -575,9 +576,48 @@ fn clones_only_shared_blocks_on_a_revision_site_path() {
     assert!(!Arc::ptr_eq(cell_changed, actual_cell_changed));
 
     let mut probe = original.clone();
-    let mut walker = SiteWalker::new(&session, None);
-    walker.request(&mut probe).unwrap();
+    let found = collect(&probe, &session).unwrap();
+    let mut walker = SiteWalker::new(&session, None, &found.blocks_with_sites);
+    walker.request(&mut probe);
     assert_eq!(walker.block_make_mut, 2);
+}
+
+#[test]
+fn bounds_visits_to_nested_shared_blocks() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            for depth in [50, 100] {
+                let mut original = request(json!([
+                    {"type": "paragraph", "content": []},
+                    {"type": "paragraph", "content": [change(FIRST)]}
+                ]));
+                let mut block = original.document.content.pop().unwrap();
+                let sibling = original.document.content.pop().unwrap();
+                let properties: docx_parse::inline::SdtProperties =
+                    serde_json::from_value(json!({"sdtType": "richText"})).unwrap();
+                for _ in 0..depth {
+                    block = BlockContent::BlockSdt(Arc::new(BlockSdt {
+                        node_type: "blockSdt".to_owned(),
+                        properties: properties.clone(),
+                        content: vec![sibling.clone(), block],
+                    }));
+                }
+                original.document.content.push(block);
+                let mut actual = original.clone();
+
+                BLOCK_VISITS.set(0);
+                assert_eq!(
+                    assign_session_revision_ids(&mut actual, &BTreeSet::from([FIRST])).unwrap(),
+                    BTreeMap::from([(FIRST, 1)])
+                );
+                let visits = BLOCK_VISITS.get();
+                assert!(visits <= 3 * (2 * depth + 1), "{visits} visits at depth {depth}");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::{self, Write};
+use std::ptr;
 use std::sync::Arc;
 
 use docx_parse::S13SaveRequest;
@@ -24,6 +25,11 @@ const HYPERLINK_FIELDS: [&str; 2] = ["children", "structuredChildren"];
 const STRUCTURED_FIELDS: [&str; 2] = ["inline", "blocks"];
 const FIELD_TREE_FIELDS: [&str; 3] = ["code", "result", "children"];
 const SCENE_NODE_FIELDS: [&str; 2] = ["shape", "children"];
+
+#[cfg(test)]
+thread_local! {
+    static BLOCK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RevisionIdsError {
@@ -82,8 +88,8 @@ fn assign(
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut walker = SiteWalker::new(session, paths);
-    walker.request(request)?;
+    let mut walker = SiteWalker::new(session, paths, &found.blocks_with_sites);
+    walker.request(request);
 
     let mut next = found.max;
     let mut ids = BTreeMap::new();
@@ -113,7 +119,7 @@ fn assign(
         }
     }
 
-    let rewritten = collect_at(request, session, None, true)?;
+    let rewritten = collect_with(request, session, Collection::SitesOnly)?;
     if let Some((&id, _)) = rewritten
         .sites
         .iter()
@@ -141,7 +147,7 @@ pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<RevisionIdReservations, RevisionIdsError> {
-    let found = collect_at(request, session, Some(String::new()), false)?;
+    let found = collect_with(request, session, Collection::Reservations)?;
     Ok(RevisionIdReservations {
         used: found.used,
         max: found.max,
@@ -166,6 +172,14 @@ fn placeholder(id: f64) -> Option<u64> {
 }
 
 #[derive(Default)]
+enum Collection {
+    #[default]
+    Assignment,
+    Reservations,
+    SitesOnly,
+}
+
+#[derive(Default)]
 struct Collected {
     max: u32,
     used: BTreeSet<u32>,
@@ -173,7 +187,9 @@ struct Collected {
     reservations: BTreeMap<(String, u32), usize>,
     pending: Vec<Observation>,
     pending_depth: usize,
-    sites_only: bool,
+    collection: Collection,
+    site_count: usize,
+    blocks_with_sites: HashSet<*const ()>,
     #[cfg(test)]
     reservation_inserts: usize,
 }
@@ -185,7 +201,7 @@ enum Observation {
 
 impl Collected {
     fn note(&mut self, id: Kind, raises_base: bool, pointer: Option<&str>) {
-        if !self.sites_only
+        if !matches!(self.collection, Collection::SitesOnly)
             && let Kind::Number(id) = id
             && (0.0..f64::from(MAX_ID)).contains(&id)
             && id.fract() == 0.0
@@ -221,7 +237,10 @@ impl Collected {
                     self.max = self.max.max(id);
                 }
             }
-            Observation::Site(id) => *self.sites.entry(id).or_default() += 1,
+            Observation::Site(id) => {
+                self.site_count += 1;
+                *self.sites.entry(id).or_default() += 1;
+            }
         }
     }
 
@@ -321,17 +340,17 @@ enum Kind {
 }
 
 fn collect<T: Serialize>(value: &T, session: &BTreeSet<u64>) -> Result<Collected, RevisionIdsError> {
-    collect_at(value, session, None, false)
+    collect_with(value, session, Collection::Assignment)
 }
 
-fn collect_at<T: Serialize + ?Sized>(
+fn collect_with<T: Serialize>(
     value: &T,
     session: &BTreeSet<u64>,
-    pointer: Option<String>,
-    sites_only: bool,
+    collection: Collection,
 ) -> Result<Collected, RevisionIdsError> {
+    let pointer = matches!(collection, Collection::Reservations).then(String::new);
     let mut found = Collected {
-        sites_only,
+        collection,
         ..Collected::default()
     };
     value.serialize(Visitor {
@@ -363,6 +382,8 @@ struct Record<'a> {
     name: &'static str,
     key: Kind,
     pending_start: Option<usize>,
+    site_count_at_start: usize,
+    block_key: Option<*const ()>,
     author: Kind,
     id: Kind,
     revision_id: Kind,
@@ -378,10 +399,12 @@ impl<'a> Record<'a> {
             visitor.found.pending.len()
         });
         Self {
+            site_count_at_start: visitor.found.site_count,
             visitor,
             name,
             key: Kind::Other,
             pending_start,
+            block_key: None,
             author: Kind::Other,
             id: Kind::Other,
             revision_id: Kind::Other,
@@ -421,6 +444,13 @@ impl<'a> Record<'a> {
         key: &'static str,
         value: &T,
     ) -> Result<(), RevisionIdsError> {
+        if key == "type" && matches!(self.name, "Paragraph" | "Table" | "BlockSdt") {
+            #[cfg(test)]
+            BLOCK_VISITS.set(BLOCK_VISITS.get() + 1);
+            if matches!(self.visitor.found.collection, Collection::Assignment) {
+                self.block_key = Some(ptr::from_ref(value).cast::<()>());
+            }
+        }
         let model = self.visitor.model
             || matches!(
                 (self.name, key),
@@ -434,6 +464,11 @@ impl<'a> Record<'a> {
 
     fn finish(self) -> Kind {
         let found = self.visitor.found;
+        if let Some(key) = self.block_key
+            && found.site_count != self.site_count_at_start
+        {
+            found.blocks_with_sites.insert(key);
+        }
         if let Some(start) = self.pending_start {
             let session_id = match (&self.author, &self.id) {
                 (Kind::String(_), Kind::Number(id)) => {
@@ -623,7 +658,7 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_str(self, value: &str) -> Result<Kind, Self::Error> {
-        if self.scan_strings && !self.found.sites_only {
+        if self.scan_strings && !matches!(self.found.collection, Collection::SitesOnly) {
             self.found.scan_xml(value, self.pointer.as_deref());
         } else if !self.scan_strings && self.pointer.is_some() {
             return Ok(Kind::Key(value.to_owned()));
@@ -747,22 +782,26 @@ enum Site<'a> {
 
 struct SiteWalker<'a, 's, 'p> {
     session: &'s BTreeSet<u64>,
+    blocks_with_sites: &'s HashSet<*const ()>,
     sites: Vec<(u64, Site<'a>)>,
     paths: Option<&'p mut Vec<(String, u64)>>,
     path: String,
-    error: Option<RevisionIdsError>,
     #[cfg(test)]
     block_make_mut: usize,
 }
 
 impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
-    fn new(session: &'s BTreeSet<u64>, paths: Option<&'p mut Vec<(String, u64)>>) -> Self {
+    fn new(
+        session: &'s BTreeSet<u64>,
+        paths: Option<&'p mut Vec<(String, u64)>>,
+        blocks_with_sites: &'s HashSet<*const ()>,
+    ) -> Self {
         Self {
             session,
+            blocks_with_sites,
             sites: Vec::new(),
             paths,
             path: String::new(),
-            error: None,
             #[cfg(test)]
             block_make_mut: 0,
         }
@@ -806,7 +845,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         self.at(key, |walker| walker.entries(values, visit));
     }
 
-    fn request(&mut self, request: &'a mut S13SaveRequest) -> Result<(), RevisionIdsError> {
+    fn request(&mut self, request: &'a mut S13SaveRequest) {
         self.at("document", |walker| {
             walker.at("content", |walker| walker.blocks(&mut request.document.content));
             walker.field_entries(
@@ -859,7 +898,6 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                 });
             });
         }
-        self.error.take().map_or(Ok(()), Err)
     }
 
     fn push(&mut self, placeholder: u64, site: Site<'a>) {
@@ -883,40 +921,38 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         placeholder(id).filter(|id| self.session.contains(id))
     }
 
-    fn block_mut<T: Clone + Serialize>(&mut self, block: &'a mut Arc<T>) -> Option<&'a mut T> {
-        if Arc::get_mut(block).is_some() {
-            return Arc::get_mut(block);
+    fn block_mut<T: Clone>(
+        &mut self,
+        block: &'a mut Arc<T>,
+        node_type: impl FnOnce(&T) -> &String,
+    ) -> Option<&'a mut T> {
+        #[cfg(test)]
+        BLOCK_VISITS.set(BLOCK_VISITS.get() + 1);
+        let key = ptr::from_ref(node_type(block.as_ref())).cast::<()>();
+        if !self.blocks_with_sites.contains(&key) {
+            return None;
         }
-        match collect_at(block.as_ref(), self.session, None, true) {
-            Ok(found) if !found.sites.is_empty() => {
-                #[cfg(test)]
-                {
-                    self.block_make_mut += 1;
-                }
-                Some(Arc::make_mut(block))
-            }
-            Ok(_) => None,
-            Err(error) => {
-                self.error = Some(error);
-                None
-            }
+        #[cfg(test)]
+        {
+            self.block_make_mut += 1;
         }
+        Some(Arc::make_mut(block))
     }
 
     fn blocks(&mut self, blocks: &'a mut [BlockContent]) {
         self.entries(blocks, |walker, block| match block {
             BlockContent::Paragraph(paragraph) => {
-                if let Some(paragraph) = walker.block_mut(paragraph) {
+                if let Some(paragraph) = walker.block_mut(paragraph, |block| &block.node_type) {
                     walker.paragraph(paragraph);
                 }
             }
             BlockContent::Table(table) => {
-                if let Some(table) = walker.block_mut(table) {
+                if let Some(table) = walker.block_mut(table, |block| &block.node_type) {
                     walker.table(table);
                 }
             }
             BlockContent::BlockSdt(control) => {
-                if let Some(control) = walker.block_mut(control) {
+                if let Some(control) = walker.block_mut(control, |block| &block.node_type) {
                     walker.at("content", |walker| walker.blocks(&mut control.content));
                 }
             }
