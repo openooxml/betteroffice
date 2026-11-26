@@ -51,6 +51,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host, UpdateSubscription};
 
+mod section_plan;
+
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
     r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
@@ -1444,7 +1446,7 @@ impl EditSession {
     #[doc(hidden)]
     #[wasm_bindgen(skip_typescript)]
     pub fn section_save_plan_json(&self, input_json: &str) -> Result<String, JsValue> {
-        crate::save::sections::transport::plan_json(input_json)
+        section_plan::plan_json(input_json)
             .map_err(EngineError::message)
             .map_err(JsValue::from)
     }
