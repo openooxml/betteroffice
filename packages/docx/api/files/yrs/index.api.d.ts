@@ -1000,6 +1000,8 @@ export interface YrsSession extends CollaborationReplica {
     loadState(update: Uint8Array): void;
     encodePeerMetadata(): Uint8Array;
     bootstrapPeer(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | undefined, host: YrsDocxHost, options?: YrsOpeningOptions): YrsDocxHost;
+    /** @internal */
+    bootstrapPeerWithProvenance(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | undefined, host: YrsDocxHost, sidecar: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
     /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
     seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
     /**
@@ -1081,6 +1083,8 @@ export interface YrsSession extends CollaborationReplica {
     encodeStateVector(): Uint8Array;
     /** Full state, or only the state missing from a peer vector. */
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+    /** @internal */
+    encodeEditProvenanceForTransfer(bytes: Uint8Array, base?: Uint8Array): Uint8Array;
     /**
      * The state missing from a peer vector as ordered updates of at most `maxChunkBytes` each: one update when it fits,
      * otherwise causally ordered structs and then the delete set alone. Only an update holding a single larger struct
@@ -1093,6 +1097,8 @@ export interface YrsSession extends CollaborationReplica {
     applyUpdateChunks(updates: readonly Uint8Array[]): void;
     /** Apply a same-user worker update under the local undo origin. @internal */
     applyLocalUpdate(update: Uint8Array): void;
+    /** @internal */
+    applyLocalUpdateWithProvenance(update: Uint8Array, sidecar: Uint8Array): void;
     /** Adopt another replica's host batch outside undo history. @internal */
     applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
     /**
@@ -1350,6 +1356,8 @@ export interface YrsSession extends CollaborationReplica {
     storyParagraphIds(story: string): Array<string | null>;
     /** The paragraph IDs a save of the session applies. @internal */
     paragraphSavePlan(): DocxParagraphSavePlan;
+    /** @internal */
+    paragraphSavePlanWithLocalProvenance(): DocxParagraphSavePlan;
     /**
      * Publishes the `[owner, paraId]` pairs a save captured and returns those
      * whose binding changed since. @internal

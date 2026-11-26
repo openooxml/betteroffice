@@ -130,6 +130,7 @@ impl EditingDoc {
             RawOp::SetEmbedAttr { key, .. } => key == PARA_ID,
             _ => false,
         });
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let since = txn.before_state().get(&ClientID::new(self.client_id()));
         if rekeys {
@@ -175,6 +176,7 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         self.apply_raw_seed_batches(batches, ctx).map(|_| ())
     }
 

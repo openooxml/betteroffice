@@ -16,6 +16,7 @@ use crate::ops::{
     position_chunks_indexed, range_chunks, range_chunks_observed_indexed, remove_units,
     snapshot_range, utf16_len,
 };
+use crate::provenance::PendingSplice;
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
     check_range, revision_value, story_ref,
@@ -489,6 +490,17 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let pending = PendingSplice::capture(
+            self,
+            txn,
+            &at.story,
+            &story,
+            at.index,
+            at.index,
+            &chunks,
+            indexed.as_ref(),
+            !ctx.is_suggesting() && matches!(policy, FormatPolicy::Inherit),
+        );
         let mut observe = Some(observe);
         let carry = Carry::capture(&story, txn, at.index, at.index, indexed.as_ref());
         let mut end = at.index;
@@ -502,6 +514,9 @@ impl EditingDoc {
         }
         if let Some(carry) = carry {
             carry.inserted(txn, at.index, end - at.index);
+        }
+        if let Some(pending) = pending {
+            pending.finish(self, txn, &story, at.index, end);
         }
         let bounds = bounds.map(|mut bounds| {
             if at.index <= bounds.pilcrow {
@@ -573,6 +588,17 @@ impl EditingDoc {
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
                 .unwrap_or_else(|| self.next_id(txn))
         });
+        let pending = PendingSplice::capture(
+            self,
+            txn,
+            &range.story,
+            &story,
+            range.start,
+            range.end,
+            &chunks,
+            indexed.as_ref(),
+            !ctx.is_suggesting(),
+        );
         let carry = Carry::capture(&story, txn, range.start, range.end, indexed.as_ref());
         let (result_end, outcome) = if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
@@ -585,6 +611,9 @@ impl EditingDoc {
         };
         if let Some(carry) = carry {
             carry.apply(txn, &outcome.changes, &[]);
+        }
+        if let Some(pending) = pending {
+            pending.finish(self, txn, &story, range.start, range.start);
         }
         let bounds = bounds.map(|mut bounds| {
             bounds.pilcrow -= before_len - story.len(txn);
@@ -709,6 +738,17 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let pending = PendingSplice::capture(
+            self,
+            txn,
+            &range.story,
+            &story,
+            range.start,
+            range.end,
+            &chunks,
+            None,
+            !ctx.is_suggesting(),
+        );
         let carry = Carry::capture(&story, txn, range.start, range.end, None);
         let mut changes = Vec::new();
         if len > 0 {
@@ -733,6 +773,9 @@ impl EditingDoc {
         if let Some(carry) = carry {
             changes.push(Change::Insert { at, len: end - at });
             carry.apply(txn, &changes, &[]);
+        }
+        if let Some(pending) = pending {
+            pending.finish(self, txn, &story, at, end);
         }
         let loc_range = loc_range_in_txn(&range.story, &story, txn, at, end)?;
         Ok((
@@ -808,6 +851,17 @@ impl EditingDoc {
         let revision = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        let pending = PendingSplice::capture(
+            self,
+            txn,
+            &range.story,
+            &story,
+            range.start,
+            range.end,
+            &chunks,
+            None,
+            !ctx.is_suggesting(),
+        );
         let carry = Carry::capture(&story, txn, range.start, range.end, None);
         let mut changes = Vec::new();
         if len > 0 {
@@ -856,6 +910,9 @@ impl EditingDoc {
             });
             carry.apply(txn, &changes, &[]);
         }
+        if let Some(pending) = pending {
+            pending.finish(self, txn, &story, at, cursor);
+        }
         let loc_range = loc_range_in_txn(&range.story, &story, txn, at, cursor)?;
         Ok((
             Receipt {
@@ -884,6 +941,7 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        self.mark_provenance_range(&txn, &story, at.index, at.index);
         let carry = Carry::capture(&story, &txn, at.index, at.index, None);
         let embed = story.insert_embed_with_attributes(
             &mut txn,
@@ -920,6 +978,7 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        self.mark_provenance_range(&txn, &story, at.index, at.index);
         let carry = Carry::capture(&story, &txn, at.index, at.index, None);
         story.insert_with_attributes(&mut txn, at.index, "\t", stamped_attrs(formatting, ins));
         if let Some(carry) = carry {
