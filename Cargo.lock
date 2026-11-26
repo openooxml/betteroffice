@@ -460,7 +460,6 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
  "betteroffice-metafile",
- "betteroffice-ooxml-diff",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-pptx-edit",

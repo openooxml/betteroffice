@@ -256,7 +256,6 @@ impl FloatBitsWalk for pptx_edit::TextStyle {
             font_size_pt,
             color,
             font_family,
-            east_asian_font_family,
             underline,
             strike,
             spacing_pt,
@@ -269,7 +268,6 @@ impl FloatBitsWalk for pptx_edit::TextStyle {
         font_size_pt.float_bits(out);
         color.float_bits(out);
         font_family.float_bits(out);
-        east_asian_font_family.float_bits(out);
         underline.float_bits(out);
         strike.float_bits(out);
         spacing_pt.float_bits(out);
@@ -597,7 +595,6 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
             strike,
             caps,
             font_family,
-            east_asian_font_family,
             color,
             language,
             hyperlink_relationship_id,
@@ -614,7 +611,6 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
         strike.float_bits(out);
         caps.float_bits(out);
         font_family.float_bits(out);
-        east_asian_font_family.float_bits(out);
         color.float_bits(out);
         language.float_bits(out);
         hyperlink_relationship_id.float_bits(out);
