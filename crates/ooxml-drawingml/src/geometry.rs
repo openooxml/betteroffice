@@ -224,10 +224,10 @@ pub fn preset_geometry_to_path(
         value if value.starts_with("star") => {
             star(star_preset(value)?, adjustments.get("adj").copied())
         }
-        "bentConnector2" => bent_connector(2, adjustments),
-        "bentConnector3" => bent_connector(3, adjustments),
-        "bentConnector4" => bent_connector(4, adjustments),
-        "bentConnector5" => bent_connector(5, adjustments),
+        "bentConnector2" => legacy_bent_connector(2, adjustments.get("adj1").copied()),
+        "bentConnector3" => legacy_bent_connector(3, adjustments.get("adj1").copied()),
+        "bentConnector4" => legacy_bent_connector(4, adjustments.get("adj1").copied()),
+        "bentConnector5" => legacy_bent_connector(5, adjustments.get("adj1").copied()),
         "curvedConnector2" => curved_connector(2),
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
@@ -1120,6 +1120,7 @@ fn orient(direction: &str, x: f64, y: f64) -> (f64, f64) {
     }
 }
 
+#[doc(hidden)]
 pub fn is_corrected_connector_preset(shape_type: &str) -> bool {
     matches!(
         shape_type,
@@ -1131,23 +1132,23 @@ pub fn is_corrected_connector_preset(shape_type: &str) -> bool {
     )
 }
 
-pub fn legacy_connector_path(
+#[doc(hidden)]
+pub fn connector_geometry_for_rendering(
     shape_type: &str,
     adjustments: &HashMap<String, f64>,
 ) -> Option<Vec<GeometryPathCommand>> {
-    let adjustment = adjustments.get("adj1").copied();
     Some(match shape_type {
-        "bentConnector2" => legacy_bent_connector(2, adjustment),
-        "bentConnector3" => legacy_bent_connector(3, adjustment),
-        "bentConnector4" => legacy_bent_connector(4, adjustment),
-        "bentConnector5" => legacy_bent_connector(5, adjustment),
+        "bentConnector2" => bent_connector(2, adjustments),
+        "bentConnector3" => bent_connector(3, adjustments),
+        "bentConnector4" => bent_connector(4, adjustments),
+        "bentConnector5" => bent_connector(5, adjustments),
         "curvedConnector2" => vec![
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Cubic {
                 cp1x: 0.5,
                 cp1y: 0.0,
-                cp2x: 0.5,
-                cp2y: 1.0,
+                cp2x: 1.0,
+                cp2y: 0.5,
                 x: 1.0,
                 y: 1.0,
             },
@@ -1233,8 +1234,8 @@ fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
             GeometryPathCommand::Cubic {
                 cp1x: 0.5,
                 cp1y: 0.0,
-                cp2x: 1.0,
-                cp2y: 0.5,
+                cp2x: 0.5,
+                cp2y: 1.0,
                 x: 1.0,
                 y: 1.0,
             },
@@ -1513,7 +1514,7 @@ mod tests {
     #[test]
     fn bent_connectors_follow_ecma376_orthogonal_segments() {
         for adjustments in [HashMap::new(), HashMap::from([("adj1".to_owned(), 0.25)])] {
-            let b2 = preset_geometry_to_path("bentConnector2", &adjustments, 1.0).unwrap();
+            let b2 = connector_geometry_for_rendering("bentConnector2", &adjustments).unwrap();
             assert_eq!(
                 b2,
                 vec![
@@ -1523,7 +1524,7 @@ mod tests {
                 ]
             );
         }
-        let b3 = preset_geometry_to_path("bentConnector3", &HashMap::new(), 1.0).unwrap();
+        let b3 = connector_geometry_for_rendering("bentConnector3", &HashMap::new()).unwrap();
         assert_eq!(
             b3,
             vec![
@@ -1533,10 +1534,9 @@ mod tests {
                 GeometryPathCommand::Line { x: 1.0, y: 1.0 },
             ]
         );
-        let b4 = preset_geometry_to_path(
+        let b4 = connector_geometry_for_rendering(
             "bentConnector4",
             &HashMap::from([("adj1".to_owned(), 0.75), ("adj2".to_owned(), -0.25)]),
-            1.0,
         )
         .unwrap();
         assert_eq!(
@@ -1549,14 +1549,13 @@ mod tests {
                 GeometryPathCommand::Line { x: 1.0, y: 1.0 },
             ]
         );
-        let b5 = preset_geometry_to_path(
+        let b5 = connector_geometry_for_rendering(
             "bentConnector5",
             &HashMap::from([
                 ("adj1".to_owned(), 0.25),
                 ("adj2".to_owned(), 0.4),
                 ("adj3".to_owned(), 0.75),
             ]),
-            1.0,
         )
         .unwrap();
         assert_eq!(
@@ -1575,7 +1574,7 @@ mod tests {
     #[test]
     fn bent_connector_supports_unpinned_detours() {
         let detour = HashMap::from([("adj1".to_owned(), 1.5)]);
-        let b3 = preset_geometry_to_path("bentConnector3", &detour, 1.0).unwrap();
+        let b3 = connector_geometry_for_rendering("bentConnector3", &detour).unwrap();
         assert_eq!(
             b3,
             vec![
@@ -1586,7 +1585,7 @@ mod tests {
             ]
         );
         let negative = HashMap::from([("adj1".to_owned(), -0.5)]);
-        let b3_neg = preset_geometry_to_path("bentConnector3", &negative, 1.0).unwrap();
+        let b3_neg = connector_geometry_for_rendering("bentConnector3", &negative).unwrap();
         assert_eq!(
             b3_neg,
             vec![
@@ -1600,19 +1599,19 @@ mod tests {
 
     #[test]
     fn bent_connector_defaults_non_finite_adjustments() {
-        let expected = preset_geometry_to_path("bentConnector5", &HashMap::new(), 1.0).unwrap();
+        let expected = connector_geometry_for_rendering("bentConnector5", &HashMap::new()).unwrap();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let adjustments = ["adj1", "adj2", "adj3"]
                 .map(|name| (name.to_owned(), value))
                 .into();
-            let path = preset_geometry_to_path("bentConnector5", &adjustments, 1.0).unwrap();
+            let path = connector_geometry_for_rendering("bentConnector5", &adjustments).unwrap();
             assert_eq!(path, expected, "{value}");
         }
     }
 
     #[test]
     fn curved_connector2_curves_from_horizontal_to_vertical() {
-        let cmds = preset_geometry_to_path("curvedConnector2", &HashMap::new(), 1.0).unwrap();
+        let cmds = connector_geometry_for_rendering("curvedConnector2", &HashMap::new()).unwrap();
         assert_eq!(
             cmds,
             vec![
@@ -1640,6 +1639,7 @@ mod tests {
             "octagon",
             "rightArrow",
             "star5",
+            "bentConnector3",
             "plus",
         ] {
             let path = |value| {

@@ -12,7 +12,7 @@ use crate::relationships::{
 };
 use crate::scalars::ColorValue;
 use crate::shape::{
-    DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody,
+    DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody, capture_connector_guides,
     parse_drawing_scene_with_sources, placed_scene_node, render_scene_connector_paths,
     resolve_shape_fill_pictures,
 };
@@ -54,9 +54,10 @@ pub fn parse_smart_art_from_drawing(
     context: Option<&mut SmartArtContext>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<Shape>, ParseError> {
-    parse_smart_art(drawing, relationships, media, context, budget, false)
+    parse_smart_art(drawing, relationships, media, context, budget, false, None)
 }
 
+#[doc(hidden)]
 pub fn smart_art_for_rendering(
     drawing: &XmlElement,
     relationships: &RelationshipMap,
@@ -71,16 +72,18 @@ pub fn smart_art_for_rendering(
         Some(context),
         budget,
         true,
+        None,
     )
 }
 
-fn parse_smart_art(
+pub(crate) fn parse_smart_art(
     drawing: &XmlElement,
     relationships: Option<&RelationshipMap>,
     media: Option<&MediaMap>,
     context: Option<&mut SmartArtContext>,
     budget: &mut ParseBudget<'_>,
     render_connectors: bool,
+    guides: Option<&mut crate::s9::PreviewConnectorGuides>,
 ) -> Result<Option<Shape>, ParseError> {
     let (Some(relationships), Some(context)) = (relationships, context) else {
         return Ok(None);
@@ -123,6 +126,7 @@ fn parse_smart_art(
             &text_colors,
             budget,
             render_connectors,
+            guides,
         )?;
         if !parsed.shapes.is_empty() {
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
@@ -292,7 +296,7 @@ pub fn parse_diagram_drawing_scene(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<DiagramDrawing, ParseError> {
-    parse_styled_drawing_scene(xml, part, &HashMap::new(), budget, false)
+    parse_styled_drawing_scene(xml, part, &HashMap::new(), budget, false, None)
 }
 
 fn parse_styled_drawing_scene(
@@ -301,6 +305,7 @@ fn parse_styled_drawing_scene(
     text_colors: &HashMap<String, ColorValue>,
     budget: &mut ParseBudget<'_>,
     render_connectors: bool,
+    mut guides: Option<&mut crate::s9::PreviewConnectorGuides>,
 ) -> Result<DiagramDrawing, ParseError> {
     let document = parse_xml(xml, part, budget)?;
     let Some(root) = document.root() else {
@@ -324,6 +329,7 @@ fn parse_styled_drawing_scene(
         &mut shapes,
         &mut sources.into_iter(),
         text_colors,
+        &mut guides,
     ) {
         scene.root = Some(DrawingSceneNode {
             kind: Some("canvas".into()),
@@ -352,12 +358,16 @@ fn collect_scene_shapes<'a>(
     shapes: &mut Vec<Shape>,
     sources: &mut impl Iterator<Item = &'a XmlElement>,
     text_colors: &HashMap<String, ColorValue>,
+    guides: &mut Option<&mut crate::s9::PreviewConnectorGuides>,
 ) -> Option<DrawingSceneNode> {
     let node = node?;
     if node.kind.as_deref() == Some("shape")
         && let Some(shape) = node.shape.as_deref_mut()
     {
         if let Some(source) = sources.next() {
+            if let Some(guides) = guides.as_deref_mut() {
+                capture_connector_guides(source, &[shapes.len()], guides);
+            }
             if source.local_name() == "cxnSp" && find_descendant(source, "prstGeom", 0).is_none() {
                 shape.shape_type = "straightConnector1".to_owned();
                 shape.geometry_path =
@@ -406,7 +416,7 @@ fn collect_scene_shapes<'a>(
         let mut index = 0;
         while index < children.len() {
             if let Some(frame) =
-                collect_scene_shapes(children.get_mut(index), shapes, sources, text_colors)
+                collect_scene_shapes(children.get_mut(index), shapes, sources, text_colors, guides)
             {
                 index += 1;
                 children.insert(index, frame);

@@ -103,6 +103,8 @@ pub struct ParseBudget<'a> {
     direction_scopes: u32,
     direction_scope_bytes: std::cell::Cell<usize>,
     unmodeled_inline: Vec<(String, usize)>,
+    pub(crate) preview_connectors: Option<crate::s9::PreviewConnectorSources>,
+    pub(crate) connector_story: Option<(String, Option<String>)>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -130,6 +132,29 @@ impl<'a> ParseBudget<'a> {
             direction_scopes: 0,
             direction_scope_bytes: std::cell::Cell::new(0),
             unmodeled_inline: Vec::new(),
+            preview_connectors: None,
+            connector_story: None,
+        }
+    }
+
+    pub(crate) fn connector_story(&mut self, part: &str, item: Option<String>) {
+        if self.preview_connectors.is_some() {
+            self.connector_story = Some((part.trim_start_matches('/').to_owned(), item));
+        }
+    }
+
+    pub(crate) fn record_connector(
+        &mut self,
+        baseline: &crate::shape::Shape,
+        guides: crate::s9::PreviewConnectorGuides,
+    ) {
+        if !guides.is_empty()
+            && let (Some(sources), Some(story)) = (&mut self.preview_connectors, &self.connector_story)
+        {
+            sources
+                .entry(story.clone())
+                .or_default()
+                .push((baseline.clone(), guides));
         }
     }
 

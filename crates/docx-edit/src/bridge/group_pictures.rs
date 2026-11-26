@@ -47,14 +47,6 @@ pub(crate) fn source_shapes(
     let Ok(table) = MediaTable::new(package) else {
         return GroupPictureSources::default();
     };
-    source_shapes_with_media(table, roots, true)
-}
-
-pub(crate) fn source_shapes_with_media(
-    table: MediaTable,
-    roots: &std::collections::HashMap<String, SourceStory>,
-    include_pictures: bool,
-) -> GroupPictureSources {
     let mut sources = BTreeMap::new();
     let package = table.retained_package();
     let media = table.media_map();
@@ -100,7 +92,7 @@ pub(crate) fn source_shapes_with_media(
             && (has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"));
         let connectors =
             has_connector_preset(&bytes) || (!smart_art.parts.is_empty() && has(b"relIds"));
-        if !(include_pictures && picture_group || connectors) {
+        if !(picture_group || connectors) {
             continue;
         }
         let Ok(document) = parse_xml(&bytes, path, &mut budget) else {
@@ -144,7 +136,7 @@ pub(crate) fn source_shapes_with_media(
                 &mut shapes,
                 &mut smart_art,
                 &mut budget,
-                include_pictures && !separator,
+                !separator,
             );
             if !shapes.is_empty() {
                 sources.insert(story.to_owned(), shapes);
@@ -157,10 +149,43 @@ pub(crate) fn source_shapes_with_media(
     }
 }
 
-pub(crate) fn has_connector_preset(bytes: &[u8]) -> bool {
+fn has_connector_preset(bytes: &[u8]) -> bool {
     [b"bentConnector".as_slice(), b"curvedConnector2"]
         .into_iter()
         .any(|name| bytes.windows(name.len()).any(|window| window == name))
+}
+
+pub(crate) fn preview_connector_sources(
+    connectors: docx_parse::s9::PreviewConnectorSources,
+    roots: impl Iterator<Item = (String, SourceStory)>,
+) -> GroupPictureSources {
+    let mut shapes = BTreeMap::new();
+    let roots = roots.map(|(story, source)| (story, (source.part_uri, source.item_id)));
+    for (story, (path, item)) in roots.chain([
+        ("footnote".to_owned(), (FOOTNOTES_PART.to_owned(), None)),
+        ("endnote".to_owned(), (ENDNOTES_PART.to_owned(), None)),
+    ]) {
+        let key = (path.trim_start_matches('/').to_owned(), item);
+        let drawings = connectors.get(&key).or_else(|| {
+            connectors.iter().find_map(|((path, item), drawings)| {
+                (item == &key.1 && path.eq_ignore_ascii_case(&key.0)).then_some(drawings)
+            })
+        });
+        if let Some(drawings) = drawings {
+            let mut by_id: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+            for (baseline, guides) in drawings {
+                by_id
+                    .entry(baseline.id.clone().unwrap_or_default())
+                    .or_default()
+                    .push(serde_json::json!({"baseline": baseline, "guides": guides}));
+            }
+            shapes.insert(story, by_id);
+        }
+    }
+    GroupPictureSources {
+        shapes: Arc::new(shapes),
+        media: None,
+    }
 }
 
 fn has_connector(shape: &Shape) -> bool {
@@ -400,7 +425,7 @@ pub(super) fn project(
         }
     }
     let source = candidates.iter().find(|source| {
-        source["connectors"].is_object()
+        (source["connectors"].is_object() || source["guides"].is_array())
             && matches(source, &["children", "shapeType", "geometryPath"])
             && same_model(
                 shape.pointer("/scene/root"),
@@ -408,7 +433,23 @@ pub(super) fn project(
             )
     })?;
     let mut projected = raw_projection(shape);
-    copy_connector_paths(&mut projected, &source["connectors"], &source["baseline"]);
+    if let Some(guides) = source.get("guides") {
+        let guides: docx_parse::s9::PreviewConnectorGuides =
+            serde_json::from_value(guides.clone()).ok()?;
+        for (indices, preset, adjustments) in guides {
+            let child = indices.iter().try_fold(&mut projected, |shape, index| {
+                shape.get_mut("children")?.get_mut(*index)
+            });
+            if let Some(child) = child
+                && let Some(path) =
+                    ooxml_drawingml::connector_geometry_for_rendering(&preset, &adjustments)
+            {
+                child["geometryPath"] = serde_json::json!(path);
+            }
+        }
+    } else {
+        copy_connector_paths(&mut projected, &source["connectors"], &source["baseline"]);
+    }
     Some(projected)
 }
 

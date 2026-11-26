@@ -231,11 +231,15 @@ pub fn parse_preset_geometry_path(
     let preset = sp_pr?.child_by_full_name("a:prstGeom")?;
     let shape_type = preset.attribute(None, "prst")?;
     let adjustments = preset_adjustments(preset);
-    ooxml_drawingml::legacy_connector_path(shape_type, &adjustments)
-        .or_else(|| preset_outline(shape_type, &adjustments, aspect_ratio))
+    preset_outline(shape_type, &adjustments, aspect_ratio)
 }
 
 pub(crate) fn connector_path_for_rendering(sp_pr: &XmlElement) -> Option<Vec<GeometryPathCommand>> {
+    let (shape_type, adjustments) = connector_guides(sp_pr)?;
+    ooxml_drawingml::connector_geometry_for_rendering(&shape_type, &adjustments)
+}
+
+pub(crate) fn connector_guides(sp_pr: &XmlElement) -> Option<(String, HashMap<String, f64>)> {
     let preset = sp_pr.child_by_full_name("a:prstGeom")?;
     let shape_type = preset.attribute(None, "prst")?;
     if !ooxml_drawingml::is_corrected_connector_preset(shape_type)
@@ -243,7 +247,9 @@ pub(crate) fn connector_path_for_rendering(sp_pr: &XmlElement) -> Option<Vec<Geo
     {
         return None;
     }
-    preset_geometry_to_path(shape_type, &preset_adjustments(preset), 1.0)
+    let mut adjustments = preset_adjustments(preset);
+    adjustments.retain(|_, value| value.is_finite());
+    Some((shape_type.to_owned(), adjustments))
 }
 
 fn preset_adjustments(preset: &XmlElement) -> HashMap<String, f64> {

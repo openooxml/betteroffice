@@ -8063,11 +8063,12 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some((envelope, media, _, document_path)) = parse_docx_preview(bytes.into(), blocks, None)?
+    let Some((envelope, media, _, document_path, connectors)) =
+        parse_docx_preview(bytes.into(), blocks, None)?
     else {
         return Ok(false);
     };
-    seed_preview_envelope(document, envelope, media, &document_path).map(|_| true)
+    seed_preview_envelope(document, envelope, media, &document_path, connectors).map(|_| true)
 }
 
 /// The parse [`seed_docx_preview`] seeds from and the media its images name,
@@ -8082,12 +8083,13 @@ pub(crate) fn parse_docx_preview(
         docx_parse::media::MediaTable,
         bool,
         String,
+        docx_parse::s9::PreviewConnectorSources,
     )>,
     String,
 > {
     let (parts, media) =
         docx_parse::media_table_parts_bytes(&bytes).map_err(|error| error.to_string())?;
-    let envelope = docx_parse::parse_docx_s9_preview_with_media_table_with_budget(
+    let envelope = docx_parse::s9::parse_docx_preview_with_connectors(
         &parts,
         &media,
         blocks,
@@ -8100,7 +8102,7 @@ pub(crate) fn parse_docx_preview(
         paragraph_budget,
     )
     .map_err(|error| error.to_string())?;
-    let Some((envelope, budget_stopped)) = envelope else {
+    let Some((envelope, budget_stopped, connectors)) = envelope else {
         return Ok(None);
     };
     let limits = docx_parse::xml::ParseLimits::default();
@@ -8109,7 +8111,7 @@ pub(crate) fn parse_docx_preview(
         &mut docx_parse::xml::ParseBudget::new(&limits),
     )
     .map_err(|error| error.to_string())?;
-    Ok(Some((envelope, media, budget_stopped, document_path)))
+    Ok(Some((envelope, media, budget_stopped, document_path, connectors)))
 }
 
 /// Seeds a preview parse and keeps the media its images name; returns the
@@ -8120,42 +8122,18 @@ pub(crate) fn seed_preview_envelope(
     envelope: docx_parse::S9WireEnvelope,
     media: docx_parse::media::MediaTable,
     document_path: &str,
+    connectors: docx_parse::s9::PreviewConnectorSources,
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
-    let has_connector = crate::bridge::group_pictures::has_connector_preset;
-    let connector_in_separator = lowered
-        .read
-        .note_separator_paragraphs
-        .values()
-        .flatten()
-        .any(|value| has_connector(value.to_string().as_bytes()));
-    if connector_in_separator
-        || lowered
-            .context
-            .plans
-            .iter()
-            .flat_map(|plan| &plan.units)
-            .any(|unit| {
-                let UnitContent::Embed { payload, .. } = &unit.content else {
-                    return false;
-                };
-                ["shapeJson", "textBoxJson"].into_iter().any(|key| {
-                    payload
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| has_connector(value.as_bytes()))
-                })
-            })
-    {
+    if !connectors.is_empty() {
         let roots = source_story_roots(
             std::mem::take(&mut lowered.roots),
             document_path,
             &lowered.relationships,
-        )
-        .collect();
+        );
         lowered.preview_shape_sources = Some(
-            crate::bridge::group_pictures::source_shapes_with_media(media.clone(), &roots, false),
+            crate::bridge::group_pictures::preview_connector_sources(connectors, roots),
         );
     }
     let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed, true)?;

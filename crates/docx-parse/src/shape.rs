@@ -996,14 +996,26 @@ pub(crate) fn parse_text_body_properties(element: &XmlElement) -> ShapeTextBodyP
 }
 
 pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
-    parse_drawing_shape(drawing, false)
+    parse_drawing_shape(drawing, false, None)
 }
 
+#[doc(hidden)]
 pub fn shape_with_rendered_connectors(drawing: &XmlElement) -> Option<Shape> {
-    parse_drawing_shape(drawing, true)
+    parse_drawing_shape(drawing, true, None)
 }
 
-fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<Shape> {
+pub(crate) fn parse_shape_with_connector_guides(
+    drawing: &XmlElement,
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) -> Option<Shape> {
+    parse_drawing_shape(drawing, false, Some(guides))
+}
+
+fn parse_drawing_shape(
+    drawing: &XmlElement,
+    render_connectors: bool,
+    guides: Option<&mut crate::s9::PreviewConnectorGuides>,
+) -> Option<Shape> {
     let container = drawing
         .child_elements()
         .find(|value| matches!(value.name.as_str(), "wp:inline" | "wp:anchor"))?;
@@ -1020,12 +1032,16 @@ fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<
         let mut shape = parse_shape(root);
         if render_connectors {
             render_connector_path(&mut shape, root);
+        } else if let Some(guides) = guides {
+            capture_connector_guides(root, &[], guides);
         }
         shape
     } else {
         let (mut parsed, sources) = parse_drawing_scene_with_sources(root);
         if render_connectors {
             render_scene_connector_paths(parsed.root.as_mut(), &mut sources.into_iter());
+        } else if let (Some(guides), Some(root)) = (guides, parsed.root.as_ref()) {
+            capture_scene_connector_guides(root, &mut sources.into_iter(), &mut Vec::new(), guides);
         }
         let legacy = scene_node_to_legacy(parsed.root.as_ref()?, 0);
         scene = Some(parsed);
@@ -1096,6 +1112,43 @@ fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<
         shape.scene = Some(Box::new(scene))
     }
     Some(shape)
+}
+
+pub(crate) fn capture_connector_guides(
+    source: &XmlElement,
+    indices: &[usize],
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) {
+    if let Some((preset, adjustments)) =
+        direct_child(Some(source), "spPr").and_then(crate::drawingml::connector_guides)
+    {
+        guides.push((indices.to_vec(), preset, adjustments));
+    }
+}
+
+fn capture_scene_connector_guides<'a>(
+    node: &DrawingSceneNode,
+    sources: &mut impl Iterator<Item = &'a XmlElement>,
+    indices: &mut Vec<usize>,
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) {
+    if node.kind.as_deref() == Some("shape") {
+        if let Some(source) = sources.next() {
+            capture_connector_guides(source, indices, guides);
+        }
+        return;
+    }
+    for (index, child) in node
+        .children
+        .iter()
+        .flatten()
+        .filter(|child| matches!(child.kind.as_deref(), Some("shape" | "group" | "canvas")))
+        .enumerate()
+    {
+        indices.push(index);
+        capture_scene_connector_guides(child, sources, indices, guides);
+        indices.pop();
+    }
 }
 
 fn render_connector_path(shape: &mut Shape, source: &XmlElement) {

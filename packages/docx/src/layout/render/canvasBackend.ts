@@ -1154,11 +1154,13 @@ function drawShapeLineEnds(
   if (!hasHead && !hasTail) return;
   const endpoints = shapePathEndpoints(shape.geometryPath);
   if (!endpoints) return;
+  const solidArrow = 'shapeType' in shape && typeof shape.shapeType === 'string' &&
+    /^(?:bentConnector[2-5]|curvedConnector2)$/.test(shape.shapeType);
   if (hasHead) {
-    drawLineEnd(ctx, endpoints.start, endpoints.next, head, color, width);
+    drawLineEnd(ctx, endpoints.start, endpoints.next, head, color, width, solidArrow);
   }
   if (hasTail) {
-    drawLineEnd(ctx, endpoints.end, endpoints.prev, tail, color, width);
+    drawLineEnd(ctx, endpoints.end, endpoints.prev, tail, color, width, solidArrow);
   }
 }
 
@@ -1200,7 +1202,8 @@ function drawLineEnd(
   toward: Point,
   end: { type?: string; width?: string; length?: string },
   color: string,
-  strokeWidth: number
+  strokeWidth: number,
+  solidArrow: boolean
 ): void {
   const angle = Math.atan2(toward.y - tip.y, toward.x - tip.x);
   const length = strokeWidth * lineEndScale(end.length, 4);
@@ -1230,8 +1233,10 @@ function drawLineEnd(
     ctx.lineTo(baseX + normalX, baseY + normalY);
     ctx.lineTo(baseX - normalX, baseY - normalY);
     ctx.closePath();
-    if (end.type === 'arrow') ctx.stroke();
-    else ctx.fill();
+    if (end.type === 'arrow') {
+      if (solidArrow) ctx.setLineDash([]);
+      ctx.stroke();
+    } else ctx.fill();
   }
   ctx.restore();
 }

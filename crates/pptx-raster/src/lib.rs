@@ -1753,10 +1753,9 @@ mod tests {
         let images = AssetMap::new();
         let resources = RenderResources::new(&fonts, &images);
         for (guide, painted, gap) in [(1e37, 160, 154), (-1e37, 10, 17)] {
-            let commands = ooxml_drawingml::preset_geometry_to_path(
+            let commands = ooxml_drawingml::connector_geometry_for_rendering(
                 "bentConnector3",
                 &std::collections::HashMap::from([("adj1".to_owned(), guide)]),
-                1.0,
             )
             .unwrap();
             let mut list = empty_list(192.0, 160.0);

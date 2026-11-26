@@ -8010,7 +8010,9 @@ fn geometry_path_with_fallback(
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect();
-    match preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+    match ooxml_drawingml::connector_geometry_for_rendering(geometry, &adjustments)
+        .or_else(|| preset_geometry_to_path(geometry, &adjustments, aspect_ratio))
+    {
         Some(path) => (path, false),
         None => (
             preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio).unwrap_or_default(),

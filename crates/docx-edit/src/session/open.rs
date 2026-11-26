@@ -293,7 +293,7 @@ impl EditSessionCore {
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some((envelope, media, budget_stopped, document_path)) =
+        let Some((envelope, media, budget_stopped, document_path, connectors)) =
             crate::seed::parse_docx_preview(bytes.into(), blocks, paragraph_budget)?
         else {
             return Ok(None);
@@ -301,8 +301,13 @@ impl EditSessionCore {
         let host_envelope = thin_docx_envelope(&envelope);
         let whole_body =
             !budget_stopped && envelope.document.package.document.content.len() < blocks;
-        let fonts =
-            crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media, &document_path)?;
+        let fonts = crate::seed::seed_preview_envelope(
+            self.engine.doc(),
+            envelope,
+            media,
+            &document_path,
+            connectors,
+        )?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);

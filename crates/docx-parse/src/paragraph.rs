@@ -25,7 +25,7 @@ use crate::section::{SectionProperties, parse_section_properties};
 use crate::shape::{
     Shape, is_shape_drawing, parse_shape_from_drawing, resolve_shape_fill_pictures,
 };
-use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
+use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art};
 use crate::styles::{DocDefaults, StyleMap};
 use crate::text_box::with_bookmark_scope;
 use crate::theme::Theme;
@@ -1539,19 +1539,24 @@ fn parse_drawing_owned_inner(
         DrawingChart::None => {}
     }
     if is_smart_art_drawing(element) {
+        let mut guides = Vec::new();
+        let capture = budget.connector_story.is_some().then_some(&mut guides);
         let shape = match drawing {
-            Some(context) => parse_smart_art_from_drawing(
+            Some(context) => parse_smart_art(
                 element,
                 relationships,
                 Some(context.media),
                 Some(&mut *context.smart_art),
                 budget,
+                false,
+                capture,
             )?,
             None => None,
         };
         return Ok(vec![match shape {
             Some(mut shape) => {
                 apply_shape_metadata(&mut shape, element);
+                budget.record_connector(&shape, guides);
                 RunContent::Shape {
                     shape: Box::new(shape),
                     drawing_properties: None,
@@ -1568,7 +1573,13 @@ fn parse_drawing_owned_inner(
         }]);
     }
     if is_shape_drawing(element) {
-        if let Some(mut shape) = parse_shape_from_drawing(element) {
+        let mut guides = Vec::new();
+        let parsed = if budget.connector_story.is_some() {
+            crate::shape::parse_shape_with_connector_guides(element, &mut guides)
+        } else {
+            parse_shape_from_drawing(element)
+        };
+        if let Some(mut shape) = parsed {
             if shape.scene.is_some()
                 && let Some(context) = drawing.as_deref_mut()
                 && let Some(enrich) = context.group_text_boxes.as_deref_mut()
@@ -1578,6 +1589,7 @@ fn parse_drawing_owned_inner(
             let media = drawing.as_ref().map(|context| context.media);
             resolve_shape_fill_pictures(&mut shape, relationships, media);
             apply_shape_metadata(&mut shape, element);
+            budget.record_connector(&shape, guides);
             crate::text_box::capture_bookmark_source(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),

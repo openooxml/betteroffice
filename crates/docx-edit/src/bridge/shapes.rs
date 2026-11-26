@@ -1442,9 +1442,6 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
         "star16" => star(16),
         "star24" => star(24),
         "star32" => star(32),
-        name if ooxml_drawingml::is_corrected_connector_preset(name) => {
-            return shared_preset_geometry(name, &Value::Null);
-        }
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
         "curvedConnector5" => curved_connector(5),
