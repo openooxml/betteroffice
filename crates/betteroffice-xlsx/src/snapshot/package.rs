@@ -293,7 +293,7 @@ impl PackageSlot {
             || (styles_changed
                 && sheet_alternates
                     .get(sheet)
-                    .is_some_and(|cached| matches!(cached.get(), Some(Ok(Some(_)))))
+                    .is_some_and(|cached| matches!(cached.get(), Some(Ok(Some(_))))))
     }
 
     fn sheet_alternate_source(&self, sheet: usize) -> Result<Option<&AlternateContentSources>> {
