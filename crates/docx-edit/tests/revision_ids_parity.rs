@@ -10,6 +10,9 @@ use docx_parse::S13SaveRequest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[path = "support/revision_id_string_paths.rs"]
+mod string_paths;
+
 #[derive(Deserialize)]
 struct Case {
     document: String,
@@ -112,7 +115,6 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
             .into());
         }
     }
-    drop(typed_before);
     if !ts_ids.keys().eq(case.session.iter()) {
         return Err("recorded sites and session placeholders differ".into());
     }
@@ -127,6 +129,22 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         )
         .into());
     }
+
+    let skipped = case
+        .sites
+        .iter()
+        .map(|site| site.path.strip_suffix("/id").unwrap())
+        .collect();
+    let expected_strings = string_paths::json_string_paths(&typed_before, &skipped);
+    if reservations.string_paths != expected_strings {
+        let missing = expected_strings.difference(&reservations.string_paths).next();
+        let extra = reservations.string_paths.difference(&expected_strings).next();
+        return Err(format!(
+            "string paths differ: first JSON-only path {missing:?}, first Rust-only path {extra:?}"
+        )
+        .into());
+    }
+    drop(typed_before);
 
     let mut paths = Vec::new();
     let actual_ids =

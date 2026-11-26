@@ -226,6 +226,7 @@ pub struct RevisionIdReservations {
     pub used: BTreeSet<u32>,
     pub max: u32,
     pub sites: BTreeMap<(String, u32), usize>,
+    pub string_paths: BTreeSet<String>,
 }
 
 #[doc(hidden)]
@@ -238,6 +239,7 @@ pub fn session_revision_id_reservations(
         used: found.used.into_iter().collect(),
         max: found.max,
         sites: found.reservations,
+        string_paths: found.string_paths,
     })
 }
 
@@ -272,6 +274,7 @@ struct Collected {
     used: FastSet<u32>,
     sites: FastMap<u64, SiteCount>,
     reservations: BTreeMap<(String, u32), usize>,
+    string_paths: BTreeSet<String>,
     site_count: usize,
     blocks_with_sites: FastSet<*const ()>,
     body_blocks_with_sites: Vec<usize>,

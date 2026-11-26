@@ -4,6 +4,13 @@ use docx_parse::write_docx_s13;
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlDocument, XmlElement, parse_xml};
 use serde_json::json;
 
+mod string_paths {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/revision_id_string_paths.rs"
+    ));
+}
+
 const FIRST: u64 = (1 << 53) - 1;
 const SECOND: u64 = 1 << 40;
 const DOCUMENT: &str = "word/document.xml";
@@ -532,6 +539,321 @@ fn reports_reservations_at_serialized_typed_and_json_paths() {
     assert_eq!(paths, [("/document/content/1/pPrIns/id".to_owned(), FIRST)]);
 }
 
+fn drawing_string_path_examples() -> Vec<Value> {
+    let transforms = [
+        "tint", "shade", "hue", "hueMod", "hueOff", "sat", "satMod", "satOff", "lum",
+        "lumMod", "lumOff", "red", "redMod", "redOff", "green", "greenMod", "greenOff",
+        "blue", "blueMod", "blueOff", "alpha", "alphaMod", "alphaOff",
+    ]
+    .into_iter()
+    .map(|kind| json!({"kind": kind, "value": 0.5}))
+    .chain(
+        ["comp", "inv", "gray", "gamma", "invGamma"]
+            .into_iter()
+            .map(|kind| json!({"kind": kind})),
+    )
+    .collect::<Vec<_>>();
+    let image = json!({
+        "type": "image", "rId": "rId1", "size": {"width": 1, "height": 1},
+        "wrap": {"type": "square", "wrapText": "bothSides"},
+        "position": {"horizontal": {"relativeTo": "page"}, "vertical": {"relativeTo": "line"}},
+        "hyperlink": {"href": "https://example.com", "doc_location": "target"},
+        "effects": {"ordered": [{"kind": "duotone", "colors": ["001122", "334455"]}]}
+    });
+    let shape = json!({
+        "type": "shape", "shapeType": "rect", "size": {"width": 1, "height": 1},
+        "fill": {
+            "type": "gradient",
+            "gradient": {"type": "linear", "stops": [
+                {"position": 0, "color": {"rgb": "112233", "transforms": transforms}}
+            ]}
+        },
+        "outline": {"style": "solid", "headEnd": {"type": "triangle"}},
+        "fillPaint": {
+            "kind": "picture", "picture": image, "tile": {"alignment": "ctr"},
+            "stops": [{"color": {"rgb": "334455"}}]
+        },
+        "strokePaint": {"dash": "dash", "tailEnd": {"type": "arrow"}},
+        "effects": [{"kind": "shadow", "color": {"rgb": "556677"}}],
+        "textBodyProperties": {"anchor": "ctr", "margins": {}},
+        "geometryPath": [
+            {"type": "move", "x": 1, "y": 2},
+            {"type": "line", "x": 2, "y": 3},
+            {"type": "quad", "cpx": 3, "cpy": 4, "x": 5, "y": 6},
+            {"type": "cubic", "cp1x": 1, "cp1y": 2, "cp2x": 3, "cp2y": 4, "x": 5, "y": 6},
+            {"type": "close"}
+        ],
+        "scene": {"title": "group", "root": {"kind": "group"}},
+        "drawingModel": {
+            "type": "insertion",
+            "info": {"id": SECOND, "author": "Reviewer", "custom": ["hidden", {"name": "hidden"}]},
+            "content": [
+                {"type": "run", "content": [{"type": "text", "text": "Drawing"}]},
+                {"type": "hyperlink", "children": [
+                    {"type": "simpleField", "fieldTree": {"result": {"inline": ["Page"]}}},
+                    {"type": "complexField", "structuredCode": {"inline": ["PAGE"]}}
+                ]},
+                {"type": "shape", "scene": {"root": {"shape": {"name": "Untyped shape"}}}},
+                {"type": "table", "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "content": [{"type": "paragraph", "typeLabel": "Cell"}]}
+                ]}]}
+            ]
+        },
+        "textBody": {"anchor": "ctr", "content": [
+            {"type": "paragraph", "content": ["", null, false, 1, {"a~/b": "nested text"}]}
+        ]}
+    });
+    let chart = json!({
+        "type": "chart", "chartType": "bar",
+        "series": [{
+            "name": "A", "categories": ["Q1"], "values": [1], "color": "112233",
+            "points": [{"color": "223344"}], "marker": {"symbol": "circle"},
+            "dataLabels": {"separator": ", ", "points": [{
+                "runs": [{"text": "w:id='91'"}, {"field": "VALUE"}], "labels": {}
+            }]}
+        }],
+        "axes": {"category": {
+            "axisType": "category", "reversed": false, "hidden": false,
+            "line": {"none": false, "color": "334455"}
+        }},
+        "legend": {"visible": true, "position": "b", "text": {"font": "Arial"}},
+        "plotGroups": [{"axisIds": ["1"], "series": [], "varyColors": false, "showDataLabels": true}]
+    });
+    let mut drawings = vec![
+        json!({"type": "drawing", "image": image}),
+        json!({"type": "shape", "shape": shape}),
+        json!({"type": "chart", "chart": chart}),
+        json!({"type": "opaqueDrawing", "kind": "drawing", "xml": "<w:drawing/>", "textBox": shape}),
+        json!({"type": "horizontalRule", "rule": {
+            "height": 1, "alignment": "left", "noShade": false, "color": "000000", "xml": "<w:pict/>"
+        }}),
+    ];
+    drawings.extend(
+        ["picture", "shape", "textBox", "group", "chart", "diagram", "other"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                json!({"type": "drawing", "image": image, "drawing": {
+                    "type": kind, "placement": if index == 0 { "inline" } else { "anchor" },
+                    "hidden": false, "decorative": false, "name": "Example"
+                }})
+            }),
+    );
+    drawings
+}
+
+fn patch_string_path_examples() -> Value {
+    let delta = json!({
+        "path": ["a~/b"], "before": {"state": "missing"},
+        "after": {"state": "present", "value": {"description": "Added"}}
+    });
+    let mut patch = json!({
+        "ordinal": 0, "sessionKey": "body:0", "resultSha256": "result",
+        "seed": {
+            "units": [
+                {"kind": "text", "text": "Before", "attrs": {"color": "red"}},
+                {"kind": "atom", "atomKind": "opaque", "payload": {"xml": "<w:r/>"}, "attrs": {}}
+            ],
+            "properties": {}, "unitSha256": "seed",
+            "inherit": {"paragraph": {"style": "Normal"}, "runs": [{}], "paragraphMark": {}}
+        },
+        "textEdits": [
+            {"from": 0, "to": 1, "insert": [{"text": "After", "attrs": {}, "inherit": {}}],
+                "donor": {"kind": "at", "at": 0}},
+            {"from": 2, "to": 3, "insert": [], "donor": {"kind": "pilcrow"}}
+        ],
+        "runEdits": [{"from": 0, "to": 1, "deltas": [delta], "target": {}, "inherit": {}}],
+        "paraDeltas": [delta], "paraInherit": {}, "markInherit": {"font": "Arial"}
+    });
+    let current = patch.clone();
+    patch["inheritance"] = json!("unknown");
+    let legacy = [
+        "MISSING_SOURCE", "SOURCE_DIGEST_MISMATCH", "INVALID_PLAN", "SEED_MISMATCH",
+        "AMBIGUOUS_ALIGNMENT", "AMBIGUOUS_DONOR", "INVALID_BOUNDARY", "UNSUPPORTED_KEY",
+        "UNSUPPORTED_STRUCTURE", "PROPERTY_CONFLICT", "PATCH_CONFLICT", "RESULT_MISMATCH",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(ordinal, code)| json!({"ordinal": ordinal, "code": code, "detail": "Reason"}))
+    .collect::<Vec<_>>();
+    json!({
+        "removedCommentIds": ["1"],
+        "sectionEdits": {"sha256": "sections", "edits": [{"properties": {"type": "nextPage"}}]},
+        "assignments": [{"part": DOCUMENT, "ordinal": 0, "paraId": "00000001"}],
+        "patchedParts": [{"part": DOCUMENT, "paraIds": [[0, "00000001"]]}],
+        "wholeParts": [{"part": "word/header1.xml", "sha256": "header", "changed": [0]}],
+        "touchedParts": [{"part": "word/footer1.xml", "touched": [0]}],
+        "splicedParts": [{
+            "part": DOCUMENT, "sha256": "body", "paragraphPatches": [current, patch],
+            "legacyParagraphs": legacy, "tablePatches": [{
+                "ordinal": 0, "before": {"type": "table", "rows": []},
+                "after": {"type": "table", "rows": ["untyped row"]}
+            }]
+        }]
+    })
+}
+
+#[test]
+fn scans_all_serialized_string_paths() {
+    const TS_SKIPPED_REVISION_INFOS: (&str, [&str; 3]) = (
+        "packages/docx/src/docx/sessionRevisionIds.ts:60",
+        [
+            "/document/content/0/pPrIns",
+            "/document/content/0/content/0/content/1/shape/drawingModel/info",
+            "/document/content/0/content/0/content/3/textBox/drawingModel/info",
+        ],
+    );
+    let mut run_content = drawing_string_path_examples();
+    run_content.extend([
+        json!({"type": "text", "text": "Body", "preserveSpace": true}),
+        json!({"type": "tab"}),
+        json!({"type": "break", "breakType": "textWrapping", "clear": "all"}),
+        json!({"type": "symbol", "font": "Symbol", "char": "F0B7"}),
+        json!({"type": "footnoteRef", "id": 1}),
+        json!({"type": "endnoteRef", "id": 1}),
+        json!({"type": "footnoteRefMark"}),
+        json!({"type": "endnoteRefMark"}),
+        json!({"type": "separator"}),
+        json!({"type": "continuationSeparator"}),
+        json!({"type": "commentReference", "id": 2}),
+        json!({"type": "fieldChar", "charType": "begin", "formData": {
+            "name": "Example", "controlType": "dropDown", "listEntries": ["One"]
+        }}),
+        json!({"type": "instrText", "text": "PAGE"}),
+        json!({"type": "softHyphen"}),
+        json!({"type": "noBreakHyphen"}),
+    ]);
+    let run_formatting = json!({
+        "underline": {"style": "single"}, "fontFamily": {"ascii": "Arial"},
+        "language": {"latin": "en-US"}, "modernEffects": {
+            "glow": {"color": "112233"}, "shadow": {"color": "223344"},
+            "textFill": {"kind": "gradient", "stops": [{"color": "334455"}]},
+            "textOutline": {"color": "445566", "dash": "solid"}
+        }
+    });
+    let sdt = json!({
+        "sdtType": "richText", "alias": "Control", "listItems": [{"displayText": "One", "value": "1"}],
+        "dateState": {"format": "yyyy-MM-dd"}, "checkedState": {"value": "2612"},
+        "gallery": {"gallery": "placeholder"}, "controlState": {"value": "1"},
+        "dataBinding": {"xpath": "/root/value", "storeItemID": "item"}
+    });
+    let raw = json!({"type": "rawXml", "xml": "<w:customXml/>"});
+    let empty_paragraph = json!({"type": "paragraph", "content": []});
+    let field_result = json!({"inline": [raw], "blocks": [empty_paragraph]});
+    let info = json!({"id": 3, "author": "Editor", "date": "2030-01-02"});
+    let body = json!({
+        "type": "paragraph", "paraId": "00000001",
+        "pPrIns": {"id": FIRST, "author": "Skipped", "date": "2030-01-03"},
+        "pPrDel": info,
+        "propertyChanges": [{"type": "paragraphPropertyChange", "info": info}],
+        "formatting": {
+            "frame": {"hAnchor": "page"}, "cnfStyle": {"val": "1000"},
+            "borders": {"top": {"style": "single"}}, "shading": {"pattern": "clear"},
+            "tabs": [{"position": 720, "alignment": "left"}], "runProperties": run_formatting
+        },
+        "listRendering": {
+            "marker": "1.", "level": 0, "numId": 1, "isBullet": false,
+            "numFmt": "decimal", "levelNumFmts": ["decimal"]
+        },
+        "extraAttributes": [{"name": "custom", "value": "body"}],
+        "content": [
+            {"type": "run", "formatting": run_formatting, "content": run_content,
+                "directionScopes": [{"kind": "dir", "id": 0, "val": "ltr"}, {"kind": "bdo", "id": 1}],
+                "propertyChanges": [{"type": "runPropertyChange",
+                    "info": {"id": 4, "author": "Editor", "rsid": "0123ABCD"}}]},
+            change(5),
+            {"type": "moveFromRangeStart", "id": 6, "name": "move"},
+            {"type": "moveFromRangeEnd", "id": 6},
+            {"type": "commentRangeStart", "id": 2},
+            {"type": "bookmarkStart", "id": 7, "name": "bookmark"},
+            {"type": "bookmarkEnd", "id": 7},
+            {"type": "hyperlink", "href": "#bookmark", "children": [change(8)]},
+            {"type": "simpleField", "instruction": "PAGE", "fieldType": "PAGE", "content": [],
+                "structuredResult": field_result},
+            {"type": "complexField", "instruction": "PAGE", "fieldType": "PAGE",
+                "fieldCode": [], "fieldResult": [], "fieldTree": {
+                    "displayMode": "result", "result": field_result
+                }},
+            {"type": "inlineSdt", "properties": sdt, "content": []},
+            {"type": "mathEquation", "display": "inline", "ommlXml": "<m:oMath/>"},
+            raw
+        ]
+    });
+    let table = json!({
+        "type": "table", "formatting": {
+            "caption": "Table", "floating": {"horzAnchor": "page"},
+            "look": {"value": "04A0"}, "cellMargins": {"top": {"type": "dxa", "value": 100}}
+        },
+        "propertyChanges": [{"type": "tablePropertyChange", "info": info}],
+        "rows": [{
+            "type": "tableRow", "formatting": {"heightRule": "atLeast"},
+            "propertyChanges": [{"type": "tableRowPropertyChange", "info": info}],
+            "structuralChange": {"type": "insertion", "info": info},
+            "cells": [{
+                "type": "tableCell", "formatting": {"verticalAlign": "center"},
+                "propertyChanges": [{"type": "tableCellPropertyChange", "info": info}],
+                "content": [empty_paragraph]
+            }]
+        }]
+    });
+    let sections = json!({
+        "orientation": "portrait",
+        "headerReferences": [{"type": "default", "rId": "rId1"}],
+        "lineNumbers": {"restart": "continuous"}, "pageNumbering": {"format": "decimal"},
+        "pageBorders": {"display": "allPages"}, "background": {"themeColor": "accent1"},
+        "footnotePr": {"position": "pageBottom", "separators": [{"kind": "separator"}]},
+        "docGrid": {"type": "lines"}
+    });
+    let level = json!({"ilvl": 0, "numFmt": "decimal", "lvlText": "%1."});
+    let request: S13SaveRequest = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
+        "document": {
+            "content": [body, table, raw, {"type": "blockSdt", "properties": sdt, "content": [raw]}],
+            "sections": [{"id": "main", "properties": sections, "content": [empty_paragraph]}],
+            "comments": [{"id": 2, "author": "Reviewer", "content": [empty_paragraph]}]
+        },
+        "headerEntries": [["rId1", {
+            "type": "header", "hdrFtrType": "default", "content": [empty_paragraph],
+            "watermark": {"kind": "text", "text": "Draft", "font": "Arial", "color": "AAAAAA",
+                "semitransparent": true, "layout": "diagonal"},
+            "watermarkBox": {"widthPt": 20, "heightPt": 10, "rotation": 45, "horizontal": "center"}
+        }]],
+        "footerEntries": [["rId2", {
+            "type": "footer", "hdrFtrType": "default", "content": [empty_paragraph],
+            "watermark": {"kind": "picture", "relId": "rId3", "scale": 1, "washout": false}
+        }]],
+        "footnotes": [{"type": "footnote", "id": 1, "noteType": "normal", "content": [empty_paragraph]}],
+        "endnotes": [{"type": "endnote", "id": 1, "noteType": "normal", "content": [raw]}],
+        "relationshipEntries": [
+            ["rId1", {"id": "rId1", "type": "header", "target": "header1.xml", "targetMode": "Internal"}],
+            ["rId2", {"id": "rId2", "type": "hyperlink", "target": "https://example.com", "targetMode": "External"}]
+        ],
+        "options": {"modifiedBy": "Editor"},
+        "numbering": {
+            "abstractNums": [{"abstractNumId": 1, "levels": [level]}],
+            "nums": [{"numId": 1, "abstractNumId": 1, "levelOverrides": [{"ilvl": 0, "lvl": level}]}]
+        },
+        "selective": {"changedParaIds": ["00000001"], "sourceParagraphs": {
+            "partSha256": "body", "paragraphs": [{"path": [0], "block": 0}]
+        }},
+        "paragraphIds": patch_string_path_examples()
+    }))
+    .unwrap();
+    let found =
+        session_revision_id_reservations(&request, &BTreeSet::from([FIRST, SECOND])).unwrap();
+    let wire = serde_json::to_value(&request).unwrap();
+    let (source, skipped) = TS_SKIPPED_REVISION_INFOS;
+    for path in skipped {
+        assert!(
+            wire.pointer(path).is_some(),
+            "missing {source} exception at {path}"
+        );
+    }
+    let expected = string_paths::json_string_paths(&wire, &BTreeSet::from(skipped));
+    assert_eq!(found.string_paths, expected, "{source}");
+    assert!(found.used.contains(&91));
+}
+
 #[test]
 fn assigns_in_site_order_and_shares_one_id_across_info_types() {
     let mut request = request(json!([
@@ -764,33 +1086,33 @@ fn bounds_visits_to_nested_shared_blocks() {
         .unwrap();
 }
 
+fn assign_flat(paragraphs: usize) -> Work {
+    let mut session = BTreeSet::new();
+    let mut blocks = Vec::with_capacity(paragraphs + paragraphs / 50);
+    for index in 0..paragraphs {
+        let mut content = vec![json!({
+            "type": "run", "content": [{"type": "text", "text": "Earlier inspection."}]
+        })];
+        if index % 10 == 0 {
+            let id = FIRST - index as u64;
+            session.insert(id);
+            content.push(change(id));
+        }
+        blocks.push(json!({"type": "paragraph", "content": content}));
+        if index % 50 == 0 {
+            blocks.push(json!({"type": "rawXml", "xml": "<w:customXml w:id='42'/>"}));
+        }
+    }
+    let mut request = request(Value::Array(blocks));
+    WORK.with_borrow_mut(|work| *work = Work::default());
+    let ids = assign_session_revision_ids(&mut request, &session).unwrap();
+    assert_eq!(ids.len(), paragraphs / 10);
+    assert_eq!(ids.values().copied().min(), Some(43));
+    WORK.with_borrow(|work| *work)
+}
+
 #[test]
 fn bounds_work_for_flat_revision_requests() {
-    fn assign_flat(paragraphs: usize) -> Work {
-        let mut session = BTreeSet::new();
-        let mut blocks = Vec::with_capacity(paragraphs + paragraphs / 50);
-        for index in 0..paragraphs {
-            let mut content = vec![json!({
-                "type": "run", "content": [{"type": "text", "text": "Earlier inspection."}]
-            })];
-            if index % 10 == 0 {
-                let id = FIRST - index as u64;
-                session.insert(id);
-                content.push(change(id));
-            }
-            blocks.push(json!({"type": "paragraph", "content": content}));
-            if index % 50 == 0 {
-                blocks.push(json!({"type": "rawXml", "xml": "<w:customXml w:id='42'/>"}));
-            }
-        }
-        let mut request = request(Value::Array(blocks));
-        WORK.with_borrow_mut(|work| *work = Work::default());
-        let ids = assign_session_revision_ids(&mut request, &session).unwrap();
-        assert_eq!(ids.len(), paragraphs / 10);
-        assert_eq!(ids.values().copied().min(), Some(43));
-        WORK.with_borrow(|work| *work)
-    }
-
     let paragraphs = 2_000;
     let small = assign_flat(paragraphs);
     let large = assign_flat(10 * paragraphs);
@@ -840,6 +1162,53 @@ fn bounds_work_for_flat_revision_requests() {
         assert_eq!(work.make_mut, count / 10);
         assert_eq!(work.id_probes, count / 10);
         assert_eq!(work.verified, count / 10);
+    }
+}
+
+#[test]
+#[ignore]
+fn revision_id_work_counts_large() {
+    let small = assign_flat(50_000);
+    let large = assign_flat(200_000);
+    let counters = [
+        ("fields", small.fields, large.fields, 14),
+        ("strings", small.strings, large.strings, 2),
+        ("string_bytes", small.string_bytes, large.string_bytes, 88),
+        (
+            "reservation_inserts",
+            small.reservation_inserts,
+            large.reservation_inserts,
+            0,
+        ),
+        ("site_inserts", small.site_inserts, large.site_inserts, 0),
+        (
+            "collected_blocks",
+            small.collected_blocks,
+            large.collected_blocks,
+            0,
+        ),
+        (
+            "body_block_selections",
+            small.body_block_selections,
+            large.body_block_selections,
+            0,
+        ),
+        ("block_inserts", small.block_inserts, large.block_inserts, 0),
+        ("block_probes", small.block_probes, large.block_probes, 0),
+        ("make_mut", small.make_mut, large.make_mut, 0),
+        ("id_probes", small.id_probes, large.id_probes, 0),
+        ("verified", small.verified, large.verified, 0),
+    ];
+    for (paragraphs, use_large) in [(50_000, false), (200_000, true)] {
+        let mut line = format!("REVISION-ID-WORK paragraphs={paragraphs}");
+        for (name, small, large, _) in counters {
+            let value = if use_large { large } else { small };
+            write!(line, " {name}={value}").unwrap();
+        }
+        println!("{line}");
+    }
+    for (name, small, large, fixed) in counters {
+        assert_eq!(large + 3 * fixed, 4 * small, "{name} (fixed work: {fixed})");
     }
 }
 
