@@ -1732,8 +1732,15 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        stroke_visible_path(&mut target, &path, &paint, &stroke, Transform::identity(), None)
-            .unwrap();
+        stroke_visible_path(
+            &mut target,
+            &path,
+            &paint,
+            &stroke,
+            Transform::identity(),
+            None,
+        )
+        .unwrap();
         let single = target.pixel(10, 8).unwrap();
         assert!((126..=128).contains(&single.green()));
         assert_eq!(target.pixel(14, 8), Some(single));

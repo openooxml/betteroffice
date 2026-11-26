@@ -1,4 +1,6 @@
-use tiny_skia::{Path, PathBuilder, PathSegment, PathStroker, Point, Stroke, StrokeDash, Transform};
+use tiny_skia::{
+    Path, PathBuilder, PathSegment, PathStroker, Point, Stroke, StrokeDash, Transform,
+};
 
 /// Clips an open polyline and keeps the dash phase measured from its original start.
 pub fn clip_dashed_polyline(

@@ -1815,7 +1815,12 @@ mod tests {
             Some(&0.5)
         );
         assert!(preset_geometry_default_adjustments("rect").is_empty());
-        for preset in ["bentConnector2", "bentConnector3", "bentConnector4", "bentConnector5"] {
+        for preset in [
+            "bentConnector2",
+            "bentConnector3",
+            "bentConnector4",
+            "bentConnector5",
+        ] {
             assert!(preset_geometry_default_adjustments(preset).is_empty());
         }
     }
