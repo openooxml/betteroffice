@@ -253,7 +253,7 @@ describe('native package release wiring', () => {
       "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
     );
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(90);
+    expect(job['timeout-minutes']).toBe(120);
     expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
     expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
     const step = job.steps[1];
@@ -385,6 +385,10 @@ describe('native package release wiring', () => {
       expect([...targets].sort()).toEqual([...manifest.napi.targets].sort());
     }
     expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
+    expect(job['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
+    expect(job.strategy.matrix.platform.filter((platform: any) => platform.timeout)).toEqual([
+      { os: 'macos-15-intel', target: 'x86_64-apple-darwin', timeout: 75 }
+    ]);
     expect(publish.jobs.dist.uses).toBe('./.github/workflows/native-dist.yml');
     expect(publish.jobs.dist.with).toEqual({
       binding: '${{ inputs.binding }}',
