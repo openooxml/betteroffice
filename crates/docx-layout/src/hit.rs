@@ -949,28 +949,27 @@ fn in_note_area(area: &NoteRegion, x: f64, y: f64) -> bool {
 /// Mirrors `displayListImages.ts`: reverse paint order, and no document
 /// position means nothing selects it (a picture watermark), so text painted
 /// over such an image stays readable through it.
-fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
-    prims
-        .iter()
+fn over_selectable_image<'a>(
+    prims: &[Primitive],
+    candidates: impl DoubleEndedIterator<Item = (usize, &'a Primitive)>,
+    x: f64,
+    y: f64,
+) -> bool {
+    candidates
         .rev()
-        .find(|primitive| match primitive {
+        .find_map(|(index, primitive)| match primitive {
             Primitive::Image(img) => {
                 let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
                 let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-                x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+                (x >= ix && x <= ix + iw && y >= iy && y <= iy + ih)
+                    .then_some(img.attrs.doc_start.is_some())
             }
-            Primitive::Shape(shape) => {
-                shape.attrs.doc_start.is_some()
-                    && shape_can_hit(shape)
-                    && shape_contains_point(shape, x, y)
+            Primitive::Shape(shape) if shape_can_hit(shape) && shape_contains_point(shape, x, y) => {
+                shape_doc_start(&prims[..index], shape).map(|_| true)
             }
-            _ => false,
+            _ => None,
         })
-        .is_some_and(|primitive| match primitive {
-            Primitive::Image(img) => img.attrs.doc_start.is_some(),
-            Primitive::Shape(shape) => shape.attrs.doc_start.is_some(),
-            _ => false,
-        })
+        .unwrap_or(false)
 }
 
 fn is_connector(shape: &ShapePrimitive) -> bool {
@@ -979,6 +978,26 @@ fn is_connector(shape: &ShapePrimitive) -> bool {
         .image_shape_type
         .as_deref()
         .is_some_and(ooxml_drawingml::is_corrected_connector_preset)
+}
+
+fn shape_doc_start(preceding: &[Primitive], shape: &ShapePrimitive) -> Option<i64> {
+    shape.attrs.doc_start.or_else(|| {
+        let mut child = shape.attrs.block_key.as_deref()?;
+        if !is_connector(shape) || !child.contains(":child:") {
+            return None;
+        }
+        preceding.iter().rev().find_map(|primitive| {
+            let Primitive::Shape(owner) = primitive else {
+                return None;
+            };
+            let key = owner.attrs.block_key.as_deref()?;
+            if !child.strip_prefix(key)?.starts_with(":child:") {
+                return None;
+            }
+            child = key;
+            owner.attrs.doc_start
+        })
+    })
 }
 
 fn shape_can_hit(shape: &ShapePrimitive) -> bool {
@@ -1021,10 +1040,20 @@ fn shape_contains_point(shape: &ShapePrimitive, x: f64, y: f64) -> bool {
 /// point is in the region's typeable area (false for a band, which has no
 /// content box); it widens the target only, never the position.
 fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointResolution {
+    resolve_point_in(prims, prims.iter().enumerate(), typeable, x, y)
+}
+
+fn resolve_point_in<'a>(
+    prims: &[Primitive],
+    candidates: impl DoubleEndedIterator<Item = (usize, &'a Primitive)> + Clone,
+    typeable: bool,
+    x: f64,
+    y: f64,
+) -> PointResolution {
     // outranks text for the CURSOR only: the pointer path selects an image
     // before it asks for a position, so position resolution keeps its own order
-    let image_target = over_selectable_image(prims, x, y);
-    let hits = text_hits(prims);
+    let image_target = over_selectable_image(prims, candidates.clone(), x, y);
+    let hits: Vec<_> = candidates.clone().filter_map(|(_, p)| text_hit(p)).collect();
     // What the point earns once no run claims it. An area with no positionable
     // text is not typeable whatever it encloses: such a click is answered with
     // the document's end.
@@ -1057,7 +1086,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     // 2. direct hit on an image with a doc position (caret parks before it).
     // Only the topmost image decides the target, so an unselectable one over
     // this leaves the area's answer standing.
-    for p in prims {
+    for (index, p) in candidates {
         match p {
             Primitive::Image(img) => {
                 let Some(ds) = img.attrs.doc_start else {
@@ -1074,13 +1103,10 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                 }
             }
             Primitive::Shape(shape) => {
-                if !shape_can_hit(shape) {
-                    continue;
-                }
-                let Some(ds) = shape.attrs.doc_start else {
-                    continue;
-                };
-                if shape_contains_point(shape, x, y) {
+                if shape_can_hit(shape)
+                    && shape_contains_point(shape, x, y)
+                    && let Some(ds) = shape_doc_start(&prims[..index], shape)
+                {
                     return PointResolution {
                         pos: Some(ds),
                         target,
@@ -1291,7 +1317,12 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
 
 /// Whether `primitive` carries a document position and paints its hit box at
 /// the point, inside its clip as the canvas and raster painters draw it.
-fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
+fn painted_body_hit_at(primitive: &Primitive, preceding: &[Primitive], x: f64, y: f64) -> bool {
+    if let Primitive::Shape(shape) = primitive
+        && is_connector(shape)
+    {
+        return connector::contains(shape, x, y, 0.0) && shape_doc_start(preceding, shape).is_some();
+    }
     let Some(attrs) = doc_attrs(primitive) else {
         return false;
     };
@@ -1315,11 +1346,6 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         || transparent(attrs.primitive_opacity.as_ref())
     {
         return false;
-    }
-    if let Primitive::Shape(shape) = primitive
-        && is_connector(shape)
-    {
-        return connector::contains(shape, x, y, 0.0);
     }
     let paints = match primitive {
         Primitive::Text(text) => !js_blank(&text.text) && !text_fill_none(attrs),
@@ -1588,13 +1614,15 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
             && in_band(band)
         {
             // Only body content painted at the point takes it, and its own position answers.
-            let painted: Vec<Primitive> = page
+            let painted: Vec<_> = page
                 .primitives
                 .iter()
-                .filter(|primitive| painted_body_hit_at(primitive, x, y))
-                .cloned()
+                .enumerate()
+                .filter(|(index, primitive)| {
+                    painted_body_hit_at(primitive, &page.primitives[..*index], x, y)
+                })
                 .collect();
-            let body = resolve_point(&painted, false, x, y);
+            let body = resolve_point_in(&page.primitives, painted.into_iter(), false, x, y);
             if body.direct {
                 return Some(RegionHit {
                     region: HitRegion::Body,

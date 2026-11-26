@@ -507,7 +507,7 @@ fn parse_s9_package_impl(
         ));
     }
     let mut budget = ParseBudget::new(limits);
-    budget.preview_connectors = capture_connectors.then(BTreeMap::new);
+    budget.preview_connectors = capture_connectors.then(Default::default);
     if let Some(table) = media_table {
         budget.read_media_from(table);
     }
@@ -906,7 +906,9 @@ fn parse_s9_package_impl(
             canonical_sha256,
         },
         budget_stopped,
-        budget.preview_connectors.unwrap_or_default(),
+        budget.preview_connectors.map_or_else(BTreeMap::new, |sources| {
+            std::mem::take(&mut *sources.lock().unwrap())
+        }),
     )))
 }
 

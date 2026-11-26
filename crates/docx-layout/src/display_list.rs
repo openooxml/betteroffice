@@ -10591,7 +10591,6 @@ fn emit_shape_fragment_with_clip(
         .filter(|name| ooxml_drawingml::is_corrected_connector_preset(name))
         .map(str::to_owned);
     attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
-    let owner_start = attrs.doc_start;
 
     let decorative = block.decorative.unwrap_or_else(|| {
         block.inner_text.is_empty() && block.title.is_none() && block.description.is_none()
@@ -10770,7 +10769,6 @@ fn emit_shape_fragment_with_clip(
         }
     }
 
-    let children_start = prims.len();
     for child in &block.children {
         let child_frag = ShapeFragmentIn {
             block_id: child.id.clone(),
@@ -10786,16 +10784,6 @@ fn emit_shape_fragment_with_clip(
             z_index: None,
         };
         emit_shape_fragment_with_clip(prims, &child_frag, child, ctx, group_clip.clone());
-    }
-    if owner_start.is_some() {
-        for primitive in &mut prims[children_start..] {
-            if let Primitive::Shape(shape) = primitive
-                && shape.attrs.doc_start.is_none()
-                && shape.attrs.image_shape_type.is_some()
-            {
-                shape.attrs.doc_start = owner_start;
-            }
-        }
     }
 
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);

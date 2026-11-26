@@ -46,7 +46,15 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
     let color = paint("color")
         .and_then(Value::as_str)
         .or_else(|| stroke.map(|stroke| stroke.color.as_str()));
-    if width <= 0.0 || color.is_some_and(|color| matches!(color, "transparent" | "none")) {
+    if width <= 0.0
+        || color.is_some_and(|color| {
+            matches!(color, "transparent" | "none")
+                || matches!(
+                    color.as_bytes(),
+                    [b'#', _, _, _, b'0'] | [b'#', _, _, _, _, _, _, b'0', b'0']
+                )
+        })
+    {
         return false;
     }
     let point = if let Some(transform) = &shape.transform {
@@ -132,6 +140,14 @@ pub(super) fn contains(shape: &ShapePrimitive, x: f64, y: f64, min_radius: f64) 
     if paths.iter_mut().any(|path| {
         path.dedup();
         stroke.contains(path, false)
+            || (min_radius > 0.0
+                && cap == "flat"
+                && path.first() != path.last()
+                && path
+                    .first()
+                    .into_iter()
+                    .chain(path.last())
+                    .any(|end| (point.0 - end.0).hypot(point.1 - end.1) <= stroke.radius))
     }) {
         return true;
     }

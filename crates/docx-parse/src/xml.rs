@@ -1,5 +1,7 @@
 //! Bounded, resolver-free OOXML event/tree core.
 
+use std::sync::{Arc, Mutex};
+
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -103,7 +105,7 @@ pub struct ParseBudget<'a> {
     direction_scopes: u32,
     direction_scope_bytes: std::cell::Cell<usize>,
     unmodeled_inline: Vec<(String, usize)>,
-    pub(crate) preview_connectors: Option<crate::s9::PreviewConnectorSources>,
+    pub(crate) preview_connectors: Option<Arc<Mutex<crate::s9::PreviewConnectorSources>>>,
     pub(crate) connector_story: Option<(String, Option<String>)>,
 }
 
@@ -150,9 +152,11 @@ impl<'a> ParseBudget<'a> {
     ) {
         if !guides.is_empty()
             && let (Some(sources), Some(story)) =
-                (&mut self.preview_connectors, &self.connector_story)
+                (&self.preview_connectors, &self.connector_story)
         {
             sources
+                .lock()
+                .unwrap()
                 .entry(story.clone())
                 .or_default()
                 .push((baseline.clone(), guides));
