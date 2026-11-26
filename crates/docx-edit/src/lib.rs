@@ -888,7 +888,7 @@ pub struct EditingDoc {
     story_views: Mutex<EpochCache<target::StoryView>>,
     paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
-    projection: Mutex<projection::ProjectionCache>,
+    projection: Mutex<Box<projection::ProjectionCache>>,
     projection_markers: Arc<Mutex<projection::MarkerIndex>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
@@ -1409,7 +1409,7 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
-        *self.projection.lock().unwrap() = projection::ProjectionCache::for_source(&source);
+        **self.projection.lock().unwrap() = projection::ProjectionCache::for_source(&source);
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);

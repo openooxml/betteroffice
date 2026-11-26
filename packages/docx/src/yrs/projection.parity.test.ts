@@ -20,7 +20,7 @@ import {
   projectionRootOrder,
   random,
   seedParityFixtures,
-  type Allowance,
+  type AllowanceUsage,
   type NativeProjection,
   type ProjectionEdit,
 } from './projectionParity.support';
@@ -54,7 +54,7 @@ function editParagraphProperties(session: YrsSession, recordEdit: (outcome: Proj
 
 describe('Native DOCX projection parity', () => {
   const fixtures = seedParityFixtures();
-  const used = new Set<Allowance>();
+  const used: AllowanceUsage = new Map();
 
   beforeAll(async () => {
     expect(fixtures.length).toBeGreaterThan(0);
@@ -74,7 +74,9 @@ describe('Native DOCX projection parity', () => {
       const session = wrapSession(raw, CLIENT);
       try {
         const bytes = buildFixtureDocx(name);
-        const { document: base } = session.seedFromDocx(bytes);
+        session.seedFromDocx(bytes);
+        const base = session.materializeDocx();
+        if (!base) throw new Error('DOCX projection requires the complete source document');
         const buffer = base.originalBuffer!;
         const source = canonicalStories(session, base);
         const next = random(name);
@@ -139,6 +141,17 @@ describe('Native DOCX projection parity', () => {
   }
 
   afterAll(() => {
+    const owners = {
+      fields: 'P1.1 fields',
+      tables: 'P1.2 tables',
+      markers: 'P1.3 markers',
+      storiesAux: 'P1.4 storiesAux',
+    } as const;
+    for (const family of Object.keys(owners) as (keyof typeof owners)[]) {
+      const entries = projectionAllowlist.filter((entry) => entry.family === family);
+      const covered = entries.reduce((count, entry) => count + (used.get(entry) ?? 0), 0);
+      console.log(`${owners[family]} covers ${covered} differences with ${entries.length} allowlist entries`);
+    }
     const unused = projectionAllowlist.filter((entry) => !used.has(entry));
     const details = unused.map(({ family, kind, path, reason }) => `${family}/${kind} ${path}: ${reason}`);
     expect(unused, details.join('\n')).toEqual([]);

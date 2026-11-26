@@ -227,23 +227,62 @@ export function projectionRootOrder(storyIds: Iterable<string>): string[] {
   return [...storyIds].sort();
 }
 
-export function normalizeProjection(value: unknown): unknown {
+function normalizeProjection(value: unknown, semantic: boolean): unknown {
   if (value instanceof ArrayBuffer) return { base64: Buffer.from(value).toString('base64') };
   if (ArrayBuffer.isView(value)) {
     return { base64: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64') };
   }
   if (value instanceof Date) return value.toISOString();
   if (value instanceof Map) {
-    return Object.fromEntries([...value].map(([key, entry]) => [key, normalizeProjection(entry)]));
+    return Object.fromEntries([...value].map(([key, entry]) => [key, normalizeProjection(entry, semantic)]));
   }
-  if (Array.isArray(value)) return value.map(normalizeProjection);
-  const object = value !== null && typeof value === 'object'
-    ? value as Record<string, unknown>
-    : undefined;
-  return object
-    ? Object.fromEntries(Object.entries(object).filter(([, entry]) => entry !== undefined)
-        .map(([key, entry]) => [key, normalizeProjection(entry)]))
-    : value;
+  if (Array.isArray(value)) return value.map((entry) => normalizeProjection(entry, semantic));
+  const object = record(value);
+  if (!object) return value;
+  const result = Object.fromEntries(Object.entries(object).filter(([, entry]) => entry !== undefined)
+    .map(([key, entry]) => [key, normalizeProjection(entry, semantic)]));
+  if (!semantic) return result;
+
+  // A paragraph has the same semantic value with or without its independently checked source ordinal.
+  if (result.type === 'paragraph' && Array.isArray(result.content)) delete result.sourceOrdinal;
+
+  // An absent whitespace hint and true are equivalent when the text itself forces preservation.
+  if (result.type === 'text' && typeof result.text === 'string' && result.preserveSpace === true &&
+      (result.text.startsWith(' ') || result.text.endsWith(' ') || result.text.includes('  '))) {
+    delete result.preserveSpace;
+  }
+
+  // A run with an empty formatting object is equivalent to a run with absent formatting.
+  const formatting = record(result.formatting);
+  if (result.type === 'run' && formatting && Object.keys(formatting).length === 0) {
+    delete result.formatting;
+  }
+
+  // An empty table style cascade is equivalent to absent cascade metadata.
+  const cascade = record(formatting?.styleCascade);
+  if (result.type === 'table' && formatting && cascade && Object.keys(cascade).length === 0) {
+    delete formatting.styleCascade;
+    if (Object.keys(formatting).length === 0) delete result.formatting;
+  }
+
+  // An omitted field tree display mode is equivalent to an explicit result mode.
+  const tree = record(result.fieldTree);
+  if ((result.type === 'simpleField' || result.type === 'complexField') && tree &&
+      tree.displayMode === 'result') delete tree.displayMode;
+
+  // A missing package separator collection is equivalent to an empty collection of that kind.
+  const pkg = record(result.package);
+  if (pkg && record(pkg.document)) {
+    for (const name of ['footnoteSeparators', 'endnoteSeparators']) {
+      const separators = pkg[name];
+      if (Array.isArray(separators) && separators.length === 0) delete pkg[name];
+    }
+  }
+  return result;
+}
+
+export function canonicalProjection(value: unknown): unknown {
+  return normalizeProjection(value, true);
 }
 
 type ProjectionExport = 'project_document_json' | 'project_story_json';
@@ -303,6 +342,7 @@ interface Story {
 }
 
 export type Allowance = (typeof projectionAllowlist)[number];
+export type AllowanceUsage = Map<Allowance, number>;
 const families = new Set<ProjectionFamily>(['fields', 'tables', 'markers', 'storiesAux']);
 
 export function projectionExport<K extends ProjectionExport>(session: EditSession, name: K) {
@@ -389,7 +429,7 @@ function collectStory(
     if (block.type === 'blockSdt') {
       const child = blockSdtStoryId(storyId, sdtIndex++);
       collectStory(stories, child, block.content, { ...site, family: 'storiesAux' });
-      skeleton.push(normalizeProjection({ ...block, content: { storyId: child } }));
+      skeleton.push(canonicalProjection({ ...block, content: { storyId: child } }));
     } else if (block.type === 'table') {
       const table = tableIndex++;
       const cells = seededCellIndices(block);
@@ -403,9 +443,9 @@ function collectStory(
           return { ...cell, content: { storyId: child } };
         }),
       }));
-      skeleton.push(normalizeProjection({ ...block, rows }));
+      skeleton.push(canonicalProjection({ ...block, rows }));
     } else {
-      skeleton.push(normalizeProjection(block));
+      skeleton.push(canonicalProjection(block));
     }
   }
 }
@@ -437,14 +477,14 @@ function packageFields(session: YrsSession, document: Document): unknown {
       const canonical = headerFooterStory(session, id).slice(3);
       if (canonical === id) return [id, part];
       const owner = values.get(canonical);
-      const sameStory = owner && equal(normalizeProjection(content), normalizeProjection(owner.content));
+      const sameStory = owner && equal(canonicalProjection(content), canonicalProjection(owner.content));
       return [id, sameStory ? part : { ...part, content }];
     })
   );
   let nextSectionStart = 0;
   const notes = (values: typeof footnotes | typeof endnotes) =>
     values?.map(({ content: _, ...note }) => note);
-  return normalizeProjection({
+  return canonicalProjection({
     ...envelope,
     package: {
       ...fields,
@@ -471,6 +511,8 @@ function packageFields(session: YrsSession, document: Document): unknown {
 const DEFERRED_NODE_KINDS: Readonly<Record<string, string>> = {
   simpleField: 'field',
   complexField: 'field',
+  fieldChar: 'field',
+  instrText: 'field',
   hyperlink: 'hyperlink',
   tab: 'tab',
   break: 'break',
@@ -479,6 +521,7 @@ const DEFERRED_NODE_KINDS: Readonly<Record<string, string>> = {
   inlineSdt: 'sdt',
   mathEquation: 'math',
   drawing: 'image',
+  chart: 'chart',
   opaqueDrawing: 'opaqueDrawing',
   shape: 'shape',
 };
@@ -556,14 +599,18 @@ class Comparison {
   constructor(
     private readonly deferred: readonly Deferral[] = [],
     private readonly strict = false,
-    private readonly used?: Set<Allowance>
+    private readonly used?: AllowanceUsage
   ) {}
 
-  allow(feature: Feature, path: string, site: Site): boolean {
+  allow(feature: Feature, path: string, site: Site, count = 1): boolean {
     const match = this.allowance(feature, path, site);
     if (!match) return false;
-    this.used?.add(match);
+    this.recordAllowance(match, count);
     return true;
+  }
+
+  private recordAllowance(allowance: Allowance, count = 1): void {
+    if (this.used) this.used.set(allowance, (this.used.get(allowance) ?? 0) + count);
   }
 
   private allowance({ family, kind }: Feature, path: string, site: Site): Allowance | undefined {
@@ -586,56 +633,55 @@ class Comparison {
     );
   }
 
-  compare(expected: unknown, actual: unknown, site: Site, path: string): void {
+  compare(expected: unknown, actual: unknown, site: Site, path: string, feature?: Feature): void {
     if (equal(expected, actual)) return;
     if (Array.isArray(expected) && Array.isArray(actual)) {
-      this.compareArray(expected, actual, site, path);
+      this.compareArray(expected, actual, site, path, feature);
       return;
     }
     const left = record(expected);
     const right = record(actual);
     if (left && right) {
+      const owner = typeOf(left) === typeOf(right) ? deferredNode(right) ?? feature : feature;
       for (const field of new Set([...Object.keys(left), ...Object.keys(right)])) {
         const childPath = path ? `${path}.${field}` : field;
-        const feature = this.missingField(left[field], right[field], childPath);
-        if (feature && this.allow(feature, childPath, site)) continue;
-        this.compare(left[field], right[field], site, childPath);
+        const missing = this.missingField(left[field], right[field], childPath, owner);
+        if (missing && this.allow(missing, childPath, site)) continue;
+        this.compare(left[field], right[field], site, childPath, owner);
       }
       return;
     }
     this.report(site, path, expected, actual);
   }
 
-  private missingField(expected: unknown, actual: unknown, path: string): Feature | undefined {
+  private missingField(expected: unknown, actual: unknown, path: string, owner?: Feature): Feature | undefined {
     if (expected !== undefined && actual === undefined) {
-      if (/^blocks\[\d+\]\.propertyChanges$/.test(path)) return { family: 'markers', kind: 'pPrChange' };
       if (/^blocks\[\d+\]\.content\[\d+\]\.propertyChanges$/.test(path)) {
         return { family: 'markers', kind: 'rPrChange' };
       }
     }
-    if (expected === undefined && typeof actual === 'string' &&
-        /^package\.(endnotes|footnotes)\[\d+\]\.verbatimXml$/.test(path)) {
-      return { family: 'storiesAux', kind: 'noteStory' };
-    }
-    if (!equal(expected, actual) && /^package\.document\.sections\[\d+\]\.content$/.test(path)) {
+    if (!equal(expected, actual) && /^package\.document\.sections\[\d+\]\.(content|id|properties\.\w+)$/.test(path)) {
       return { family: 'storiesAux', kind: 'sectionRanges' };
     }
+    if (owner?.family === 'tables' && expected !== undefined && actual === undefined) return owner;
+    if (owner?.family === 'fields' && expected === undefined && actual !== undefined) return owner;
     return undefined;
   }
 
-  private compareArray(expected: unknown[], actual: unknown[], site: Site, path: string): void {
+  private compareArray(expected: unknown[], actual: unknown[], site: Site, path: string, owner?: Feature): void {
     let right = 0;
     let paragraph = 0;
     const pending = expected.map((value, index) => ({ value, index }));
+    const native = [...actual];
     for (let left = 0; left < pending.length; left++) {
       const { value, index } = pending[left]!;
       const location = arraySite(site, path, paragraph, value);
       const entryPath = `${path}[${index}]`;
-      const candidate = actual[right];
-      const remaining = actual.slice(right);
+      const candidate = native[right];
+      const remaining = native.slice(right);
       const omission = this.omission(value, remaining, location, entryPath);
       if (omission) {
-        this.used?.add(omission.allowance);
+        this.recordAllowance(omission.allowance);
         pending.splice(left + 1, 0, ...omission.children.map((child) => ({ value: child, index })));
         continue;
       }
@@ -645,15 +691,33 @@ class Comparison {
         right++;
         continue;
       }
-      this.compare(value, candidate, location, entryPath);
-      if (right < actual.length) right++;
+      const retained = this.retainedInline(candidate, pending.slice(left).map(({ value }) => value), location, entryPath);
+      if (retained) {
+        this.recordAllowance(retained.allowance);
+        native.splice(right, 1, ...retained.children);
+        left--;
+        continue;
+      }
+      this.compare(value, candidate, location, entryPath, owner);
+      if (right < native.length) right++;
       if (path === 'blocks' && typeOf(value) === 'paragraph') paragraph++;
     }
-    for (; right < actual.length; right++) {
-      const location = arraySite(site, path, paragraph, actual[right]);
-      this.report(location, `${path}[${right}]`, undefined, actual[right]);
-      if (path === 'blocks' && typeOf(actual[right]) === 'paragraph') paragraph++;
+    for (; right < native.length; right++) {
+      const value = native[right];
+      const location = arraySite(site, path, paragraph, value);
+      const entryPath = `${path}[${right}]`;
+      const retained = this.retainedInline(value, [], location, entryPath);
+      if (retained && retained.children.length === 0) this.recordAllowance(retained.allowance);
+      else if (!owner || !this.allow(owner, entryPath, location)) this.report(location, entryPath, undefined, value);
+      if (path === 'blocks' && typeOf(value) === 'paragraph') paragraph++;
     }
+  }
+
+  private retainedInline(value: unknown, expected: readonly unknown[], site: Site, path: string) {
+    if (value === undefined || !/^blocks\[\d+\]\.content\[\d+\]$/.test(path)) return undefined;
+    const omission = this.omission(value, expected, site, path);
+    const family = omission?.allowance.family;
+    return family === 'fields' || family === 'markers' ? omission : undefined;
   }
 
   private omission(value: unknown, actual: readonly unknown[], site: Site, path: string) {
@@ -706,7 +770,7 @@ class Comparison {
         if (!target.text.startsWith(text)) return undefined;
       }
       if (text === target.text) {
-        for (const match of matches) this.used?.add(match);
+        for (const match of matches) this.recordAllowance(match);
         return index;
       }
       if (!omission) return undefined;
@@ -722,22 +786,31 @@ function compareStories(
   source: Map<string, Story>,
   only?: ReadonlySet<string>
 ): void {
-  const omittedStories = new Set<string>();
   for (const storyId of new Set([...expected.keys(), ...actual.keys()])) {
     if (only && !only.has(dirtyProjectionStory(storyId))) continue;
     const left = expected.get(storyId);
     const right = actual.get(storyId);
-    const owner = left?.owner;
-    if (owner && !equal(left?.blocks, right?.blocks)) {
-      if (!right && (omittedStories.has(owner.storyId) ||
-          (owner.paragraph !== null && comparison.allow(owner, 'blocks[]', owner)))) {
-        omittedStories.add(storyId);
-        continue;
+    const site = { storyId, paragraph: null };
+    if (left?.owner && !equal(left.blocks, right?.blocks) &&
+        (!right || equal(right.blocks, source.get(storyId)?.blocks))) {
+      const retained = new Comparison([], true);
+      retained.compare(left.blocks, right?.blocks, site, 'blocks');
+      let owner: Story['owner'] = left.owner;
+      let allowed = false;
+      while (owner) {
+        const path = owner.paragraph === null ? 'blocks' : 'blocks[]';
+        if ((right || owner.paragraph !== null) &&
+            comparison.allow(owner, path, owner, retained.differences.length)) {
+          allowed = true;
+          break;
+        }
+        const parent: Story['owner'] = expected.get(owner.storyId)?.owner;
+        if (parent === owner) break;
+        owner = parent;
       }
-      if (right && equal(right.blocks, source.get(storyId)?.blocks) &&
-          comparison.allow(owner, owner.paragraph === null ? 'blocks' : 'blocks[]', owner)) continue;
+      if (allowed) continue;
     }
-    comparison.compare(left?.blocks, right?.blocks, { storyId, paragraph: null }, 'blocks');
+    comparison.compare(left?.blocks, right?.blocks, site, 'blocks');
   }
 }
 
@@ -758,13 +831,69 @@ function compareStoryKeys(
   }
 }
 
+export function checkSourceOrdinals(
+  storyId: string,
+  blocks: readonly BlockContent[],
+  source: readonly BlockContent[],
+  keys: readonly string[] = []
+): string[] {
+  const comparison = new Comparison([], true);
+  const paragraphs = (content: readonly BlockContent[]) => content.filter((block) => block.type === 'paragraph');
+  const originals = paragraphs(source);
+  const byKey = new Map(originals.map((paragraph, index) => [
+    (!paragraph.repeatedParaId && paragraph.paraId) || `${storyId}:p${index}`, paragraph,
+  ]));
+  paragraphs(blocks).forEach((paragraph, index) => {
+    const key = keys[index];
+    const original = key === undefined ? originals[index] : byKey.get(key);
+    comparison.compare(
+      original?.sourceOrdinal, paragraph.sourceOrdinal, { storyId, paragraph: index }, 'sourceOrdinal'
+    );
+  });
+
+  const nested = (content: readonly BlockContent[], visit: (paragraph: Record<string, unknown>, path: string) => void) => {
+    const walk = (value: unknown, path: string): void => {
+      if (Array.isArray(value)) {
+        value.forEach((entry, index) => walk(entry, `${path}[${index}]`));
+        return;
+      }
+      const node = record(value);
+      if (!node) return;
+      if (node.type === 'paragraph' && Array.isArray(node.content)) visit(node, path);
+      for (const [name, child] of Object.entries(node)) {
+        if (typeof child === 'object') walk(child, `${path}.${name}`);
+      }
+    };
+    content.forEach((block, index) => {
+      const path = `blocks[${index}]`;
+      if (block.type === 'paragraph') walk(block.content, `${path}.content`);
+      else walk(block, path);
+    });
+  };
+  const nestedSources = new Map<string, unknown[]>();
+  nested(source, (paragraph) => {
+    const key = stableStringify(canonicalProjection(paragraph));
+    const ordinals = nestedSources.get(key) ?? [];
+    ordinals.push(paragraph.sourceOrdinal);
+    nestedSources.set(key, ordinals);
+  });
+  nested(blocks, (paragraph, path) => {
+    const key = stableStringify(canonicalProjection(paragraph));
+    const candidates = nestedSources.get(key);
+    const match = candidates?.indexOf(paragraph.sourceOrdinal) ?? -1;
+    if (match >= 0) candidates!.splice(0, match + 1);
+    else comparison.compare(candidates?.[0], paragraph.sourceOrdinal, { storyId, paragraph: null }, `${path}.sourceOrdinal`);
+  });
+  return comparison.differences;
+}
+
 export function check(
   session: YrsSession,
   ts: Document,
   native: NativeProjection,
   source: Map<string, Story>,
   roots?: ReadonlySet<string>,
-  used?: Set<Allowance>
+  used?: AllowanceUsage
 ): string[] {
   const comparison = new Comparison(native.deferred, false, used);
   const expected = canonicalStories(session, ts);
@@ -772,6 +901,13 @@ export function check(
   compareStories(comparison, expected, actual, source);
   if (!roots || roots.has('body')) {
     compareStoryKeys(comparison, 'body', expected.get('body'), native.paragraphSessionKeys);
+  }
+  for (const [storyId, story] of actual) {
+    if (dirtyProjectionStory(storyId) !== storyId) continue;
+    comparison.differences.push(...checkSourceOrdinals(
+      storyId, story.content, source.get(storyId)?.content ?? [],
+      storyId === 'body' ? native.paragraphSessionKeys : []
+    ));
   }
   comparison.compare(packageFields(session, ts), packageFields(session, native.document), {
     storyId: '<package>', paragraph: null,
@@ -783,7 +919,7 @@ export function checkStory(
   expected: Map<string, Story>,
   native: NativeStoryProjection,
   source: Map<string, Story>,
-  used?: Set<Allowance>
+  used?: AllowanceUsage
 ): string[] {
   const { storyId, blocks, deferred, paragraphSessionKeys } = native;
   const comparison = new Comparison(deferred, false, used);
@@ -793,6 +929,7 @@ export function checkStory(
   const rootDeferred = deferred.some((entry) => entry.storyId === storyId && entry.paragraph === null &&
     entry.family === 'storiesAux' && (entry.kind === 'headerFooterStory' || entry.kind === 'noteStory'));
   if (!rootDeferred) compareStoryKeys(comparison, storyId, expected.get(storyId), paragraphSessionKeys);
+  comparison.differences.push(...checkSourceOrdinals(storyId, blocks, source.get(storyId)?.content ?? [], paragraphSessionKeys));
   return comparison.differences;
 }
 
@@ -809,8 +946,8 @@ export function checkComposition(
   const deferred: Deferral[] = [];
   for (const story of stories) {
     comparison.compare(
-      normalizeProjection(document.get(story.storyId)?.content),
-      normalizeProjection(story.blocks),
+      normalizeProjection(document.get(story.storyId)?.content, false),
+      normalizeProjection(story.blocks, false),
       { storyId: story.storyId, paragraph: null },
       'blocks'
     );

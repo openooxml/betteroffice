@@ -54,6 +54,7 @@ const BOOLEAN_MARKS: &[&str] = &[
 ];
 
 type Properties = Map<String, Value>;
+pub(super) type SourceRun<'a> = (String, Option<&'a TextFormatting>);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +73,7 @@ pub(super) fn lower_plain(
     paragraph_attrs: &Attrs,
     items: &[(&str, &Attrs)],
     source: Option<&Paragraph>,
-    allow_mark_fallback: bool,
+    mapped_sources: Option<Vec<SourceRun<'_>>>,
 ) -> Result<Vec<ParagraphContent>, ProjectionError> {
     let boundaries: Vec<OriginalBoundary> = decode(
         paragraph_attrs
@@ -83,7 +84,7 @@ pub(super) fn lower_plain(
     )?
     .unwrap_or_default();
     let live: String = items.iter().map(|(text, _)| *text).collect();
-    let mark_fallback = if allow_mark_fallback && source.is_none() && boundaries.is_empty() {
+    let mark_fallback = if mapped_sources.is_none() && source.is_none() && boundaries.is_empty() {
         let original = paragraph_attrs
             .get("_originalFormatting")
             .map(json_value)
@@ -99,12 +100,15 @@ pub(super) fn lower_plain(
     } else {
         None
     };
-    let mut sources = source.and_then(plain_source).unwrap_or_else(|| {
-        boundaries
-            .iter()
-            .map(|boundary| (boundary.text.clone(), boundary.formatting.as_ref()))
-            .collect()
-    });
+    let restore_boundaries = mapped_sources.is_none();
+    let mut sources = mapped_sources
+        .or_else(|| source.map(source_runs))
+        .unwrap_or_else(|| {
+            boundaries
+                .iter()
+                .map(|boundary| (boundary.text.clone(), boundary.formatting.as_ref()))
+                .collect()
+        });
     if let Some(mark) = &mark_fallback {
         sources.push((live.clone(), Some(mark)));
     }
@@ -112,7 +116,9 @@ pub(super) fn lower_plain(
         .iter()
         .map(|(_, attrs)| attributes(attrs))
         .collect::<Result<_, _>>()?;
-    if let Some(content) = restore(&boundaries, &sources, &live, items, &live_attrs)? {
+    if restore_boundaries
+        && let Some(content) = restore(&boundaries, &sources, &live, items, &live_attrs)?
+    {
         return Ok(content);
     }
 
@@ -559,26 +565,132 @@ fn is_plain(content: &RunContent) -> bool {
     matches!(content, RunContent::Text { .. })
 }
 
-fn plain_source(paragraph: &Paragraph) -> Option<Vec<(String, Option<&TextFormatting>)>> {
-    paragraph
-        .content
-        .iter()
-        .map(|content| {
-            let ParagraphContent::Inline(InlineNode::Run(run)) = content else {
-                return None;
-            };
-            let mut text = String::new();
-            for entry in &run.content {
-                match entry {
-                    RunContent::Text { text: entry, .. } => text.push_str(entry),
-                    RunContent::SoftHyphen => text.push('\u{ad}'),
-                    RunContent::NoBreakHyphen => text.push('\u{2011}'),
-                    _ => return None,
+fn source_runs(paragraph: &Paragraph) -> Vec<SourceRun<'_>> {
+    fn inline_run<'a>(node: &'a InlineNode, runs: &mut Vec<SourceRun<'a>>) {
+        let units = match node {
+            InlineNode::Run(run) => {
+                let mut text = String::new();
+                for entry in &run.content {
+                    match entry {
+                        RunContent::Text { text: entry, .. }
+                        | RunContent::InstrText { text: entry } => {
+                            text.push_str(entry);
+                        }
+                        RunContent::Symbol { char, .. } => text.push_str(char),
+                        RunContent::Tab => text.push('\t'),
+                        RunContent::SoftHyphen => text.push('\u{ad}'),
+                        RunContent::NoBreakHyphen => text.push('\u{2011}'),
+                        RunContent::Break { break_type, .. }
+                            if matches!(break_type.as_deref(), None | Some("textWrapping")) =>
+                        {
+                            text.push('\u{fffc}');
+                        }
+                        RunContent::FootnoteRef { .. }
+                        | RunContent::EndnoteRef { .. }
+                        | RunContent::CommentReference { .. }
+                        | RunContent::Drawing { .. }
+                        | RunContent::Shape { .. }
+                        | RunContent::HorizontalRule { .. }
+                        | RunContent::Chart { .. }
+                        | RunContent::OpaqueDrawing { .. } => text.push('\u{fffc}'),
+                        _ => {}
+                    }
+                }
+                runs.push((text, run.formatting.as_ref()));
+                return;
+            }
+            InlineNode::Hyperlink(link) => {
+                for child in &link.children {
+                    inline_run(child, runs);
+                }
+                return;
+            }
+            InlineNode::InlineSdt(control) => {
+                for child in &control.content {
+                    inline_run(child, runs);
+                }
+                return;
+            }
+            InlineNode::Tracked(track) => {
+                for child in &track.content {
+                    inline_run(child, runs);
+                }
+                return;
+            }
+            InlineNode::ComplexField(field) => {
+                1 + [&field.structured_code, &field.structured_result]
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|content| content.inline.iter().flatten())
+                    .filter(|node| {
+                        matches!(node, InlineNode::Hyperlink(_) | InlineNode::SimpleField(_))
+                    })
+                    .count()
+            }
+            InlineNode::SimpleField(_) | InlineNode::Math(_) => 1,
+            InlineNode::RawXml(raw)
+                if raw.xml.trim_start().starts_with("<w:") && !raw.xml.trim_end().ends_with("/>") =>
+            {
+                1
+            }
+            _ => 0,
+        };
+        runs.push(("\u{fffc}".repeat(units), None));
+    }
+
+    let mut runs = Vec::new();
+    for content in &paragraph.content {
+        match content {
+            ParagraphContent::Inline(node) => inline_run(node, &mut runs),
+            ParagraphContent::Tracked(track) => {
+                for child in &track.content {
+                    inline_run(child, &mut runs);
                 }
             }
-            Some((text, run.formatting.as_ref()))
-        })
-        .collect()
+            _ => runs.push((String::new(), None)),
+        }
+    }
+    runs
+}
+
+pub(super) struct MappedSourceRuns<'a> {
+    sources: Vec<SourceRun<'a>>,
+    spans: Vec<SourceSpan>,
+    live: Vec<char>,
+}
+
+impl<'a> MappedSourceRuns<'a> {
+    pub(super) fn new(source: &'a Paragraph, live: Vec<char>) -> Self {
+        let sources = source_runs(source);
+        let original = sources
+            .iter()
+            .flat_map(|(text, _)| text.chars())
+            .collect::<Vec<_>>();
+        let spans = source_spans(&sources, &original, &live);
+        Self {
+            sources,
+            spans,
+            live,
+        }
+    }
+
+    pub(super) fn slice(&self, range: Range<usize>) -> Vec<SourceRun<'a>> {
+        let first = self
+            .spans
+            .partition_point(|span| span.range.end <= range.start);
+        self.spans[first..]
+            .iter()
+            .take_while(|span| span.range.start < range.end)
+            .map(|span| {
+                let start = range.start.max(span.range.start);
+                let end = range.end.min(span.range.end);
+                (
+                    self.live[start..end].iter().collect(),
+                    self.sources[span.index].1,
+                )
+            })
+            .collect()
+    }
 }
 
 fn marks_key(key: Option<&str>) -> Result<Properties, ProjectionError> {
@@ -700,11 +812,15 @@ fn restore(
             formatting.font_family = source.and_then(|source| source.font_family.clone());
             formatting.language = source.and_then(|source| source.language.clone());
         }
+        let content = run_content(&boundary.text, &direct(&expected));
+        if !content.iter().all(is_plain) {
+            return Ok(None);
+        }
         result.push(inline(Run {
             node_type: RunType::Run,
             formatting: (formatting != TextFormatting::default()).then_some(formatting),
             property_changes: boundary.property_changes.clone(),
-            content: run_content(&boundary.text, &direct(&expected)),
+            content,
             direction_scopes: decode(expected.get("directionScopes"))?.unwrap_or_default(),
         }));
     }

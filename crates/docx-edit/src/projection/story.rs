@@ -312,7 +312,8 @@ fn finish_paragraph(
     let mut content = lower_items(context, story, attrs, items, source)?;
     if properties.is_none() && content.is_empty() {
         for deferral in &mut story.result.deferred[first_deferral..] {
-            deferral.paragraph = None;
+            deferral.paragraph = matches!(deferral.kind.as_str(), "pageBreak" | "columnBreak")
+                .then(|| story.state.paragraph_index.saturating_sub(1));
         }
         return Ok(());
     }
@@ -362,10 +363,30 @@ fn lower_items(
             attrs,
             &text_items(items),
             source,
-            true,
+            None,
         );
     }
 
+    let mut offsets = Vec::with_capacity(items.len() + 1);
+    let mapped = source.map(|source| {
+        let mut live = Vec::new();
+        for item in items {
+            offsets.push(live.len());
+            match &item.segment.content {
+                SegmentContent::Text(text) => live.extend(text.chars()),
+                SegmentContent::OtherEmbed { kind, .. } if kind == "tab" => live.push('\t'),
+                SegmentContent::OtherEmbed { .. } => live.push('\u{fffc}'),
+                SegmentContent::Pilcrow(_) => unreachable!("pilcrows close segments"),
+            }
+        }
+        offsets.push(live.len());
+        runs::MappedSourceRuns::new(source, live)
+    });
+    let source_slice = |start: usize, end: usize| {
+        mapped.as_ref().map_or_else(Vec::new, |source| {
+            source.slice(offsets[start]..offsets[end])
+        })
+    };
     let mut fallback = SourceInlines::new(source);
     let mut content = Vec::new();
     let paragraph_end = story.state.offset;
@@ -391,7 +412,7 @@ fn lower_items(
                 attrs,
                 &text,
                 None,
-                false,
+                Some(source_slice(index, end)),
             )?);
             index = end;
             continue;
@@ -399,7 +420,6 @@ fn lower_items(
         let mut lowered = match &item.content {
             SegmentContent::Text(text) => {
                 let mark = runs::attributes(&item.attributes)?;
-                let run = runs::make_run(context, &story.state, attrs, text, &mark, None)?;
                 let kind = ["del", "ins", "hyperlink", "rPrChange"]
                     .into_iter()
                     .find(|kind| has_mark(item, kind));
@@ -423,11 +443,22 @@ fn lower_items(
                     }
                 }
                 if matches!(lowered, Lowered::Deferred) {
-                    lowered = Lowered::Inline(vec![
-                        fallback
-                            .marked(kind, text)
-                            .unwrap_or_else(|| runs::inline(run)),
-                    ]);
+                    lowered = if let Some(source) = fallback.marked(kind, text) {
+                        Lowered::Inline(vec![source])
+                    } else {
+                        let mut slices = source_slice(index, index + 1);
+                        if slices.is_empty() {
+                            slices.push((text.clone(), None));
+                        }
+                        let runs = slices
+                            .into_iter()
+                            .map(|(text, source)| {
+                                runs::make_run(context, &story.state, attrs, &text, &mark, source)
+                                    .map(runs::inline)
+                            })
+                            .collect::<Result<_, _>>()?;
+                        Lowered::Inline(runs)
+                    };
                 }
                 lowered
             }
@@ -456,7 +487,13 @@ fn lower_items(
                         } else {
                             kind
                         };
-                        Lowered::Inline(fallback.take(source_kind, payload).into_iter().collect())
+                        let mut source = fallback.take(source_kind, payload);
+                        if kind == "noteRef"
+                            && let Some(ParagraphContent::Inline(InlineNode::Run(run))) = &mut source
+                        {
+                            run.formatting = None;
+                        }
+                        Lowered::Inline(source.into_iter().collect())
                     }
                     lowered => lowered,
                 }
@@ -590,12 +627,24 @@ impl SourceInlines {
     fn take(&mut self, kind: &str, payload: &Attrs) -> Option<ParagraphContent> {
         let candidates = self.items.get_mut(kind)?;
         let raw_xml = attr_string(payload, "xml");
+        let comment_id = match payload.get("commentId") {
+            Some(Any::Number(id)) => Some(*id),
+            _ => None,
+        };
         candidates
             .iter_mut()
             .find(|item| {
                 item.as_ref().is_some_and(|item| match (item, raw_xml) {
                     (ParagraphContent::Inline(InlineNode::RawXml(raw)), Some(xml)) => {
                         raw.xml == xml
+                    }
+                    (ParagraphContent::Inline(InlineNode::Run(run)), _)
+                        if kind == "commentReference" && comment_id.is_some() =>
+                    {
+                        matches!(
+                            run.content.as_slice(),
+                            [RunContent::CommentReference { id }] if *id == comment_id
+                        )
                     }
                     _ => true,
                 })
