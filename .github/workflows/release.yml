@@ -20,7 +20,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
       published: ${{ steps.changesets.outputs.published }}
@@ -73,12 +73,16 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
+      - name: Note skipped tests
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'
+        run: echo "::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests."
+
       - name: Type check
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run typecheck:packages
 
       - name: Test
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run test
 
       - name: Build packages
@@ -138,6 +142,13 @@ jobs:
 
       # changesets does not rewrite the workspace: protocol here, so pin it to
       # concrete versions before publish (ephemeral checkout; source is unchanged).
+      - name: Note the npm fallback token
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Pin workspace deps for npm publish
         if: steps.pending.outputs.publishing == 'true'
         run: bun scripts/rewrite-workspace-deps.ts
@@ -159,9 +170,11 @@ jobs:
           commit: "chore: release"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No npm token: auth is OIDC Trusted Publishing (configured per
-          # package after the first manual publish creates it). id-token: write
-          # above authorizes the exchange and signs provenance.
+          # Auth is OIDC Trusted Publishing (configured per package after the
+          # first manual publish creates it). id-token: write above authorizes
+          # the exchange and signs provenance. npm uses NPM_FALLBACK_TOKEN only
+          # for a package whose exchange fails; it is unset unless publishing.
+          NODE_AUTH_TOKEN: ${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}
           NPM_CONFIG_PROVENANCE: "true"
 
       - name: Upload held npm tarballs
@@ -291,8 +304,8 @@ jobs:
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
-    timeout-minutes: 75
+    # Covers native-dist (75 minutes on the Intel Mac, then 15 for the musl smoke test) and publishing (15 minutes) with dispatch overhead.
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: write
@@ -367,11 +380,18 @@ jobs:
           name: held-npm
           path: ${{ runner.temp }}/held-npm
 
+      - name: Note the npm fallback token
+        env:
+          FALLBACK: ${{ secrets.NPM_FALLBACK_TOKEN != '' }}
+        run: |
+          if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi
+
       - name: Publish held packages and create releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HELD_NPM_PACKAGES: ${{ needs.release.outputs.held }}
           NATIVE_NPM_RESULT: ${{ needs.native-npm.result }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_FALLBACK_TOKEN }}
         run: node scripts/held-npm-packages.mjs --publish "$RUNNER_TEMP/held-npm"
 
   # Runs only when this run published and WOPI_IMAGE_PUBLISH opts in; without

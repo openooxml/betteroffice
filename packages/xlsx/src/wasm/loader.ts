@@ -34,7 +34,7 @@ import { wasmAssetUrl } from './asset';
 import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { pngFontReaders, workbookPngFonts } from './pngDisplayList';
 import { renderPng as renderEnginePng, type XlsxPngEngine } from './enginePng';
-import { pngDisplayList, resolvePngTarget, type ResolvedPngTarget } from './pngResolve';
+import { pngDisplayList, resolvePngTarget } from './pngResolve';
 import type { XlsxPngFont, XlsxPngOptions, XlsxPngTarget } from './pngTarget';
 import { canvasPngAvailable, sheetFonts } from '../render/png';
 export type { XlsxFontFace, XlsxPngFont, XlsxPngOptions, XlsxPngTarget, XlsxRangeAddress, XlsxSheetRef } from './pngTarget';
@@ -1125,8 +1125,9 @@ function wrapWorkbookDocument(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
-  function pngEngine(): XlsxPngEngine {
+  function pngEngine(reportedFontCdnErrors?: Set<Error>): XlsxPngEngine {
     return {
+      reportedFontCdnErrors,
       doc: doc as unknown as XlsxPngEngine['doc'],
       onSheet: (sheet, read) => {
         const active = parseJson<SheetInfo>(() => doc.sheetInfoJson()).activeSheet;
@@ -1413,13 +1414,13 @@ function wrapWorkbookDocument(
       return parseJson(() => doc.historyStateJson());
     },
     renderPng(target: XlsxPngTarget, options: XlsxPngOptions = {}): Promise<Uint8Array> {
-      let resolved: ResolvedPngTarget;
       try {
-        resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
+        const resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
+        const reported = Object.getOwnPropertyDescriptor(target, Symbol.for('@betteroffice/xlsx/reportedFontCdnErrors'))?.value as Set<Error> | undefined;
+        return renderEnginePng(pngEngine(reported), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
       } catch (error) {
         return Promise.reject(error);
       }
-      return renderEnginePng(pngEngine(), resolved, options).catch((error: unknown) => Promise.reject(toError(error)));
     },
     renderPngFonts: (target: XlsxPngTarget, options: XlsxPngOptions = {}): XlsxPngFont[] => workbookPngFonts(handle, target, options),
     save(): Uint8Array {

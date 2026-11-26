@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use yrs::types::text::YChange;
@@ -8,6 +11,9 @@ pub(crate) struct SessionIds {
     client_id: u64,
     counter: AtomicU64,
     floored: AtomicBool,
+    unused: AtomicU64,
+    drawn: Mutex<Vec<Range<u64>>>,
+    seen: Mutex<HashSet<u64>>,
 }
 
 impl SessionIds {
@@ -16,6 +22,9 @@ impl SessionIds {
             client_id,
             counter: AtomicU64::new(0),
             floored: AtomicBool::new(false),
+            unused: AtomicU64::new(0),
+            drawn: Mutex::new(Vec::new()),
+            seen: Mutex::new(HashSet::new()),
         }
     }
 
@@ -23,11 +32,24 @@ impl SessionIds {
     /// counter past every `{client_id}:N` the document read through `txn` holds.
     pub(crate) fn draw<T: ReadTxn>(&self, txn: &T) -> String {
         if !self.floored.swap(true, Ordering::Relaxed) {
-            self.counter.fetch_max(self.floor(txn), Ordering::Relaxed);
+            let floor = self.floor(txn);
+            if floor >= CAPTURE_FLOOR {
+                let before = self.counter.load(Ordering::Relaxed);
+                if before < CAPTURE_FLOOR {
+                    self.unused.fetch_max(before, Ordering::Relaxed);
+                }
+                let mut seen = self.seen.lock().unwrap();
+                self.scan(txn, &mut |n| {
+                    seen.insert(n);
+                });
+            }
+            self.counter.fetch_max(floor, Ordering::Relaxed);
         }
         let mut counter = self.counter.load(Ordering::Relaxed);
         loop {
-            assert!(counter < MAX_FLOOR, "session id counter exhausted");
+            if counter >= MAX_FLOOR {
+                return self.draw_unused(txn);
+            }
             match self.counter.compare_exchange_weak(
                 counter,
                 counter + 1,
@@ -38,7 +60,38 @@ impl SessionIds {
                 Err(current) => counter = current,
             }
         }
+        let mut drawn = self.drawn.lock().unwrap();
+        match drawn.last_mut() {
+            Some(run) if run.end == counter => run.end += 1,
+            _ => drawn.push(counter..counter + 1),
+        }
+        drop(drawn);
         format!("{}:{counter}", self.client_id)
+    }
+
+    /// The smallest `{client_id}:N` from the last one drawn here that no live id uses and this
+    /// session has not drawn, for when the floor has reached the cap.
+    fn draw_unused<T: ReadTxn>(&self, txn: &T) -> String {
+        let mut seen = self.seen.lock().unwrap();
+        self.scan(txn, &mut |n| {
+            seen.insert(n);
+        });
+        let drawn = self.drawn.lock().unwrap();
+        let mut next = self.unused.load(Ordering::Relaxed);
+        loop {
+            if let Some(run) = drawn.iter().find(|run| run.contains(&next)) {
+                next = run.end;
+            } else if seen.contains(&next) {
+                next += 1;
+            } else {
+                break;
+            }
+        }
+        drop(seen);
+        drop(drawn);
+        assert!(next < MAX_FLOOR, "session id counter exhausted");
+        self.unused.store(next + 1, Ordering::Relaxed);
+        format!("{}:{next}", self.client_id)
     }
 
     /// Makes the next draw floor the counter again.
@@ -52,6 +105,12 @@ impl SessionIds {
             .store(other.counter.load(Ordering::Relaxed), Ordering::Relaxed);
         self.floored
             .store(other.floored.load(Ordering::Relaxed), Ordering::Relaxed);
+        self.unused
+            .store(other.unused.load(Ordering::Relaxed), Ordering::Relaxed);
+        let drawn = other.drawn.lock().unwrap().clone();
+        *self.drawn.lock().unwrap() = drawn;
+        let seen = other.seen.lock().unwrap().clone();
+        *self.seen.lock().unwrap() = seen;
     }
 
     #[cfg(test)]
@@ -62,18 +121,25 @@ impl SessionIds {
     /// One past the highest `N` of a `{client_id}:N` in a live map key, text attribute or value;
     /// 0 without reading when this client has written nothing to the document.
     fn floor<T: ReadTxn>(&self, txn: &T) -> u64 {
+        let mut floor = 0;
+        self.scan(txn, &mut |n| floor = floor.max(n + 1));
+        floor
+    }
+
+    /// Each `N` below [`MAX_FLOOR`] of a `{client_id}:N` in a live map key, text attribute or
+    /// value; none without reading when this client has written nothing to the document.
+    fn scan<T: ReadTxn>(&self, txn: &T, seen: &mut dyn FnMut(u64)) {
         if txn.state_vector().get(&ClientID::new(self.client_id)) == 0 {
-            return 0;
+            return;
         }
         let prefix = format!("{}:", self.client_id);
-        let mut floor = 0;
         let mut pending: Vec<Out> = txn.root_refs().map(|(_, value)| value).collect();
         while let Some(value) = pending.pop() {
             match value {
-                Out::Any(any) => note_any(&any, &prefix, &mut floor),
+                Out::Any(any) => note_any(&any, &prefix, seen),
                 Out::YMap(map) => {
                     for (key, value) in map.iter(txn) {
-                        note(key, &prefix, &mut floor);
+                        note(key, &prefix, seen);
                         pending.push(value);
                     }
                 }
@@ -81,8 +147,8 @@ impl SessionIds {
                     for chunk in text.diff(txn, YChange::identity) {
                         if let Some(attrs) = &chunk.attributes {
                             for (key, value) in attrs.iter() {
-                                note(key, &prefix, &mut floor);
-                                note_any(value, &prefix, &mut floor);
+                                note(key, &prefix, seen);
+                                note_any(value, &prefix, seen);
                             }
                         }
                         if !matches!(chunk.insert, Out::Any(Any::String(_))) {
@@ -94,19 +160,18 @@ impl SessionIds {
                 _ => {}
             }
         }
-        floor
     }
 }
 
-fn note_any(any: &Any, prefix: &str, floor: &mut u64) {
+fn note_any(any: &Any, prefix: &str, seen: &mut dyn FnMut(u64)) {
     let mut pending = vec![any];
     while let Some(any) = pending.pop() {
         match any {
-            Any::String(text) => note(text, prefix, floor),
+            Any::String(text) => note(text, prefix, seen),
             Any::Array(items) => pending.extend(items.iter()),
             Any::Map(entries) => {
                 for (key, value) in entries.iter() {
-                    note(key, prefix, floor);
+                    note(key, prefix, seen);
                     pending.push(value);
                 }
             }
@@ -117,9 +182,12 @@ fn note_any(any: &Any, prefix: &str, floor: &mut u64) {
 
 const MAX_FLOOR: u64 = 1 << 53;
 
-/// Raises `floor` past each `N` below [`MAX_FLOOR`] in `text` written as `prefix` then digits,
+/// A floor at or above this keeps the ids its scan saw for the fallback; real ids stay far below.
+const CAPTURE_FLOOR: u64 = 1 << 52;
+
+/// Passes each `N` below [`MAX_FLOOR`] in `text` written as `prefix` then digits to `seen`,
 /// where `prefix` does not continue a longer number.
-fn note(text: &str, prefix: &str, floor: &mut u64) {
+fn note(text: &str, prefix: &str, seen: &mut dyn FnMut(u64)) {
     for (at, _) in text.match_indices(prefix) {
         if text[..at].ends_with(|c: char| c.is_ascii_digit()) {
             continue;
@@ -131,7 +199,7 @@ fn note(text: &str, prefix: &str, floor: &mut u64) {
         if let Ok(n) = digits[..end].parse::<u64>()
             && n < MAX_FLOOR
         {
-            *floor = (*floor).max(n + 1);
+            seen(n);
         }
     }
 }
@@ -146,7 +214,7 @@ mod tests {
 
     fn floor(text: &str) -> u64 {
         let mut floor = 0;
-        note(text, "41:", &mut floor);
+        note(text, "41:", &mut |n| floor = floor.max(n + 1));
         floor
     }
 
@@ -194,18 +262,97 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "session id counter exhausted")]
-    fn a_floor_at_the_cap_fails_loudly_instead_of_drawing_an_unseen_id() {
-        drawn_after("41:9007199254740991");
+    fn a_floor_at_the_cap_draws_the_smallest_unused_ids() {
+        let (first, second) = drawn_after("41:9007199254740991 41:1");
+        assert_eq!((first.as_str(), second.as_str()), ("41:2", "41:3"));
     }
 
     #[test]
-    #[should_panic(expected = "session id counter exhausted")]
-    fn the_counter_fails_loudly_instead_of_wrapping() {
+    fn the_fallback_skips_ids_this_session_drew() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:0", Any::String("note".into()));
+        }
+        let ids = SessionIds::new(41);
+        let txn = doc.transact();
+        assert_eq!(ids.draw(&txn), "41:1");
+        ids.counter.store(super::MAX_FLOOR, Ordering::Relaxed);
+        assert_eq!(ids.draw(&txn), "41:2");
+        assert_eq!(ids.draw(&txn), "41:3");
+    }
+
+    #[test]
+    fn the_fallback_never_reissues_an_id_seen_live_this_session() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:1", Any::String("old".into()));
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740991".into()));
+        }
+        let ids = SessionIds::new(41);
+        let first = ids.draw(&doc.transact());
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:1");
+        }
+        let txn = doc.transact();
+        let later = [ids.draw(&txn), ids.draw(&txn)];
+        assert_eq!(first, "41:0");
+        assert!(!later.contains(&"41:1".to_owned()), "{later:?}");
+        assert!(!later.contains(&first), "{later:?}");
+    }
+
+    #[test]
+    fn the_fallback_never_reissues_an_id_that_was_live_after_the_cap() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740991".into()));
+        }
+        let ids = SessionIds::new(41);
+        assert_eq!(ids.draw(&doc.transact()), "41:0");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:2", Any::String("later".into()));
+        }
+        assert_eq!(ids.draw(&doc.transact()), "41:1");
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:2");
+        }
+        assert_eq!(ids.draw(&doc.transact()), "41:3");
+    }
+
+    #[test]
+    fn reaching_the_cap_by_drawing_keeps_ids_the_floor_saw() {
+        let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
+        let comments = doc.get_or_insert_map("comments");
+        {
+            let mut txn = doc.transact_mut();
+            comments.insert(&mut txn, "41:1", Any::String("old".into()));
+            comments.insert(&mut txn, "41:5", Any::String("41:9007199254740990".into()));
+        }
+        let ids = SessionIds::new(41);
+        assert_eq!(ids.draw(&doc.transact()), "41:9007199254740991");
+        {
+            let mut txn = doc.transact_mut();
+            comments.remove(&mut txn, "41:1");
+        }
+        let txn = doc.transact();
+        let later = [ids.draw(&txn), ids.draw(&txn)];
+        assert!(!later.contains(&"41:1".to_owned()), "{later:?}");
+    }
+
+    #[test]
+    fn the_counter_never_wraps() {
         let doc = Doc::with_options(Options::with_client_id(ClientID::new(41)));
         let ids = SessionIds::new(41);
         ids.floored.store(true, Ordering::Relaxed);
         ids.counter.store(u64::MAX, Ordering::Relaxed);
-        ids.draw(&doc.transact());
+        assert_eq!(ids.draw(&doc.transact()), "41:0");
     }
 }

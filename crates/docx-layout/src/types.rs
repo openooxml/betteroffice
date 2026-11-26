@@ -82,6 +82,22 @@ pub struct ColumnLayout {
     pub columns: Option<Vec<ColumnDefinition>>,
 }
 
+/// The most columns a section lays out.
+pub const MAX_COLUMNS: usize = 45;
+
+impl ColumnLayout {
+    /// `count` as laid out: at least one column and at most [`MAX_COLUMNS`].
+    pub fn column_count(&self) -> usize {
+        (self.count as usize).clamp(1, MAX_COLUMNS)
+    }
+
+    /// This layout with `count` set to [`Self::column_count`].
+    pub fn clamped(mut self) -> Self {
+        self.count = self.column_count() as f64;
+        self
+    }
+}
+
 /// `w:type` on a section break: how the *next* section starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2033,6 +2049,8 @@ pub struct TypesetRow {
     /// Extra first-line px after a marker overruns its hanging indent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_tab_offset: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_list_marker: Option<ooxml_text::measure::InlineListMarker<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_advances: Option<Vec<TypesetRunAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2263,6 +2281,25 @@ pub struct Input {
     pub measured: Vec<MeasuredBlock>,
     #[serde(default)]
     pub options: LayoutOptions,
+}
+
+impl Input {
+    /// Sets every column count to [`ColumnLayout::column_count`]; counts from 1 to
+    /// [`MAX_COLUMNS`] are unchanged.
+    pub fn clamp_column_counts(&mut self) {
+        let clamp = |columns: &mut Option<ColumnLayout>| {
+            *columns = columns.take().map(ColumnLayout::clamped);
+        };
+        clamp(&mut self.options.columns);
+        for section in self.options.sections.iter_mut().flatten() {
+            clamp(&mut section.columns);
+        }
+        for measured in &mut self.measured {
+            if let LayoutBlock::SectionBreak(block) = &mut measured.block {
+                clamp(&mut block.columns);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

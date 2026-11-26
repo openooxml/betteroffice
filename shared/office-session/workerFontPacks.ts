@@ -1,4 +1,3 @@
-import { setWorkerFontAssets } from '../../packages/fonts/src/workerAssets';
-import { installWorkerFontPacks } from './optionalFontPacks';
+import { installWorkerFontPacks, setWorkerFontAssets } from './optionalFontPacks';
 
 installWorkerFontPacks(self, setWorkerFontAssets);

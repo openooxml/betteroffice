@@ -1,0 +1,23 @@
+betteroffice-fonts-cjk-kr: publishing with bootstrap.
+    Updating crates.io index
+   Packaging betteroffice-fonts-cjk-kr v0.6.0 (/home/runner/work/betteroffice/betteroffice/crates/betteroffice-fonts-cjk-kr)
+    Updating crates.io index
+    Packaged 11 files, 3.3MiB (3.3MiB compressed)
+   Verifying betteroffice-fonts-cjk-kr v0.6.0 (/home/runner/work/betteroffice/betteroffice/crates/betteroffice-fonts-cjk-kr)
+   Compiling betteroffice-fonts-cjk-kr v0.6.0 (/home/runner/work/betteroffice/betteroffice/target/package/betteroffice-fonts-cjk-kr-0.6.0)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s
+   Uploading betteroffice-fonts-cjk-kr v0.6.0 (/home/runner/work/betteroffice/betteroffice/crates/betteroffice-fonts-cjk-kr)
+error: failed to publish betteroffice-fonts-cjk-kr v0.6.0 to registry at https://crates.io
+
+Caused by:
+  the remote server responded with an error (status 429 Too Many Requests): You have published too many new crates in a short period of time. Please try again after Wed, 25 Nov 2026 16:06:03 GMT and see https://crates.io/docs/rate-limits for more details.
+file:///home/runner/work/betteroffice/betteroffice/scripts/publish-crates.mjs:212
+      throw new Error(`Failed to publish ${name}@${version} with the bootstrap token`);
+            ^
+
+Error: Failed to publish betteroffice-fonts-cjk-kr@0.6.0 with the bootstrap token
+    at attemptPublishWithFallback (file:///home/runner/work/betteroffice/betteroffice/scripts/publish-crates.mjs:212:13)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async publishOneCrate (file:///home/runner/work/betteroffice/betteroffice/scripts/publish-crates.mjs:239:22)
+    at async publish (file:///home/runner/work/betteroffice/betteroffice/scripts/publish-crates.mjs:394:5)
+    at async file:///home/runner/work/betteroffice/betteroffice/scripts/publish-crates.mjs:416:3

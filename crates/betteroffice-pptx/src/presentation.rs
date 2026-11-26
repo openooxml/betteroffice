@@ -1147,7 +1147,7 @@ impl Presentation {
     pub fn save(&self) -> Result<Vec<u8>> {
         #[cfg(feature = "fonts")]
         {
-            let scopes = (0..self.slides().len())
+            let scopes = (0..self.slide_ids()?.len())
                 .map(|index| slide_scope(&self.session, index))
                 .collect::<Result<Vec<_>>>()?;
             self.prepare_fonts(self.session.package(), &scopes)?;
