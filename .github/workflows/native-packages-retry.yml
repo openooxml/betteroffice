@@ -16,6 +16,7 @@ jobs:
   rerun:
     name: Re-run failed native builds once
     if: >-
+      github.run_attempt == 1 &&
       github.event.workflow_run.path == '.github/workflows/native-packages.yml' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&

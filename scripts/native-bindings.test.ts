@@ -1177,7 +1177,7 @@ describe('native packages retry', () => {
         ? Number(left) === Number(right)
         : left === right;
 
-  const triggered = (run: Record<string, unknown>) => {
+  const triggered = (run: Record<string, unknown>, helperAttempt: unknown = 1) => {
     const event = {
       path: '.github/workflows/native-packages.yml',
       event: 'push',
@@ -1194,7 +1194,9 @@ describe('native packages retry', () => {
           ? Number(operand)
           : operand === 'github.repository'
             ? repo
-            : operand.replace(/^github\.event\.workflow_run\./, '').split('.').reduce((at: any, key) => at?.[key], event);
+            : operand === 'github.run_attempt'
+              ? helperAttempt
+              : operand.replace(/^github\.event\.workflow_run\./, '').split('.').reduce((at: any, key) => at?.[key], event);
     const operands: unknown[] = [];
     const condition = String(job.if).replace(
       /([\w.]+|'[^']*')\s*==\s*([\w.]+|'[^']*')/g,
@@ -1310,6 +1312,11 @@ describe('native packages retry', () => {
       expect(triggered({ run_attempt })).toBe(false);
       expect(triggered({ run_attempt, conclusion: 'failure' })).toBe(false);
     }
+  });
+
+  test('a re-run of this helper never requests another attempt', () => {
+    expect(triggered({}, 2)).toBe(false);
+    expect(triggered({ conclusion: 'failure' }, 2)).toBe(false);
   });
 
   test.each([
