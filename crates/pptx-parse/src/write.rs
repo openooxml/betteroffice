@@ -4292,7 +4292,7 @@ mod tests {
         }
     }
 
-#[test]
+    #[test]
     fn a_labelled_ellipse_is_not_written_as_a_text_box() {
         let add = ShapeAdd {
             name: "Labelled ellipse".to_owned(),
