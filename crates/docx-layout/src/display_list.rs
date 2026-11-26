@@ -12967,7 +12967,7 @@ fn cell_floating_shapes<'a>(
         };
         let position = shape.position.as_ref();
         let wrap = shape.wrap_type.as_deref();
-        if !crate::anchor::is_cell_shape_anchor(position, wrap) {
+        if !crate::anchor::is_cell_shape_anchor(position, wrap) || shape.inner_text.is_empty() {
             continue;
         }
         if next_block <= index {
