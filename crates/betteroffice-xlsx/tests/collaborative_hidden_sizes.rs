@@ -202,6 +202,55 @@ fn unhide_replicates_authored_sizes_and_undo_restores_hidden_state() {
     assert_visible(&left);
 }
 
+#[cfg(feature = "unstable-track-visibility")]
+#[test]
+fn range_unhide_restores_authored_and_default_sizes_on_both_replicas() {
+    use std::collections::BTreeMap;
+
+    let source = source_with_worksheet(concat!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<cols><col min="1" max="1" width="18" customWidth="1" hidden="1"/>"#,
+        r#"<col min="2" max="2" hidden="1"/>"#,
+        r#"<col min="3" max="3" width="24" customWidth="1" hidden="1"/></cols>"#,
+        r#"<sheetData><row r="1" ht="25" customHeight="1" hidden="1"></row>"#,
+        r#"<row r="2" hidden="1"></row>"#,
+        r#"<row r="3" ht="30" customHeight="1" hidden="1"></row></sheetData></worksheet>"#,
+    ));
+    let mut left = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut right = Workbook::from_model_collaborative(stripped_model(&source), 8).unwrap();
+    for workbook in [&left, &right] {
+        let sheet = workbook.sheet(DATA).unwrap();
+        for track in 0..3 {
+            assert!(sheet.row_hidden(track));
+            assert!(sheet.col_hidden(track));
+        }
+    }
+    apply(
+        &mut left,
+        vec![
+            Op::SetRowsVisibility {
+                sheet: DATA,
+                row: 0,
+                count: 3,
+                hidden: false,
+            },
+            Op::SetColsVisibility {
+                sheet: DATA,
+                col: 0,
+                count: 3,
+                hidden: false,
+            },
+        ],
+    );
+    let update = diff(&left, &right);
+    receive(&mut right, &update);
+    for workbook in [&left, &right] {
+        let sheet = workbook.sheet(DATA).unwrap();
+        assert_eq!(sheet.row_heights, BTreeMap::from([(0, 25.0), (2, 30.0)]));
+        assert_eq!(sheet.col_widths, BTreeMap::from([(0, 18.0), (2, 24.0)]));
+    }
+}
+
 #[test]
 fn undo_of_a_default_row_resize_leaves_no_size_for_a_later_peer_hide() {
     let source = source();
@@ -401,20 +450,22 @@ fn retried_remote_hide_remembers_and_republishes_the_predecessor_height() {
 }
 
 #[test]
-fn saving_rewrites_a_worksheet_when_only_its_hidden_sizes_differ() {
+fn hidden_row_resize_save_keeps_the_source_until_hidden_only_changes_patch() {
     let source = source();
     let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
     apply(&mut workbook, vec![row_height(0, 40.0)]);
     apply(&mut workbook, vec![row_visibility(0, true)]);
+    let resized = (Some(40.0), Some(30.0), Some(18.0));
+    assert_eq!(hidden_sizes(&workbook), resized);
+    assert_eq!(hidden_sizes(&reopen(&workbook)), AUTHORED);
+
+    edit(&mut workbook);
     let saved = reopen(&workbook);
-    assert_eq!(
-        (sizes(&saved), hidden_sizes(&saved)),
-        (HIDDEN, (Some(40.0), Some(30.0), Some(18.0))),
-    );
+    assert_eq!((sizes(&saved), hidden_sizes(&saved)), (HIDDEN, resized));
 }
 
 #[test]
-fn hidden_size_only_batch_commits_without_a_shared_update_and_keeps_the_resize() {
+fn hidden_size_only_batch_keeps_the_source_until_hidden_only_changes_patch() {
     let source = source();
     let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
     let version = workbook.version();
@@ -435,7 +486,7 @@ fn hidden_size_only_batch_commits_without_a_shared_update_and_keeps_the_resize()
         (true, false, before, (Some(40.0), Some(30.0), Some(18.0))),
     );
     assert_ne!(workbook.version(), version);
-    assert_eq!(hidden_sizes(&reopen(&workbook)).0, Some(40.0));
+    assert_eq!(hidden_sizes(&reopen(&workbook)), AUTHORED);
     apply(&mut workbook, vec![row_visibility(0, false)]);
     assert_eq!(sizes(&workbook).0, Some(40.0));
 }
@@ -474,7 +525,7 @@ fn no_op_reset_then_hide_forgets_the_local_size_without_committing() {
 }
 
 #[test]
-fn immediate_save_persists_the_local_clear_after_a_released_no_op() {
+fn reset_then_hide_save_keeps_the_source_until_hidden_only_changes_patch() {
     let source = source();
     let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
     assert_eq!(workbook.save().unwrap(), source);
@@ -496,9 +547,13 @@ fn immediate_save_persists_the_local_clear_after_a_released_no_op() {
     assert!(!result.applied);
     assert_eq!(workbook.version(), version);
     assert_eq!(workbook.recovery_checkpoint(1, None).unwrap(), checkpoint);
+    let cleared = (None, Some(30.0), Some(18.0));
+    assert_eq!(hidden_sizes(&workbook), cleared);
+    assert_eq!(workbook.save().unwrap(), source);
+
+    edit(&mut workbook);
     let saved = reopen(&workbook);
-    assert_eq!(sizes(&saved), HIDDEN);
-    assert_eq!(hidden_sizes(&saved), (None, Some(30.0), Some(18.0)));
+    assert_eq!((sizes(&saved), hidden_sizes(&saved)), (HIDDEN, cleared));
 }
 
 #[test]

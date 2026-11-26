@@ -1806,12 +1806,7 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let serialize = if self.is_collaborative() {
-                    xlsx_parse::serialize_collaborative_workbook_with_package
-                } else {
-                    xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes
-                };
-                let parts = serialize(
+                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
