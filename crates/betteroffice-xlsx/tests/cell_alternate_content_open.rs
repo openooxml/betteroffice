@@ -68,7 +68,9 @@ fn a_cell_alternate_content_formula_refuses_sheet_rewrites_before_mutation() {
     let baseline = workbook.save().unwrap();
     for address in ["A1", "B1"] {
         let at = CellRef::parse_a1(address).unwrap();
-        let error = workbook.edit_cell(SheetId(0), at, "4", options).unwrap_err();
+        let error = workbook
+            .edit_cell(SheetId(0), at, "4", options)
+            .unwrap_err();
         assert!(matches!(
             error,
             Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
