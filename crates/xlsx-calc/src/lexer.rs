@@ -6,7 +6,7 @@ use std::fmt;
 use xlsx_model::sheet_qualifier::{is_r1c1_reference, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
-use crate::reference::{MAX_TABLE_SPEC_ITEMS, r1c1_rect};
+use crate::reference::MAX_TABLE_SPEC_ITEMS;
 use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
@@ -284,18 +284,9 @@ pub fn rewrite_table_columns<'a>(
             continue;
         };
         let token = &tokens[index];
-        let TokKind::TableRef { sheet, table, spec } = &token.kind else {
+        let TokKind::TableRef { sheet, table, .. } = &token.kind else {
             continue;
         };
-        if table.is_empty()
-            && spec.bands.is_empty()
-            && index >= 2
-            && tokens[index - 1].kind == TokKind::Intersection
-            && matches!(&tokens[index - 2].kind, TokKind::ExternalRef(reference)
-                if matches!(reference.as_ref(), TokKind::Name { scope: Some(_), .. }))
-        {
-            continue;
-        }
         for (column, span) in columns {
             if let Some(new) = caption(sheet.as_deref(), table, &column) {
                 let prefix = &input[selector_start + 1..span.start];
@@ -368,6 +359,20 @@ fn workbook_scope(scope: &str) -> Option<&str> {
         .map(|(_, sheet)| sheet)
 }
 
+fn is_quoted_workbook_path(scope: &str) -> bool {
+    let Some((prefix, rest)) = scope.split_once(':') else {
+        return false;
+    };
+    (prefix.len() == 1
+        && prefix.as_bytes()[0].is_ascii_alphabetic()
+        && rest.starts_with(['\\', '/']))
+        || (rest.starts_with("//")
+            && prefix.starts_with(|ch: char| ch.is_ascii_alphabetic())
+            && prefix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
+            }))
+}
+
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '\\')
 }
@@ -379,7 +384,6 @@ pub(crate) fn is_unquoted_sheet(word: &str) -> bool {
         && !word.eq_ignore_ascii_case("FALSE")
         && CellRef::parse_a1(&word.to_ascii_uppercase()).is_err()
         && !is_r1c1_reference(word)
-        && r1c1_rect(word, Some(CellRef::new(0, 0))).is_none()
 }
 
 fn is_reference(kind: &TokKind) -> bool {
@@ -635,6 +639,9 @@ impl Lexer<'_> {
         if let Some(kind) = self.try_external_ref(start)? {
             return Ok(kind);
         }
+        if self.input[start..].starts_with("[]") {
+            return Err(ParseError::new(start, "empty local structured reference"));
+        }
         let kind = self.lex_table_ref(None, String::new(), start)?;
         if self
             .peek()
@@ -659,6 +666,7 @@ impl Lexer<'_> {
         };
         if end == 0
             || !book[end..].starts_with(']')
+            || TableBand::parse(&book[..end]).is_some()
             || book[..end].contains(|ch: char| {
                 ch.is_whitespace()
                     || matches!(ch, '@' | ':' | '+' | '*' | '/' | '\\' | '<' | '>' | '=')
@@ -730,7 +738,7 @@ impl Lexer<'_> {
         let kind = self
             .try_sheet_reference(&sheet, true, start)?
             .ok_or_else(|| ParseError::new(self.pos, "expected a sheet qualifier"))?;
-        if workbook_scope(&sheet).is_some()
+        if (workbook_scope(&sheet).is_some() || is_quoted_workbook_path(&sheet))
             && !(matches!(kind, TokKind::Name { .. }) && self.after_ws().starts_with('('))
         {
             return Ok(TokKind::ExternalRef(Box::new(kind)));
@@ -746,7 +754,9 @@ impl Lexer<'_> {
     ) -> Result<Option<TokKind>, ParseError> {
         if self.consume_bang() {
             if quoted
-                && let Some((first, last)) = workbook_scope(first).unwrap_or(first).split_once(':')
+                && let Some((first, last)) = workbook_scope(first)
+                    .or_else(|| (!is_quoted_workbook_path(first)).then_some(first))
+                    .and_then(|scope| scope.split_once(':'))
             {
                 if first.is_empty() || last.is_empty() || last.contains(':') {
                     return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
@@ -772,12 +782,20 @@ impl Lexer<'_> {
         }
         if let Some(last) = self.read_sheet_endpoint()
             && self.consume_bang()
-            && (quoted_last
+        {
+            let first = workbook_scope(first).unwrap_or(first);
+            if quoted
+                && (first.is_empty() || last.is_empty() || first.contains(':') || last.contains(':'))
+            {
+                return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
+            }
+            if (quoted_last
                 || (last.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
                     && !last.contains(['$', '\\'])))
-            && let Some(kind) = self.read_3d_target(workbook_scope(first).unwrap_or(first), &last)
-        {
-            return Ok(Some(kind));
+                && let Some(kind) = self.read_3d_target(first, &last)
+            {
+                return Ok(Some(kind));
+            }
         }
         self.pos = save;
         Ok(None)
@@ -808,9 +826,16 @@ impl Lexer<'_> {
             let after_path = path.trim_start_matches(is_word_char);
             self.pos = self.input.len() - after_path.len();
         }
-        if (self.pos != end || word.ends_with('\\'))
+        let path_end = self.pos;
+        if (path_end != end || word.ends_with('\\'))
             && let Some(kind) = self.try_external_ref(start)?
         {
+            if !self.input[start..path_end].ends_with('\\') {
+                return Err(ParseError::new(
+                    path_end,
+                    "expected a path separator before the workbook",
+                ));
+            }
             return Ok(kind);
         }
         self.pos = end;
@@ -986,7 +1011,9 @@ impl Lexer<'_> {
 
     fn is_call(&self, word: &str) -> bool {
         self.peek() == Some('(')
-            || (self.after_ws().starts_with('(') && crate::functions::resolve(word).is_some())
+            || (self.after_ws().starts_with('(')
+                && (crate::functions::resolve(word).is_some()
+                    || crate::array::is_array_builtin(word)))
     }
 
     fn ends_address(&self, word: &str) -> bool {
@@ -1002,7 +1029,7 @@ impl Lexer<'_> {
         self.bump();
         self.skip_ws();
         let end = self.read_word();
-        if self.ends_address(&end) && !self.after_ws().starts_with('(') {
+        if self.ends_address(&end) {
             if let (Ok(first), Ok(last)) = (
                 CellRef::parse_a1(&word.to_ascii_uppercase()),
                 CellRef::parse_a1(&end.to_ascii_uppercase()),
@@ -1112,6 +1139,9 @@ mod tests {
             ("Sheet1:Sheet2!A1:B2", "Sheet1:Sheet2"),
             ("Sheet1:Sheet2!A:A", "Sheet1:Sheet2"),
             ("Sheet1:Sheet2!1:1", "Sheet1:Sheet2"),
+            ("Sheet1:Sheet2!#REF!", "Sheet1:Sheet2"),
+            ("Q1_Sales:Data_1!A1", "Q1_Sales:Data_1"),
+            ("Résumé:Sheet2!A1", "Résumé:Sheet2"),
         ] {
             let tokens = lex_for_rewrite(source).unwrap();
             assert_eq!(tokens.len(), 1, "{source}");
@@ -1121,7 +1151,8 @@ mod tests {
                 TokKind::ThreeDRef { first: start, last: end, target }
                     if start == first && end == last
                         && matches!(target.as_ref(), TokKind::Ref { .. } | TokKind::Range { .. }
-                            | TokKind::ColumnRange { .. } | TokKind::RowRange { .. })),
+                            | TokKind::ColumnRange { .. } | TokKind::RowRange { .. }
+                            | TokKind::ErrLit(ErrorValue::Ref))),
                 "{source}"
             );
             assert_eq!((tokens[0].start, tokens[0].end), (0, source.len()));
@@ -1216,6 +1247,7 @@ mod tests {
     fn lexer_modes_share_token_spans_and_kinds() {
         for source in [
             "SUM(Sales:Q2!#REF!)",
+            "SUM(Sheet1:Sheet2!A1,Sheet1:Sheet2!#REF!,R2C3x:Sheet2!#REF!)",
             "Amt:Tax[Old]",
             "SUM(Amt : Tax[Old])",
             "SUM(Sheet1!Amt:Tax[Old])",
@@ -1232,12 +1264,14 @@ mod tests {
             r"\Table1:Other!A1",
             "SUM(Amt:IF(C1,B1,B2))",
             "SUM(Amt:LET(x,B1,x))",
+            "SUM(Amt:LET (x,B1,x),Amt:Tax (1:2),A1:B2 (C1:D2))",
             "SUM([2024] Prices[Amt])",
             "SUM([1] Prices)",
             "SUM([1]Sheet1!A1 [@Old])",
             "SUM('[1]Sheet 1'!A1:B5 [@Old])",
             "SUM([1]!ExternalRange [@Old])",
             "SUM([Book.xlsx]Sheet1!A1 [@Old])",
+            "SUM([1]Sheet1!ExternalName [[Old]:[X]])",
             "Sheet1 !A1+Table1[Old]",
             "Sheet1! A1+Table1[Old]",
             "'My Sheet' ! A1+Table1[Old]",
@@ -1249,6 +1283,7 @@ mod tests {
             "[1]Sheet1!A1+[1]!Name+[1]Sheet1:Sheet2!A1+[1]Sheet1:Sheet2!#REF!",
             "[1]!ExternalFn([@Old])",
             r"'C:\x\[Book.xlsx]Sheet1'!A1+C:\dir\[Book.xlsx]Sheet1!A1",
+            "'https://example.com:8443/book.xlsx'!A1+T[Old]",
             "'It''s'!A1+'a!b'!A1+'It''s':'Other'!A1+'It''s:Other'!A1",
             "A1:Sheet2!B2+$A$1:Sheet2!B2:C3+LOG10:Sheet2!B2",
             "A1:LOG10(1)+Sheet1!LOG10(1)+Sheet1:Sheet2!LOG10(1)",
@@ -1344,16 +1379,18 @@ mod tests {
     }
 
     #[test]
-    fn unambiguous_local_selectors_after_external_names_follow_a_header_rename() {
+    fn local_selectors_after_external_names_follow_a_header_rename() {
         let source = concat!(
             "SUM([1]Sheet1!ExternalName [Old])+",
+            "SUM([1]Sheet1!ExternalName [[Old]:[X]])+",
             "SUM([1]Sheet1!ExternalName [@Old])+",
-            "SUM(([1]Sheet1!ExternalName) [Old])+[1]!T[Old]",
+            "SUM(([1]Sheet1!ExternalName) [Old])+[1]Sheet1!T[Old]+[1]!T[Old]",
         );
         let expected = concat!(
-            "SUM([1]Sheet1!ExternalName [Old])+",
+            "SUM([1]Sheet1!ExternalName [New])+",
+            "SUM([1]Sheet1!ExternalName [[New]:[X]])+",
             "SUM([1]Sheet1!ExternalName [@New])+",
-            "SUM(([1]Sheet1!ExternalName) [New])+[1]!T[Old]",
+            "SUM(([1]Sheet1!ExternalName) [New])+[1]Sheet1!T[Old]+[1]!T[Old]",
         );
         assert_eq!(
             rewrite_table_column(source, "T", "Data", true, "Old", "New"),
@@ -1403,6 +1440,50 @@ mod tests {
             "[Book.xlsx]'Sheet 1'!A1",
         ] {
             assert!(lex(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn bracketed_band_keywords_cannot_qualify_external_references() {
+        for band in ["#All", "#Headers", "#Data", "#Totals", "#This Row"] {
+            assert!(matches!(
+                &kinds(&format!("[{band}]"))[0],
+                TokKind::TableRef { .. }
+            ));
+            assert!(lex(&format!("[{band}]!Name")).is_err());
+            assert!(lex(&format!("[{band}]Sheet1!A1")).is_err());
+        }
+        assert!(matches!(
+            &kinds("[#2025.xlsx]!Name")[0],
+            TokKind::ExternalRef(_)
+        ));
+    }
+
+    #[test]
+    fn empty_local_structured_references_require_a_table_name() {
+        assert_eq!(
+            rewrite_table_column("[]+T[Old]", "T", "Data", true, "Old", "New"),
+            Err(ParseError::new(0, "empty local structured reference")),
+        );
+        assert_eq!(
+            rewrite_table_column("T[]+T[Old]", "T", "Data", true, "Old", "New"),
+            Ok(Some("T[]+T[New]".into())),
+        );
+    }
+
+    #[test]
+    fn a_drive_path_requires_a_separator_before_the_workbook() {
+        for tail in ["[Book.xlsx]Sheet1!A1", "[1]!Name"] {
+            let valid = format!(r"C:\Foo\{tail}");
+            assert!(matches!(&kinds(&valid)[..], [TokKind::ExternalRef(_)]));
+            let invalid = format!(r"C:\Foo{tail}");
+            assert_eq!(
+                lex_for_rewrite(&invalid),
+                Err(ParseError::new(
+                    6,
+                    "expected a path separator before the workbook",
+                )),
+            );
         }
     }
 

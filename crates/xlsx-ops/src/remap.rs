@@ -2971,6 +2971,36 @@ mod tests {
     }
 
     #[test]
+    fn sheet_spans_with_r1c1_prefixes_survive_table_removal_and_follow_sheet_edits() {
+        for first in ["RCost", "R2C3x"] {
+            let sheets = [first, "Mid", "Sheet2"].map(str::to_owned);
+            for target in ["A1", "#REF!"] {
+                let source = format!("SUM({first}:Sheet2!{target})");
+                assert_eq!(
+                    remove_table_references(&source, &sheets[..1], &sheets),
+                    None,
+                );
+                assert_eq!(
+                    rename_formula_sheet(&source, "Sheet2", "New Sheet"),
+                    format!("SUM('{first}:New Sheet'!{target})"),
+                );
+                assert_eq!(
+                    rename_formula_sheet(&source, first, "Renamed"),
+                    format!("SUM(Renamed:Sheet2!{target})"),
+                );
+                assert_eq!(
+                    xlsx_model::sheet_qualifier::remove_sheet_references(&source, "Sheet2", &sheets),
+                    Some(format!("SUM({first}:Mid!{target})")),
+                );
+                assert_eq!(
+                    xlsx_model::sheet_qualifier::remove_sheet_references(&source, first, &sheets),
+                    Some(format!("SUM(Mid:Sheet2!{target})")),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_dropped_table_can_be_the_first_operand_of_a_qualified_range_join() {
         let sheets = ["Other".to_owned()];
         for (table, operand) in [
@@ -3004,6 +3034,28 @@ mod tests {
                 Some(source.replace("Amt", "#REF!"))
             );
         }
+    }
+
+    #[test]
+    fn parenthesized_intersections_keep_ranges_during_table_removal() {
+        let dropped = ["Amt".to_owned()];
+        for intersection in ["Amt:Tax (1:2)", "1:2 (A:B)", "A1:B2 (C1:D2)"] {
+            let source = format!("SUM({intersection})+Amt[Old]");
+            let tokens = lex_for_rewrite(&source).unwrap();
+            assert!(matches!(
+                &tokens[2].kind,
+                TokKind::ColumnRange { .. } | TokKind::RowRange { .. } | TokKind::Range { .. }
+            ));
+            assert_eq!(tokens[3].kind, TokKind::Intersection);
+            assert_eq!(
+                remove_table_references(&source, &dropped, &[]),
+                Some(format!("SUM({intersection})+#REF!")),
+            );
+        }
+        assert_eq!(
+            remove_table_references("SUM(Amt:LET (x,B1,x))", &dropped, &[]).as_deref(),
+            Some("SUM(#REF!:LET (x,B1,x))"),
+        );
     }
 
     #[test]
@@ -3564,6 +3616,44 @@ mod tests {
             workbook.defined_names[0].formula,
             "SUM([1]Data!B1,Data ! A2 : A3)"
         );
+    }
+
+    #[test]
+    fn structural_edits_refuse_external_spans_that_cannot_round_trip() {
+        let mut workbook = wb(&["Data", "Report"]);
+        let owner = SheetId(1);
+        let op = insert_rows(0, 0, 1);
+        set_formula(
+            &mut workbook,
+            owner,
+            "A1",
+            "'[1]Sheet1:Sheet2'!A1+Data!A1",
+        );
+        remap_formulas(&mut workbook, &op).unwrap();
+        assert_eq!(
+            formula(&workbook, owner, "A1").as_deref(),
+            Some("'[1]Sheet1:Sheet2'!A1+Data!A2"),
+        );
+        for source in [
+            "'[1]Sheet1':'Sheet2'!A1+Data!A1",
+            "'[Book.xlsx]Sheet1':'Sheet2'!A1+Data!A1",
+            "'[1]Sheet1':Sheet2!A1+Data!A1",
+        ] {
+            set_formula(&mut workbook, owner, "B1", source);
+            assert_eq!(
+                remap_formulas(&mut workbook, &op).unwrap_err(),
+                OpError::FormulaNotRewritable {
+                    sheet: owner,
+                    cell: r("B1"),
+                },
+                "{source}"
+            );
+            assert_eq!(formula(&workbook, owner, "B1").as_deref(), Some(source));
+            assert_eq!(
+                formula(&workbook, owner, "A1").as_deref(),
+                Some("'[1]Sheet1:Sheet2'!A1+Data!A2"),
+            );
+        }
     }
 
     /// A span whose endpoints this workbook does not hold cannot be resolved,

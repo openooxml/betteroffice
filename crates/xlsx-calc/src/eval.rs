@@ -2261,6 +2261,28 @@ mod tests {
     }
 
     #[test]
+    fn sheet_names_with_r1c1_prefixes_remain_qualified_references() {
+        let mut workbook = Workbook::default();
+        let mut sheet = Sheet::new("RCost");
+        sheet.set_cell(CellRef::new(0, 0), number(7.0));
+        workbook.sheets.push(sheet);
+        let context = EvalContext::new(&workbook, SheetId(0));
+        for source in ["RCost!A1", r#"INDIRECT("RCost!R1C1",FALSE)"#] {
+            assert_eq!(
+                evaluate(&parse_formula(source).unwrap(), &context),
+                num(7.0),
+            );
+        }
+        for source in ["R2C3x!A1", "RCPT!A1:B5", "RC_Data!Total", "'RC'!A1"] {
+            assert_eq!(parse_formula(source).unwrap().to_formula(), source);
+        }
+        assert!(crate::parser::is_formula_source("[1]RCost!A1"));
+        assert!(parse_formula("_xlpm.c:RCost!A2").is_ok());
+        assert!(parse_formula("RC!A1").is_err());
+        assert!(parse_formula("R2C3!A1").is_err());
+    }
+
+    #[test]
     fn direct_evaluation_keeps_quoted_external_reference_errors_and_lazy_branches() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));

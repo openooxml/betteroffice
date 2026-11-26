@@ -1,7 +1,7 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::sheet_qualifier::parse_sheet_token;
+use xlsx_model::sheet_qualifier::{parse_sheet_token, qualified_target};
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::lexer::{ParseError, TokKind, Token, is_unquoted_sheet, lex};
@@ -450,7 +450,9 @@ impl<'a> Parser<'a> {
         if self.source[pos..].starts_with('\'') {
             return match kind {
                 TokKind::ThreeDRef { target, .. } => {
-                    let qualifier = parse_sheet_token(self.source, pos).ok_or_else(err)?;
+                    let qualifier = parse_sheet_token(self.source, pos)
+                        .filter(|qualifier| qualified_target(self.source, qualifier.end).is_some())
+                        .ok_or_else(err)?;
                     Ok(qualify_reference(*target, qualifier.name))
                 }
                 other => Ok(other),
@@ -949,6 +951,42 @@ mod tests {
             let error = parse_formula(source).unwrap_err();
             assert_eq!(error.pos, pos, "{source}");
             assert!(error.message.contains(message), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn path_qualified_references_are_not_sheet_spans() {
+        for source in [
+            r"'C:\Program Files\Addin.xlam'!MyFunc(A1)",
+            r"'C:\Books\Data.xlsx'!MyName",
+            r"'C:\Books\Data.xlsx'!A1",
+            "'https://example.com/book.xlsx'!MyName",
+            "'https://example.com:8443/book.xlsx'!A1",
+        ] {
+            assert_eq!(parse(source).to_formula(), source);
+        }
+        assert_eq!(
+            crate::lexer::rewrite_table_column(
+                r"'C:\Addin.xlam'!MyFunc(T[Old])",
+                "T",
+                "Data",
+                false,
+                "Old",
+                "New",
+            ),
+            Ok(Some(r"'C:\Addin.xlam'!MyFunc(T[New])".into())),
+        );
+    }
+
+    #[test]
+    fn quoted_sheet_span_endpoints_cannot_themselves_be_spans() {
+        assert_eq!(parse("'A:B'!A1").to_formula(), "'A:B'!A1");
+        for source in ["'A:B':'C'!A1", "'A':'B:C'!A1"] {
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(0, "invalid 3-D sheet qualifier")),
+                "{source}"
+            );
         }
     }
 

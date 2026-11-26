@@ -1477,6 +1477,8 @@ fn a_header_rename_preserves_other_workbook_and_table_selectors() {
     let other_refs = concat!(
         r"'C:\Books\[Other.xlsx]Data'!OtherTable[Status]+[1]Sheet1!Other[Status]+",
         "[1]Sheet1!Table1[Status]+OtherTable[Status]+",
+    );
+    let external_name_intersections = concat!(
         r"'C:\Books\[Other.xlsx]Data'!OtherTable [Status]+",
         r"C:\Books\[Other.xlsx]Data!OtherTable [Status]+[1]Sheet1!Other [Status]+",
     );
@@ -1485,7 +1487,9 @@ fn a_header_rename_preserves_other_workbook_and_table_selectors() {
         &book(),
         "xl/worksheets/sheet1.xml",
         r#"<c r="C2"><v>1</v></c>"#,
-        &format!(r#"<c r="C2"><f>{other_refs}{local_refs}</f><v>1</v></c>"#),
+        &format!(
+            r#"<c r="C2"><f>{other_refs}{external_name_intersections}{local_refs}</f><v>1</v></c>"#
+        ),
     );
     let source = replace_part(
         &source,
@@ -1497,7 +1501,8 @@ fn a_header_rename_preserves_other_workbook_and_table_selectors() {
     edit(&mut workbook, "B1", "State");
     let reopened = assert_saved_headers(&workbook.save().unwrap(), ["Name", "State", "Rev"]);
     let local_rewritten = "OtherTable [State]+SUM(AllowedRange [@State])+[@State]";
-    let rewritten = format!("{other_refs}{local_rewritten}");
+    let intersections_rewritten = external_name_intersections.replace("[Status]", "[State]");
+    let rewritten = format!("{other_refs}{intersections_rewritten}{local_rewritten}");
     for (address, formula) in [("C2", rewritten.as_str()), ("H2", local_refs)] {
         assert_eq!(
             reopened.model().sheets[0]

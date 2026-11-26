@@ -4,6 +4,7 @@
 //! rename in `xlsx-ops` and the writer's rename of preserved fragments.
 
 use crate::CellRef;
+use crate::addr::{MAX_COLS, MAX_ROWS};
 
 /// One sheet qualifier found in a formula. A 3-D qualifier names two
 /// endpoints and covers every sheet between them in workbook order, whether it
@@ -321,15 +322,21 @@ pub fn is_simple_sheet_name(name: &str) -> bool {
 }
 
 pub fn is_r1c1_reference(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-    if matches!(upper.as_str(), "R" | "C") {
-        return true;
-    }
-    let Some(rest) = upper.strip_prefix('R') else {
-        return false;
+    let axis = |digits: &str, limit| {
+        digits.is_empty()
+            || (digits.bytes().all(|byte| byte.is_ascii_digit())
+                && digits
+                    .parse::<u32>()
+                    .is_ok_and(|index| (1..=limit).contains(&index)))
     };
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    rest.as_bytes().get(digits) == Some(&b'C')
+    if let Some(rest) = name.strip_prefix(['R', 'r']) {
+        if let Some((row, column)) = rest.split_once(['C', 'c']) {
+            return axis(row, MAX_ROWS) && axis(column, MAX_COLS);
+        }
+        return axis(rest, MAX_ROWS);
+    }
+    name.strip_prefix(['C', 'c'])
+        .is_some_and(|column| axis(column, MAX_COLS))
 }
 
 /// `source` with the sheets `renamed` maps (each sheet's old name to its new
