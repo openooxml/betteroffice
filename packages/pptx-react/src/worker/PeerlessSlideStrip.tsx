@@ -234,13 +234,11 @@ export const PeerlessSlideStrip = memo(function PeerlessSlideStrip({ run, comman
   }, [store, client, run]);
   const view = useSyncExternalStore(subscribe, snapshot, snapshot);
   const readStrip = useCallback((id: string) => client.access!('proposalSlideStrip', id), [client, view]);
-  const loadProposalSlide = useCallback(async (slideId: string) => {
-    await run.ensureWholeFonts?.();
-    return peerlessProposalFrameSource(run, proposalId!, slideId);
-  }, [run, proposalId, view]);
+  const loadProposalSlide = useCallback((slideId: string) => peerlessProposalFrameSource(run, proposalId!, slideId), [run, proposalId, view]);
   return <div style={styles.strip}><aside ref={strip} style={{ overflowY: 'auto', flex: 1 }} aria-label={t('slides.panelLabel')}>
     {proposalId && onPreviewSlide ? <AsyncProposalSlideStrip id={proposalId} read={readStrip}
-      load={loadProposalSlide} selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
+      load={loadProposalSlide} fontCoverage={run.fontCoverage?.thumbnails}
+      selectedSlideId={previewSlideId ?? view.active} onSelect={onPreviewSlide} />
       : view.slides.map((slide, index) => <Slide key={slide.id} {...slide} index={index} total={view.slides.length} active={slide.id === view.active}
       disabled={view.disabled} run={run} previewFit={previewFit} current={current} onNavigate={onNavigate} />)}
   </aside><SlideActions run={run} active={view.active} disabled={view.disabled} />{contextMenu.element}</div>;
