@@ -57,6 +57,63 @@ struct RecoveryHistory {
     preserved_redo: Vec<RecoveryPreservedHistory>,
 }
 
+fn capture_history_stack(model: &WorkbookModel, stack: &[Vec<Op>]) -> Result<Vec<Vec<Op>>> {
+    let Some(first_rename) = stack.iter().position(|step| {
+        step.iter()
+            .any(|op| matches!(op, Op::RestoreTableColumn { .. }))
+    }) else {
+        return Ok(stack.to_vec());
+    };
+    let mut preview = model.clone();
+    let mut batch =
+        xlsx_ops::InPlaceBatch::without_inverse(&mut preview).with_cell_restoration(true);
+    let mut captured = Vec::with_capacity(stack.len());
+    for step in stack[first_rename..].iter().rev() {
+        let mut ops = Vec::with_capacity(step.len());
+        for op in step {
+            if let Op::RestoreTableColumn { sheet, at, .. } = op {
+                let mut cells = vec![(*sheet, *at)];
+                let mut names_changed = false;
+                batch.apply_with_inverse(op, |inverse| {
+                    if let [
+                        Op::RestoreTableColumn {
+                            formulas,
+                            defined_names,
+                            ..
+                        },
+                    ] = inverse
+                    {
+                        cells.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                        names_changed = !defined_names.is_empty();
+                    }
+                })?;
+                let model = batch.workbook();
+                ops.push(Op::SetTables {
+                    tables: model.tables.clone(),
+                });
+                ops.extend(cells.into_iter().map(|(sheet, at)| Op::SetCell {
+                    sheet,
+                    at,
+                    cell: current_cell_state(model, sheet, at),
+                }));
+                if names_changed {
+                    ops.push(Op::SetDefinedNames {
+                        defined_names: model.defined_names.clone(),
+                    });
+                }
+            } else {
+                batch.apply(op)?;
+                ops.push(op.clone());
+            }
+        }
+        captured.push(ops);
+        pulse();
+    }
+    captured.extend(stack[..first_rename].iter().rev().cloned());
+    captured.reverse();
+    Ok(captured)
+}
+
 struct RecoveryPreservedHistory {
     before: RecoveryPreserved,
     after: RecoveryPreserved,
@@ -701,6 +758,20 @@ impl Workbook {
         let calculation =
             RecoveryCalculation::capture(&self.model, projection, self.is_collaborative())?;
         pulse();
+        let history = if let Some((preserved_undo, preserved_redo)) = history {
+            let (undo, redo) = self.undo.recovery_stacks();
+            Some(RecoveryHistory {
+                undo: UndoStack::from_recovery_stacks(
+                    capture_history_stack(&self.model, undo)?,
+                    capture_history_stack(&self.model, redo)?,
+                ),
+                sheet_order: built.recovery_sheet_order_history(),
+                preserved_undo,
+                preserved_redo,
+            })
+        } else {
+            None
+        };
         let checkpoint = RecoveryCheckpoint {
             engine: env!("CARGO_PKG_VERSION").into(),
             through_seq,
@@ -710,12 +781,7 @@ impl Workbook {
             proposals: self.proposals.list().to_vec(),
             proposal_id_counter: self.proposals.id_counter(),
             axes: capture_axes(&self.preserved.axes)?,
-            history: history.map(|(preserved_undo, preserved_redo)| RecoveryHistory {
-                undo: self.undo.clone(),
-                sheet_order: built.recovery_sheet_order_history(),
-                preserved_undo,
-                preserved_redo,
-            }),
+            history,
         };
         let mut metadata = Writer::bounded(limit.max - limit.used);
         checkpoint.write(&mut metadata);

@@ -240,16 +240,12 @@ impl SnapshotGraphBuilder {
                 )?;
                 if let Some((sheet, defined)) = resolved {
                     let key = (sheet, name.2.to_ascii_lowercase());
+                    let owner = defined.local_sheet.unwrap_or(sheet);
                     if formula.expanded.insert(key)
-                        && let Some(expression) = parse_cached(
-                            &self.graph.asts,
-                            defined
-                                .formula
-                                .strip_prefix('=')
-                                .unwrap_or(&defined.formula),
-                        )
+                        && let Some(expression) =
+                            self.graph
+                                .parse_definition(&self.graph.asts, owner, defined)
                     {
-                        let owner = defined.local_sheet.unwrap_or(sheet);
                         formula.names.pop_front();
                         formula.expression(&self.graph, owner, &expression);
                         return Ok((false, 1, bytes));
@@ -275,12 +271,10 @@ impl SnapshotGraphBuilder {
                     && formula
                         .volatile_expanded
                         .insert((sheet, name.2.to_ascii_lowercase()))
-                    && let Some(expression) = parse_cached(
+                    && let Some(expression) = self.graph.parse_definition(
                         &self.graph.asts,
-                        defined
-                            .formula
-                            .strip_prefix('=')
-                            .unwrap_or(&defined.formula),
+                        defined.local_sheet.unwrap_or(sheet),
+                        defined,
                     )
                 {
                     formula.volatile = push_volatile_name_uses(
@@ -449,10 +443,11 @@ impl SnapshotGraphBuilder {
                     };
                     let bytes = admit(cell.formula.as_ref().map_or(1, String::len), max_bytes)?;
                     self.last_cell = Some((at.row, at.col));
+                    let key = NodeKey::new(SheetId(self.index as u32), at);
                     if let Some(source) = &cell.formula
-                        && let Some(ast) = parse_cached(&self.graph.asts, formula_source(source))
+                        && let Some(ast) =
+                            self.graph.parse_formula(key.sheet, formula_source(source))
                     {
-                        let key = NodeKey::new(SheetId(self.index as u32), at);
                         let mut formula = Formula {
                             key,
                             ast: Arc::clone(&ast),

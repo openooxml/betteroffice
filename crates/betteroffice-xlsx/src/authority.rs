@@ -1458,6 +1458,45 @@ impl WorkbookAuthority {
         self.base.auto_filters.get(index)?.as_ref()
     }
 
+    pub(crate) fn keeps_table_headers(&self, model: &WorkbookModel) -> Result<bool, String> {
+        if self.base.tables.iter().all(|table| table.header_rows == 0) {
+            return Ok(true);
+        }
+        let txn = self.doc.transact();
+        let order = txn.get_array(SHEET_ORDER).ok_or("missing sheet order")?;
+        let keys = sheet_keys(&order, &txn)?;
+        let sheets = txn.get_map(SHEETS).ok_or("missing sheet map")?;
+        for table in self
+            .base
+            .tables
+            .iter()
+            .filter(|table| table.header_rows != 0)
+        {
+            let sheet = keys
+                .get(table.sheet.0 as usize)
+                .and_then(|key| sheets.get(&txn, key))
+                .and_then(|sheet| sheet.cast::<MapRef>().ok())
+                .ok_or("missing table worksheet")?;
+            let contents = nested_map(&sheet, &txn, CONTENTS)?;
+            let projected = model.sheet(table.sheet).ok_or("missing table worksheet")?;
+            for col in table.range.start.col..=table.range.end.col {
+                let at = CellRef::new(table.range.start.row, col);
+                let before = match contents.get(&txn, &cell_key(at)) {
+                    Some(Out::Any(value)) => Some(content_from_any(&value)?),
+                    Some(_) => return Err("table header content is not an atomic value".into()),
+                    None => None,
+                };
+                let after = projected
+                    .cell(at)
+                    .filter(|cell| cell.formula.is_some() || cell.value != CellValue::Empty);
+                if !authored_content_equal(before.as_ref(), after) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// What a sheet's rules read as with no overlay.
     fn baseline_rules<T: ReadTxn>(
         &self,
@@ -1742,19 +1781,26 @@ impl WorkbookAuthority {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
-        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model);
+        let mut rewritten = HashSet::new();
+        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model)
+            .with_cell_restoration(matches!(origin, SyncOrigin::Undo | SyncOrigin::Redo));
         for op in ops {
-            batch.apply(op).map_err(|error| {
-                AuthorityError::InvalidState(format!(
-                    "cannot apply local operation to authored state: {error}"
-                ))
-            })?;
+            batch
+                .apply_with_inverse(op, |inverse| {
+                    for restored in inverse {
+                        if let Op::RestoreTableColumn { formulas, .. } = restored {
+                            rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    AuthorityError::InvalidState(format!(
+                        "cannot apply local operation to authored state: {error}"
+                    ))
+                })?;
         }
         if !collaborative && self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
-        }
-        if self.base.tables != model.tables {
-            Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
         let plain_style_cells =
             if let (Some(count), [Op::SetCell { cell, .. }]) = (plain_cell_baseline, ops) {
@@ -1768,8 +1814,15 @@ impl WorkbookAuthority {
             } else {
                 None
             };
-        self.sync_model(&model, ops, origin, &authored_styles, collaborative)
-            .map_err(AuthorityError::InvalidState)?;
+        self.sync_model(
+            &model,
+            ops,
+            origin,
+            &authored_styles,
+            &rewritten,
+            collaborative,
+        )
+        .map_err(AuthorityError::InvalidState)?;
         if let (Some(replica), Some(dimensions)) = (replica, dimensions) {
             for (index, changes) in dimensions {
                 let sizes = HiddenSizes::take(&mut model.sheets[index]);
@@ -1777,6 +1830,9 @@ impl WorkbookAuthority {
                     .hidden_sizes
                     .insert(index, AuthoredDimensions { sizes, changes });
             }
+        }
+        if !collaborative && self.base.tables != model.tables {
+            Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
         if let [Op::SetCell { at, cell, .. }] = ops
             && at.row < MAX_ROWS
@@ -1808,6 +1864,9 @@ impl WorkbookAuthority {
         let [Op::SetCell { sheet, at, cell }] = ops else {
             return None;
         };
+        if xlsx_ops::table_header_at(&self.base.tables, *sheet, *at).is_some() {
+            return None;
+        }
         let count = self.plain_style_cells.load(Ordering::Relaxed);
         let version = self.schema_version().ok()?;
         if !self.projection_valid.load(Ordering::Relaxed)
@@ -3379,6 +3438,7 @@ impl WorkbookAuthority {
         ops: &[Op],
         origin: SyncOrigin,
         authored_styles: &HashMap<(u32, CellRef), Option<u32>>,
+        rewritten: &HashSet<(SheetId, CellRef)>,
         collaborative: bool,
     ) -> Result<(), String> {
         let current_keys = self.current_sheet_keys()?;
@@ -3446,6 +3506,11 @@ impl WorkbookAuthority {
         let mut auto_filters = BTreeSet::new();
         let mut chart_anchors = BTreeSet::new();
         if !full_sync {
+            authored_cells.extend(
+                rewritten
+                    .iter()
+                    .filter_map(|(sheet, at)| Some((keys.get(sheet.0 as usize)?.clone(), *at))),
+            );
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
@@ -4029,6 +4094,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5093,6 +5159,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5138,6 +5205,7 @@ fn targeted_sheet_keys(
             }
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
@@ -5225,7 +5293,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. }
-        | Op::SetTables { .. } => None,
+        | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. } => None,
     }
 }
 
@@ -5683,6 +5752,16 @@ fn remap_styles<'a>(
                     sheet: *sheet,
                     name: name.clone(),
                     formulas: restored,
+                })
+            }
+            Op::RestoreTableColumn { cell, .. } => {
+                let style = resolve(cell.style)?;
+                (style != cell.style).then(|| {
+                    let mut rewritten = op.clone();
+                    if let Op::RestoreTableColumn { cell, .. } = &mut rewritten {
+                        cell.style = style;
+                    }
+                    rewritten
                 })
             }
             _ => None,
