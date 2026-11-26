@@ -2999,7 +2999,9 @@ impl Workbook {
                     for &index in dimensions.keys() {
                         let prior = &self.model.sheets[index];
                         let sheet = &mut preview.sheets[index];
-                        sheet.hidden_row_heights.clone_from(&prior.hidden_row_heights);
+                        sheet
+                            .hidden_row_heights
+                            .clone_from(&prior.hidden_row_heights);
                         sheet.hidden_col_widths.clone_from(&prior.hidden_col_widths);
                     }
                     let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut preview);
@@ -3007,7 +3009,8 @@ impl Workbook {
                         batch.apply(op)?;
                     }
                     for (index, changes) in dimensions {
-                        self.hidden_sizes.forget_touched(&structure.sheet_keys[index], changes);
+                        self.hidden_sizes
+                            .forget_touched(&structure.sheet_keys[index], changes);
                         HiddenSizes::take(&mut preview.sheets[index])
                             .put(&mut self.model.sheets[index]);
                     }

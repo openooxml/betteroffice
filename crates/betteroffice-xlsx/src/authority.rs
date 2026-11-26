@@ -1,8 +1,8 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::sheet_json::{
     check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
@@ -32,8 +32,9 @@ use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, Assoc, BranchID, DeepObservable, Doc, ID, IndexedSequence, Map, MapPrelim,
-    MapRef, Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, Assoc, BranchID, DeepObservable, Doc, ID, IndexedSequence, Map,
+    MapPrelim, MapRef, Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut,
+    Update, WriteTxn,
 };
 
 mod auto_filters;
@@ -2447,8 +2448,10 @@ impl WorkbookAuthority {
                         }
                         (Some(PathSegment::Key(key)), _, 1) => {
                             let keys = event.keys(txn);
-                            let (rows, cols) =
-                                (keys.contains_key(ROW_HEIGHTS), keys.contains_key(COL_WIDTHS));
+                            let (rows, cols) = (
+                                keys.contains_key(ROW_HEIGHTS),
+                                keys.contains_key(COL_WIDTHS),
+                            );
                             if rows || cols {
                                 let sheet = dimensions.entry(key.to_string()).or_default();
                                 sheet.rows.replaced |= rows;
@@ -2462,9 +2465,16 @@ impl WorkbookAuthority {
                                 _ => continue,
                             };
                             let sheet = dimensions.entry(key.to_string()).or_default();
-                            let axis = if rows { &mut sheet.rows } else { &mut sheet.cols };
+                            let axis = if rows {
+                                &mut sheet.rows
+                            } else {
+                                &mut sheet.cols
+                            };
                             axis.tracks.extend(
-                                event.keys(txn).keys().filter_map(|key| key.parse::<u32>().ok()),
+                                event
+                                    .keys(txn)
+                                    .keys()
+                                    .filter_map(|key| key.parse::<u32>().ok()),
                             );
                         }
                         _ => {}

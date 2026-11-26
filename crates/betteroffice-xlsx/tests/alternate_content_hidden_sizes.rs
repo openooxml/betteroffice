@@ -76,7 +76,10 @@ fn wrapped_row_source() -> Vec<u8> {
         ..Default::default()
     };
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
-    let sheet = parts.iter_mut().find(|(name, _)| name == SHEET_PATH).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(name, _)| name == SHEET_PATH)
+        .unwrap();
     sheet.1 = format!(
         concat!(
             r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" "#,

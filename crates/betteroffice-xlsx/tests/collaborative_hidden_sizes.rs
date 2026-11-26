@@ -44,12 +44,7 @@ fn stripped_model(source: &[u8]) -> WorkbookModel {
 
 fn edit(workbook: &mut Workbook) {
     workbook
-        .edit_cell(
-            DATA,
-            CellRef::new(2, 0),
-            "4",
-            CalculationOptions::default(),
-        )
+        .edit_cell(DATA, CellRef::new(2, 0), "4", CalculationOptions::default())
         .unwrap();
 }
 
@@ -355,8 +350,16 @@ fn undo_preserves_a_reauthored_local_size_without_invalidating_another_row() {
             vec![row_height(0, height), row_visibility(0, true)],
         );
     }
-    assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
-    assert_eq!(hidden_sizes(&workbook), (Some(40.0), Some(30.0), Some(18.0)));
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(
+        hidden_sizes(&workbook),
+        (Some(40.0), Some(30.0), Some(18.0))
+    );
 }
 
 #[test]
@@ -384,7 +387,10 @@ fn received_undo_remembers_the_last_visible_size_seen() {
         (hidden_sizes(&left).0, hidden_sizes(&right).0),
         (Some(25.0), Some(25.0)),
     );
-    apply(&mut left, vec![row_visibility(0, false), row_height(0, 40.0)]);
+    apply(
+        &mut left,
+        vec![row_visibility(0, false), row_height(0, 40.0)],
+    );
     let update = diff(&left, &right);
     receive(&mut right, &update);
     assert_eq!(sizes(&right).0, Some(40.0));
@@ -422,7 +428,11 @@ fn replicas_without_local_sizes_receive_authored_unhides_and_send_default_unhide
             (DEFAULT, DEFAULT, DEFAULT, DEFAULT)
         };
         assert_eq!(
-            (known_at_open, visible_sizes(&current), visible_sizes(&released)),
+            (
+                known_at_open,
+                visible_sizes(&current),
+                visible_sizes(&released)
+            ),
             (AUTHORED, expected, expected),
         );
     }
@@ -436,7 +446,10 @@ fn released_unhide_then_undo_restores_remembered_hidden_sizes() {
     unhide(&mut released);
     let update = diff(&released, &current);
     receive(&mut current, &update);
-    assert_eq!((sizes(&current), hidden_sizes(&current)), (DEFAULT, DEFAULT));
+    assert_eq!(
+        (sizes(&current), hidden_sizes(&current)),
+        (DEFAULT, DEFAULT)
+    );
     released.undo(CalculationOptions::default()).unwrap();
     let update = diff(&released, &current);
     receive(&mut current, &update);
@@ -507,7 +520,10 @@ fn concurrent_unhide_converges_with_resize_or_rehide_on_both_axes() {
                 let other = |workbook: &mut Workbook| {
                     if rehide {
                         apply(workbook, reveal());
-                        apply(workbook, vec![row_visibility(0, true), col_visibility(true)]);
+                        apply(
+                            workbook,
+                            vec![row_visibility(0, true), col_visibility(true)],
+                        );
                     } else {
                         apply(workbook, vec![row_height(0, 40.0), col_width(28.0)]);
                     }
@@ -566,7 +582,10 @@ fn remote_hide_remembers_the_size_of_a_previously_visible_row() {
     let saved = reopen(&left);
     let sheet = saved.sheet(DATA).unwrap();
     assert_eq!(
-        (sheet.row_hidden(2), sheet.hidden_row_heights.get(&2).copied()),
+        (
+            sheet.row_hidden(2),
+            sheet.hidden_row_heights.get(&2).copied()
+        ),
         (true, Some(22.0)),
     );
 }
@@ -703,7 +722,10 @@ fn local_reset_then_hide_keeps_the_staged_absence_on_both_axes() {
             (hidden_sizes(&workbook).0, hidden_sizes(&workbook).2),
             (None, None),
         );
-        apply(&mut workbook, vec![row_visibility(0, false), col_visibility(false)]);
+        apply(
+            &mut workbook,
+            vec![row_visibility(0, false), col_visibility(false)],
+        );
         assert_eq!((sizes(&workbook).0, sizes(&workbook).2), (None, None));
     }
 }
@@ -711,7 +733,9 @@ fn local_reset_then_hide_keeps_the_staged_absence_on_both_axes() {
 #[test]
 fn cell_edit_preserves_hidden_sizes_on_an_untouched_sheet_with_many_overrides() {
     let mut dimensions = Sheet::new("Dimensions");
-    dimensions.row_heights.extend((0..5_000).map(|row| (row, 0.0)));
+    dimensions
+        .row_heights
+        .extend((0..5_000).map(|row| (row, 0.0)));
     dimensions
         .hidden_row_heights
         .extend((0..5_000).map(|row| (row, 25.0)));
@@ -744,7 +768,9 @@ fn cell_edit_preserves_hidden_sizes_on_an_untouched_sheet_with_many_overrides() 
 #[test]
 fn validating_applying_and_receiving_cell_batches_keep_untouched_size_maps() {
     let mut dimensions = Sheet::new("Dimensions");
-    dimensions.row_heights.extend((0..5_000).map(|row| (row, 0.0)));
+    dimensions
+        .row_heights
+        .extend((0..5_000).map(|row| (row, 0.0)));
     dimensions
         .hidden_row_heights
         .extend((0..5_000).map(|row| (row, 25.0)));
@@ -815,7 +841,9 @@ fn collaborative_checkpoint_excludes_local_sizes_and_recovers_them_from_source()
     let model = Workbook::open(&source).unwrap().into_model();
     let mut sized = Workbook::from_model_collaborative(model, 7).unwrap();
     let mut stripped = Workbook::from_model_collaborative(stripped_model(&source), 7).unwrap();
-    stripped.adopt_peer_version(sized.version().as_str()).unwrap();
+    stripped
+        .adopt_peer_version(sized.version().as_str())
+        .unwrap();
     let mut source_backed = Workbook::open_collaborative(&source, 7).unwrap();
     for workbook in [&mut sized, &mut stripped, &mut source_backed] {
         edit(workbook);
@@ -823,7 +851,10 @@ fn collaborative_checkpoint_excludes_local_sizes_and_recovers_them_from_source()
     let checkpoint = source_backed.recovery_checkpoint(1, None).unwrap();
     let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
     assert_eq!(
-        (sized.recovery_checkpoint(1, None).unwrap(), hidden_sizes(&restored)),
+        (
+            sized.recovery_checkpoint(1, None).unwrap(),
+            hidden_sizes(&restored)
+        ),
         (stripped.recovery_checkpoint(1, None).unwrap(), AUTHORED),
     );
     assert_saved_hidden(&restored);

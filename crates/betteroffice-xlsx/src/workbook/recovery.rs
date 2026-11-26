@@ -429,8 +429,12 @@ impl RecoveryCalculation {
         let mut applied = state.apply(projection)?;
         if collaborative {
             for (sheet, applied) in model.sheets.iter().zip(&mut applied.sheets) {
-                applied.hidden_row_heights.clone_from(&sheet.hidden_row_heights);
-                applied.hidden_col_widths.clone_from(&sheet.hidden_col_widths);
+                applied
+                    .hidden_row_heights
+                    .clone_from(&sheet.hidden_row_heights);
+                applied
+                    .hidden_col_widths
+                    .clone_from(&sheet.hidden_col_widths);
             }
         }
         if applied != *model {

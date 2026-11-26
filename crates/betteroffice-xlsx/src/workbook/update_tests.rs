@@ -42,10 +42,15 @@ fn hidden_size_only_commit_matches_released_checkpoint_bytes() {
         let mut released = Workbook::open_collaborative(&source, 7).unwrap();
         released.model.sheets[0].hidden_row_heights.clear();
         released.model.sheets[0].hidden_col_widths.clear();
-        released.adopt_peer_version(current.version().as_str()).unwrap();
+        released
+            .adopt_peer_version(current.version().as_str())
+            .unwrap();
         let ops = vec![op, visibility(true)];
         for book in [&mut current, &mut released] {
-            assert_eq!(book.apply_ops(ops.clone(), options).unwrap().applied, applied);
+            assert_eq!(
+                book.apply_ops(ops.clone(), options).unwrap().applied,
+                applied
+            );
         }
         assert_eq!(current.history_state(), released.history_state());
         assert_eq!(

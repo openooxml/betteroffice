@@ -115,10 +115,16 @@ pub(super) fn derive_source_hidden_sizes(
                     })
                     .collect()
             };
-            sheet.hidden_row_heights =
-                derive(&sheet.row_heights, &prior.hidden_row_heights, &prior.row_heights);
-            sheet.hidden_col_widths =
-                derive(&sheet.col_widths, &prior.hidden_col_widths, &prior.col_widths);
+            sheet.hidden_row_heights = derive(
+                &sheet.row_heights,
+                &prior.hidden_row_heights,
+                &prior.row_heights,
+            );
+            sheet.hidden_col_widths = derive(
+                &sheet.col_widths,
+                &prior.hidden_col_widths,
+                &prior.col_widths,
+            );
         }
     }
 }
@@ -217,7 +223,9 @@ impl ReplicaHiddenSizes {
 
     pub(super) fn store_moved_step(&mut self, redo: bool, depth: usize, step: HiddenSizeStep) {
         let stack = if redo { &mut self.undo } else { &mut self.redo };
-        if !step.is_empty() && let Some(index) = depth.checked_sub(1) {
+        if !step.is_empty()
+            && let Some(index) = depth.checked_sub(1)
+        {
             stack.insert(index, step);
         }
     }
@@ -249,7 +257,10 @@ impl ReplicaHiddenSizes {
                 None => Some(index),
             };
             let mut prior = prior.map(|index| &mut previous.sheets[index]);
-            let mut hidden = prior.as_deref_mut().map(HiddenSizes::take).unwrap_or_default();
+            let mut hidden = prior
+                .as_deref_mut()
+                .map(HiddenSizes::take)
+                .unwrap_or_default();
             let (changes, authored) = match &mut transition {
                 DimensionTransition::Local(sheets) => match sheets.remove(&index) {
                     Some(authored) => (Some(authored.changes), Some(authored.sizes)),
@@ -275,8 +286,9 @@ impl ReplicaHiddenSizes {
             let (rows, cols) = prior.map_or((&empty, &empty), |prior| {
                 (&prior.row_heights, &prior.col_widths)
             });
-            let (row_changes, col_changes) =
-                changes.map_or((None, None), |changes| (Some(changes.rows), Some(changes.cols)));
+            let (row_changes, col_changes) = changes.map_or((None, None), |changes| {
+                (Some(changes.rows), Some(changes.cols))
+            });
             let mut local = self.sheets.remove(key).unwrap_or_default();
             let record = matches!(history, HiddenSizeHistory::Record);
             let row_steps = local.rows.reconcile(
