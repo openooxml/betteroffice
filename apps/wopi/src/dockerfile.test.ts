@@ -266,6 +266,10 @@ describe("apps/wopi/Dockerfile", () => {
     expect(copyPin).toBeGreaterThan(build.indexOf("WORKDIR /app"));
     expect(installRust).toBeGreaterThan(copyPin);
     expect(build.indexOf("COPY . .")).toBeGreaterThan(installRust);
+    const pin = Bun.TOML.parse(readFileSync(join(repoRoot, "rust-toolchain.toml"), "utf8")) as {
+      toolchain: { targets: string[] };
+    };
+    expect(pin.toolchain.targets).toContain("wasm32-unknown-unknown");
     expect(source).not.toContain("--default-toolchain stable");
   });
 

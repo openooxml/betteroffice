@@ -944,9 +944,10 @@ describe('native package release wiring', () => {
     );
   });
 
-  test('package assembly runs after merges to main, path-filtered, and builds every format', () => {
+  test('package assembly runs on filtered pushes and toolchain pull requests and builds every format', () => {
     expect(packages.name).toBe('Native packages');
-    expect(Object.keys(packages.on).sort()).toEqual(['push', 'workflow_dispatch']);
+    expect(Object.keys(packages.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch']);
+    expect(packages.on.pull_request.paths).toEqual(['rust-toolchain.toml']);
     expect(packages.on.push.branches).toEqual(['main']);
     expect(packages.on.push.paths).toEqual([
       'bindings/*-native/**',

@@ -1,8 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const workflows = new URL('../.github/workflows/', import.meta.url);
 const actions = new URL('../.github/actions/', import.meta.url);
+const toolchainFile = new URL('../rust-toolchain.toml', import.meta.url);
+const nativeJob = 'native-dist.yml bindings';
+const upstream = /^dtolnay\/rust-toolchain@/i;
 
 // These steps also run on windows-latest, where a bash default would replace pwsh.
 const WINDOWS_STEPS = [
@@ -44,6 +49,18 @@ const runSteps = jobs.flatMap(({ name, job, shell }) =>
     }))
 );
 
+const rustCommand = /(?:^|[\s(;&|=])(?:cargo|rustc|rustup|wasm-pack|napi[ \t]+build)(?=\s|[);&|]|$)/;
+const bunScript = /\bbun[ \t]+run[ \t]+(?:(?:--(?:cwd|filter)(?:=|[ \t]+)(?:"[^"\n]+"|'[^'\n]+'|\S+)|--[\w-]+)[ \t]+)*["']?([\w:./-]+)/g;
+
+function needsRust(job: string, step: { uses?: string; run?: string }): boolean {
+  if (step.uses === './.github/actions/wasm-toolchain') return true;
+  const run = (step.run ?? '').replace(/^[ \t]*#.*$/gm, '').replace(/\\\r?\n/g, ' ');
+  if (rustCommand.test(run)) return true;
+  if (job === 'ci.yml python' && /\bpython -m pip install\b[^\n]* -e\b/.test(run)) return true;
+  const scripts = run.replace(/\$\{\{.*?\}\}/g, 'expression').matchAll(bunScript);
+  return [...scripts].some(([, script]) => /wasm|native/.test(script));
+}
+
 describe('workflow shells', () => {
   test('every run step runs under bash with pipefail, except the native binding steps that also run on Windows', () => {
     expect(runSteps.length).toBeGreaterThan(0);
@@ -67,12 +84,65 @@ describe('workflow shells', () => {
   });
 });
 
-test('CI installs Rust from the repository toolchain pin', () => {
-  const pin = Bun.TOML.parse(readFileSync(new URL('../rust-toolchain.toml', import.meta.url), 'utf8')) as any;
+test('the Rust pin readers require exact channels and handle missing files', () => {
+  const source = readFileSync(toolchainFile, 'utf8');
+  const pin = Bun.TOML.parse(source) as { toolchain: { channel: string } };
   expect(pin.toolchain.channel).toMatch(/^\d+\.\d+\.\d+$/);
+  const composite = compositeActions.find(({ name }) => name === 'rust-toolchain');
+  const native = jobs.find(({ name }) => name === nativeJob);
+  const readers = [
+    {
+      name: 'composite pin',
+      run: composite?.steps.find((step: any) => step.id === 'pin')?.run,
+      missingChannel: null,
+    },
+    {
+      name: 'native-dist rust-pin',
+      run: native?.job.steps.find((step: any) => step.id === 'rust-pin')?.run,
+      missingChannel: 'stable',
+    },
+  ];
+  const valid = '[toolchain]\nprofile = "minimal"\nchannel = "1.2.3"\ncomponents = ["clippy"]\n';
+  const cases = [
+    { name: 'LF', contents: valid, channel: '1.2.3' },
+    { name: 'CRLF', contents: valid.replace(/\n/g, '\r\n'), channel: '1.2.3' },
+    { name: 'stable', contents: valid.replace('1.2.3', 'stable'), channel: null },
+    { name: 'minor only', contents: valid.replace('1.2.3', '1.2'), channel: null },
+    { name: 'missing file', contents: undefined, channel: null },
+    { name: 'repository pin', contents: source, channel: pin.toolchain.channel },
+  ];
+  for (const { name, contents, channel } of cases) {
+    const cwd = mkdtempSync(join(tmpdir(), 'workflow-rust-pin-'));
+    try {
+      const file = join(cwd, 'rust-toolchain.toml');
+      const output = join(cwd, 'output');
+      if (contents !== undefined) writeFileSync(file, contents);
+      for (const reader of readers) {
+        const context = `${reader.name}: ${name}`;
+        expect(typeof reader.run, context).toBe('string');
+        writeFileSync(output, '');
+        const result = Bun.spawnSync(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', reader.run], {
+          cwd,
+          env: { ...process.env, RUST_TOOLCHAIN_FILE: file, GITHUB_OUTPUT: output },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        const expected = contents === undefined ? reader.missingChannel : channel;
+        const statusContext = `${context}\n${result.stdout.toString()}${result.stderr.toString()}`;
+        if (expected === null) {
+          expect(result.exitCode, statusContext).toBeGreaterThan(0);
+        } else {
+          expect(result.exitCode, statusContext).toBe(0);
+        }
+        expect(readFileSync(output, 'utf8'), context).toBe(expected === null ? '' : `toolchain=${expected}\n`);
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  }
+});
 
-  const upstream = /^dtolnay\/rust-toolchain@/i;
-  const nativeJob = 'native-dist.yml bindings';
+test('CI installs Rust from the repository toolchain pin', () => {
   const installers: { name: string; toolchain: unknown }[] = [];
   for (const { name, steps } of [
     ...jobs.map(({ name, job }) => ({ name, steps: [job, ...(job.steps ?? [])] })),
@@ -92,20 +162,27 @@ test('CI installs Rust from the repository toolchain pin', () => {
     { name: 'rust-toolchain', toolchain: '${{ steps.pin.outputs.toolchain }}' },
   ]);
 
-  for (const { name, job } of jobs) {
+  const rustJobs = jobs.flatMap(({ name, job }) => {
     const steps = job.steps ?? [];
+    const firstUse = steps.findIndex((step: any) => needsRust(name, step));
+    return firstUse < 0 ? [] : [{ name, steps, firstUse }];
+  });
+  expect(rustJobs.map(({ name }) => name)).toEqual(expect.arrayContaining([
+    'ci.yml native-hooks',
+    'ci.yml python',
+    nativeJob,
+  ]));
+
+  for (const { name, steps, firstUse } of rustJobs) {
+    const install = steps.findIndex((step: any) => name === nativeJob
+      ? upstream.test(step.uses ?? '')
+      : step.uses === './.github/actions/rust-toolchain');
+    expect(install, name).toBeGreaterThanOrEqual(0);
+    expect(install, `${name}: ${label(steps[firstUse])}`).toBeLessThan(firstUse);
     if (name === nativeJob) {
       const readPin = steps.findIndex((step: any) => step.id === 'rust-pin' && step.run);
-      const install = steps.findIndex((step: any) => upstream.test(step.uses ?? ''));
       expect(readPin, name).toBeGreaterThanOrEqual(0);
       expect(install, name).toBeGreaterThan(readPin);
-      continue;
-    }
-    const wasm = steps.some((step: any) => step.uses === './.github/actions/wasm-toolchain');
-    const cargo = steps.some((step: any) => /\bcargo[ \t]/.test(step.run ?? ''));
-    const maturin = steps.some((step: any) => /^PyO3\/maturin-action@/i.test(step.uses ?? ''));
-    if (wasm || (cargo && !maturin)) {
-      expect(steps.map((step: any) => step.uses), name).toContain('./.github/actions/rust-toolchain');
     }
   }
 });

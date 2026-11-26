@@ -1,6 +1,8 @@
 name: Native packages
 
 on:
+  pull_request:
+    paths: ['rust-toolchain.toml']
   push:
     branches: [main]
     paths:
