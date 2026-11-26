@@ -1578,7 +1578,7 @@ function wrapWorkbookDocument(
   pngFontReaders.set(handle, (target, options) => {
     const resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
     const { list } = pngDisplayList(pngEngine(), resolved, options);
-    const useBundledScriptFonts = engineKind === 'wasm' && cellScriptFontRequests(list).length > 0;
+    const useBundledScriptFonts = engineKind === 'wasm' && cellScriptFontRequests(list, 'png').length > 0;
     return useBundledScriptFonts ? [] : sheetFonts(list);
   });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));

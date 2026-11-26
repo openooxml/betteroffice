@@ -288,7 +288,7 @@ export function createDefaultFontPainter(
       if (['\t', '\n', '\f', '\r'].some((character) => face.characters.has(character))) face.characters.add(' ');
     }
     if (includeScriptFallbacks) {
-      for (const request of cellScriptFontRequests(displayList, frameScripts)) {
+      for (const request of cellScriptFontRequests(displayList, 'editor', frameScripts)) {
         faces.set(`${cdn}\0${cellScriptFontKey(request)}`, { ...request, characters: new Set() });
       }
     }

@@ -15,6 +15,7 @@ export type ScriptFontDisplayList = DisplayList & { cellScriptFamilies?: CellScr
 export type CellScriptCache = Map<string, readonly BundledFontScript[]>;
 
 const NO_SCRIPTS: readonly BundledFontScript[] = [];
+const UNCOVERED_EDITOR_SCRIPTS = new Set<BundledFontScript>(['arabic']);
 const SCRIPT_CACHE_CAPACITY = 1024;
 const SCRIPT_CACHE_MAX_TEXT_LENGTH = 512;
 const scriptsByText = new Map<string, readonly BundledFontScript[]>();
@@ -55,13 +56,14 @@ export function cellScriptFamilies(cmd: TextCmd, families: ReadonlyMap<string, s
   const style = cellFontKey(cmd.fontFamily ?? '', cmd.bold === true, cmd.italic === true);
   const names: string[] = [];
   for (const script of scripts) {
+    if (UNCOVERED_EDITOR_SCRIPTS.has(script)) continue;
     const name = families.get(`${script}\0${style}`);
     if (name !== undefined) names.push(name);
   }
   return names;
 }
 
-export function cellScriptFontRequests(displayList: DisplayList, frameScripts?: CellScriptCache): CellScriptFontRequest[] {
+export function cellScriptFontRequests(displayList: DisplayList, target: 'editor' | 'png', frameScripts?: CellScriptCache): CellScriptFontRequest[] {
   const requests = new Map<string, CellScriptFontRequest>();
   const add = (cmd: TextCmd, scripts: readonly BundledFontScript[]) => {
     if (!scripts.length) return;
@@ -70,6 +72,7 @@ export function cellScriptFontRequests(displayList: DisplayList, frameScripts?: 
     const italic = cmd.italic === true;
     const style = cellFontKey(fontFamily, bold, italic);
     for (const script of scripts) {
+      if (target === 'editor' && UNCOVERED_EDITOR_SCRIPTS.has(script)) continue;
       const key = `${script}\0${style}`;
       if (!requests.has(key)) requests.set(key, { script, fontFamily, bold, italic });
     }
