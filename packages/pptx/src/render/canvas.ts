@@ -1005,7 +1005,8 @@ function paintTextRun(
   const selected = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId });
   const family = selected ?? families(run.fontFamily, run.bold, run.italic);
   const alias = (run as PositionedTextRun & { paintFontFamily?: string }).paintFontFamily;
-  const stack = alias && selected === undefined ? `${quoteFamily(alias)}, ${quoteFamily(family)}` : quoteFamily(family);
+  const stack = alias && selected === undefined && family === run.fontFamily
+    ? `${quoteFamily(alias)}, ${quoteFamily(family)}` : quoteFamily(family);
   ctx.font = `${style}${weight}${run.fontSizePx}px ${stack}`;
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;
