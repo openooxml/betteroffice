@@ -644,6 +644,9 @@ describe('native package release wiring', () => {
     const zigbuild = steps.find((step: any) => step.uses?.startsWith('taiki-e/install-action@'));
     expect(zig.if).toBe('matrix.platform.zig');
     expect(zigbuild.if).toBe('matrix.platform.zig');
+    const lastZig = steps.findLastIndex((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
+    expect(steps.indexOf(zigbuild)).toBeGreaterThan(lastZig);
+    expect(steps.findIndex((step: any) => step.name === 'Build binding')).toBeGreaterThan(steps.indexOf(zigbuild));
     expect(zig.with.version).toBe('${{ env.ZIG_VERSION }}');
     expect(zigbuild.with.tool).toBe('cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}');
     const testing = steps.find((step: any) => step.name === 'Test binding');
@@ -652,6 +655,35 @@ describe('native package release wiring', () => {
     for (const target of ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl']) {
       expect(config).toContain(`[target.${target}]\nrustflags = ["-C", "target-feature=-crt-static"]`);
     }
+  });
+
+  test('dist bounds the zig setup and tries it a second time unless the pinned zig is already installed', () => {
+    const steps = dist.jobs.bindings.steps;
+    const setups = steps.filter((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
+    expect(setups).toHaveLength(2);
+    const [first, second] = setups;
+    for (const setup of setups) {
+      expect(setup.uses).toMatch(/^mlugg\/setup-zig@[0-9a-f]{40}$/);
+      expect(setup['timeout-minutes']).toBe(8);
+      expect(setup.with).toEqual({ version: '${{ env.ZIG_VERSION }}' });
+    }
+    expect(first.id).toBe('setup-zig');
+    expect(first['continue-on-error']).toBe(true);
+    expect(second['continue-on-error']).toBeUndefined();
+    const check = steps[steps.indexOf(first) + 1];
+    expect(steps[steps.indexOf(first) + 2]).toBe(second);
+    expect(check).toEqual({
+      name: 'Check the installed Zig',
+      id: 'zig-installed',
+      if: "matrix.platform.zig && steps.setup-zig.outcome != 'success'",
+      shell: 'bash',
+      run: 'if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then\n  echo "usable=true" >> "$GITHUB_OUTPUT"\nfi\n'
+    });
+    expect(second.if).toBe(
+      "matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'"
+    );
+    expect(dist.jobs.bindings.env.ZIG_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(dist.jobs.bindings['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
   });
 
   test('dist loads each musl binary in Node on Alpine', () => {
