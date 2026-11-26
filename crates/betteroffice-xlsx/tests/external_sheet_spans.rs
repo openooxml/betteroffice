@@ -83,7 +83,11 @@ fn workbook_bytes(formula: &str) -> Vec<u8> {
 
 fn assert_formulas(workbook: &Workbook, expected: &str, stage: &str) {
     let model = workbook.model();
-    let report = model.sheets.iter().find(|sheet| sheet.name == "Report").unwrap();
+    let report = model
+        .sheets
+        .iter()
+        .find(|sheet| sheet.name == "Report")
+        .unwrap();
     let cell = report.cell(CellRef::new(0, 1)).unwrap();
     assert_eq!(cell.formula.as_deref(), Some(expected), "Report!B1 {stage}");
 
