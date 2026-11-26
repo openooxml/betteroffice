@@ -26,6 +26,49 @@ fn opens_with_backstop_options() {
     assert_eq!(workbook.model().sheets.len(), 1);
 }
 
+#[cfg(all(feature = "fonts-latin", feature = "raster"))]
+#[test]
+fn arabic_in_arial_png_uses_naskh() {
+    use betteroffice_xlsx::{Cell, CellRef, CellValue, PngFontFace, PngTarget, RenderOptions, SheetId};
+    use xlsx_model::{CellFormat, Font};
+
+    let mut model = WorkbookModel::default();
+    let style = model
+        .styles
+        .intern_cell_format(&CellFormat {
+            font: Font {
+                name: Some("Arial".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let mut sheet = Sheet::new("Text");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Text { value: "مرحبا".into() },
+            style,
+            ..Default::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let workbook = Workbook::from_model(model).unwrap();
+    let target = PngTarget::UsedRange { sheet: SheetId(0) };
+    let options = RenderOptions::default();
+    let naskh = PngFontFace {
+        family: "Arial",
+        bold: false,
+        italic: false,
+        bytes: include_bytes!("../../../packages/fonts/assets/NotoNaskhArabic-Regular.ttf"),
+    };
+    let expected = workbook
+        .render_png_with_faces(target.clone(), &options, Some(&[naskh]))
+        .unwrap();
+    let actual = workbook.render_png(target, &options).unwrap();
+    assert!(actual.bytes == expected.bytes);
+}
+
 #[cfg(all(feature = "fonts", not(feature = "fonts-latin")))]
 #[test]
 fn explicitly_missing_pack_returns_the_typed_error() {

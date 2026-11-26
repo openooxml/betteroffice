@@ -619,7 +619,7 @@ fn on_demand_defers_local_reads_and_preload_reads_at_open() {
 }
 
 #[test]
-fn naskh_styled_families_chain_noto_naskh_arabic_as_their_arabic_fallback() {
+fn arabic_runs_chain_noto_naskh_arabic_in_word_and_powerpoint() {
     let root = tempfile::tempdir().unwrap();
     deploy_flat(root.path());
     let latin =
@@ -629,34 +629,28 @@ fn naskh_styled_families_chain_noto_naskh_arabic_as_their_arabic_fallback() {
         FontLoading::OnDemand,
     )
     .unwrap();
-    let arabic = |family: &str, bold: bool| {
+    let arabic = |family: &str, bold: bool, office| {
         manager
             .resolve(
                 family,
                 bold,
                 false,
                 &["arabic".to_string()],
-                LastResortOffice::Word,
+                office,
             )
             .into_iter()
             .filter(|face| face.family.contains("Arabic"))
             .map(|face| (face.family, face.bold))
             .collect::<Vec<_>>()
     };
-    for family in ["Simplified Arabic", "Traditional Arabic"] {
+    for family in ["Arial", "Times New Roman", "Simplified Arabic", "Traditional Arabic"] {
         for bold in [false, true] {
-            assert_eq!(
-                arabic(family, bold),
-                [("Noto Naskh Arabic".to_string(), false)]
-            );
-        }
-    }
-    for family in ["Arial", "Times New Roman"] {
-        for bold in [false, true] {
-            assert_eq!(
-                arabic(family, bold),
-                [("Noto Sans Arabic".to_string(), bold)]
-            );
+            for office in [LastResortOffice::Word, LastResortOffice::PowerPoint] {
+                assert_eq!(
+                    arabic(family, bold, office),
+                    [("Noto Naskh Arabic".to_string(), false)]
+                );
+            }
         }
     }
 }
