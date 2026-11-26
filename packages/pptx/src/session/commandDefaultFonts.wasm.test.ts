@@ -19,6 +19,7 @@ import { defaultFontLayout, releaseDefaultFontLayout } from '../wasm/enginePngFo
 import type { SlideDisplayList } from '../types';
 import { openPresentationSession, type PresentationSession } from '../worker';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
+import * as commandDefaultFonts from './commandDefaultFonts';
 import { commandFontProvider } from './commandDefaultFonts';
 import { createPresentationSessionHost } from './host';
 import type { PresentationCommandClient, PresentationCommandOpenOptions } from './commandProtocol';
@@ -119,6 +120,11 @@ afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.dispose()));
   for (const restore of restorers.splice(0).reverse()) restore();
 });
+
+function enableArabicCoverage() {
+  const scripts = 'UNCOVERED_EDITOR_SCRIPTS' in commandDefaultFonts ? commandDefaultFonts.UNCOVERED_EDITOR_SCRIPTS : undefined;
+  if (scripts instanceof Set && scripts.delete('arabic')) restorers.push(() => { scripts.add('arabic'); });
+}
 
 function stubPngCanvas(encoded: BlobPart = 'png') {
   const painted = mock((_text: string) => {});
@@ -722,7 +728,37 @@ test('inserting script text loads coverage after the family attempt and repaints
   expect(runs.some((run) => /[\u3040-\u309f]/.test(run.text) && run.fontFamily === 'Noto Sans JP')).toBe(true);
 });
 
+test.each(['Arial', 'Simplified Arabic'])('%s keeps Arabic in the browser while requesting Hebrew and Thai faces', async (family) => {
+  const arial = family === 'Arial';
+  const primary = arial ? font
+    : new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
+  const arabicFace = arial ? 'NotoSansArabic' : 'NotoNaskhArabic';
+  const arabic = new Uint8Array(await readFile(new URL(`../../../fonts/assets/${arabicFace}-Regular.ttf`, import.meta.url))).buffer;
+  const hebrew = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansHebrew-Regular.ttf', import.meta.url))).buffer;
+  const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
+    { codec: 'zstd' })).font;
+  const loaders = new Map([['arabic', async () => arabic], ['hebrew', async () => hebrew], ['thai', async () => thai]]);
+  const manager = source(arial ? { [family]: async () => primary } : {}, (script) => loaders.get(script));
+  manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
+    resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => primary });
+  const installed: DefaultFontFace[] = [];
+  const client = await createPresentationCommandClient(await deck([family], ['وتين', ' שלום', ' ภาษาไทย']), Object.assign({ ...options }, {
+    [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
+  }), connection().transport);
+  clients.push(client);
+  expect(manager.resolveScriptFallback.mock.calls.map(([script]) => script).sort()).toEqual(['hebrew', 'thai']);
+  expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
+    .toEqual(['Noto Sans Hebrew', 'Noto Sans Thai']);
+  expect(installed.filter((face) => face.kind !== 'coverage')).toEqual([{ family, bold: false, italic: false, bytes: primary }]);
+  const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+  const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
+    .flatMap((box) => box.lines.flatMap((line) => line.runs)).filter((run) => /[\u0600-\u06ff]/.test(run.text));
+  expect(runs.length).toBeGreaterThan(0);
+  expect(runs.every((run) => run.fontFamily === family && run.fontId === 0xffffffff)).toBe(true);
+});
+
 test('Arabic and Thai runs in Arial load and use their script defaults', async () => {
+  enableArabicCoverage();
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
     { codec: 'zstd' })).font;
@@ -748,6 +784,7 @@ test('Arabic and Thai runs in Arial load and use their script defaults', async (
 });
 
 test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their PNG faces in either registration order', async (family) => {
+  enableArabicCoverage();
   const sans = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const arial = fonts.resolveBundledFamilyFace('Arial', false, false)!;
@@ -787,6 +824,7 @@ test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their P
 });
 
 test('wrong script face bytes keep the browser font', async () => {
+  enableArabicCoverage();
   const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
   const manager = source({ Calibri: async () => carlito }, () => async () => font);
   const wire = connection();

@@ -9,6 +9,7 @@ import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import type { FontCdnDiagnostic, FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import type { DefaultFontFace, DefaultFontLanding } from '../../../../shared/pptxDefaultFonts';
+import * as commandDefaultFonts from './commandDefaultFonts';
 import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
@@ -53,6 +54,11 @@ function retryClock() {
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+function enableArabicCoverage() {
+  const scripts = 'UNCOVERED_EDITOR_SCRIPTS' in commandDefaultFonts ? commandDefaultFonts.UNCOVERED_EDITOR_SCRIPTS : undefined;
+  if (scripts instanceof Set && scripts.delete('arabic')) restorers.push(() => { scripts.add('arabic'); });
+}
 
 function packDiagnostics(): FontCdnDiagnostic[] {
   const diagnostics: FontCdnDiagnostic[] = [];
@@ -274,6 +280,7 @@ test('a transient failure retries after backoff and registers the second load', 
 });
 
 test.each(['primary', 'last-resort'] as const)('a transient CDN failure retries the %s after the cooldown', async (kind) => {
+  if (kind === 'last-resort') enableArabicCoverage();
   const advance = retryClock();
   const diagnostics = packDiagnostics();
   const load = mock(async () => bytes).mockRejectedValueOnce(implicitFontFailure('latin', new Error('Offline')));
@@ -301,6 +308,7 @@ test.each(['primary', 'last-resort'] as const)('a transient CDN failure retries 
 });
 
 test.each([403, 404, 410])('a Naskh HTTP %s miss uses the available last resort as the primary', async (status) => {
+  enableArabicCoverage();
   const advance = retryClock();
   const diagnostics = packDiagnostics();
   const naskh = mock(async () => bytes).mockRejectedValueOnce(
@@ -429,6 +437,7 @@ test('primary and coverage misses emit one diagnostic per pack in each session',
 });
 
 test.each([403, 404, 410])('an implicit HTTP %s miss settles the preferred Arabic primary', async (status) => {
+  enableArabicCoverage();
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals(false);
   const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
@@ -761,6 +770,7 @@ test('default font plumbing stays out of all package entries', async () => {
 });
 
 test('Arabic requests keep family and traits and install the shared regular face only once', async () => {
+  enableArabicCoverage();
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, (script, bold, italic) =>
     script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
@@ -792,6 +802,7 @@ const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMa
   [[true, false], [false, true], [true, true]].map(([bold, italic]): [string, boolean, boolean] => [family, bold, italic]));
 
 test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s, italic: %s)', async (family, bold, italic) => {
+  enableArabicCoverage();
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, () => async () => naskh);
   source.resolveLastResort.mockReturnValue(async () => bytes);
@@ -805,6 +816,7 @@ test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s,
 });
 
 test.each([false, true])('Simplified Arabic uses its last resort while the Naskh face is unavailable (implicit: %s)', async (implicit) => {
+  enableArabicCoverage();
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const advance = retryClock();
   const delay = implicit ? 60_000 : 2000;
@@ -921,8 +933,9 @@ test('missing CJK packs never install Latin substitute bytes as coverage', async
 });
 
 test('browser refusal prevents coverage registration and settlement', async () => {
+  enableArabicCoverage();
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
-  provider(() => undefined, () => async () => arabic);
+  const source = provider(() => undefined, () => async () => arabic);
   const register = mock(() => {});
   const settled = mock(() => {});
   const beforeRegister = mock(() => {});
@@ -930,6 +943,7 @@ test('browser refusal prevents coverage registration and settlement', async () =
     register, settled, async () => [], beforeRegister);
   try {
     expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, 'Calibri');
     expect(register).not.toHaveBeenCalled();
     expect(settled).not.toHaveBeenCalled();
     expect(beforeRegister).not.toHaveBeenCalled();
