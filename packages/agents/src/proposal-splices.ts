@@ -86,19 +86,6 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
   }
 
   const splices: ProposalChange[] = [];
-  const appendSplice = (next: ProposalChange) => {
-    if (!next.oldText && !next.newText) return;
-    const previous = splices.at(-1);
-    if (previous && (!previous.oldText || !previous.newText || !next.oldText || !next.newText)) {
-      const gap = oldText.slice(previous.start - change.start + previous.oldText.length, next.start - change.start);
-      if (/^\s+$/u.test(gap)) {
-        previous.oldText += gap + next.oldText;
-        previous.newText += gap + next.newText;
-        return;
-      }
-    }
-    splices.push(next);
-  };
   let oldFrom = 0, newFrom = 0;
   for (let i = 0; i < oldCount; i++) {
     const row = i * columns;
@@ -106,12 +93,12 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
     if (!remaining) break;
     for (let j = newFrom; j < newCount && lcs[row + j] === remaining; j++) {
       if (oldTokens[i] !== newTokens[j]) continue;
-      if (i !== oldFrom || j !== newFrom) appendSplice(splice(oldFrom, i, newFrom, j));
+      if (i !== oldFrom || j !== newFrom) splices.push(splice(oldFrom, i, newFrom, j));
       oldFrom = i + 1;
       newFrom = j + 1;
       break;
     }
   }
-  if (oldFrom !== oldCount || newFrom !== newCount) appendSplice(splice(oldFrom, oldCount, newFrom, newCount));
-  return splices;
+  if (oldFrom !== oldCount || newFrom !== newCount) splices.push(splice(oldFrom, oldCount, newFrom, newCount));
+  return splices.filter(({ oldText, newText }) => oldText || newText);
 }

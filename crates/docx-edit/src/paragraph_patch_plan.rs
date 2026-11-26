@@ -2328,12 +2328,15 @@ mod tests {
 
     #[test]
     fn base_replaces_a_recorded_edit_that_crosses_a_permission_range() {
+        use docx_parse::serializer::{S13SaveRequest, write_docx_s13_parts_with_report};
+        use sha2::{Digest, Sha256};
+
         let seeded = paragraph("aKEEPz", json!({}));
         let live = paragraph("bKEEPy", json!({}));
         let proof = whole_word_replacement();
         let range = concat!(
             r#"<w:permStart w:edGrp="everyone" w:id="7"/>"#,
-            "<w:r><w:t>EE</w:t></w:r>",
+            "<w:r><w:rPr><w:noProof/></w:rPr><w:t>EE</w:t></w:r>",
             r#"<w:permEnd w:id="7"/>"#,
         );
         let source = ParagraphPatchSource::new(format!(
@@ -2350,6 +2353,34 @@ mod tests {
             .base_preserving_more_runs(0, &patch, &recorded)
             .unwrap();
         assert!(xml.contains(range));
+
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
+            source.as_str()
+        );
+        let part = "word/document.xml";
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": [{"type": "paragraph", "sourceOrdinal": 0, "content": [{
+                "type": "run", "content": [{"type": "text", "text": "bKEEPy"}]
+            }]}]},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [{
+                "part": part, "sha256": format!("{:x}", Sha256::digest(xml.as_bytes())),
+                "paragraphs": [0], "changed": [0], "paragraphPatches": [recorded]
+            }]}
+        }))
+        .unwrap();
+        let (_, report) = write_docx_s13_parts_with_report(
+            request,
+            &[(part.to_owned(), xml.into_bytes())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            report.warnings,
+            ["DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"]
+        );
     }
 
     #[test]

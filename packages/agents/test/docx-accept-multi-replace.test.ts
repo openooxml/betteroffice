@@ -221,13 +221,36 @@ test('a word replaced as one token takes the replacement formatting through its 
   });
 }, 30_000);
 
-test('export preserves a permission range inside a recorded replacement', async () => {
-  const permission = `<w:permStart w:edGrp="everyone" w:id="7"/>${run(2, 'EE')}<w:permEnd w:id="7"/>`;
-  await checkProposal([run(1, 'aK'), permission, run(3, 'Pz')], [{ query: 'aKEEPz', newText: 'bKEEPy' }],
-    paragraph => {
+test('export preserves a permission range when the writer refuses the recorded replacement', async () => {
+  const middle = run(2, 'EE').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+  const permission = `<w:permStart w:edGrp="everyone" w:id="7"/>${middle}<w:permEnd w:id="7"/>`;
+  const query = 'aKEEPz';
+  const newText = 'bKEEPy';
+  const doc = await openDocx(await fixture([run(1, 'aK'), permission, run(3, 'Pz')]));
+  try {
+    const [hit] = doc.grep({ query }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText }] });
+    expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
+    await checkExport(() => doc.export(), paragraph => {
       expect(paragraph).toContain(permission);
-      expect(runsOf(paragraph).map(xml => runText(xml)[0]).join('')).toBe('bKEEPy');
-    }, { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
+      expect(runsOf(paragraph).map(xml => runText(xml)[0]).join('')).toBe(newText);
+    }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
+
+    const base = doc.session.materializeDocx()!;
+    const capture = captureSessionSave(doc.session);
+    const part = capture.plan.splicedParts!.find(part => part.part === DOCUMENT)!;
+    const patch = part.paragraphPatches![0]!;
+    const firstEdit = patch.textEdits[0]!;
+    expect(part.legacyParagraphs).toEqual([]);
+    part.paragraphPatches = [{
+      ...patch,
+      textEdits: [{ ...firstEdit, to: query.length, insert: [{ ...firstEdit.insert[0]!, text: newText }] }],
+    }];
+    await checkExport(async () => (await writeSessionSave(doc.session, yrsToDocument(doc.session, base),
+      capture, base.originalBuffer!, { updateModifiedDate: false })).bytes, paragraph => {
+      expect(runsOf(paragraph).map(xml => runText(xml)[0]).join('')).toBe(newText);
+    }, [['DOCX_MINIMAL_PATCH replace counts {"marker":1}']]);
+  } finally { doc.close(); }
 }, 30_000);
 
 test('accepts a lone recorded insertion and keeps the untouched run byte-identical', async () => {
@@ -236,22 +259,32 @@ test('accepts a lone recorded insertion and keeps the untouched run byte-identic
     paragraph => expectRuns(paragraph, [untouched], [['fii', false], [' ti', false]]));
 }, 30_000);
 
-test('headless acceptance merges changes across a space at a hyperlink boundary', async () => {
-  const hyperlink = '<w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink>';
-  const alpha = '<w:r><w:t xml:space="preserve"> alpha</w:t></w:r>';
-  const omega = run(3, ' omega').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
-  const doc = await openDocx(await fixture([hyperlink, alpha, omega], after, 'rId1'));
-  try {
-    const [hit] = doc.grep({ query: 'link alpha' }).matches;
-    const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText: 'link! ALPHA BETA' }] });
-    expect(doc['proposals'].get(proposal.id)?.splices).toMatchObject([{ start: 4, oldText: ' alpha', newText: '! ALPHA BETA' }]);
-    expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
-    await checkExport(() => doc.export(), paragraph => {
-      expect(paragraph).toContain(hyperlink);
-      expectRuns(paragraph, [omega], [['link', false], ['! ALPHA BETA', false], [' omega', false]]);
-    });
-  } finally { doc.close(); }
-}, 30_000);
+for (const [name, query, newText, savedText] of [
+  ['headless acceptance rewrites only the paragraph for a hyperlink-edge insertion', 'link', 'link!', 'link! alpha omega'],
+  ['known exception: a hyperlink-edge insertion split from a replacement rewrites only the paragraph', 'link alpha', 'link! ALPHA BETA', 'link! ALPHA BETA omega'],
+] as const) {
+  test(name, async () => {
+    const hyperlink = '<w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink>';
+    const omega = run(3, ' omega').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+    const doc = await openDocx(await fixture([hyperlink, run(2, ' alpha', true), omega], after, 'rId1'));
+    try {
+      const [hit] = doc.grep({ query }).matches;
+      const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText }] });
+      expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
+      const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
+      expect(part?.changed).toEqual([1]);
+      expect(part?.paragraphPatches).toEqual([]);
+      expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
+      const xml = await documentXml(await doc.export());
+      const paragraphs = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+      expect(paragraphs).toHaveLength(3);
+      expect([paragraphs[0], paragraphs[2]]).toEqual([before, after]);
+      const runs = runsOf(paragraphs[1]!);
+      expect(runs).not.toContain(omega);
+      expect(runs.map(xml => runText(xml)[0]).join('')).toBe(savedText);
+    } finally { doc.close(); }
+  }, 30_000);
+}
 
 test('acceptance retains a shared suffix run inside a changed token byte-identically', async () => {
   const untouched = run(3, 'a&#x62;').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');

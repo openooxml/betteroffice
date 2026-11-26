@@ -17,7 +17,7 @@ import {
   nativeBudgetFailure,
 } from '../../shared/office-session/trap';
 import { readClipboardSlice, readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
-import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
+import type { DocxParagraphSavePlan, YrsStorySegment } from '../../packages/docx/src/yrs/index';
 import {
   SAVE_SEED_MAX_GROWTH,
   SAVE_SEED_MAX_SLICE_BYTES,
@@ -1233,19 +1233,26 @@ describe('docx native engine parity', () => {
     const runs = '<w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r>';
     parts[part] = new TextEncoder().encode(xml.replace('<w:r><w:t>Engine text</w:t></w:r>', runs));
     const bytes = wasm.rezip_docx(parts);
-    for (const engine of [wasm, native]) {
+    const plans = [wasm, native].map(engine => {
       const session = new engine.EditSession(17);
       try {
         session.open_docx(bytes, true, 'opening');
         const paraId = paragraphId(session);
         session.replace_range('body', paraId, 0, paraId, 6, 'bKEEPy');
-        const base = JSON.parse(session.paragraph_save_plan(false));
+        const base = JSON.parse(session.paragraph_save_plan(false)) as DocxParagraphSavePlan;
+        const recorded = JSON.parse(session.paragraph_save_plan(true)) as DocxParagraphSavePlan;
         expect(JSON.parse(session.paragraph_save_plan())).toEqual(base);
-        expect(JSON.parse(session.paragraph_save_plan(true))).toEqual({ ...base, provenanceNet: 1 });
+        const edits = (plan: DocxParagraphSavePlan) => plan.splicedParts?.find(entry => entry.part === part)
+          ?.paragraphPatches?.[0]?.textEdits.map(({ from, to, insert }) => [from, to, insert.map(run => run.text).join('')]);
+        expect(edits(base)).toEqual([[0, 1, 'b'], [5, 6, 'y']]);
+        expect(edits(recorded)).toEqual([[0, 6, 'bKEEPy']]);
+        expect(recorded).not.toHaveProperty('provenanceNet');
+        return { base, recorded };
       } finally {
         session.free();
       }
-    }
+    });
+    expect(plans[1]).toEqual(plans[0]);
   });
 
   test('an unreadable relationships part warns the same way in both engines', () => {

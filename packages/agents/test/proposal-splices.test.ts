@@ -120,8 +120,9 @@ test('splices split 33 replacements and retain every KEEP word', () => {
     .toEqual(Array.from({ length: 33 }, (_, i) => change('a', 'b', 2 + i * 7)));
 });
 
-test('splices attach a pure insertion or deletion to a neighbour across a whitespace-only gap', () => {
-  expect(spliceChange(change('link alpha', 'link! ALPHA BETA'))).toEqual([change(' alpha', '! ALPHA BETA', 4)]);
-  expect(spliceChange(change('alpha beta gamma', 'ALPHA gamma'))).toEqual([change('alpha beta', 'ALPHA')]);
-  expect(spliceChange(change('yankee zulu', 'YANKEE ZULU'))).toEqual([change('yankee', 'YANKEE'), change('zulu', 'ZULU', 7)]);
+test('splices keep insertions and replacements separate across retained whitespace', () => {
+  expect(spliceChange(change('link alpha', 'link! ALPHA BETA')))
+    .toEqual([change('', '!', 4), change('alpha', 'ALPHA BETA', 5)]);
+  expect(spliceChange(change('yankee zulu', 'yankees ZULU')))
+    .toEqual([change('', 's', 6), change('zulu', 'ZULU', 7)]);
 });
