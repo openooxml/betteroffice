@@ -622,8 +622,10 @@ function fieldResultFormatting(
   field: SimpleField | ComplexField,
   runs: readonly ParagraphContent[] = flatFieldResult(field)
 ): TextFormatting | undefined {
-  for (const child of runs) {
-    if (child?.type === 'run' && child.formatting) return child.formatting;
+  if (Array.isArray(runs)) {
+    for (const child of runs) {
+      if (child?.type === 'run' && child.formatting) return child.formatting;
+    }
   }
   return field.type === 'complexField' ? field.formatting : undefined;
 }
