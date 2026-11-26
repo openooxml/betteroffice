@@ -5,6 +5,7 @@ import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
+import * as fontModules from '../../../../shared/office-session/fontModules';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
 import type { FontCdnDiagnostic, FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
@@ -1010,6 +1011,34 @@ test('with sliced faces off, coverage prefetch fetches whole faces', async () =>
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(load).toHaveBeenCalledTimes(1);
   expect(open).not.toHaveBeenCalled();
+});
+
+test('coverage prefetch fetches no slices if it becomes stale while the progressive module loads', async () => {
+  let release!: (module: typeof progressive) => void;
+  const loading = new Promise<typeof progressive>((resolve) => { release = resolve; });
+  const imported = spyOn(fontModules, 'importProgressiveFonts').mockReturnValue(loading);
+  const fetch = spyOnFontFetch(async () => new Response(null, { status: 404 }));
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => imported.mockRestore(), () => fetch.mockRestore(), () => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const base = 'https://stale-prefetch.example/';
+  const load = Object.assign(mock(async () => bytes), { slices: {
+    ref: { format: 1, index: 'slices.json', indexSha256: '' }, base,
+    url: async (file: string) => new URL(file, base), decode: async (encoded: ArrayBuffer) => encoded,
+  } });
+  provider(() => undefined, () => load);
+  let current = true;
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => commandFontProvider.load(), true, () => current);
+  await sleep(0);
+  expect(imported).toHaveBeenCalledTimes(1);
+  current = false;
+  release(progressive);
+  await sleep(0);
+  expect(fetch).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
 });
 
 test('a host-supplied face under a coverage family is never sliced over', async () => {
