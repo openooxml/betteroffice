@@ -10132,6 +10132,22 @@ mod tests {
     }
 
     #[test]
+    fn nested_results_keep_default_character_vanish_when_derived_style_sets_false() {
+        let styles = format!(
+            concat!(
+                "{}",
+                r#"<w:style w:type="character" w:styleId="Derived"><w:basedOn w:val="DefaultParagraphFont"/><w:rPr><w:vanish w:val="0"/></w:rPr></w:style>"#,
+            ),
+            DEFAULT_CHARACTER_VANISH,
+        );
+        let result = r#"<w:r><w:rPr><w:rStyle w:val="Derived"/></w:rPr><w:t>Cached</w:t></w:r>"#;
+        let inner = quote_field_xml(result, "", "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, &styles);
+        assert_eq!(payload["displayText"], Any::from(""));
+    }
+
+    #[test]
     fn an_unprojected_owner_keeps_its_flattened_simple_field_runs() {
         let mut simple_run = run("Simple ");
         simple_run["formatting"] = json!({"hidden":true});
