@@ -726,6 +726,13 @@ jobs:
           bun test bindings/engine-parity/docx-crate-save.test.ts
           cargo test --locked -p betteroffice-docx --test wasm_parity -- --ignored
 
+      - name: Check native DOCX revision IDs against the product save
+        env:
+          DOCX_REVISION_IDS_DIR: ${{ runner.temp }}/docx-revision-ids
+        run: |
+          bun test bindings/engine-parity/docx-revision-ids.test.ts
+          cargo test --locked -p betteroffice-docx-edit --test revision_ids_parity -- --ignored
+
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
 
