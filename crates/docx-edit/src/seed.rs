@@ -2876,8 +2876,26 @@ pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
     } else {
         "fieldResult"
     };
-    array(field(Some(field_value), key))
+    let runs = array(field(Some(field_value), key));
+    let visible = runs
         .iter()
+        .any(|child| boolean(field(field(Some(child), "formatting"), "hidden")) == Some(true))
+        .then(|| {
+            runs.iter().find(|child| {
+                string(field(Some(child), "type")) == Some("run")
+                    && boolean(field(field(Some(child), "formatting"), "hidden")) != Some(true)
+                    && array(field(Some(child), "content")).iter().any(|content| {
+                        string(field(Some(content), "type")) == Some("text")
+                            && string(field(Some(content), "text"))
+                                .is_some_and(|text| !text.is_empty())
+                    })
+            })
+        })
+        .flatten();
+    if let Some(child) = visible {
+        return field(Some(child), "formatting");
+    }
+    runs.iter()
         .filter(|child| string(field(Some(child), "type")) == Some("run"))
         .find_map(|child| field(Some(child), "formatting"))
         .or_else(|| {
@@ -2887,17 +2905,30 @@ pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
         })
 }
 
-fn field_payload(
+pub(crate) fn field_display_text(
     field_value: &Value,
-    style_formatting: Option<&Value>,
-    source: &BTreeMap<String, String>,
-) -> (JsonObject, Vec<Mark>) {
-    let kind = string(field(Some(field_value), "type")).unwrap_or_default();
+    show_hidden_text: bool,
+    projected_children: bool,
+) -> String {
     let mut display_text = String::new();
     let mut pending = vec![field_value];
     while let Some(node) = pending.pop() {
+        if !show_hidden_text
+            && matches!(
+                string(field(Some(node), "type")),
+                Some("simpleField" | "complexField")
+            )
+            && boolean(field(field_result_formatting(node), "hidden")) == Some(true)
+        {
+            continue;
+        }
         let children = match string(field(Some(node), "type")) {
             Some("run") => {
+                if !show_hidden_text
+                    && boolean(field(field(Some(node), "formatting"), "hidden")) == Some(true)
+                {
+                    continue;
+                }
                 for content in array(field(Some(node), "content")) {
                     if string(field(Some(content), "type")) == Some("text") {
                         display_text
@@ -2916,8 +2947,25 @@ fn field_payload(
             }
             _ => None,
         };
-        pending.extend(array(children).iter().rev());
+        pending.extend(array(children).iter().rev().filter(|child| {
+            !(projected_children
+                && std::ptr::eq(node, field_value)
+                && matches!(
+                    string(field(Some(child), "type")),
+                    Some("hyperlink" | "simpleField")
+                ))
+        }));
     }
+    display_text
+}
+
+fn field_payload(
+    field_value: &Value,
+    style_formatting: Option<&Value>,
+    source: &BTreeMap<String, String>,
+) -> (JsonObject, Vec<Mark>) {
+    let kind = string(field(Some(field_value), "type")).unwrap_or_default();
+    let display_text = field_display_text(field_value, false, false);
     let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
@@ -9545,6 +9593,72 @@ mod tests {
                 panic!("expected complex field owner");
             };
             assert_eq!(owner["displayText"], json!("Before Sincerely, After"));
+        }
+    }
+
+    #[test]
+    fn hidden_nested_field_results_stay_hidden() {
+        let hidden = json!({"type":"run", "formatting":{"hidden":true},
+            "content":[{"type":"text","text":"Hidden"}]});
+        for instruction in ["AUTOTEXTLIST", "QUOTE"] {
+            let inner = json!({"type":"complexField", "instruction":instruction,
+                "fieldResult":[hidden.clone()]});
+            for (result, visible, shown) in [
+                (
+                    vec![run("Before "), inner.clone(), run(" After")],
+                    "Before  After",
+                    "Before Hidden After",
+                ),
+                (vec![inner], "", "Hidden"),
+                (
+                    vec![
+                        run("Visible"),
+                        json!({"type":"complexField", "instruction":instruction,
+                    "formatting":{"hidden":true}, "fieldResult":[run("Hidden")]}),
+                    ],
+                    "Visible",
+                    "VisibleHidden",
+                ),
+                (
+                    vec![hidden.clone(), run("Visible")],
+                    "Visible",
+                    "HiddenVisible",
+                ),
+                (vec![hidden.clone()], "", "Hidden"),
+            ] {
+                let outer = json!({"type":"complexField", "instruction":instruction,
+                    "fieldResult":result, "structuredResult":{"inline":result}});
+                let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+                assert_eq!(payload["displayText"], json!(visible));
+                assert_eq!(payload["hasCachedResult"], json!(!visible.is_empty()));
+                let document = seed_body(&[json!({"type":"paragraph","content":[outer]})]);
+                for show_hidden_text in [false, true] {
+                    let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                        &document,
+                        "body",
+                        &crate::bridge::RenderEnv {
+                            show_hidden_text,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let actual: String = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            docx_layout::types::LayoutBlock::Paragraph(paragraph) => {
+                                Some(&paragraph.runs)
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                        .filter_map(|run| match run {
+                            docx_layout::types::Run::Field(field) => field.fallback.as_deref(),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(actual, if show_hidden_text { shown } else { visible });
+                }
+            }
         }
     }
 

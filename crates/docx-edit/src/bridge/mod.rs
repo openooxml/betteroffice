@@ -1482,7 +1482,14 @@ fn walk_story_chunks<T: ReadTxn>(
                         fallback: Some(if hidden {
                             String::new()
                         } else {
-                            shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            revealed_field_text(
+                                || shared_map_string(field, txn, "fieldData"),
+                                shared_any(field, txn, "resultProjection").is_some(),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            })
                         }),
                         source: field_join
                             .as_ref()
@@ -2012,6 +2019,22 @@ fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, 
         previews.extend(images.iter().filter_map(any_map));
     }
     previews
+}
+
+fn revealed_field_text(
+    source: impl FnOnce() -> Option<String>,
+    projected_children: bool,
+    env: &RenderEnv,
+) -> Option<String> {
+    if !env.show_hidden_text {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&source()?).ok()?;
+    Some(crate::seed::field_display_text(
+        &value,
+        true,
+        projected_children,
+    ))
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
@@ -3665,9 +3688,18 @@ fn lower_inline_sdt_values(
                         raw_type: (field_type != mapped_type).then_some(field_type),
                         instruction,
                         fallback: Some(
-                            payload
-                                .and_then(|payload| map_string(payload, "displayText"))
-                                .unwrap_or_default(),
+                            revealed_field_text(
+                                || payload.and_then(|payload| map_string(payload, "fieldData")),
+                                payload.is_some_and(|payload| {
+                                    payload.contains_key("resultProjection")
+                                }),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                payload
+                                    .and_then(|payload| map_string(payload, "displayText"))
+                                    .unwrap_or_default()
+                            }),
                         ),
                         source: payload.and_then(|payload| map_string(payload, "fieldData")),
                         locked: payload

@@ -237,9 +237,48 @@ describe('DOCX engine seeding', () => {
           segment.kind === 'text' ? [segment.text] : []
         );
         expect(links.join('')).toBe('Link');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          expect(sequenceRuns(blocks).flatMap((run) => run.kind === 'field' ? [run.fallback] : [])).toEqual([
+            'Before Sincerely, After', 'Simple', 'Before Sincerely, After',
+          ]);
+        }
       }
     } finally {
       for (const session of seeded.sessions) session.destroy();
+    }
+  });
+
+  it.each(['AUTOTEXTLIST', 'QUOTE'])('keeps hidden nested %s results out of visible cached text', async (instruction) => {
+    const text = (value: string, hidden = false) => `<w:r>${hidden ? '<w:rPr><w:vanish/></w:rPr>' : ''}<w:t xml:space="preserve">${value}</w:t></w:r>`;
+    const field = (result: string) => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> ${instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const hidden = field(text('Hidden', true));
+    const structuralHidden = field(text('Hidden')).replace('<w:r><w:fldChar', '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar');
+    const bytes = sequencePackage([
+      field(text('Before ') + hidden + text(' After')),
+      field(hidden),
+      field(text('Hidden', true) + text('Visible')),
+      field(text('Hidden', true)),
+      field(text('Visible') + structuralHidden),
+    ].map((result) => `<w:p>${result}</w:p>`).join(''));
+    const { sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of sessions) {
+        const payloads = session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
+        );
+        expect(payloads.map((payload) => payload.displayText)).toEqual(['Before  After', '', 'Visible', '', 'Visible']);
+        expect(payloads.map((payload) => payload.hasCachedResult)).toEqual([true, false, true, false, true]);
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks).flatMap((run) => run.kind === 'field' ? [run.fallback] : []);
+          expect(results).toEqual(showHiddenText
+            ? ['Before Hidden After', 'Hidden', 'HiddenVisible', 'Hidden', 'VisibleHidden']
+            : ['Before  After', '', 'Visible', 'Visible']);
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
     }
   });
 

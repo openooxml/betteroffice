@@ -614,6 +614,26 @@ function chartPayload(chart: Chart): Attrs {
   }) as Attrs;
 }
 
+function fieldResultFormatting(field: SimpleField | ComplexField): TextFormatting | undefined {
+  let fieldFormatting: TextFormatting | undefined;
+  const runs = field.type === 'simpleField' ? field.content : field.fieldResult;
+  if (!Array.isArray(runs)) return field.type === 'complexField' ? field.formatting : undefined;
+  const visible = runs.some((child) => child?.type === 'run' && child.formatting?.hidden)
+    ? runs.find((child) => child?.type === 'run' && !child.formatting?.hidden &&
+      Array.isArray(child.content) && child.content.some((content) => content?.type === 'text' && content.text.length > 0))
+    : undefined;
+  if (visible?.type === 'run') {
+    fieldFormatting = visible.formatting;
+  } else {
+    for (const child of runs) {
+      if (child?.type !== 'run') continue;
+      if (!fieldFormatting && child.formatting) fieldFormatting = child.formatting;
+    }
+  }
+  return visible ? fieldFormatting :
+    fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
+}
+
 function fieldPayload(
   field: SimpleField | ComplexField,
   styleFormatting?: TextFormatting
@@ -622,20 +642,15 @@ function fieldPayload(
   marks: MarkDescriptor[];
 } {
   let displayText = '';
-  let fieldFormatting: TextFormatting | undefined;
-  const runs = field.type === 'simpleField' ? field.content : field.fieldResult;
-  for (const child of runs) {
-    if (child.type !== 'run') continue;
-    if (!fieldFormatting && child.formatting) fieldFormatting = child.formatting;
-  }
   const pending: ParagraphContent[] = [field];
   while (pending.length > 0) {
     const node = pending.pop()!;
     if (!node) continue;
+    if ((node.type === 'simpleField' || node.type === 'complexField') && fieldResultFormatting(node)?.hidden) continue;
     let children: readonly ParagraphContent[] = [];
     switch (node.type) {
       case 'run':
-        if (!Array.isArray(node.content)) break;
+        if (node.formatting?.hidden || !Array.isArray(node.content)) break;
         for (const content of node.content) {
           if (content?.type === 'text') displayText += content.text;
         }
@@ -656,8 +671,7 @@ function fieldPayload(
     if (!Array.isArray(children)) continue;
     for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
   }
-  const formatting =
-    fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
+  const formatting = fieldResultFormatting(field);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
   return {
     payload: {
