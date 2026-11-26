@@ -6,7 +6,7 @@ import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type Do
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
 import { cleanupGuard } from './cleanup';
-import { boundary, spliceChange } from './proposal-splices';
+import { boundary, graphemeRange, spliceChange, trimChange } from './proposal-splices';
 import {
   DocumentToolError,
   AcceptDateUnsupportedError,
@@ -97,6 +97,7 @@ interface HeldProposal {
 }
 
 const MAX_TEXT = 16_000;
+const MAX_PROPOSAL_STEPS = 128;
 
 function integer(value: number, min: number, max: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -126,6 +127,15 @@ function literal(query: string, caseSensitive: boolean): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
 }
 
+function touchesChange(left: ProposalChange, right: ProposalChange): boolean {
+  if (left.ref !== right.ref) return false;
+  const leftEnd = left.start + left.oldText.length;
+  const rightEnd = right.start + right.oldText.length;
+  return !left.oldText || !right.oldText
+    ? left.start <= rightEnd && right.start <= leftEnd
+    : left.start < rightEnd && right.start < leftEnd;
+}
+
 export class DocxAgentDocument {
   readonly name: string;
   private get attached() { return !this.ownsSession; }
@@ -141,6 +151,7 @@ export class DocxAgentDocument {
   private readonly identities = new Map<string, Paragraph>();
   private readonly runRevisions = new Map<string, { fingerprint: string; revision: number }>();
   private readonly proposals = new Map<string, HeldProposal>();
+  private readonly stagingProposals = new Set<Promise<DocxProposalResult>>();
   private readonly matches = new Map<string, Omit<ExactTextEdit, 'newText'>>();
   private readonly cursors = new Map<string, { epoch: number; signature: string; paragraph: number; offset: number }>();
   private readonly unsubscribe: () => void;
@@ -151,6 +162,7 @@ export class DocxAgentDocument {
   private nextCursor = 1;
   private nextMatch = 1;
   private closed = false;
+  private closeWithdrawal?: Promise<void>;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; allowLegacy: boolean; check: Promise<CommentSource> };
   private commentPackageBaseline?: { version: number; deletion: boolean; bytes: Promise<Uint8Array> };
@@ -432,7 +444,7 @@ export class DocxAgentDocument {
         throw new DocumentToolError('TEXT_MISMATCH', 'oldText does not match at start. Run grep and use its match ID instead of calculating offsets.', { ref: p.ref });
       }
       const end = start + edit.oldText.length;
-      if (!boundary(p.text, start) || !boundary(p.text, end)) throw new DocumentToolError('INVALID_RANGE', 'Text ranges must not split a Unicode character.');
+      if (!graphemeRange(p.text, start, end)) throw new DocumentToolError('INVALID_RANGE', 'Text ranges must not split a Unicode character.');
       if (edit.oldText === edit.newText) throw new DocumentToolError('NO_CHANGE', 'oldText and newText are identical.');
       if (p.runs.some(run => run.protected && (run.start < end && run.end > start || start === end && run.start <= start && start < run.end))) {
         if (this.attached) {
@@ -448,7 +460,9 @@ export class DocxAgentDocument {
       targets.set(p.ref, { story: p.story, paraId: p.paraId, fingerprint: p.fingerprint });
     }
     const value: Proposal = { id: `proposal${this.nextProposal++}`, author: input.author, note: input.note ?? '', status: 'pending', changes, staleRefs: [] };
-    return { value, splices: changes.flatMap(spliceChange), targets, engine: [], registered: new Set(), editorDecisions: new Map() };
+    const split = changes.flatMap(spliceChange);
+    const splices = split.length > MAX_PROPOSAL_STEPS ? changes.map(change => trimChange(change)) : split;
+    return { value, splices, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
   }
 
   propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
@@ -472,14 +486,19 @@ export class DocxAgentDocument {
   async proposeAsync(input: { author: string; note?: string; edits: TextEdit[] }): Promise<Proposal> {
     if (!this.proposalPeer) return this.propose(input);
     const plan = this.prepareProposal(input);
+    let staging: Promise<DocxProposalResult> | undefined;
     try {
-      const result = await this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
+      staging = this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
+      this.stagingProposals.add(staging);
+      const result = await staging;
+      if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
       this.synchronizeProposals(this.session.getProposals());
       const snapshot = this.proposalResult(result, plan.held.splices);
       const value = this.recordProposal(plan, snapshot);
       if (!plan.held.editorDecisions.size) this.checkDecisionReferences(plan.references, plan.held);
       return value;
     } catch (error) {
+      if (this.closed) throw error;
       if (!plan.held.editorDecisions.size && plan.held.registered.size) {
         const current = this.proposalSnapshot ?? this.session.getProposals();
         const ids = [...plan.held.registered];
@@ -495,6 +514,8 @@ export class DocxAgentDocument {
         this.proposals.delete(plan.held.value.id);
       }
       throw error;
+    } finally {
+      if (staging) this.stagingProposals.delete(staging);
     }
   }
 
@@ -797,8 +818,10 @@ export class DocxAgentDocument {
   }
 
   close() {
-    if (this.closed) return;
+    if (this.closed) return this.closeWithdrawal;
     this.closed = true;
+    const ids = [...this.proposals.values()].flatMap(held => held.value.status === 'pending'
+      ? held.engine.map(record => record.id) : [...held.registered]);
     this.unsubscribe();
     this.unsubscribeProposals();
     this.proposals.clear();
@@ -809,7 +832,26 @@ export class DocxAgentDocument {
     this.identities.clear();
     this.runRevisions.clear();
     this.paragraphs = [];
-    if (this.ownsSession) this.session.destroy();
+    if (this.ownsSession) {
+      this.session.destroy();
+    } else if (ids.length) {
+      const withdraw = () => {
+        const snapshot = this.session.getProposals();
+        const previewVersion = Math.max(snapshot.previewVersion, this.proposalSnapshot?.previewVersion ?? 0);
+        const request = { expectVersion: this.session.version(), expectPreviewVersion: previewVersion, ids };
+        const peer = this.proposalPeer;
+        if (peer) return peer.withdrawProposals(request).then(result =>
+          !result.ok && result.failure.code === 'tracked-revision-conflict'
+            ? peer.withdrawProposals({ ...request, keepRevisions: true }) : result
+        ).then(result => { this.proposalResult(result, []); });
+        const result = this.session.withdrawProposals(request);
+        this.proposalResult(!result.ok && result.failure.code === 'tracked-revision-conflict'
+          ? this.session.withdrawProposals({ ...request, keepRevisions: true }) : result, []);
+      };
+      this.closeWithdrawal = this.stagingProposals.size ? Promise.allSettled(this.stagingProposals).then(withdraw) : withdraw();
+      void this.closeWithdrawal?.catch(() => {});
+      return this.closeWithdrawal;
+    }
   }
 
   private index() {
@@ -1021,9 +1063,15 @@ export class DocxAgentDocument {
         match.oldText = p.text.slice(start, end);
       }
       for (const held of this.proposals.values()) {
-        if (accepted && held !== accepted && held.value.status === 'pending' && changes.some(change => change.ref === p.ref)) continue;
         const target = held.targets.get(p.ref);
         if (target?.fingerprint !== previous.fingerprint) continue;
+        if (accepted && held !== accepted && held.value.status === 'pending') {
+          if (!this.proposalPeer && changes.some(change => change.ref === p.ref)) continue;
+          if (held.value.changes.some(change => change.ref === p.ref && accepted.value.changes.some(edit => touchesChange(change, edit)))) {
+            target.fingerprint = '\u0000stale';
+            continue;
+          }
+        }
         target.fingerprint = p.fingerprint;
         if (held.value.status === 'pending') {
           for (const change of held.value.changes) if (change.ref === p.ref) change.start = shift(p.ref, change.start);
@@ -1282,7 +1330,7 @@ export class DocxAgentDocument {
       const withdrawal = await peer.withdrawProposals({ ids, expectVersion: decided.version, expectPreviewVersion: decided.previewVersion, keepRevisions });
       this.finishProposalOperation(withdrawal);
       settled = this.proposalResult(withdrawal, held.splices);
-      this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions));
+      this.preserveReferences(before, settled.version, this.agentDecisionChanges(held, state, keepRevisions), state === 'accepted' ? held : undefined);
       this.checkDecisionReferences(before, held);
     } catch (error) {
       if (this.proposalOperation) this.finishProposalOperation();

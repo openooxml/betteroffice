@@ -3500,11 +3500,23 @@ fn a_projected_seed_without_item_ids_uses_alignment_for_local_text_edits() {
 }
 
 #[test]
-fn ambiguous_single_typing_keeps_the_model_save_path() {
-    let doc = open(r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#);
-    doc.insert_text(&ctx(), Position::new("body", 1), "i", FormatPolicy::Inherit)
+fn editor_save_uses_alignment_for_ambiguous_single_typing() {
+    let source = package(
+        r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#,
+    );
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let session = EditSessionCore::new(71, host);
+    session.open_docx(&source, true, None, None).unwrap();
+    session
+        .insert_text("body", "00000001", 1, "i", None, None)
         .unwrap();
-    assert_ambiguous(&doc, "ambiguous: nonunique content alignment");
+    let editor = session
+        .paragraph_save_plan_with_local_provenance(false)
+        .unwrap();
+    assert!(
+        editor.contains("ambiguous: nonunique content alignment"),
+        "{editor}"
+    );
 }
 
 #[test]

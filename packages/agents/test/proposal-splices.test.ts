@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { MAX_SPLICE_CELLS, spliceChange } from '../src/proposal-splices';
+import { MAX_SPLICE_CELLS, MAX_SPLICES_PER_CHANGE, spliceChange } from '../src/proposal-splices';
 
 const change = (oldText: string, newText: string, start = 0) => ({
   ref: 'p1', revision: 1, story: 'body', paragraph: 1, start, oldText, newText,
@@ -8,10 +8,19 @@ const change = (oldText: string, newText: string, start = 0) => ({
 test('splices preserve the leftmost old tokens on ties', () => {
   expect(spliceChange(change('aXa', 'a', 10))).toEqual([change('Xa', '', 11)]);
   expect(spliceChange(change('abab', 'ab'))).toEqual([change('ab', '', 2)]);
-  expect(spliceChange(change('X|red blue|Y', 'Z|blue red|W')))
-    .toEqual([change('X', 'Z'), change('', 'blue ', 2), change(' blue', '', 5), change('Y', 'W', 11)]);
+  expect(spliceChange(change('X|red tan|Y', 'Z|tan red|W')))
+    .toEqual([change('X', 'Z'), change('', 'tan ', 2), change(' tan', '', 5), change('Y', 'W', 10)]);
   expect(spliceChange(change('X|red|Y', 'Z|red blue red|W')))
     .toEqual([change('X', 'Z'), change('', ' blue red', 5), change('Y', 'W', 6)]);
+});
+
+test('splices maximize the UTF-16 length of retained tokens', () => {
+  expect(spliceChange(change('a b KEEP', 'KEEP c d')))
+    .toEqual([change('a b ', ''), change('', ' c d', 8)]);
+  expect(spliceChange(change('X|red blue|Y', 'Z|blue red|W')))
+    .toEqual([change('X', 'Z'), change('red ', '', 2), change('', ' red', 10), change('Y', 'W', 11)]);
+  expect(spliceChange(change('X|KEEP 👩‍💻|Y', 'Z|👩‍💻 KEEP|W')))
+    .toEqual([change('X', 'Z'), change('KEEP ', '', 2), change('', ' KEEP', 12), change('Y', 'W', 13)]);
 });
 
 test('splices keep shared space between swapped words', () => {
@@ -21,8 +30,24 @@ test('splices keep shared space between swapped words', () => {
 });
 
 test('splices remove brackets, retain the unchanged word and space, and merge a replacement with an abutting deletion', () => {
+  expect(spliceChange(change('[MRID xxxxxxxx]', 'MRID xxxxxxxx')))
+    .toEqual([change('[', ''), change(']', '', 14)]);
   expect(spliceChange(change('[MRID xxxxxxxx]', 'MRID 12345678')))
     .toEqual([change('[', ''), change('xxxxxxxx]', '12345678', 6)]);
+});
+
+test('splices keep punctuation inside numbers, dates, IDs and URL components', () => {
+  for (const [oldToken, newToken] of [
+    ['1,234.56', '1,923.56'],
+    ['2024-01-31', '2024-02-31'],
+    ['tenant-prod-123', 'tenant-dev-123'],
+    ['alpha.example', 'beta.example'],
+  ]) {
+    expect(spliceChange(change(`x ${oldToken} a`, `y ${newToken} b`)))
+      .toEqual([change('x', 'y'), change(oldToken, newToken, 2), change('a', 'b', oldToken.length + 3)]);
+  }
+  expect(spliceChange(change('x https://alpha.example/path a', 'y https://beta.example/path b')))
+    .toEqual([change('x', 'y'), change('alpha.example/path', 'beta.example/path', 10), change('a', 'b', 29)]);
 });
 
 test('splices keep CJK runs, marks, numbers and underscores inside word tokens', () => {
@@ -65,7 +90,16 @@ test('splices cap the trimmed token alignment table', () => {
 
 test('splices combine adjacent deletions and insertions and preserve pure edits', () => {
   expect(spliceChange(change('aXYZb', 'a123b'))).toEqual([change('XYZ', '123', 1)]);
-  expect(spliceChange(change('a|X|b', 'Y!a||b?Z')))
-    .toEqual([change('', 'Y!'), change('X', '', 2), change('', '?Z', 5)]);
+  expect(spliceChange(change('a|X|b', 'Y|a||b|Z')))
+    .toEqual([change('', 'Y|'), change('X', '', 2), change('', '|Z', 5)]);
   expect(spliceChange(change('a', 'a'))).toEqual([]);
+});
+
+test('splices keep the trimmed replacement whole above the per-change cap', () => {
+  const words = (word: string, count: number) => Array(count).fill(word).join(' ');
+  const at = change(words('a', MAX_SPLICES_PER_CHANGE), words('b', MAX_SPLICES_PER_CHANGE));
+  expect(spliceChange(at)).toHaveLength(MAX_SPLICES_PER_CHANGE);
+  const over = change(words('a', MAX_SPLICES_PER_CHANGE + 1), words('b', MAX_SPLICES_PER_CHANGE + 1));
+  expect(spliceChange(change(`p ${over.oldText} z`, `p ${over.newText} z`)))
+    .toEqual([change(over.oldText, over.newText, 2)]);
 });

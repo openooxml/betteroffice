@@ -1673,11 +1673,6 @@ fn plan_paragraph(
         Err(detail) => Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
     };
     let (retained, recorded, donors) = if let Some(proof) = proof {
-        if let [edit] = proof.edits.as_slice()
-            && edit.from == edit.to
-        {
-            align()?;
-        }
         let donors = DonorIndex::new(&old);
         let (retained, edits) = recorded_pairs(proof, &old, &new, &donors)
             .ok_or_else(|| unproven_paragraph(context.ordinal))?;

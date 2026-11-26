@@ -690,6 +690,9 @@ test('attached DOCX refuses acceptance of a preview joined by same-author typing
     expect(doc.review(proposal.id).status).toBe('pending');
     expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(['proposed']);
     expect((await doc.export(proposal.id)).length).toBeGreaterThan(0);
+    doc.close();
+    expect(owner.session.getProposals().proposals).toEqual([]);
+    expect(owner.session.storySegments('body')).toEqual(text);
   } finally { doc.close(); owner.close(); }
 });
 
@@ -978,12 +981,118 @@ test('an interleaved user edit during an async DOCX proposal does not revive ref
   } finally { agent.close(); owner.close(); }
 });
 
-async function proposalRaceFixture() {
+async function proposalRaceFixture(text = 'alpha beta gamma gamma') {
   const zip = await JSZip.loadAsync(await fixture());
   const xml = await zip.file('word/document.xml')!.async('string');
-  zip.file('word/document.xml', xml.replace('Executive summary', 'alpha beta gamma gamma'));
+  zip.file('word/document.xml', xml.replace('Executive summary', text));
   return openDocx(await zip.generateAsync({ type: 'uint8array' }));
 }
+
+for (const [wordCount, changeCount] of [[129, 1], [26, 5]] as const) {
+  test(`attached DOCX uses one record per change when ${wordCount} words across ${changeCount} changes exceed a splice cap`, async () => {
+    const oldText = Array(wordCount).fill('a').join(' ');
+    const newText = Array(wordCount).fill('b').join(' ');
+    const separator = ' | ';
+    const original = Array(changeCount).fill(oldText).join(separator);
+    const owner = await proposalRaceFixture(original);
+    const doc = attachDocx(owner.session, { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } });
+    try {
+      const p = doc.list({ story: 'body' }).items[0];
+      const edits = Array.from({ length: changeCount }, (_, i) => ({ ...p, start: i * (oldText.length + separator.length), oldText, newText }));
+      const proposal = await doc.proposeAsync({ author: 'Agent', edits });
+      expect(owner.session.getProposals().proposals).toHaveLength(changeCount);
+      expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted' });
+      expect(doc.read(p.ref).text).toBe(Array(changeCount).fill(newText).join(separator));
+    } finally { await doc.close(); owner.close(); }
+  });
+}
+
+test('attached DOCX preserves the batch refusal when 129 original changes exceed the step limit', async () => {
+  const count = 129;
+  const owner = await proposalRaceFixture(Array(count).fill('a').join(' '));
+  const doc = attachDocx(owner.session, { maxEdits: count });
+  try {
+    const p = doc.list({ story: 'body' }).items[0];
+    const edits = Array.from({ length: count }, (_, i) => ({ ...p, start: i * 2, oldText: 'a', newText: 'b' }));
+    await expect(doc.proposeAsync({ author: 'Agent', edits })).rejects.toMatchObject({ code: 'limit-exceeded' });
+    expect(owner.session.getProposals().proposals).toEqual([]);
+  } finally { doc.close(); owner.close(); }
+});
+
+test('attached DOCX peer stales the original span when an edit changes retained text', async () => {
+  const oldText = 'alpha guard center guard omega';
+  const newText = 'ALPHA guard center guard OMEGA';
+  const owner = await proposalRaceFixture(`${oldText} trailing`);
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const [outer, center, trailing] = [oldText, 'center', 'trailing'].map(query => doc.grep({ query }).matches[0]);
+    const propose = (match: string, replacement: string) => doc.proposeAsync({ author: 'Agent', edits: [{ match, newText: replacement }] });
+    const split = await propose(outer.match, newText);
+    expect(split.records).toHaveLength(2);
+    const disjoint = await propose(trailing.match, 'TRAILING');
+    const edit = await propose(center.match, 'core');
+    expect(doc.review(split.id).staleRefs).toEqual([]);
+    await doc.accept(edit.id);
+    expect(doc.review(split.id)).toMatchObject({ status: 'pending', staleRefs: [outer.ref], changes: [{ oldText, newText }] });
+    await expect(doc.accept(split.id)).rejects.toMatchObject({ code: 'STALE_TARGET', details: { refs: [outer.ref] } });
+    expect(doc.review(disjoint.id)).toMatchObject({ staleRefs: [], changes: [{ start: trailing.start - 2 }] });
+    await doc.accept(disjoint.id);
+    expect(doc.read(outer.ref).text).toBe('alpha guard core guard omega TRAILING');
+    await doc.rejectAsync(split.id);
+  } finally { await doc.close(); owner.close(); }
+});
+
+for (const peer of [false, true]) {
+  test(`attached DOCX close withdraws only its own split records, peer=${peer}`, async () => {
+    const oldText = 'alpha guard omega';
+    const owner = await proposalRaceFixture(oldText);
+    const doc = attachDocx(owner.session, peer ? { editPeer: {
+      async proposeChanges(request) { return owner.session.proposeChanges(request); },
+      async setProposalStates(request) { return owner.session.setProposalStates(request); },
+      async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+    } } : {});
+    const other = attachDocx(owner.session);
+    try {
+      const [hit] = doc.grep({ query: oldText }).matches;
+      const split = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA guard OMEGA' }] });
+      expect(split.records).toHaveLength(2);
+      const [forecast] = other.grep({ query: 'forecast' }).matches;
+      const unrelated = other.propose({ author: 'Editor', edits: [{ match: forecast.match, newText: 'FORECAST' }] });
+      await doc.close();
+      expect(owner.session.getProposals().proposals.map(record => record.id)).toEqual(unrelated.records!.map(record => record.id));
+      expect(other.grep({ query: oldText }).matches).toHaveLength(1);
+    } finally { await doc.close(); other.close(); owner.close(); }
+  });
+}
+
+test('attached DOCX close withdraws split records staged after close begins', async () => {
+  const owner = await proposalRaceFixture('alpha guard omega');
+  let resume = () => {};
+  const staging = new Promise<void>(resolve => { resume = () => resolve(); });
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { await staging; return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const [hit] = doc.grep({ query: 'alpha guard omega' }).matches;
+    const proposal = doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA guard OMEGA' }] });
+    const closed = doc.close();
+    resume();
+    await expect(proposal).rejects.toMatchObject({ code: 'CLOSED' });
+    await closed;
+    expect(owner.session.getProposals().proposals).toEqual([]);
+    expect(owner.grep({ query: 'alpha guard omega' }).matches).toHaveLength(1);
+  } finally { resume(); await doc.close(); owner.close(); }
+});
 
 for (const peer of [false, true]) {
   for (const state of ['accepted', 'rejected'] as const) {

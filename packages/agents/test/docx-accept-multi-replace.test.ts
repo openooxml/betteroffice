@@ -167,6 +167,12 @@ test('patches each replaced run when recorded edits resolve ambiguous alignment'
   ]));
 }, 30_000);
 
+test('accepts a lone recorded insertion and keeps the untouched run byte-identical', async () => {
+  const untouched = run(2, ' ti').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+  await checkProposal([run(1, 'fi'), untouched], [{ query: 'fi', newText: 'fii' }],
+    paragraph => expectRuns(paragraph, [untouched], [['fii', false], [' ti', false]]));
+}, 30_000);
+
 test('accepts replacements in neighbouring runs one character apart', async () => {
   const left = run(1, 'Before ');
   const gap = run(3, '-', true);
