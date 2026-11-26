@@ -2253,7 +2253,10 @@ mod tests {
         let context = EvalContext::new(&workbook, SheetId(0));
         for sheet in ["Data", "'Data Set'"] {
             let source = format!("_xlfn.LET(_xlpm.c,{sheet}!A1,SUM(_xlpm.c:{sheet}!A2))");
-            assert_eq!(evaluate(&parse_formula(&source).unwrap(), &context), num(5.0));
+            assert_eq!(
+                evaluate(&parse_formula(&source).unwrap(), &context),
+                num(5.0)
+            );
         }
     }
 
@@ -2261,7 +2264,9 @@ mod tests {
     fn direct_evaluation_keeps_quoted_external_reference_errors_and_lazy_branches() {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
-        workbook.defined_names.push(defined_name("Rates", "'[Book.xlsx]Data'!$A$1"));
+        workbook
+            .defined_names
+            .push(defined_name("Rates", "'[Book.xlsx]Data'!$A$1"));
         let context = EvalContext::new(&workbook, SheetId(0));
         for (source, expected) in [
             ("IF(TRUE,42,'[1]Data'!A1)", num(42.0)),
@@ -2269,7 +2274,11 @@ mod tests {
             ("'[x]Data'!A1", err(ErrorValue::Ref)),
             ("Rates", err(ErrorValue::Ref)),
         ] {
-            assert_eq!(evaluate(&parse_formula(source).unwrap(), &context), expected, "{source}");
+            assert_eq!(
+                evaluate(&parse_formula(source).unwrap(), &context),
+                expected,
+                "{source}"
+            );
         }
     }
 

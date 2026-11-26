@@ -651,7 +651,8 @@ impl Lexer<'_> {
         if end == 0
             || !book[end..].starts_with(']')
             || book[..end].contains(|ch: char| {
-                ch.is_whitespace() || matches!(ch, '@' | ':' | '+' | '*' | '/' | '\\' | '<' | '>' | '=')
+                ch.is_whitespace()
+                    || matches!(ch, '@' | ':' | '+' | '*' | '/' | '\\' | '<' | '>' | '=')
             })
         {
             return Ok(None);
@@ -1106,11 +1107,14 @@ mod tests {
             let tokens = lex_for_rewrite(source).unwrap();
             assert_eq!(tokens.len(), 1, "{source}");
             let (first, last) = scope.split_once(':').unwrap();
-            assert!(matches!(&tokens[0].kind,
+            assert!(
+                matches!(&tokens[0].kind,
                 TokKind::ThreeDRef { first: start, last: end, target }
                     if start == first && end == last
                         && matches!(target.as_ref(), TokKind::Ref { .. } | TokKind::Range { .. }
-                            | TokKind::ColumnRange { .. } | TokKind::RowRange { .. })), "{source}");
+                            | TokKind::ColumnRange { .. } | TokKind::RowRange { .. })),
+                "{source}"
+            );
             assert_eq!((tokens[0].start, tokens[0].end), (0, source.len()));
         }
     }
@@ -1341,12 +1345,20 @@ mod tests {
 
     #[test]
     fn deleted_external_names_and_address_shaped_span_endpoints_keep_their_spans() {
-        for reference in ["[1]!#REF!", "Sales:Q2!A1", "Sales:R1C1!#REF!", "Sales:TRUE!#REF!"] {
+        for reference in [
+            "[1]!#REF!",
+            "Sales:Q2!A1",
+            "Sales:R1C1!#REF!",
+            "Sales:TRUE!#REF!",
+        ] {
             let source = format!("SUM({reference})+T[Old]");
             let tokens = lex(&source).unwrap();
             let token = &tokens[2];
             assert_eq!(&source[token.start..token.end], reference);
-            assert!(matches!(token.kind, TokKind::ExternalRef(_) | TokKind::ThreeDRef { .. }));
+            assert!(matches!(
+                token.kind,
+                TokKind::ExternalRef(_) | TokKind::ThreeDRef { .. }
+            ));
             assert_eq!(lex_for_rewrite(&source).unwrap(), tokens);
             assert_eq!(
                 rewrite_table_column(&source, "T", "Data", false, "Old", "New"),

@@ -429,7 +429,12 @@ mod tests {
     #[test]
     fn formula_source_validation_preserves_the_add_in_call_syntax() {
         assert!(is_formula_source("[1]!AddIn(1)"));
-        for source in ["[1] !AddIn(1)", "[1]! AddIn(1)", "[1]!A$1(1)", r"[1]!\AddIn(1)"] {
+        for source in [
+            "[1] !AddIn(1)",
+            "[1]! AddIn(1)",
+            "[1]!A$1(1)",
+            r"[1]!\AddIn(1)",
+        ] {
             assert!(!is_formula_source(source), "{source}");
         }
     }

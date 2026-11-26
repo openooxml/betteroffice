@@ -448,7 +448,8 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     ) {
         if let Expr::Name {
             scope: Some(scope), ..
-        } = &expr {
+        } = &expr
+        {
             if names_other_workbook(scope) {
                 ctx.record_other_workbook();
             } else if scope.contains('[') {

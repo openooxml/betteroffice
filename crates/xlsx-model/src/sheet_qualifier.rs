@@ -58,7 +58,10 @@ pub fn sheet_qualifiers_with_sheets(
         }
         if bracket_depth != 0 {
             if bytes[index] == b'\''
-                && matches!(bytes.get(index + 1), Some(b'[' | b']' | b'\'' | b'#' | b'@'))
+                && matches!(
+                    bytes.get(index + 1),
+                    Some(b'[' | b']' | b'\'' | b'#' | b'@')
+                )
             {
                 index += 2;
                 continue;
@@ -140,7 +143,9 @@ fn is_span_target(source: &str, target: usize) -> bool {
     let address = &source[target..reference_end(source, target)];
     address == "#REF!"
         || (address_shape(address) == Some(AddressShape::Cell)
-            && !source[target + address.len()..].trim_start().starts_with(['!', '(']))
+            && !source[target + address.len()..]
+                .trim_start()
+                .starts_with(['!', '(']))
         || address.split_once(':').is_some_and(|(first, last)| {
             let first = address_shape(first.trim());
             first.is_some() && first == address_shape(last.trim())
@@ -560,7 +565,11 @@ pub fn remove_sheet_references_noting_spans(
 ) -> Option<(String, bool)> {
     let mut replacements: Vec<(core::ops::Range<usize>, String)> = Vec::new();
     let mut narrowed = false;
-    let has_sheet = |name: &str| order_before.iter().any(|sheet| sheet_names_equal(sheet, name));
+    let has_sheet = |name: &str| {
+        order_before
+            .iter()
+            .any(|sheet| sheet_names_equal(sheet, name))
+    };
     for qualifier in sheet_qualifiers_with_sheets(source, has_sheet) {
         let Some(start) = qualified_target(source, qualifier.span.end)
             .filter(|_| qualifier.bound && !qualifier.external)
@@ -599,7 +608,8 @@ pub fn remove_sheet_references_noting_spans(
                 *text = "#REF!".to_owned();
             }
             Some((last, text))
-                if text.as_str() == "#REF!" && replacement == "#REF!"
+                if text.as_str() == "#REF!"
+                    && replacement == "#REF!"
                     && source[last.end..span.start].trim() == ":" =>
             {
                 last.end = span.end;
@@ -713,7 +723,11 @@ mod removal_tests {
             ("SUM(Tax!Amt:Fee[Old])", Some("SUM(#REF!:Fee[Old])")),
             ("SUM('[Book.xlsx]Data:Tax'!A1)", None),
         ] {
-            assert_eq!(remove_sheet_references(source, "Tax", &order).as_deref(), expected, "{source}");
+            assert_eq!(
+                remove_sheet_references(source, "Tax", &order).as_deref(),
+                expected,
+                "{source}"
+            );
         }
     }
 }

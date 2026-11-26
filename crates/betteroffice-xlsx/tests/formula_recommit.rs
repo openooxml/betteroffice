@@ -170,7 +170,10 @@ fn external_references_recommit_unchanged_through_batches() {
 
 #[test]
 fn batches_recommit_a_deleted_external_name_and_enter_it_without_a_value() {
-    let source = package(r#"<row r="1"><c r="A1"><f>[1]!#REF!+1</f><v>9</v></c></row>"#, "");
+    let source = package(
+        r#"<row r="1"><c r="A1"><f>[1]!#REF!+1</f><v>9</v></c></row>"#,
+        "",
+    );
     let mut workbook = Workbook::open(&source).unwrap();
     let version = workbook.version();
     apply(&mut workbook, json!([set_formula("A1", "[1]!#REF!+1")]));
@@ -180,7 +183,10 @@ fn batches_recommit_a_deleted_external_name_and_enter_it_without_a_value() {
 
     apply(&mut workbook, json!([set_input("B1", "=[1]!#REF!")]));
     workbook.recalculate_all(options());
-    assert_eq!(stored(&workbook, "B1"), (Some("[1]!#REF!".into()), CellValue::Empty));
+    assert_eq!(
+        stored(&workbook, "B1"),
+        (Some("[1]!#REF!".into()), CellValue::Empty)
+    );
 }
 
 const QUOTED: &str = concat!(

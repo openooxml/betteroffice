@@ -1,8 +1,8 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 use xlsx_model::sheet_qualifier::parse_sheet_token;
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::lexer::{ParseError, TokKind, Token, is_unquoted_sheet, lex};
 use crate::{ColumnRange, RowRange, TableSpec};
@@ -143,11 +143,18 @@ fn parse_source(
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
-    let tokens = if tokens.iter().any(|token| is_name_range_join(token, src, has_sheet)) {
+    let tokens = if tokens
+        .iter()
+        .any(|token| is_name_range_join(token, src, has_sheet))
+    {
         let mut joined = Vec::with_capacity(tokens.len() + 2);
         for token in tokens {
             if is_name_range_join(&token, src, has_sheet)
-                && let TokKind::ThreeDRef { first, last, target } = &token.kind
+                && let TokKind::ThreeDRef {
+                    first,
+                    last,
+                    target,
+                } = &token.kind
             {
                 let colon = token.start + first.len();
                 joined.extend([
@@ -363,11 +370,14 @@ impl<'a> Parser<'a> {
             return Err(ParseError::new(pos, "unexpected end of formula"));
         };
         let kind = match tok.kind.clone() {
-            TokKind::ThreeDRef { first, last, target }
-                if (self.has_sheet)(&first)
-                    || (self.source[pos..].starts_with('\'')
-                        && parse_sheet_token(self.source, pos)
-                            .is_some_and(|token| token.name.contains(':'))) =>
+            TokKind::ThreeDRef {
+                first,
+                last,
+                target,
+            } if (self.has_sheet)(&first)
+                || (self.source[pos..].starts_with('\'')
+                    && parse_sheet_token(self.source, pos)
+                        .is_some_and(|token| token.name.contains(':'))) =>
             {
                 qualify_reference(*target, format!("{first}:{last}"))
             }
@@ -446,15 +456,20 @@ impl<'a> Parser<'a> {
                 other => Ok(other),
             };
         }
-        if !self.accept_indexed_external || !crate::deps::names_other_workbook(&self.source[pos..]) {
+        if !self.accept_indexed_external || !crate::deps::names_other_workbook(&self.source[pos..])
+        {
             return Err(err());
         }
         match kind {
             TokKind::ThreeDRef { .. } => Err(err()),
-            TokKind::Name { scope: None, ref name }
-                if CellRef::parse_a1(&name.to_ascii_uppercase()).is_ok()
-                    || !name.starts_with(|ch: char| ch.is_alphabetic() || matches!(ch, '_' | '\\'))
-                    || self.source[token.end..].trim_start().starts_with(['!', ':', '(']) =>
+            TokKind::Name {
+                scope: None,
+                ref name,
+            } if CellRef::parse_a1(&name.to_ascii_uppercase()).is_ok()
+                || !name.starts_with(|ch: char| ch.is_alphabetic() || matches!(ch, '_' | '\\'))
+                || self.source[token.end..]
+                    .trim_start()
+                    .starts_with(['!', ':', '(']) =>
             {
                 Err(err())
             }
@@ -983,8 +998,11 @@ mod tests {
             ("'A1:Sheet2'!B2", "A1:Sheet2"),
             (r"'C:\x\[Book.xlsx]Sheet1'!A1", r"C:\x\[Book.xlsx]Sheet1"),
         ] {
-            assert!(matches!(parse_formula(source).unwrap(),
-                Expr::Ref { sheet: Some(sheet), .. } if sheet == expected), "{source}");
+            assert!(
+                matches!(parse_formula(source).unwrap(),
+                Expr::Ref { sheet: Some(sheet), .. } if sheet == expected),
+                "{source}"
+            );
         }
         for source in ["'Jan:Mar'!#REF!", "'[1]Rates'!#REF!"] {
             assert_eq!(parse_formula(source).unwrap(), Expr::Error(ErrorValue::Ref));

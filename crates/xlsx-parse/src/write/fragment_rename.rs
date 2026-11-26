@@ -356,7 +356,10 @@ mod tests {
         let source = "SUM(A1B:Tax ! B2)+SUM(Data:Tax!A1)+'[Book.xlsx]Data:Tax'!A1";
         assert_eq!(
             edits.apply(source),
-            Some(("SUM(A1B:'New Tax' ! B2)+SUM('Data:New Tax'!A1)+'[Book.xlsx]Data:Tax'!A1".into(), vec![0]))
+            Some((
+                "SUM(A1B:'New Tax' ! B2)+SUM('Data:New Tax'!A1)+'[Book.xlsx]Data:Tax'!A1".into(),
+                vec![0]
+            ))
         );
     }
 

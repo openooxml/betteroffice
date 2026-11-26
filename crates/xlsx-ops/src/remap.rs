@@ -10,9 +10,9 @@ use xlsx_calc::parser::{Expr, parse_formula_with_sheet_spans};
 use xlsx_calc::{ColumnRange, RowRange, TokKind, lex_for_rewrite, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
-    Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token,
-    qualified_target, qualifier_token, quoted_endpoints, sheet_names_equal,
-    sheet_qualifiers_with_sheets, skip_string,
+    Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token, qualified_target,
+    qualifier_token, quoted_endpoints, sheet_names_equal, sheet_qualifiers_with_sheets,
+    skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
@@ -163,12 +163,12 @@ impl<'a> ProposalSheets<'a> {
     pub fn remap(&self, source: &str, owner: SheetId, op: &Op) -> Option<String> {
         let sheet_names = self.sheet_names;
         if let Op::RenameSheet { sheet, name } | Op::RestoreSheet { sheet, name, .. } = op {
-            let renamed = scan_sheet_rename(
-                source,
-                sheet_names.get(sheet.0 as usize)?,
-                name,
-                |name| sheet_names.iter().any(|sheet| sheet_names_equal(sheet, name)),
-            );
+            let renamed =
+                scan_sheet_rename(source, sheet_names.get(sheet.0 as usize)?, name, |name| {
+                    sheet_names
+                        .iter()
+                        .any(|sheet| sheet_names_equal(sheet, name))
+                });
             if renamed.ambiguous || renamed.formula.len() > MAX_FORMULA_BYTES {
                 return None;
             }
@@ -659,13 +659,11 @@ pub(crate) fn rename_chart_refs(wb: &mut Workbook, old_name: &str, new_name: &st
         let mut charts = sheet.charts.clone();
         for chart in &mut charts {
             for reference in &mut chart.refs {
-                reference.formula = scan_sheet_rename(
-                    &reference.formula,
-                    old_name,
-                    new_name,
-                    |name| workbook_has_sheet(wb, name),
-                )
-                .formula;
+                reference.formula =
+                    scan_sheet_rename(&reference.formula, old_name, new_name, |name| {
+                        workbook_has_sheet(wb, name)
+                    })
+                    .formula;
             }
         }
         if charts != sheet.charts {
@@ -772,7 +770,11 @@ fn rewrite_component_for_removal(
     order_before: &[String],
 ) -> ComponentRemoval {
     let mut replacements = Vec::new();
-    let has_sheet = |name: &str| order_before.iter().any(|sheet| sheet_names_equal(sheet, name));
+    let has_sheet = |name: &str| {
+        order_before
+            .iter()
+            .any(|sheet| sheet_names_equal(sheet, name))
+    };
     for qualifier in sheet_qualifiers_with_sheets(component, has_sheet) {
         if !qualifier.bound || qualifier.external {
             continue;
@@ -912,12 +914,12 @@ fn contains_spaced_cell_range(source: &str) -> bool {
                     kind => kind,
                 };
                 matches!(kind, TokKind::Range { .. })
-                    && source[token.start..token.end]
-                        .rsplit_once(':')
-                        .is_some_and(|(first, last)| {
+                    && source[token.start..token.end].rsplit_once(':').is_some_and(
+                        |(first, last)| {
                             first.ends_with(char::is_whitespace)
                                 || last.starts_with(char::is_whitespace)
-                        })
+                        },
+                    )
             })
         })
 }
@@ -1120,7 +1122,11 @@ fn scan_reference<'a>(source: &'a str, index: usize, qualifiers: &[Qualifier]) -
 
 /// Reads the endpoint at `index`: the implicit-intersection operator and the
 /// sheet qualifier it carries, if any, and the address after them.
-fn scan_endpoint<'a>(source: &'a str, index: usize, qualifiers: &[Qualifier]) -> ScannedEndpoint<'a> {
+fn scan_endpoint<'a>(
+    source: &'a str,
+    index: usize,
+    qualifiers: &[Qualifier],
+) -> ScannedEndpoint<'a> {
     let bytes = source.as_bytes();
     // implicit intersection picks one cell out of the reference after it, so
     // it moves with that reference and falls with it.
@@ -1726,7 +1732,9 @@ fn mentions_sheet(source: &str, index: &SheetIndex<'_>) -> bool {
     sheet_qualifiers_with_sheets(source, |name| index.has_sheet(name))
         .iter()
         .any(|qualifier| {
-            qualifier.bound && !qualifier.external && index.covers(&qualifier.first, &qualifier.last)
+            qualifier.bound
+                && !qualifier.external
+                && index.covers(&qualifier.first, &qualifier.last)
         })
 }
 
@@ -1977,8 +1985,10 @@ pub(crate) fn rename_sheet_references(
             let rewritten = writable_rename(
                 source,
                 new_name,
-                scan_sheet_rename(source, old_name, new_name, |name| workbook_has_sheet(wb, name))
-                    .formula,
+                scan_sheet_rename(source, old_name, new_name, |name| {
+                    workbook_has_sheet(wb, name)
+                })
+                .formula,
             )?;
             if rewritten != *source {
                 if rewritten.len() > MAX_FORMULA_BYTES {
@@ -2072,7 +2082,9 @@ pub(crate) fn names_unrewritable_table(text: &str, dropped: &[String], sheets: &
                         && text[token.start..]
                             .strip_prefix('[')
                             .and_then(|source| source.split_once(']'))
-                            .is_some_and(|(book, _)| !book.bytes().all(|byte| byte.is_ascii_digit()))
+                            .is_some_and(|(book, _)| {
+                                !book.bytes().all(|byte| byte.is_ascii_digit())
+                            })
                 }) && remove_table_references(text, dropped, sheets).is_some()
             }
         }
@@ -2163,7 +2175,10 @@ pub(crate) fn renamed_conditional_formats(
     new_name: &str,
 ) -> Result<Vec<(SheetId, Vec<ConditionalFormatting>)>, OpError> {
     let rename = |source: &str| {
-        scan_sheet_rename(source, old_name, new_name, |name| workbook_has_sheet(wb, name)).formula
+        scan_sheet_rename(source, old_name, new_name, |name| {
+            workbook_has_sheet(wb, name)
+        })
+        .formula
     };
     rewritten_conditional_formats(
         wb,
@@ -2925,7 +2940,11 @@ mod tests {
             &dropped,
             &sheets,
         ));
-        assert!(!names_unrewritable_table("[Book.xlsx]Data!A1", &dropped, &sheets));
+        assert!(!names_unrewritable_table(
+            "[Book.xlsx]Data!A1",
+            &dropped,
+            &sheets
+        ));
         assert_eq!(
             remove_table_references("SUM(Amounts[Amt])", &[], &sheets),
             None
@@ -2990,7 +3009,10 @@ mod tests {
             r"C:\dir\[Book.xlsx]Sheet1!A1",
         ] {
             let source = format!("{prefix}+Prices[Amt]");
-            assert!(!names_unrewritable_table(&source, &dropped, &[]), "{source}");
+            assert!(
+                !names_unrewritable_table(&source, &dropped, &[]),
+                "{source}"
+            );
             assert_eq!(
                 remove_table_references(&source, &dropped, &[]),
                 Some(format!("{prefix}+#REF!"))
@@ -3045,9 +3067,21 @@ mod tests {
         let dropped = ["Amounts".to_owned()];
         let sheets = ["Amounts".to_owned(), "Data two".to_owned()];
         for (source, expected, sheet_names) in [
-            ("SUM(Amounts:Missing!B5)", "SUM(#REF!:Missing!B5)", &sheets[1..]),
-            ("SUM(Amounts:'Data two'!B5)", "SUM(#REF!:'Data two'!B5)", &sheets[..]),
-            ("[1]!#REF!+SUM(Amounts[Amt])", "[1]!#REF!+SUM(#REF!)", &sheets[..]),
+            (
+                "SUM(Amounts:Missing!B5)",
+                "SUM(#REF!:Missing!B5)",
+                &sheets[1..],
+            ),
+            (
+                "SUM(Amounts:'Data two'!B5)",
+                "SUM(#REF!:'Data two'!B5)",
+                &sheets[..],
+            ),
+            (
+                "[1]!#REF!+SUM(Amounts[Amt])",
+                "[1]!#REF!+SUM(#REF!)",
+                &sheets[..],
+            ),
         ] {
             assert!(!names_unrewritable_table(source, &dropped, sheet_names));
             assert_eq!(
@@ -3497,9 +3531,18 @@ mod tests {
         let op = insert_rows(0, 0, 1);
         remap_formulas(&mut workbook, &op).unwrap();
         remap_defined_names(&mut workbook, &op).unwrap();
-        assert_eq!(formula(&workbook, SheetId(1), "A1").as_deref(), Some("'[1]Data'!B1"));
-        assert_eq!(formula(&workbook, SheetId(1), "B1").as_deref(), Some("'[1]Data'!B1+Data!A2"));
-        assert_eq!(workbook.defined_names[0].formula, "SUM([1]Data!B1,Data ! A2 : A3)");
+        assert_eq!(
+            formula(&workbook, SheetId(1), "A1").as_deref(),
+            Some("'[1]Data'!B1")
+        );
+        assert_eq!(
+            formula(&workbook, SheetId(1), "B1").as_deref(),
+            Some("'[1]Data'!B1+Data!A2")
+        );
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "SUM([1]Data!B1,Data ! A2 : A3)"
+        );
     }
 
     /// A span whose endpoints this workbook does not hold cannot be resolved,
@@ -3769,30 +3812,45 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(formula(&workbook, SheetId(1), "A1").as_deref(), Some(expected));
+        assert_eq!(
+            formula(&workbook, SheetId(1), "A1").as_deref(),
+            Some(expected)
+        );
         assert_eq!(workbook.defined_names[0].formula, expected);
     }
 
     #[test]
     fn conditional_format_rename_guard_recognizes_only_local_sheet_spans() {
         let mut workbook = wb(&["Data", "Report"]);
-        workbook.sheets[1].conditional_formats.push(ConditionalFormatting {
-            sqref: "A1".into(),
-            rules: vec![ConditionalFormatRule {
-                id: "rule".into(),
-                rule_type: "expression".into(),
-                operator: None,
-                formulas: vec!["SUM(A1B:Data!B5)+'[1]Data:Report'!C1".into()],
-                priority: 1,
-                dxf_id: None,
-                format: Default::default(),
-                raw_xml: None,
-            }],
-        });
-        let op = Op::RenameSheet { sheet: SheetId(0), name: "New Data".into() };
-        assert!(crate::conditional_formats::ensure_conditional_formats_allow_edit(&workbook, &op).is_ok());
-        workbook.sheets[1].conditional_formats[0].rules[0].formulas = vec!["SUM(Data:Report!B5)".into()];
-        assert!(crate::conditional_formats::ensure_conditional_formats_allow_edit(&workbook, &op).is_err());
+        workbook.sheets[1]
+            .conditional_formats
+            .push(ConditionalFormatting {
+                sqref: "A1".into(),
+                rules: vec![ConditionalFormatRule {
+                    id: "rule".into(),
+                    rule_type: "expression".into(),
+                    operator: None,
+                    formulas: vec!["SUM(A1B:Data!B5)+'[1]Data:Report'!C1".into()],
+                    priority: 1,
+                    dxf_id: None,
+                    format: Default::default(),
+                    raw_xml: None,
+                }],
+            });
+        let op = Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "New Data".into(),
+        };
+        assert!(
+            crate::conditional_formats::ensure_conditional_formats_allow_edit(&workbook, &op)
+                .is_ok()
+        );
+        workbook.sheets[1].conditional_formats[0].rules[0].formulas =
+            vec!["SUM(Data:Report!B5)".into()];
+        assert!(
+            crate::conditional_formats::ensure_conditional_formats_allow_edit(&workbook, &op)
+                .is_err()
+        );
     }
 
     #[test]
