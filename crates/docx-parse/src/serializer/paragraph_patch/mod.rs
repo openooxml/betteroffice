@@ -267,7 +267,24 @@ impl Preview {
         output: &str,
         after: &lower::Lowered,
         patch: &ParagraphPatchV1,
-    ) -> Self {
+    ) -> Option<Self> {
+        if before.xml.nodes.iter().any(|node| {
+            node.namespace == lower::WORD
+                && match node.local.as_str() {
+                    "proofErr" | "smartTag" => true,
+                    "r" => node
+                        .attributes
+                        .iter()
+                        .any(|attribute| !attribute.identifier && !attribute.run_revision),
+                    "t" => node
+                        .attributes
+                        .iter()
+                        .any(|attribute| !attribute.identifier && attribute.name != "xml:space"),
+                    _ => false,
+                }
+        }) {
+            return None;
+        }
         let mut edits = patch.text_edits.iter().peekable();
         let mut shift = 0;
         let kept = before
@@ -315,7 +332,7 @@ impl Preview {
                     .then(|| (from..to, output[node.open.clone()].to_owned()))
             })
             .collect();
-        Self {
+        Some(Self {
             kept,
             cell_runs: after.cells.iter().map(|cell| cell.run).collect(),
             run_properties: after
@@ -328,7 +345,7 @@ impl Preview {
                 })
                 .collect(),
             enclosing_markup,
-        }
+        })
     }
 }
 
@@ -404,7 +421,7 @@ fn patch_inner(
         PatchErrorCode::ResultMismatch,
     )?;
     if let Some(preview) = preview {
-        *preview = Some(Preview::new(source, &lowered, &output, &verified, patch));
+        *preview = Preview::new(source, &lowered, &output, &verified, patch);
     }
     let actual: Vec<_> = verified.cells.into_iter().map(|cell| cell.unit).collect();
     if !same_content(&actual, &units) {

@@ -286,6 +286,14 @@ for (const [name, query, newText, savedText] of [
   }, 30_000);
 }
 
+test('known exception: an insertion at a direction scope edge rewrites only that paragraph', async () => {
+  const direction = '<w:dir w:val="rtl"><w:r><w:t>word</w:t></w:r></w:dir>';
+  const newText = 'word! ALPHA BETA';
+  await checkProposal([direction, run(2, ' alpha')], [{ query: 'word alpha', newText }],
+    paragraph => expect(runsOf(paragraph).map(xml => runText(xml)[0]).join('')).toBe(newText),
+    { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"ambiguous":1}']]);
+}, 30_000);
+
 test('acceptance retains a shared suffix run inside a changed token byte-identically', async () => {
   const untouched = run(3, 'a&#x62;').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
   await checkProposal([run(1, 'u '), run(2, 'cd.'), untouched, run(4, ' v')],

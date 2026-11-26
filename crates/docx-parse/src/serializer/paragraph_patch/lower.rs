@@ -15,6 +15,7 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub(super) struct Attribute {
     pub name: String,
     pub identifier: bool,
+    pub run_revision: bool,
     pub value: Range<usize>,
     pub token: Range<usize>,
 }
@@ -112,6 +113,8 @@ impl Xml {
                 attributes.push(Attribute {
                     name: name.to_owned(),
                     identifier: is_identifier(name, &scope),
+                    run_revision: name.starts_with("w:rsid")
+                        && scope.get("w").map(String::as_str) == Some(WORD),
                     token: start..range.end + 1,
                     value: range,
                 });
