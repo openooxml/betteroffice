@@ -5,8 +5,7 @@ use std::cell::{Cell, OnceCell};
 use serde::Serialize;
 
 use crate::cell_layout::{
-    cell_vertical_offset, is_floating_image, layout_cell_content_with_rotation,
-    nested_table_float_offset, stacks_cell_shape,
+    cell_vertical_offset, is_floating_image, layout_cell_content, nested_table_float_offset,
 };
 use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
@@ -39,7 +38,6 @@ fn cell_unbreakable_ranges(
     measures: &[BlockExtent],
     start_y: f64,
     paragraph_rules: bool,
-    rotated: bool,
 ) -> Vec<(f64, f64)> {
     let mut ranges = Vec::new();
     let mut y = start_y;
@@ -99,7 +97,12 @@ fn cell_unbreakable_ranges(
             BlockExtent::Chart(value) => Some(value.height),
             _ => None,
         };
-        if matches!(block, Some(LayoutBlock::Shape(shape)) if !stacks_cell_shape(shape, rotated)) {
+        if let Some(LayoutBlock::Shape(shape)) = block
+            && crate::cell_layout::cell_overlay_drawing(
+                shape.position.is_some(),
+                shape.wrap_type.as_deref(),
+            )
+        {
             continue;
         }
         if let Some(height) = height {
@@ -642,9 +645,7 @@ fn cell_row_geometry(
         0.0
     };
     let border_bottom = border_width(cell.borders.as_ref().and_then(|b| b.bottom.as_ref()));
-    let rotated = matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"));
-    let (blocks, measures) = (&cell.blocks, &measured.blocks);
-    let layout = layout_cell_content_with_rotation(Some(blocks), Some(measures), pad_top, rotated);
+    let layout = layout_cell_content(Some(&cell.blocks), Some(&measured.blocks), pad_top);
     let cell_end = (source_row + row_span).min(row_tops.len() - 1);
     let cell_height = row_tops[cell_end] - row_tops[source_row];
     let content_offset = border_top
@@ -664,7 +665,7 @@ fn cell_row_geometry(
             .iter()
             .map(|b| b + content_offset - shift)
             .collect(),
-        ranges: cell_unbreakable_ranges(blocks, measures, pad_top, paragraph_rules, rotated)
+        ranges: cell_unbreakable_ranges(&cell.blocks, &measured.blocks, pad_top, paragraph_rules)
             .into_iter()
             .map(|(top, bottom)| {
                 (

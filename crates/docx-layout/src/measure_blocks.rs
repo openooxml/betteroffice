@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::cell_layout::{
-    nested_table_float_offset, nested_table_horizontal_offset, stacks_cell_shape,
-};
+use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
@@ -4495,7 +4493,6 @@ fn measure_table_with_compat_shift(
         let mut max_border_height = 0.0_f64;
         for (cell_index, measured_cell) in measured_row.cells.iter_mut().enumerate() {
             let source_cell = &source_row.cells[cell_index];
-            let rotated = is_rotated(source_cell);
             let has_table_floats = source_cell.blocks.iter().any(|block| {
                 matches!(block, LayoutBlock::Table(table)
                     if nested_table_float_offset(table.floating.as_ref()).is_some())
@@ -4512,7 +4509,11 @@ fn measure_table_with_compat_shift(
                     previous_after = 0.0;
                     continue;
                 }
-                if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape, rotated))
+                if let LayoutBlock::Shape(shape) = block
+                    && crate::cell_layout::cell_overlay_drawing(
+                        shape.position.is_some(),
+                        shape.wrap_type.as_deref(),
+                    )
                 {
                     continue;
                 }
@@ -4533,7 +4534,7 @@ fn measure_table_with_compat_shift(
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
             }
-            if rotated {
+            if is_rotated(source_cell) {
                 content_height = longest_line_width(&measured_cell.blocks);
                 previous_after = 0.0;
             }

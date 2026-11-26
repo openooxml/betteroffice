@@ -89,11 +89,7 @@ pub(crate) fn resolve_position(
 pub(crate) fn is_cell_shape_anchor(
     position: Option<&ImageRunPosition>,
     wrap: Option<&str>,
-    rotated: bool,
 ) -> bool {
-    if rotated {
-        return false;
-    }
     match wrap {
         Some("none" | "behind" | "inFront") => {}
         None if position.is_some() => {}

@@ -750,6 +750,24 @@ fn table_boundary_anchored_shape_without_text_paints_once() {
     assert_table_boundary_drawing(&document(&anchored_shape(), false), &["shape"]);
 }
 
+fn exact_vmerge_table(cell: &str) -> String {
+    let rows: String = (0..6)
+        .map(|row| {
+            let (merge, content) = if row == 0 {
+                (r#"<w:vMerge w:val="restart"/>"#, cell)
+            } else {
+                ("<w:vMerge/>", "<w:p/>")
+            };
+            format!(
+                r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>{merge}</w:tcPr>{content}</w:tc><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Merge row {row:02};</w:t></w:r></w:p></w:tc></w:tr>"#
+            )
+        })
+        .collect();
+    format!(
+        r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="10800" w:lineRule="exact"/></w:pPr><w:r><w:t>Before table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>{rows}</w:tbl>"#
+    )
+}
+
 #[test]
 fn table_boundary_vertically_merged_picture_paints_once_on_anchor_page() {
     for leading_lines in [0, 12] {
@@ -763,21 +781,8 @@ fn table_boundary_vertically_merged_picture_paints_once_on_anchor_page() {
                 paragraph.replace("</w:p>", "<w:r><w:t>Merged anchor</w:t></w:r></w:p>");
             let leading = r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged lead;</w:t></w:r></w:p>"#.repeat(leading_lines);
             let tail = r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged tail;</w:t></w:r></w:p>"#.repeat(12);
-            let rows: String = (0..6)
-                .map(|row| {
-                    let (merge, content) = if row == 0 {
-                        (r#"<w:vMerge w:val="restart"/>"#, format!("{leading}{paragraph}{tail}"))
-                    } else {
-                        ("<w:vMerge/>", "<w:p/>".to_owned())
-                    };
-                    format!(
-                        r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>{merge}</w:tcPr>{content}</w:tc><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Merge row {row:02};</w:t></w:r></w:p></w:tc></w:tr>"#
-                    )
-                })
-                .collect();
-            format!(
-                r#"{prefix}<w:body><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="10800" w:lineRule="exact"/></w:pPr><w:r><w:t>Before table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>{rows}</w:tbl><w:sectPr>{section}"#
-            )
+            let table = exact_vmerge_table(&format!("{leading}{paragraph}{tail}"));
+            format!("{prefix}<w:body>{table}<w:sectPr>{section}")
         });
         let (display, layout) = display_with_layout(&bytes, true);
         let pages = display["pages"].as_array().unwrap();
@@ -1002,6 +1007,67 @@ fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
 }
 
 #[test]
+fn nested_table_text_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Nested anchor"), |source| {
+        let (prefix, body) = source.split_once("<w:body>").unwrap();
+        let (table, section) = body.split_once("<w:sectPr>").unwrap();
+        format!(
+            r#"{prefix}<w:body><w:tbl><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc>{table}<w:p/></w:tc></w:tr></w:tbl><w:sectPr>{section}"#
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(start_x(text_run(primitives, "Nested anchor")))
+    );
+    assert_eq!(shape["y"], cell_anchor_table(&layout).0["y"]);
+}
+
+#[test]
+fn cell_text_box_before_lowered_inline_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let inline = cell_anchor_box("", "", "", 114300);
+    let (_, graphic) = inline.split_once("<a:graphic>").unwrap();
+    let graphic = graphic.split_once("</wp:anchor>").unwrap().0;
+    let inline = format!(
+        r#"<w:drawing><wp:inline><wp:extent cx="304800" cy="114300"/><wp:docPr id="2" name="Inline Box"/><a:graphic>{graphic}</wp:inline></w:drawing>"#
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replace("<w:t>Anchor text</w:t>", &inline)
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(64.0))
+        .unwrap();
+    assert!(
+        primitives.iter().any(|primitive| {
+            primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(32.0)
+        })
+    );
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"], table["y"]);
+}
+
+#[test]
 fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin() {
     for (frame, align) in [
         ("paragraph", "center"),
@@ -1110,6 +1176,65 @@ fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
                 .iter()
                 .any(|later| { text(later["primitives"].as_array().unwrap()).contains(last) })
         );
+    }
+}
+
+#[test]
+fn vertically_merged_text_box_belongs_to_the_fragment_with_its_line_top() {
+    use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
+    use docx_layout::types::LayoutBlock;
+
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        38100,
+    );
+    for (leading_height, owner) in [(1320, 0), (1440, 1)] {
+        let cell = format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{leading_height}" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged lead</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r>{drawing}</w:r><w:r><w:t>Merged anchor</w:t></w:r></w:p>"#
+        );
+        let bytes = document_paragraphs(&exact_vmerge_table(&cell), false);
+        let (display, layout) = display_with_layout(&bytes, true);
+        let pages = display["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 2);
+        assert!(text(pages[0]["primitives"].as_array().unwrap()).contains("Merge row 00;"));
+        assert!(text(pages[1]["primitives"].as_array().unwrap()).contains("Merge row 01;"));
+        let painted: Vec<_> = pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, value)| {
+                value["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(move |primitive| (primitive["kind"] == "shape").then_some(page))
+            })
+            .collect();
+        assert_eq!(painted, vec![owner], "leading_height={leading_height}");
+
+        let mut input = serde_json::from_value(layout).unwrap();
+        let paginated = docx_layout::compute_layout_input(&mut input).unwrap();
+        let placements = place_layout(&PlacementInput {
+            layout: &paginated,
+            measured: &input.measured,
+            headers_footers: None,
+            bands_composed: false,
+            notes: &[],
+        });
+        let shown: Vec<_> = placements
+            .pages
+            .iter()
+            .flat_map(|page| {
+                page.regions.iter().flat_map(move |region| {
+                    region.items.iter().filter_map(move |item| {
+                        matches!(item, PlacedItem::Block(LayoutBlock::Shape(_)))
+                            .then_some(page.page_index)
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(shown, painted, "leading_height={leading_height}");
     }
 }
 

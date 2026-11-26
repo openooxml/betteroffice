@@ -2,8 +2,7 @@
 
 use serde::Serialize;
 
-use crate::anchor::is_cell_shape_anchor;
-use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock, ShapeBlock};
+use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock};
 
 pub(crate) fn is_floating_image(wrap_type: Option<&str>, display_mode: Option<&str>) -> bool {
     matches!(
@@ -37,12 +36,6 @@ pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) ->
             wrap_type,
             Some("square" | "tight" | "through" | "topAndBottom")
         )
-}
-
-pub(crate) fn stacks_cell_shape(shape: &ShapeBlock, rotated: bool) -> bool {
-    let wrap = shape.wrap_type.as_deref();
-    !is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated)
-        && !cell_overlay_drawing(shape.position.is_some(), wrap)
 }
 
 /// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
@@ -157,15 +150,6 @@ pub fn layout_cell_content(
     block_measures: Option<&[BlockExtent]>,
     start_y: f64,
 ) -> CellContentLayout {
-    layout_cell_content_with_rotation(blocks, block_measures, start_y, false)
-}
-
-pub(crate) fn layout_cell_content_with_rotation(
-    blocks: Option<&[LayoutBlock]>,
-    block_measures: Option<&[BlockExtent]>,
-    start_y: f64,
-    rotated: bool,
-) -> CellContentLayout {
     let mut line_tops: Vec<Vec<f64>> = Vec::new();
     let mut flat_bottoms: Vec<f64> = Vec::new();
     let mut y = start_y;
@@ -201,7 +185,8 @@ pub(crate) fn layout_cell_content_with_rotation(
             line_tops.push(Vec::new());
             flat_bottoms.push(bottom);
             prev_after = 0.0;
-        } else if matches!(block, Some(LayoutBlock::Shape(shape)) if !stacks_cell_shape(shape, rotated))
+        } else if let Some(LayoutBlock::Shape(shape)) = block
+            && cell_overlay_drawing(shape.position.is_some(), shape.wrap_type.as_deref())
         {
             line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {
