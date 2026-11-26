@@ -16,9 +16,9 @@ test('keeps the original cell font stack for CJK punctuation', () => {
   expect(fontString({ ...cell, text: 'שלום。' }, resolve)).toBe('16px "Calibri", "Noto Sans Hebrew", sans-serif');
 });
 
-test('keeps the original Arial font stack for Arabic even when a script face is available', () => {
+test('adds Noto Naskh Arabic to the Arial font stack for Arabic text', () => {
   const style = { fontFamily: 'Arial', bold: false, italic: false };
-  const families = new Map([[cellScriptFontKey({ ...style, script: 'arabic' }), 'Noto Sans Arabic']]);
+  const families = new Map([[cellScriptFontKey({ ...style, script: 'arabic' }), 'Noto Naskh Arabic']]);
   const cell = { op: 'text', x: 0, y: 0, color: '#000000', fontSize: 12, text: 'مرحبا', ...style } as const;
-  expect(fontString(cell, (cmd) => cellScriptFamilies(cmd, families))).toBe('16px "Arial", sans-serif');
+  expect(fontString(cell, (cmd) => cellScriptFamilies(cmd, families))).toBe('16px "Arial", "Noto Naskh Arabic", sans-serif');
 });

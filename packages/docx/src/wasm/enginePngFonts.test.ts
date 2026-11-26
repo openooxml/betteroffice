@@ -45,6 +45,14 @@ test('supplied regular Arial keeps the Han script fallback', () => {
   expect(watched.resolveScriptFallback!('cjk-sc', false, false, 'Arial')).toBeFunction();
 });
 
+test('Arial uses Noto Naskh Arabic for Arabic in PNG exports', async () => {
+  const complete = (await resolveCompleteFontProvider())!;
+  const { provider } = recordFaceLoads(complete, fonts, [{ family: 'Arial', bold: true, italic: true }]);
+  const naskh = fonts.resolveBundledFamilyFace('Noto Naskh Arabic', false, false)!;
+  const fallback = provider.resolveScriptFallback!('arabic', true, true, 'Arial')!;
+  expect(await fallback()).toEqual(await fonts.loadBundledFontBytes(naskh));
+});
+
 test('supplied bold Arial keeps the regular Arial face', () => {
   const loader: BundledFontLoader = async () => bytes;
   const supplied = [{ family: 'arial', bold: true, italic: false }];

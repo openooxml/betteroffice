@@ -166,7 +166,14 @@ mod tests {
         xlsx_ops::apply_in_place(&mut model, &op).unwrap();
         assert_eq!(model.defined_names.len(), 1);
         authority
-            .sync_model(&model, &[op], SyncOrigin::User, &HashMap::new(), true)
+            .sync_model(
+                &model,
+                &[op],
+                SyncOrigin::User,
+                &HashMap::new(),
+                &HashSet::new(),
+                true,
+            )
             .unwrap();
         let txn = authority.doc.transact();
         assert!(txn.root_refs().all(|(key, _)| key != DEFINED_NAMES));

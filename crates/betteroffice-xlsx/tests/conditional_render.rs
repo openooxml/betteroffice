@@ -489,6 +489,20 @@ fn a_rule_reading_random_numbers_paints_nothing() {
 }
 
 #[test]
+fn a_rule_reading_a_volatile_released_definition_is_withheld() {
+    let names = r#"<definedNames><definedName name="RandPath">RAND()+IFERROR('C:\Books\Data.xlsx'!A1,0)</definedName></definedNames>"#;
+    let formula = "RandPath&gt;=0";
+    let workbook = workbook_named(
+        &[("A1", "1")],
+        &rule("A1", &expression(1, formula)),
+        &[&fill(RED)],
+        names,
+    );
+    assert_unpainted(&workbook, formula);
+    assert_eq!(workbook.conditional_stats().withheld_volatile, 1);
+}
+
+#[test]
 fn a_range_rule_over_overlapping_areas_paints_nothing() {
     for kind in [
         r#"type="duplicateValues""#,

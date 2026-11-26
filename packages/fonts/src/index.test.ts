@@ -375,9 +375,9 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('Caladea')).toBe('Caladea');
   });
 
-  test('script fallbacks prefer the sans face of the bucket', () => {
+  test('script fallbacks use the default face for each bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
-    expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
+    expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Naskh Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
   });
 
@@ -388,10 +388,17 @@ describe('resolution', () => {
       }
       expect(resolveScriptFallbackFace('hebrew', false, false, family)?.file).toBe('NotoSansHebrew-Regular.ttf.zst');
     }
-    expect(resolveScriptFallbackFace('arabic', false, false, 'Arial')?.file).toBe('NotoSansArabic-Regular.ttf.zst');
-    expect(resolveScriptFallbackFace('arabic', true, false, 'Arial')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
-    expect(resolveScriptFallbackFace('arabic', false, false, 'Times New Roman')?.file)
-      .toBe('NotoSansArabic-Regular.ttf.zst');
+  });
+
+  test('Arabic in Latin families uses the same bundled face in every style', () => {
+    for (const family of [undefined, 'Arial', 'Times New Roman']) {
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        expect(resolveScriptFallbackFace('arabic', bold, italic, family)?.file).toBe('NotoNaskhArabic-Regular.ttf.zst');
+      }
+    }
+    expect(resolveBundledFamilyFace('Noto Sans Arabic', false, false)?.file).toBe('NotoSansArabic-Regular.ttf.zst');
+    expect(resolveBundledFamilyFace('Noto Sans Arabic', true, false)?.file).toBe('NotoSansArabic-Bold.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', true, true, ' Noto Sans Arabic ')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
   });
 
   test('known heavy family names select the bold face and preserve italics', () => {
