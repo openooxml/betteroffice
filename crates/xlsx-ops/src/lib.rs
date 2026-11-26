@@ -16,8 +16,10 @@ pub use apply::InPlaceBatch;
 pub use apply::{
     InvertedOp, OpError, apply, apply_in_place, apply_ops, ensure_op_available,
     filter_database_formula, remap_ref, validate_auto_filter_range, validate_conditional_format,
-    validate_defined_name, validate_defined_name_formula, validate_defined_name_formula_in,
+    validate_defined_name, validate_defined_name_formula,
 };
+#[doc(hidden)]
+pub use apply::validate_defined_name_formula_in;
 pub use conditional_formats::{
     ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,
 };
@@ -35,6 +37,7 @@ pub use op::OracleOp;
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::{ProposalSheets, insertion_keeps_chart_anchor_on_grid, remap_proposal_formula};
+#[doc(hidden)]
 pub use table_header::{
     normalize_table_header, references_table_column, table_header_at, table_header_write_at,
 };

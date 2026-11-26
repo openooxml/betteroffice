@@ -12,6 +12,7 @@ use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
+#[doc(hidden)]
 pub const MAX_FORMULA_CHARS: usize = 8192;
 const TABLE_ESCAPE_CHARS: &[char] = &['[', ']', '#', '@', '\''];
 /// how many significant digits of a number literal excel keeps; the rest
