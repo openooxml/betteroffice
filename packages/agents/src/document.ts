@@ -1,7 +1,7 @@
 import { engines } from '#agents-engines';
 import type { DocxDroppedStructure, DocxKeptParagraph, DocxCommentSaveBaseline, DocxCommentSaveIdentity, DocxParagraphTarget, DocxProposalInput, DocxProposalRecord, DocxProposalSnapshot, DocxProposalResult, DocxProposalStateRequest, YrsInlineFormatDelta, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 import { readCommentPart, readSavedCommentIdentities, verifyCommentOutput, type CommentSource } from './comment-output';
-import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
+import { cellPosition, commentBody, commentRanges, commentRoot, commentText, continueList, deleteParagraph, deleteTableRow, formatParagraph, hostEdit, insertParagraphsBefore, insertTable, insertParagraphsWithAnchorFormat, insertSectionBreak, replaceCommentText, setSection, insertTableRow, lineText, listLevel, mergeCells, notInTable, requireParagraph, resolveStyle, tableCells, type ParagraphStyle } from './docx-edits';
 import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type DocxEditOutcome } from './docx-schema';
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
@@ -208,7 +208,7 @@ export class DocxAgentDocument {
       stories: entries,
       nextOffset: offset + entries.length < stories.size ? offset + entries.length : null,
       capabilities: { grep: 'literal', proposals: true, atomicEdits: true, render: !!this.options.renderer, export: !!this.session.materializeDocx()?.originalBuffer },
-      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, table rows, cell merges, comments and page setup, use docx_edit with the outline version.',
+      workflow: 'grep for the exact text to replace; read its ref for context; propose with match and newText; review; render; verify; export. For styles, bold/italic/underline, paragraphs, tables, table rows, cell merges, comments and page setup, use docx_edit with the outline version.',
     };
   }
 
@@ -1716,7 +1716,7 @@ export class DocxAgentDocument {
         return { result: { ref: p.ref, start, end, ...(Object.keys(keptUnchanged).length > 0 ? { keptUnchanged } : {}) } };
       };
     }
-    const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
+    const p = this.get(edit.op === 'insert_paragraphs' ? (edit.before ?? edit.after)! : edit.op === 'insert_table' ? edit.after : edit.op === 'set_paragraph_style' || edit.op === 'delete_paragraph' ? edit.paragraph : edit.op === 'merge_cells' ? edit.from : edit.row);
     const target = { story: p.story, paraId: p.paraId };
     switch (edit.op) {
       case 'set_paragraph_style': {
@@ -1763,6 +1763,15 @@ export class DocxAgentDocument {
           deleteParagraph(draft, target);
           return { result: { ref: p.ref } };
         };
+      case 'insert_table': {
+        if (p.story !== 'body') throw new DocumentToolError('UNSUPPORTED_TARGET', 'Tables are inserted after a main body paragraph, not inside tables, content controls, headers, footers, notes or text boxes.');
+        edit.rows.forEach(row => row.forEach(text => lineText(text)));
+        const styleId = edit.style ? resolveStyle(this.tableStyles(), edit.style, 'Table') : undefined;
+        return draft => {
+          requireParagraph(draft, target);
+          return { result: {}, created: insertTable(draft, target, edit.rows, styleId) };
+        };
+      }
       case 'insert_table_row': {
         const table = p.table ?? notInTable();
         if (edit.cells.length !== table.columns) {
@@ -1809,6 +1818,12 @@ export class DocxAgentDocument {
       this.commentPackageBaseline = { version, deletion, bytes: deletion ? this.exportBytes(undefined, false) : this.export() };
     }
     return this.commentPackageBaseline.bytes;
+  }
+
+  private tableStyles(): ParagraphStyle[] {
+    return (this.session.materializeDocx()?.package.styles?.styles ?? [])
+      .filter(style => style.type === 'table')
+      .map(style => ({ id: style.styleId, name: style.name, isDefault: !!style.default }));
   }
 
   private languageStyles(): ParagraphStyle[] {
