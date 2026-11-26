@@ -4,7 +4,7 @@
 use std::fmt;
 
 pub(crate) use xlsx_model::sheet_qualifier::can_start_span as is_unquoted_sheet;
-use xlsx_model::sheet_qualifier::parse_sheet_token;
+use xlsx_model::sheet_qualifier::{is_path_qualifier, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
 use crate::reference::MAX_TABLE_SPEC_ITEMS;
@@ -181,18 +181,25 @@ pub fn lex_with_range_names(
         pos: 0,
         table_refs: None,
         is_range_name: &is_range_name,
+        is_sheet_span: None,
         evaluation_error: None,
     }
     .run()
 }
 
-pub(crate) fn lex_for_evaluation(input: &str) -> Result<Vec<Token>, ParseError> {
+pub(crate) type SheetSpan<'a> = dyn Fn(&str, &str) -> bool + 'a;
+
+pub(crate) fn lex_for_evaluation(
+    input: &str,
+    is_sheet_span: Option<&SheetSpan<'_>>,
+) -> Result<Vec<Token>, ParseError> {
     let mut error = None;
     let tokens = Lexer {
         input,
         pos: 0,
         table_refs: None,
         is_range_name: &is_formula_parameter,
+        is_sheet_span,
         evaluation_error: Some(&mut error),
     }
     .run()?;
@@ -415,6 +422,7 @@ pub fn rewrite_table_columns<'a>(
         pos: 0,
         table_refs: Some(Vec::new()),
         is_range_name: &is_formula_parameter,
+        is_sheet_span: None,
         evaluation_error: None,
     };
     let tokens = lexer.run()?;
@@ -507,20 +515,6 @@ fn workbook_scope(scope: &str) -> Option<&str> {
         .map(|(_, sheet)| sheet)
 }
 
-fn is_quoted_workbook_path(scope: &str) -> bool {
-    let Some((prefix, rest)) = scope.split_once(':') else {
-        return false;
-    };
-    (prefix.len() == 1
-        && prefix.as_bytes()[0].is_ascii_alphabetic()
-        && rest.starts_with(['\\', '/']))
-        || (rest.starts_with("//")
-            && prefix.starts_with(|ch: char| ch.is_ascii_alphabetic())
-            && prefix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')))
-}
-
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '\\')
 }
@@ -556,6 +550,7 @@ struct Lexer<'a> {
     pos: usize,
     table_refs: Option<Vec<TableRefRewrite>>,
     is_range_name: &'a dyn Fn(&str) -> bool,
+    is_sheet_span: Option<&'a SheetSpan<'a>>,
     evaluation_error: Option<&'a mut Option<ParseError>>,
 }
 
@@ -896,10 +891,10 @@ impl Lexer<'_> {
         let kind = self
             .try_sheet_reference(&sheet, true, start)?
             .ok_or_else(|| ParseError::new(self.pos, "expected a sheet qualifier"))?;
-        if sheet.contains(['/', '\\']) {
+        if is_path_qualifier(&sheet) {
             self.reject_for_evaluation(start, "workbook path qualifiers are unsupported");
         }
-        if (workbook_scope(&sheet).is_some() || is_quoted_workbook_path(&sheet))
+        if (workbook_scope(&sheet).is_some() || is_path_qualifier(&sheet))
             && !(matches!(kind, TokKind::Name { .. }) && self.after_ws().starts_with('('))
         {
             return Ok(TokKind::ExternalRef(Box::new(kind)));
@@ -916,7 +911,7 @@ impl Lexer<'_> {
         if self.consume_bang() {
             if quoted
                 && let Some((first, last)) = workbook_scope(first)
-                    .or_else(|| (!is_quoted_workbook_path(first)).then_some(first))
+                    .or_else(|| (!is_path_qualifier(first)).then_some(first))
                     .and_then(|scope| scope.split_once(':'))
             {
                 if first.is_empty() || last.is_empty() || last.contains(':') {
@@ -954,6 +949,11 @@ impl Lexer<'_> {
             }
             if (quoted_last || has_unquoted_sheet_chars(&last))
                 && let Some(kind) = self.read_3d_target(first, &last)
+                && (quoted
+                    || &self.input[start..save] != first
+                    || last.contains([':', '['])
+                    || is_path_qualifier(&last)
+                    || self.is_sheet_span.is_none_or(|is_span| is_span(first, &last)))
             {
                 return Ok(Some(kind));
             }
@@ -1474,6 +1474,7 @@ mod tests {
                     pos: 0,
                     table_refs: Some(Vec::new()),
                     is_range_name: &is_formula_parameter,
+                    is_sheet_span: None,
                     evaluation_error: Some(&mut evaluation_error),
                 }
                 .run()

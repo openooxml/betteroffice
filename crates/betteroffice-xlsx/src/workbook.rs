@@ -1542,7 +1542,7 @@ impl Workbook {
                 .iter()
                 .all(|original| original.formula != name.formula)
             {
-                xlsx_ops::validate_defined_name_formula(&name.formula)?;
+                xlsx_ops::validate_defined_name_formula_in(staged, name.local_sheet, &name.formula)?;
             }
         }
         if let Some(package) = &self.source_package {
@@ -6723,7 +6723,26 @@ fn edit_cell_state(
             formula: Some(stored.to_owned()),
             ..CellState::default()
         },
-        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+        None => match parsed {
+            xlsx_ops::ParsedInput::Formula(text) => {
+                if xlsx_ops::is_formula_source(&text)
+                    || xlsx_calc::parser::parse_formula_for_cell(&text, workbook, sheet).is_ok()
+                {
+                    CellState {
+                        formula: Some(text),
+                        ..CellState::default()
+                    }
+                } else {
+                    CellState {
+                        value: CellValue::Text {
+                            value: input.to_owned(),
+                        },
+                        ..CellState::default()
+                    }
+                }
+            }
+            parsed => xlsx_ops::cell_state_from_parsed(input, parsed),
+        },
     };
     state.formula = state.formula.map(|typed| {
         committed_formula(
@@ -7137,7 +7156,9 @@ fn typed_formula_fails(
         .number_format;
     matches!(
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, None).0,
-        xlsx_ops::ParsedInput::Formula(source) if !xlsx_ops::is_formula_source(&source)
+        xlsx_ops::ParsedInput::Formula(source)
+            if !xlsx_ops::is_formula_source(&source)
+                && xlsx_calc::parser::parse_formula_for_cell(&source, workbook, sheet).is_err()
     )
 }
 

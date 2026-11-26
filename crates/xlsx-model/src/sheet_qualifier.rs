@@ -88,7 +88,8 @@ pub fn sheet_qualifiers_with_sheets(
             continue;
         };
         let quoted = bytes[first.start] == b'\'';
-        let external = (first.start > 0 && bytes[first.start - 1] == b']')
+        let external = is_path_qualifier(&first.name)
+            || (first.start > 0 && bytes[first.start - 1] == b']')
             || (quoted
                 && first
                     .name
@@ -117,6 +118,7 @@ pub fn sheet_qualifiers_with_sheets(
             && let Some(target) = qualified_target(source, second.end)
             && is_span_target(source, target)
         {
+            let external = external || is_path_qualifier(&second.name);
             out.push(Qualifier {
                 span: first.start..second.end,
                 first: first.name,
@@ -172,13 +174,19 @@ pub fn qualified_target(source: &str, qualifier_end: usize) -> Option<usize> {
     Some(source.len() - tail.trim_start().len())
 }
 
-/// `'Jan:Mar'` names the span from `Jan` to `Mar`; a sheet name cannot itself
-/// contain a colon, so the split is unambiguous.
+#[doc(hidden)]
+pub fn is_path_qualifier(name: &str) -> bool {
+    name.contains(['/', '\\'])
+}
+
+/// Split a quoted sheet span such as `'Jan:Mar'`.
 pub fn quoted_endpoints(name: &str) -> (String, String) {
-    match name.split_once(':') {
-        Some((first, last)) => (first.to_owned(), last.to_owned()),
-        None => (name.to_owned(), name.to_owned()),
+    if !is_path_qualifier(name)
+        && let Some((first, last)) = name.split_once(':')
+    {
+        return (first.to_owned(), last.to_owned());
     }
+    (name.to_owned(), name.to_owned())
 }
 
 /// An unquoted token followed by `(` is a function call, never a sheet name.
@@ -441,20 +449,26 @@ mod tests {
     }
 
     #[test]
-    fn quoted_workbook_paths_without_book_brackets_scan_as_local_spans() {
-        for (source, expected_first, expected_last) in [
-            (r"'C:\Books\Data.xlsx'!A1", "C", r"\Books\Data.xlsx"),
-            (
-                "'https://example.com/book.xlsx'!MyName",
-                "https",
-                "//example.com/book.xlsx",
-            ),
+    fn quoted_workbook_paths_are_external_and_preserved_by_sheet_edits() {
+        for (path, collision) in [
+            (r"C:\Books\Data.xlsx", "C"),
+            ("https://example.com/book.xlsx", "https"),
+            (r"\\server\Books\Data.xlsx", r"\\server\Books\Data.xlsx"),
+            ("/share/Data.xlsx", "/share/Data.xlsx"),
         ] {
-            let qualifiers = super::sheet_qualifiers(source);
+            let source = format!("'{path}'!A1");
+            let qualifiers = super::sheet_qualifiers(&source);
             let qualifier = &qualifiers[0];
-            assert!(qualifier.bound && qualifier.is_span() && !qualifier.external);
-            assert_eq!(qualifier.first, expected_first);
-            assert_eq!(qualifier.last, expected_last);
+            assert!(qualifier.bound && qualifier.external && !qualifier.is_span());
+            assert_eq!(qualifier.first, path);
+            assert_eq!(
+                rename_sheets(&source, &renamed(&[(collision, "Other")])),
+                (source.clone(), vec![])
+            );
+            assert_eq!(
+                super::remove_sheet_references(&source, collision, &[collision.to_owned()]),
+                None
+            );
         }
     }
 }

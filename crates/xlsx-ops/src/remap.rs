@@ -13,8 +13,8 @@ use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
 use xlsx_calc::{ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
-    Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token, qualified_target,
-    qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal,
+    Qualifier, is_function_call, is_path_qualifier, narrowed_span, next_char_len, parse_sheet_token,
+    qualified_target, qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal,
     sheet_qualifiers_with_sheets, skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
@@ -1709,7 +1709,7 @@ struct SheetIndex<'a> {
 
 impl SheetIndex<'_> {
     fn has_sheet(&self, name: &str) -> bool {
-        self.names.contains_key(&name.to_lowercase())
+        !is_path_qualifier(name) && self.names.contains_key(&name.to_lowercase())
     }
 
     /// Whether a qualifier covers the edited sheet. A span covers every sheet
@@ -1717,6 +1717,9 @@ impl SheetIndex<'_> {
     /// workbook does not hold falls back to naming them outright, so an
     /// unresolvable qualifier still binds rather than silently missing.
     fn covers(&self, first: &str, last: &str) -> bool {
+        if is_path_qualifier(first) || is_path_qualifier(last) {
+            return false;
+        }
         match (
             self.names.get(&first.to_lowercase()),
             self.names.get(&last.to_lowercase()),
@@ -4012,6 +4015,47 @@ mod tests {
         for (address, _, expected) in cases {
             assert_eq!(formula(&workbook, owner, address).as_deref(), Some(expected));
         }
+    }
+
+    #[test]
+    fn defined_names_and_proposals_rewrite_spaced_qualifiers() {
+        let mut workbook = wb(&["Data", "Report"]);
+        workbook.defined_names = vec![defined("Spaced", "Data ! A1+1")];
+        let names = vec!["Data".to_owned(), "Report".to_owned()];
+        let proposals = ProposalSheets::new(&names);
+        let op = insert_rows(0, 0, 1);
+
+        remap_defined_names(&mut workbook, &op).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, "Data!A2+1");
+        assert_eq!(
+            proposals.remap("Data ! A1+1", SheetId(1), &op).as_deref(),
+            Some("Data!A2+1")
+        );
+    }
+
+    #[test]
+    fn conditional_format_guard_reads_spaced_references_before_refusing_an_edit() {
+        let mut workbook = wb(&["Data", "Report"]);
+        workbook.sheets[1].conditional_formats.push(ConditionalFormatting {
+            sqref: "B1".into(),
+            rules: vec![ConditionalFormatRule {
+                id: "rule".into(),
+                rule_type: "expression".into(),
+                operator: None,
+                formulas: vec!["Report !A1".into()],
+                priority: 1,
+                dxf_id: None,
+                format: Default::default(),
+                raw_xml: None,
+            }],
+        });
+        let op = insert_rows(0, 0, 1);
+        assert!(crate::ensure_conditional_formats_allow_edit(&workbook, &op).is_ok());
+        workbook.sheets[1].conditional_formats[0].rules[0].formulas = vec!["Data !A1".into()];
+        assert!(matches!(
+            crate::ensure_conditional_formats_allow_edit(&workbook, &op),
+            Err(OpError::InvalidConditionalFormat(_))
+        ));
     }
 
     #[test]

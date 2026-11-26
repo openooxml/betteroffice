@@ -12,7 +12,8 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
+use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::{RecalcResult, recalc_after_with_seed};
 use xlsx_model::numfmt::format_renders_date;
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
 use xlsx_ops::{
@@ -679,7 +680,11 @@ fn replacement_match(
     Some(next)
 }
 
-fn validate_formula(source: &str) -> std::result::Result<(), String> {
+fn validate_formula(
+    source: &str,
+    workbook: &xlsx_model::Workbook,
+    sheet: SheetId,
+) -> std::result::Result<(), String> {
     if source.is_empty() {
         return Err("is empty".to_owned());
     }
@@ -692,7 +697,7 @@ fn validate_formula(source: &str) -> std::result::Result<(), String> {
     if xlsx_ops::is_formula_source(source) {
         return Ok(());
     }
-    parse_formula(source)
+    parse_formula_for_cell(source, workbook, sheet)
         .map(|_| ())
         .map_err(|error| format!("does not parse: {error}"))
 }
@@ -927,7 +932,7 @@ impl Workbook {
         }
         if let EditOperation::SetFormulas { formulas, .. } = &step.operation {
             for (cell, source) in resolved.iter().zip(formulas.iter().flatten()) {
-                validate_formula(source).map_err(|problem| {
+                validate_formula(source, &self.model, resolved.sheet).map_err(|problem| {
                     at(
                         EditFailureCode::InvalidStep,
                         format!("the formula for {} {problem}", cell.to_a1()),

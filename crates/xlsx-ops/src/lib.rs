@@ -16,7 +16,7 @@ pub use apply::InPlaceBatch;
 pub use apply::{
     InvertedOp, OpError, apply, apply_in_place, apply_ops, ensure_op_available,
     filter_database_formula, remap_ref, validate_auto_filter_range, validate_conditional_format,
-    validate_defined_name, validate_defined_name_formula,
+    validate_defined_name, validate_defined_name_formula, validate_defined_name_formula_in,
 };
 pub use conditional_formats::{
     ensure_conditional_formats_allow_edit, ensure_conditional_formats_allow_move,

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook as WorkbookModel};
 use xlsx_ops::{CellState, Op};
 
@@ -222,7 +223,7 @@ fn rewrite_expr(
     changed: &mut bool,
 ) -> Result<Expr> {
     let matches = |qualified: &Option<String>| match qualified {
-        Some(name) => name.eq_ignore_ascii_case(target_name),
+        Some(name) => !is_path_qualifier(name) && name.eq_ignore_ascii_case(target_name),
         None => owner == moved_sheet,
     };
     Ok(match expression {

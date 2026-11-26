@@ -1068,7 +1068,7 @@ fn set_defined_name(
         validate_defined_name(wb, name, scope, existing.is_none())?;
     }
     if existing.is_none_or(|index| wb.defined_names[index].formula != refers_to) {
-        validate_defined_name_formula(refers_to)?;
+        validate_defined_name_formula_in(wb, scope, refers_to)?;
     }
     let previous = snapshot.then(|| wb.defined_names.clone());
     if let Some(index) = existing {
@@ -1178,13 +1178,35 @@ pub fn validate_defined_name(
 
 #[doc(hidden)]
 pub fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
+    validate_name_formula(source, xlsx_calc::parse_formula)
+}
+
+#[doc(hidden)]
+pub fn validate_defined_name_formula_in(
+    workbook: &Workbook,
+    scope: Option<SheetId>,
+    source: &str,
+) -> Result<(), OpError> {
+    validate_name_formula(source, |source| {
+        xlsx_calc::parser::parse_formula_for_cell(source, workbook, scope.unwrap_or(SheetId(0)))
+    })
+}
+
+pub(crate) fn validate_rewritten_defined_name_formula(source: &str) -> Result<(), OpError> {
+    validate_name_formula(source, xlsx_calc::parser::parse_formula_for_rewrite)
+}
+
+fn validate_name_formula(
+    source: &str,
+    parse: impl FnOnce(&str) -> Result<xlsx_calc::Expr, xlsx_calc::ParseError>,
+) -> Result<(), OpError> {
     if source.is_empty() || source.starts_with('=')
         || source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES
         || !source.chars().all(|c| matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
     {
         return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
     }
-    xlsx_calc::parser::parse_formula_for_rewrite(source)
+    parse(source)
         .map(|_| ())
         .map_err(|error| {
             OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))

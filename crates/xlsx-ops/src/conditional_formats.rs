@@ -1,5 +1,6 @@
 use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
 use crate::remap::formula_has_sheet_span;
@@ -147,7 +148,7 @@ fn formula_affected(
 ) -> bool {
     let reference = |sheet: &Option<String>, range| {
         let matches = sheet.as_ref().map_or(owner == edit.sheet(), |name| {
-            name.to_lowercase() == target_name.to_lowercase()
+            !is_path_qualifier(name) && name.to_lowercase() == target_name.to_lowercase()
         });
         matches
             && ranges.iter().any(|application| {

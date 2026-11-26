@@ -1,7 +1,8 @@
 //! turning raw editor input into a `CellState`, classified the way excel does:
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
-use xlsx_calc::{EvalContext, evaluate, parse_formula, reads_other_workbook};
+use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::{EvalContext, evaluate, reads_other_workbook};
 use xlsx_model::{CellProvider, CellValue, DateSystem, FormatCode, SheetId};
 
 use crate::op::CellState;
@@ -291,7 +292,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
             value: CellValue::Text { value },
             ..Default::default()
         },
-        ParsedInput::Formula(text) => match parse_formula(&text) {
+        ParsedInput::Formula(text) => match parse_formula_for_cell(&text, provider, sheet) {
             Ok(expr) if reads_other_workbook(&expr) => CellState {
                 formula: Some(text),
                 ..Default::default()
@@ -300,7 +301,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
                 let ctx = EvalContext::new(provider, sheet);
                 let value = evaluate(&expr, &ctx);
                 CellState {
-                    value: if ctx.read_other_workbook() {
+                    value: if ctx.read_other_workbook() || ctx.read_unreadable_definition() {
                         CellValue::Empty
                     } else {
                         value

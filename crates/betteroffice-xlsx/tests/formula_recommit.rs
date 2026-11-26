@@ -1,5 +1,5 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRef, CellState, CellValue, EditRequest, Op,
+    CalculationOptions, CellInput, CellRange, CellRef, CellState, CellValue, EditRequest, Op,
     ProposalEditInput, ProposalRequest, SheetId, Workbook,
 };
 use serde_json::{Value, json};
@@ -473,6 +473,15 @@ fn swallowed_range_endpoints_preserve_cached_formula_results() {
         "B2",
         &["SUM(B2!A1:B2!C3)", "IFERROR(SUM(A1:B2[Col]),0)"],
     );
+    assert_calculation_keeps_formula_caches(
+        "Tax",
+        &[
+            "IFERROR(SUM(Amt:Tax[Col]),0)",
+            "IFERROR(SUM(Amt:Tax!B5),0)",
+            "IFERROR(SUM(Amt:IF(C1,B1,B2)),0)",
+            "IFERROR(SUM(Tax!1:3!B5),0)",
+        ],
+    );
 }
 
 #[test]
@@ -483,6 +492,7 @@ fn range_to_cell_shaped_calls_preserve_cached_formula_results() {
             "A1:LOG10(1)",
             "Sheet1!A1:LOG10(1)",
             "A1:'Sheet1'!LOG10(1)",
+            "IFERROR(Sheet1!LOG10(1),0)",
         ],
     );
 }
@@ -497,6 +507,177 @@ fn workbook_path_qualifiers_preserve_cached_formula_results() {
             "IFERROR('D:/Books/[Data.xlsx]Sheet1'!A1,0)",
             r"IFERROR('\\server\Books\Data.xlsx'!A1,0)",
         ],
+    );
+}
+
+#[test]
+fn defined_name_range_joins_recalculate_to_the_release_value() {
+    for (sheet, qualifier) in [("Data", "Data"), ("Data Set", "'Data Set'")] {
+        let formula = format!("SUM(Start_1:{qualifier}!B2)");
+        let mut sheet_data = format!(
+            r#"<row r="1"><c r="A1"><v>10</v></c><c r="C1"><f>{formula}</f><v>999</v></c></row><row r="2"><c r="B2"><v>20</v></c></row>"#,
+        );
+        let shapes = [
+            (format!("ROWS(Start_1:{qualifier}!B2:C3)"), 3.0),
+            (format!("COLUMNS(Start_1:{qualifier}!$A:$B)"), 2.0),
+            (format!("ROWS(Start_1:{qualifier}!1:3)"), 3.0),
+        ];
+        for (row, (formula, _)) in (4..).zip(&shapes) {
+            sheet_data.push_str(&format!(
+                r#"<row r="{row}"><c r="D{row}"><f>{formula}</f><v>999</v></c></row>"#,
+            ));
+        }
+        let workbook_tail = format!(
+            r#"<definedNames><definedName name="Start_1">{qualifier}!$A$1</definedName></definedNames><calcPr fullCalcOnLoad="1"/>"#,
+        );
+        let source = package_on_sheet(sheet, &sheet_data, &workbook_tail);
+        let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+        assert_eq!(stored(&workbook, "C1"), (Some(formula.clone()), number(30.0)));
+        for (row, (formula, expected)) in (4..).zip(shapes) {
+            assert_eq!(
+                stored(&workbook, &format!("D{row}")),
+                (Some(formula), number(expected))
+            );
+        }
+        workbook
+            .edit_cell(SheetId(0), cell("A1"), "11", options())
+            .unwrap();
+        assert_eq!(stored(&workbook, "C1").1, number(31.0));
+        workbook
+            .edit_cell(SheetId(0), cell("D1"), &format!("={formula}"), options())
+            .unwrap();
+        assert_eq!(stored(&workbook, "D1"), (Some(formula), number(31.0)));
+    }
+}
+
+#[test]
+fn indirect_with_spaced_external_qualifiers_recalculates_to_release_values() {
+    let cases = [
+        (r#"IFERROR(INDIRECT("'[1]Sheet1'! #REF!"),0)"#, number(0.0)),
+        (r#"IFERROR(INDIRECT("'[1]Sheet1' !A1"),0)"#, number(0.0)),
+        (r#"IFERROR(INDIRECT("[1]Sheet1 !A1"),0)"#, number(0.0)),
+        (
+            r#"INDIRECT("'[1]Sheet1' !R1C1",FALSE)"#,
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Ref,
+            },
+        ),
+    ];
+    let data: String = cases
+        .iter()
+        .enumerate()
+        .map(|(index, (formula, _))| {
+            let row = index + 1;
+            format!(r#"<row r="{row}"><c r="D{row}"><f>{formula}</f><v>42</v></c></row>"#)
+        })
+        .collect();
+    let source = package(&data, r#"<calcPr fullCalcOnLoad="1"/>"#);
+    let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+    workbook.recalculate_all(options());
+    for (index, (formula, value)) in cases.into_iter().enumerate() {
+        assert_eq!(
+            stored(&workbook, &format!("D{}", index + 1)),
+            (Some(formula.to_owned()), value),
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn unreadable_defined_names_keep_callers_cached_and_refuse_authoring() {
+    let sheet_data = concat!(
+        r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Target_1</f><v>41</v></c>"#,
+        r#"<c r="C1"><f>IFERROR(Target_1,0)</f><v>42</v></c><c r="D1"><f>A1*2</f><v>-1</v></c></row>"#,
+    );
+    for formula in [
+        r"'C:\Books\Data.xlsx'!A1",
+        "Sheet1 !A1",
+        "Sheet1! #REF!",
+        "SUM(A1:B2[Col])",
+        "A1:LOG10(1)",
+    ] {
+        let workbook_tail = format!(
+            r#"<definedNames><definedName name="Target_1">{formula}</definedName></definedNames><calcPr fullCalcOnLoad="1"/>"#,
+        );
+        let source = package(sheet_data, &workbook_tail);
+        let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
+        workbook.recalculate_all(options());
+        assert_eq!(stored(&workbook, "B1").1, number(41.0), "{formula}");
+        assert_eq!(stored(&workbook, "C1").1, number(42.0), "{formula}");
+        assert_eq!(stored(&workbook, "D1").1, number(14.0));
+        let result = workbook.apply_ops(
+            vec![Op::SetDefinedName {
+                name: "New_Target".into(),
+                refers_to: formula.into(),
+                scope: None,
+                hidden: None,
+            }],
+            options(),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(betteroffice_xlsx::Error::Operation(
+                    xlsx_ops::OpError::InvalidDefinedName(_)
+                ))
+            ),
+            "{formula}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn proposals_and_collaboration_recalculate_without_overwriting_unreadable_caches() {
+    let source = package(
+        concat!(
+            r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Sheet1 !A1</f><v>42</v></c>"#,
+            r#"<c r="C1"><f>A1*2</f><v>14</v></c></row>"#,
+        ),
+        "",
+    );
+    let mut left = Workbook::open_collaborative(&source, 501).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 502).unwrap();
+    let baseline = right.encode_state_vector_v1();
+    let proposal = propose(&mut left, &[("A1", "8"), ("B1", "=Sheet1 !A1")]);
+    assert!(
+        proposal.edits.iter().any(|edit| edit.a1 == "B1" && edit.new_text == "42")
+    );
+    assert!(
+        proposal.ghosts.iter().any(|ghost| ghost.col == 2 && ghost.new_text == "16")
+    );
+    left.accept_proposal(&proposal.id, false, options()).unwrap();
+    right
+        .apply_update_v1(&left.encode_diff_v1(&baseline).unwrap(), options())
+        .unwrap();
+    for workbook in [&left, &right] {
+        assert_eq!(stored(workbook, "A1").1, number(8.0));
+        assert_eq!(
+            stored(workbook, "B1"),
+            (Some("Sheet1 !A1".into()), number(42.0))
+        );
+        assert_eq!(stored(workbook, "C1").1, number(16.0));
+    }
+}
+
+#[test]
+fn moving_a_cell_rewrites_a_rejected_formula_and_keeps_its_cache() {
+    let source = package(
+        r#"<row r="1"><c r="A1"><v>7</v></c><c r="D1"><f>A1+'C:\Books\Data.xlsx'!A1</f><v>42</v></c></row>"#,
+        "",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .move_range(
+            SheetId(0),
+            CellRange::new(cell("A1"), cell("A1")),
+            cell("B1"),
+            options(),
+        )
+        .unwrap();
+    assert_eq!(stored(&workbook, "B1").1, number(7.0));
+    assert_eq!(
+        stored(&workbook, "D1"),
+        (Some(r"B1+'C:\Books\Data.xlsx'!A1".into()), number(42.0))
     );
 }
 

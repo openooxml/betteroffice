@@ -177,7 +177,7 @@ fn all_span_quoting_and_target_combinations_keep_caches_and_refuse_inserts() {
 }
 
 #[test]
-fn ambiguous_unspaced_defined_name_joins_keep_their_cached_values() {
+fn unspaced_defined_name_joins_evaluate_and_keep_the_structural_edit_guard() {
     for sheet in ["R2C3", "A1", "TRUE"] {
         let source = format!("SUM(Start_1:{sheet}!A2)");
         let mut model = model_with_cached_formula(&[sheet, "Report"], &source);
@@ -187,11 +187,56 @@ fn ambiguous_unspaced_defined_name_joins_keep_their_cached_values() {
             local_sheet: None,
             hidden: false,
         });
-        let mut workbook = Workbook::from_model(model).unwrap();
+        let mut workbook = Workbook::from_model(model.clone()).unwrap();
         workbook.recalculate_all(CalculationOptions::default());
-        assert_formula_and_cache(&workbook, &source);
-        assert_structural_edit_refused(&mut workbook, insert_row(0), &source);
+        let stored = workbook.model().sheets[1].cell(FORMULA_CELL).unwrap();
+        assert_eq!(stored.formula.as_deref(), Some(source.as_str()));
+        assert_eq!(stored.value, CellValue::Number { value: 1.0 }, "{source}");
+
+        let mut uncalculated = Workbook::from_model(model).unwrap();
+        assert_structural_edit_refused(&mut uncalculated, insert_row(0), &source);
     }
+}
+
+#[test]
+fn a_scoped_name_takes_precedence_over_a_sheet_span_only_on_its_sheet() {
+    let source = "SUM(Start_1:Data!B2)";
+    let mut model = model_with_cached_formula(&["Start_1", "Data", "Report"], source);
+    model.defined_names.push(DefinedName {
+        name: "Start_1".into(),
+        formula: "Data!A1".into(),
+        local_sheet: Some(SheetId(2)),
+        hidden: false,
+    });
+    let other_formula = CellRef::new(0, 2);
+    let data = &mut model.sheets[1];
+    for (at, value) in [(CellRef::new(0, 0), 10.0), (CellRef::new(1, 1), 20.0)] {
+        data.set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    data.set_cell(
+        other_formula,
+        Cell {
+            formula: Some(source.into()),
+            value: CACHE,
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(model).unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    assert_eq!(
+        workbook.model().sheets[1].cell(other_formula).unwrap().value,
+        CACHE
+    );
+    assert_eq!(
+        workbook.model().sheets[2].cell(FORMULA_CELL).unwrap().value,
+        CellValue::Number { value: 30.0 }
+    );
 }
 
 #[test]

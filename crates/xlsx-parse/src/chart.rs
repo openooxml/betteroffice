@@ -23,6 +23,7 @@ use ooxml_drawingml::{
 };
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::numfmt::{builtin_format_code, format_value};
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::sort::sort_by_shared;
 use xlsx_model::styles::{FormatCode, Theme};
 use xlsx_model::{
@@ -1525,14 +1526,14 @@ fn resolve_reference_with<'a, T>(
 /// is checked for them.
 fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
     let expression = |text: &str| text.contains([',', '(', '[']);
+    let local_sheet =
+        |name: &str| !name.is_empty() && !name.contains([':', '[']) && !is_path_qualifier(name);
     let Some(rest) = source.strip_prefix('\'') else {
         if expression(source) {
             return None;
         }
         return match source.split_once('!') {
-            Some((name, area)) if !name.is_empty() && !name.contains(':') => {
-                Some((Some(name.to_owned()), area))
-            }
+            Some((name, area)) if local_sheet(name) => Some((Some(name.to_owned()), area)),
             Some(_) => None,
             None => Some((None, source)),
         };
@@ -1548,7 +1549,7 @@ fn split_qualifier(source: &str) -> Option<(Option<String>, &str)> {
                 continue;
             }
             let area = rest.get(cursor + 1..)?.strip_prefix('!')?;
-            return (!name.contains([':', '[']) && !expression(area)).then_some((Some(name), area));
+            return (local_sheet(&name) && !expression(area)).then_some((Some(name), area));
         }
         let character = rest[cursor..].chars().next()?;
         name.push(character);
@@ -2126,4 +2127,33 @@ pub(crate) fn relationships_of(root: &Element) -> Vec<(String, String, String)> 
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_path_qualifiers_never_reach_local_sheet_lookup() {
+        for name in [r"\\server\Books\Data.xlsx", "/share/Data.xlsx"] {
+            let workbook = xlsx_model::Workbook {
+                sheets: vec![xlsx_model::Sheet::new(name)],
+                ..Default::default()
+            };
+            for formula in [format!("'{name}'!$A$1:$A$3"), format!("{name}!$A$1:$A$3")] {
+                let result: Result<Vec<()>, _> = resolve_reference_with(
+                    &formula,
+                    &workbook,
+                    name,
+                    10,
+                    ReferenceShape::OneDimensional,
+                    |_, _| panic!("read a local cell for {formula}"),
+                );
+                assert!(
+                    matches!(result, Err(ParseError::UnsupportedEdit(message))
+                        if message.ends_with("is not a single same-workbook area"))
+                );
+            }
+        }
+    }
 }

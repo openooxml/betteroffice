@@ -1719,7 +1719,7 @@ fn eval_node_with(
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
-    if ctx.read_other_workbook() {
+    if ctx.read_other_workbook() || ctx.read_unreadable_definition() {
         return Evaluated {
             value: None,
             limited: ctx.exhausted(),

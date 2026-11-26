@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use xlsx_calc::eval::MAX_EVALUATION_CELL_VISITS;
 use xlsx_calc::functions::criteria::CountTable;
-use xlsx_calc::{BinaryOp, ColumnRange, EvalContext, Expr, RowRange, evaluate, parse_formula};
+use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::{BinaryOp, ColumnRange, EvalContext, Expr, RowRange, evaluate};
 use xlsx_model::styles::DifferentialFormat;
 use xlsx_model::value::CellValue;
 use xlsx_model::{CellRange, CellRef, ErrorValue, MAX_COLS, MAX_ROWS, SheetId, Workbook};
@@ -196,7 +197,7 @@ pub(crate) struct Cache {
     /// cell or a recalculation, so that no result of the epoch is painted in
     /// the next.
     moved: bool,
-    parsed: HashMap<String, Option<Arc<Expr>>>,
+    parsed: HashMap<(SheetId, String), Option<Arc<Expr>>>,
     /// The cells whose last recalculation the calc engine refused or cut
     /// short, as of the epoch.
     limited: HashSet<(SheetId, u32, u32)>,
@@ -370,6 +371,7 @@ impl Cache {
                 .collect();
             self.rules.clear();
             self.aggregates.clear();
+            self.parsed.clear();
             self.whole_range = 0;
             if std::mem::take(&mut self.moved) {
                 self.previous.clear();
@@ -736,7 +738,7 @@ impl Cache {
         if ctx.exhausted() {
             return Err(Unknown::Refused);
         }
-        if ctx.has_unhandled_unsupported_function() {
+        if ctx.has_unhandled_unsupported_function() || ctx.read_unreadable_definition() {
             return Err(Unknown::EngineGap);
         }
         matched
@@ -759,7 +761,7 @@ impl Cache {
         }
         if !formula.shifts {
             let shifted = xlsx_parse::translate_formula(&formula.source, rule.anchor, at).ok()?;
-            let parsed = self.parse(shifted)?;
+            let parsed = self.parse(shifted, ctx)?;
             let values = aggregate.constants.get(slot).map_or(&[][..], Vec::as_slice);
             if values.is_empty() {
                 return Some(evaluate(&parsed, ctx));
@@ -793,16 +795,19 @@ impl Cache {
         Some(evaluate(&expr, ctx))
     }
 
-    fn parse(&mut self, text: String) -> Option<Arc<Expr>> {
-        if let Some(parsed) = self.parsed.get(&text) {
+    fn parse(&mut self, text: String, ctx: &EvalContext<'_>) -> Option<Arc<Expr>> {
+        let key = (ctx.sheet, text);
+        if let Some(parsed) = self.parsed.get(&key) {
             return parsed.clone();
         }
         if self.parsed.len() >= PARSED_CAP {
             self.parsed.clear();
         }
         self.stats.formula_parses += 1;
-        let parsed = parse_formula(&text).ok().map(Arc::new);
-        self.parsed.insert(text, parsed.clone());
+        let parsed = parse_formula_for_cell(&key.1, ctx.provider, ctx.sheet)
+            .ok()
+            .map(Arc::new);
+        self.parsed.insert(key, parsed.clone());
         parsed
     }
 
@@ -850,7 +855,8 @@ impl Cache {
                 values.push(evaluate(call, context));
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 aggregate.refused |= context.exhausted();
-                aggregate.gap |= context.has_unhandled_unsupported_function();
+                aggregate.gap |= context.has_unhandled_unsupported_function()
+                    || context.read_unreadable_definition();
                 built = true;
             }
             let mut tables = Vec::with_capacity(formula.counts.len());
@@ -875,7 +881,8 @@ impl Cache {
                 let read = MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 self.whole_range += read;
                 *spent += read;
-                aggregate.gap |= context.has_unhandled_unsupported_function();
+                aggregate.gap |= context.has_unhandled_unsupported_function()
+                    || context.read_unreadable_definition();
                 built = true;
             }
             let base = formula.base.as_ref().map(|base| {
@@ -1008,7 +1015,9 @@ fn rules(model: &Workbook, sheet: SheetId, dated: bool) -> Vec<Rule> {
                 let anchor = ranges.first()?.start;
                 let formulas: Vec<Formula> = sources
                     .iter()
-                    .map(|source| compile(source, anchor))
+                    .map(|source| {
+                        compile(source, anchor, |text| parse_formula_for_cell(text, model, sheet))
+                    })
                     .collect();
                 let reads_volatile = formulas.iter().any(|formula| {
                     formula
@@ -1086,10 +1095,12 @@ fn volatile(model: &Workbook, sheet: SheetId, expr: &Expr, dated: bool) -> bool 
             continue;
         };
         let formula = &defined.formula;
-        let Ok(definition) = parse_formula(formula.strip_prefix('=').unwrap_or(formula)) else {
+        let scope = defined.local_sheet.unwrap_or(owner);
+        let Ok(definition) =
+            parse_formula_for_cell(formula.strip_prefix('=').unwrap_or(formula), model, scope)
+        else {
             continue;
         };
-        let scope = defined.local_sheet.unwrap_or(owner);
         if calls_volatile(model, scope, &definition, &mut names, dated) {
             return true;
         }
@@ -1150,7 +1161,11 @@ fn operator(name: &str) -> Option<Op> {
 
 /// `source` parsed at `anchor`, with what shifting it by a row and a column
 /// leaves unchanged: the whole text, or calls over absolute references.
-fn compile(source: &str, anchor: CellRef) -> Formula {
+fn compile(
+    source: &str,
+    anchor: CellRef,
+    parse: impl Fn(&str) -> Result<Expr, xlsx_calc::ParseError>,
+) -> Formula {
     let step = |index: u32, max: u32| {
         if index + 1 < max {
             index + 1
@@ -1164,9 +1179,9 @@ fn compile(source: &str, anchor: CellRef) -> Formula {
     let relative = at_anchor.is_none() || shifted != at_anchor;
     let base = at_anchor
         .as_deref()
-        .and_then(|text| parse_formula(text).ok())
+        .and_then(|text| parse(text).ok())
         .map(Arc::new);
-    let moved = shifted.as_deref().and_then(|text| parse_formula(text).ok());
+    let moved = shifted.as_deref().and_then(|text| parse(text).ok());
     let mut constants = Vec::new();
     let mut counts = Vec::new();
     let mut shifts = false;
@@ -1576,6 +1591,7 @@ fn key(value: &CellValue) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsx_calc::parse_formula;
 
     #[test]
     fn shifting_a_parsed_formula_matches_parsing_its_translated_text() {
@@ -1609,7 +1625,7 @@ mod tests {
     fn a_countif_over_a_fixed_range_compiles_to_a_count_table() {
         let anchor = CellRef::new(0, 0);
         assert_eq!(
-            compile("COUNTIF($A$1:$A$50000,A1)>1", anchor).counts,
+            compile("COUNTIF($A$1:$A$50000,A1)>1", anchor, parse_formula).counts,
             [vec![0]]
         );
         for source in [
@@ -1617,7 +1633,7 @@ mod tests {
             "COUNTIF($A$1:$A$50000,$A$1)>1",
             "COUNTIF($A$1:$A$50000,A1&\"*\")>1",
         ] {
-            assert!(compile(source, anchor).counts.is_empty(), "{source}");
+            assert!(compile(source, anchor, parse_formula).counts.is_empty(), "{source}");
         }
     }
 
@@ -1653,7 +1669,7 @@ mod tests {
             .collect();
         let anchor = ranges[0].start;
         Rule {
-            formulas: vec![compile(source, anchor)],
+            formulas: vec![compile(source, anchor, parse_formula)],
             anchor,
             ranges,
             test: Test::Expression,
@@ -1766,14 +1782,14 @@ mod tests {
             "LARGE($B$1:$B$2,$C$1:$C$2)>0",
             "COUNTIFS($B$1:$B$2,$C$1:$C$2)>0",
         ] {
-            assert!(compile(source, anchor).constants.is_empty(), "{source}");
+            assert!(compile(source, anchor, parse_formula).constants.is_empty(), "{source}");
         }
         for source in [
             "COUNTIF($B$1:$B$2,$C$1)>0",
             "SUMIF($B$1:$B$2,\">0\",$C$1:$C$2)>0",
             "SUM($B$1:$B$2,$C$1:$C$2)>0",
         ] {
-            assert_eq!(compile(source, anchor).constants, [vec![0]], "{source}");
+            assert_eq!(compile(source, anchor, parse_formula).constants, [vec![0]], "{source}");
         }
         let rule = expression_rule("A1:A2", "COUNTIF($B$1:$B$2,$C$1:$C$2)>0");
         let mismatches = disagreements(&mut Cache::default(), &model, &rule);

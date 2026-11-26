@@ -286,7 +286,8 @@ fn rewrite_table_formulas(
             false,
             &location,
         )? {
-            crate::validate_defined_name_formula(&updated).map_err(|_| unsupported(location()))?;
+            crate::apply::validate_rewritten_defined_name_formula(&updated)
+                .map_err(|_| unsupported(location()))?;
             name_bytes = name_bytes - name.formula.len() + updated.len();
             names.push((index, updated));
         }
