@@ -753,7 +753,11 @@ impl<'a> EvalContext<'a> {
         }
         {
             let definitions = self.parsed_definitions.borrow();
-            let lookup = |sheet| definitions.get(&sheet).and_then(|formulas| formulas.get(formula));
+            let lookup = |sheet| {
+                definitions
+                    .get(&sheet)
+                    .and_then(|formulas| formulas.get(formula))
+            };
             if let Some(expression) = lookup(None).or_else(|| lookup(Some(owner))) {
                 return Some(Arc::clone(expression));
             }
