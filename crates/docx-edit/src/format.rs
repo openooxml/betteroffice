@@ -213,7 +213,10 @@ pub(crate) fn merge_font_family(previous: Option<&Any>, patch: &Any, east_asian:
     Any::Map(Arc::new(fonts))
 }
 
-pub(crate) fn run_font_slot_flags(complex_script: Option<&Any>, fonts: Option<&Any>) -> (bool, bool) {
+pub(crate) fn run_font_slot_flags(
+    complex_script: Option<&Any>,
+    fonts: Option<&Any>,
+) -> (bool, bool) {
     let complex_script = match complex_script {
         Some(Any::Map(value)) => value.get("enabled") != Some(&Any::Bool(false)),
         Some(value) => *value != Any::Null && *value != Any::Bool(false),
@@ -1279,7 +1282,9 @@ fn chunk_format_pieces<'a>(
     font_pick_segments(text, start - chunk_start, end - chunk_start, flags).map(
         move |(from, to, east_asian)| {
             let mut attrs = patch.clone();
-            if fonts.is_some() && let Some(fonts) = attrs.get_mut("fontFamily") {
+            if fonts.is_some()
+                && let Some(fonts) = attrs.get_mut("fontFamily")
+            {
                 *fonts = merge_font_family(Some(previous), fonts, east_asian);
             }
             (chunk_start + from, chunk_start + to, attrs)
@@ -2201,7 +2206,10 @@ impl EditingDoc {
                 _ => "",
             };
             let fonts = font_merge.map(|merge| {
-                merge.chunk_fonts(chunk.attrs.get("fontFamily"), chunk.attrs.get("complexScript"))
+                merge.chunk_fonts(
+                    chunk.attrs.get("fontFamily"),
+                    chunk.attrs.get("complexScript"),
+                )
             });
             let pieces = chunk_format_pieces(patch, fonts, text, chunk.start, (start, end));
             for (start, end, mut patch) in pieces {
