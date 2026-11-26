@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use xlsx_model::{CellRange, CellRef};
 
+#[cfg(test)]
 use crate::lexer::{TokKind, lex_for_evaluation};
 use crate::parser::{Expr, UnaryOp};
 use crate::reference::offset_rect;
@@ -50,6 +51,7 @@ pub(crate) fn names_other_workbook(qualifier: &str) -> bool {
 }
 
 /// Whether the text is a single reference qualified by a workbook index.
+#[cfg(test)]
 pub(crate) fn is_indexed_workbook_reference(source: &str) -> bool {
     lex_for_evaluation(source, None).is_ok_and(|tokens| {
         let [token] = tokens.as_slice() else {
