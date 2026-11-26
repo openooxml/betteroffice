@@ -230,7 +230,7 @@ fn formula_edits_beside_a_wrapped_cell_rebuild_the_graph() {
     </worksheet>"#
         .to_vec();
     let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
-    assert!(workbook.has_alternate_content());
+    assert!(workbook.needs_alternate_preview());
 
     let sheet = SheetId(0);
     assert_eq!(
