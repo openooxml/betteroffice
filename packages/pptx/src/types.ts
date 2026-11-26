@@ -4,6 +4,8 @@ export interface TextStyle {
   fontSizePt?: number;
   color?: string;
   fontFamily?: string;
+  /** Explicit DrawingML East Asian typeface, independent of the Latin family. */
+  eastAsianFontFamily?: string;
   underline?: string;
   strike?: string;
   spacingPt?: number;
@@ -18,6 +20,7 @@ export interface TextStyleSnapshot {
   fontSizePt: number | null;
   color: string | null;
   fontFamily: string | null;
+  eastAsianFontFamily?: string | null;
   underline: string | null;
   strike?: string | null;
   spacingPt?: number | null;

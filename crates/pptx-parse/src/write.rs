@@ -3031,6 +3031,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.strike == target.strike
         && source.caps == target.caps
         && source.font_family == target.font_family
+        && source.east_asian_font_family == target.east_asian_font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
             == resolve_color_value_to_hex_with_theme(target.color.as_ref(), theme)
 }
@@ -3676,42 +3677,44 @@ fn apply_run_properties(
             XmlNode::Element(XmlElement::new(prefixes.drawing("solidFill")).with_child(color)),
         );
     }
-    let Some(family) = &properties.font_family else {
-        base.children.retain(|child| {
-            !matches!(
-                child,
-                XmlNode::Element(element) if element.local_name() == "latin"
-            )
-        });
-        return;
-    };
-    if let Some(latin) = base.child_mut("latin") {
-        if latin.attribute("typeface") != Some(family.as_str()) {
-            // panose, pitchFamily and charset describe the old face.
-            latin
-                .attributes
-                .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
-            latin.set_attribute("typeface", family.clone());
+    for (name, family, following) in [
+        ("latin", &properties.font_family, &POST_LATIN_ELEMENTS[..]),
+        (
+            "ea",
+            &properties.east_asian_font_family,
+            &POST_LATIN_ELEMENTS[1..],
+        ),
+    ] {
+        let Some(family) = family else {
+            if name == "latin" {
+                base.children.retain(|child| {
+                    !matches!(child, XmlNode::Element(element) if element.local_name() == name)
+                });
+            }
+            continue;
+        };
+        if let Some(font) = base.child_mut(name) {
+            if font.attribute("typeface") != Some(family.as_str()) {
+                // panose, pitchFamily and charset describe the old face.
+                font.attributes
+                    .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+                font.set_attribute("typeface", family.clone());
+            }
+        } else {
+            let position = base
+                .children
+                .iter()
+                .position(|child| {
+                    matches!(child, XmlNode::Element(element) if following.contains(&element.local_name()))
+                })
+                .unwrap_or(base.children.len());
+            base.children.insert(
+                position,
+                XmlNode::Element(
+                    XmlElement::new(prefixes.drawing(name)).with_attribute("typeface", family.clone()),
+                ),
+            );
         }
-    } else {
-        let position = base
-            .children
-            .iter()
-            .position(|child| {
-                matches!(
-                    child,
-                    XmlNode::Element(element)
-                        if POST_LATIN_ELEMENTS.contains(&element.local_name())
-                )
-            })
-            .unwrap_or(base.children.len());
-        base.children.insert(
-            position,
-            XmlNode::Element(
-                XmlElement::new(prefixes.drawing("latin"))
-                    .with_attribute("typeface", family.clone()),
-            ),
-        );
     }
 }
 
@@ -3841,6 +3844,12 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     if let Some(family) = &properties.font_family {
         element = element.with_child(
             XmlElement::new(prefixes.drawing("latin")).with_attribute("typeface", family.clone()),
+        );
+        present = true;
+    }
+    if let Some(family) = &properties.east_asian_font_family {
+        element = element.with_child(
+            XmlElement::new(prefixes.drawing("ea")).with_attribute("typeface", family.clone()),
         );
         present = true;
     }

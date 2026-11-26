@@ -7336,6 +7336,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme))
             .or_else(|| linked.then(|| format!("#{}", get_theme_color(Some(theme), "hlink")))),
         font_family: properties.font_family.clone(),
+        east_asian_font_family: properties.east_asian_font_family.clone(),
         underline: properties
             .underline
             .clone()

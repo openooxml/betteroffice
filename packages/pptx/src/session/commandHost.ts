@@ -72,6 +72,8 @@ const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user'
 export const commandDefaultFontModule = { load: (): Promise<FontModule> => import('./commandDefaultFonts') };
 const sessionDecodeFontFace = sessionFontDecoder((bytes, options) => decodeFontFace(bytes, options));
 const COVERAGE_SCRIPTS = new Set<unknown>(['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc']);
+const EAST_ASIAN_TEXT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const OTHER_FONT_TEXT = /[^\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Punctuation}\p{Separator}\s]/u;
 
 function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
@@ -679,6 +681,7 @@ export function registerPresentationCommandHandlers(
     const styles: TextStyleSnapshot[] = [];
     const emptyStyles: TextStyleSnapshot[] = [];
     const alignments = new Set<string | null>();
+    const families = new Set<string>();
     for (const paragraph of story.paragraphs) {
       const paragraphStart = offset;
       for (const run of paragraph.runs) {
@@ -696,7 +699,15 @@ export function registerPresentationCommandHandlers(
         firstStyle ??= style;
         if (start >= offset && start < runEnd || start === offset && runEnd === offset) caretStyle ??= style;
         if (runEnd <= start && runEnd > offset) precedingStyle = style;
-        if (runEnd > offset && start < runEnd && end > offset) styles.push(style);
+        if (runEnd > offset && start < runEnd && end > offset) {
+          styles.push(style);
+          const text = run.text.slice(Math.max(0, start - offset), Math.min(run.text.length, end - offset));
+          const hasEastAsian = EAST_ASIAN_TEXT.test(text);
+          if (hasEastAsian) families.add(style.eastAsianFontFamily || style.fontFamily!);
+          if (!hasEastAsian || OTHER_FONT_TEXT.test(text)) {
+            families.add(style.fontFamily!);
+          }
+        }
         if (runEnd === offset && start <= offset && end > offset) emptyStyles.push(style);
         offset = runEnd;
       }
@@ -721,6 +732,7 @@ export function registerPresentationCommandHandlers(
           ? (style.strike ?? 'noStrike') !== (styles[0]!.strike ?? 'noStrike')
           : style[key] !== styles[0]![key])) formatting[key] = null;
       }
+      if (families.size > 0) formatting.fontFamily = families.size === 1 ? families.values().next().value! : null;
     }
     const value = alignments.size === 1 ? [...alignments][0] : null;
     const result: FormattingProjection = { formatting,
@@ -2095,11 +2107,12 @@ function validStyle(value: unknown): value is TextStyle | undefined {
     'dash', 'dashHeavy', 'dashLong', 'dashLongHeavy', 'dotDash', 'dotDashHeavy',
     'dotDotDash', 'dotDotDashHeavy', 'wavy', 'wavyHeavy', 'wavyDbl'];
   return Object.entries(value as Record<string, unknown>).every(([key, entry]) => {
-    if (!['bold', 'italic', 'fontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
+    if (!['bold', 'italic', 'fontFamily', 'eastAsianFontFamily', 'underline', 'strike', 'color', 'fontSizePt', 'spacingPt', 'baselinePct'].includes(key)) return false;
     if (entry === undefined) return true;
     switch (key) {
       case 'bold':
       case 'italic': return typeof entry === 'boolean';
+      case 'eastAsianFontFamily':
       case 'fontFamily': return validText(entry);
       case 'strike': return typeof entry === 'string' && ['noStrike', 'sngStrike', 'dblStrike'].includes(entry);
       case 'underline': return typeof entry === 'string' && underlines.includes(entry);

@@ -41,6 +41,8 @@ pub struct TextStyle {
     pub font_size_pt: Option<f64>,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asian_font_family: Option<String>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strike: Option<String>,
@@ -63,6 +65,8 @@ pub struct TextStylePatch {
     pub font_size_pt: Option<f64>,
     pub color: Option<String>,
     pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asian_font_family: Option<String>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strike: Option<String>,

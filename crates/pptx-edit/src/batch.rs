@@ -873,6 +873,7 @@ fn writable_style(
     let style = inherited_style(story, at);
     validate_style_values(
         style.font_family.as_deref(),
+        style.east_asian_font_family.as_deref(),
         style.underline.as_deref(),
         style.strike.as_deref(),
         style.color.as_deref(),
@@ -920,6 +921,7 @@ fn patch_changes(
                     || differs(&style.font_size_pt, &patch.font_size_pt)
                     || differs(&style.color, &patch.color)
                     || differs(&style.font_family, &patch.font_family)
+                    || differs(&style.east_asian_font_family, &patch.east_asian_font_family)
                     || differs(&style.underline, &patch.underline)
                     || strike_changed
                     || differs(&style.spacing_pt, &patch.spacing_pt)
@@ -1050,6 +1052,7 @@ fn plan_format(
     check_text(expect, &selection.text(), &requested)?;
     validate_style_values(
         patch.font_family.as_deref(),
+        patch.east_asian_font_family.as_deref(),
         patch.underline.as_deref(),
         patch.strike.as_deref(),
         patch.color.as_deref(),

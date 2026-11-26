@@ -250,6 +250,17 @@ fn inherited_text_style(
         } else {
             family.to_owned()
         }),
+        east_asian_font_family: direct
+            .east_asian_font_family
+            .as_deref()
+            .or(fallback.east_asian_font_family.as_deref())
+            .map(|family| {
+                if family.starts_with('+') {
+                    resolve_theme_font_ref(Some(theme), family)
+                } else {
+                    family.to_owned()
+                }
+            }),
         color: direct
             .color
             .clone()
@@ -1195,6 +1206,11 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     }
     if source.font_family.is_some() {
         target.font_family.clone_from(&source.font_family);
+    }
+    if source.east_asian_font_family.is_some() {
+        target
+            .east_asian_font_family
+            .clone_from(&source.east_asian_font_family);
     }
     if source.color.is_some() {
         target.color.clone_from(&source.color);
