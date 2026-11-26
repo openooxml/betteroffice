@@ -219,15 +219,31 @@ fn naskh_styled_families_fall_back_to_naskh_for_arabic_in_every_style() {
             Some("NotoSansHebrew-Regular.ttf.zst")
         );
     }
-    for (family, bold, file) in [
-        ("Arial", false, "NotoSansArabic-Regular.ttf.zst"),
-        ("Arial", true, "NotoSansArabic-Bold.ttf.zst"),
-        ("Times New Roman", false, "NotoSansArabic-Regular.ttf.zst"),
-    ] {
+}
+
+#[test]
+fn arabic_in_latin_families_falls_back_to_naskh_in_every_style() {
+    for bold in [false, true] {
+        for italic in [false, true] {
+            let default = resolve_script_fallback_face("arabic", bold, italic).unwrap();
+            assert_eq!(default.file, "NotoNaskhArabic-Regular.ttf.zst");
+            for family in ["Arial", "Times New Roman"] {
+                assert_eq!(
+                    resolve_family_script_fallback_face(family, "arabic", bold, italic)
+                        .map(|face| face.file.as_str()),
+                    Some(default.file.as_str()),
+                );
+            }
+        }
         assert_eq!(
-            resolve_family_script_fallback_face(family, "arabic", bold, false)
-                .map(|face| face.file.as_str()),
-            Some(file)
+            resolve_bundled_family_face("Noto Sans Arabic", bold, false)
+                .map(|face| face.family.as_str()),
+            Some("Noto Sans Arabic"),
+        );
+        assert_eq!(
+            resolve_family_script_fallback_face(" Noto Sans Arabic ", "arabic", bold, true)
+                .map(|face| (face.family.as_str(), face.weight)),
+            Some(("Noto Sans Arabic", if bold { 700 } else { 400 })),
         );
     }
 }

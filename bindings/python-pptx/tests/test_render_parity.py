@@ -1,6 +1,8 @@
 import base64
+import io
 import math
 import struct
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,35 @@ def diff_frame(value):
             return value
         return {key: diff_frame(item) for key, item in value.items()}
     return value
+
+
+def test_arabic_in_arial_uses_naskh_in_bundled_layout():
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+    p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    a = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as deck:
+        deck.writestr("[Content_Types].xml", """<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+          <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+        </Types>""")
+        deck.writestr("_rels/.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="doc" Type="{rel}/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
+        deck.writestr("ppt/_rels/presentation.xml.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="slide" Type="{rel}/slide" Target="slides/slide1.xml"/></Relationships>')
+        deck.writestr("ppt/presentation.xml", f'<p:presentation xmlns:p="{p}" xmlns:r="{rel}"><p:sldIdLst><p:sldId id="256" r:id="slide"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>')
+        deck.writestr("ppt/slides/slide1.xml", f'''<p:sld xmlns:p="{p}" xmlns:a="{a}"><p:cSld><p:spTree>
+          <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+          <p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="1200000"/></a:xfrm></p:spPr>
+          <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400">
+            <a:latin typeface="Arial"/><a:cs typeface="Arial"/>
+          </a:rPr><a:t>مرحبا</a:t></a:r></a:p></p:txBody></p:sp>
+        </p:spTree></p:cSld></p:sld>''')
+    frame = bo.Presentation.open(output.getvalue()).render_slide(0).to_dict()
+    runs = [run for item in frame["primitives"] if item["kind"] == "textBox"
+            for line in item["lines"] for run in line["runs"]]
+    assert {run["fontFamily"] for run in runs} == {"Noto Naskh Arabic"}
 
 
 def test_hit_test_shape_text_and_empty_points(deck):
