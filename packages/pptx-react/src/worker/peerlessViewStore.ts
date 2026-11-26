@@ -12,6 +12,9 @@ import type {
 import { measureEchoPosition } from './localEchoPainter';
 import type { DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
+import { PptxCommandRefusedError } from '../commands/PptxCommandRefusedError';
+
+export { PptxCommandRefusedError };
 
 export const PEERLESS_ACTIVE_CONTEXT_BYTES = 16 * 1024;
 export const PEERLESS_PENDING_INTENTS = 256;
@@ -143,13 +146,6 @@ export class PptxFrameDecodeError extends Error {
   }
 }
 
-export class PptxCommandRefusedError extends Error {
-  override readonly name = 'PptxCommandRefusedError';
-  constructor(readonly operation: PresentationCommandIntent['kind'], readonly outcome: PresentationCommandOutcome) {
-    super(`Presentation ${operation} refused: ${outcome.reason}`);
-  }
-}
-
 export const peerlessEchoStores = new WeakSet<PeerlessViewStore>();
 
 export function createPeerlessViewStore(
@@ -225,6 +221,10 @@ export function createPeerlessViewStore(
       if (sharedInput && chainTailInput) resultReferences.set(at, chainTailInput);
       return at;
     }
+    return confirmedReference();
+  }
+
+  function confirmedReference(): PresentationCommandSelectionReference | null {
     const selected = view.selection;
     if (selected?.kind === 'object') {
       if (!selected.storyId || !view.editState.toolbar.canEditText) return null;
@@ -583,6 +583,12 @@ export function createPeerlessViewStore(
     }
     if (intent.kind === 'insertText' && input.chunks.length) {
       intent = { ...intent, payload: { ...intent.payload, text: intent.payload.text + input.chunks.join('') } };
+    }
+    if ('at' in intent.payload && intent.payload.at?.source === 'afterSeq' && intent.payload.at.seq <= initial.throughSeq) {
+      const { at: _unsent, ...payload } = intent.payload;
+      const confirmed = intent.kind === 'setSelection' || intent.kind === 'compositionEnd' ? null : confirmedReference();
+      intent = { ...intent, payload: confirmed ? { ...payload, at: confirmed }
+        : intent.kind === 'selectAtPoint' ? { ...payload, extend: false } : payload } as PresentationCommandIntent;
     }
     let operation: Promise<PresentationCommandAck> | undefined;
     if (sharedInput) {

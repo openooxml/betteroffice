@@ -57,6 +57,7 @@ export { LocaleProvider, useTranslation, type LocaleProviderProps } from './i18n
 
 export { PptxCommandProvider, type PptxCommandProviderProps } from './commands/PptxCommandProvider';
 export { PptxCommandAdmissionError, type PptxCommandAdmissionCode } from './commands/createPptxCommandStore';
+export { PptxCommandRefusedError } from './commands/PptxCommandRefusedError';
 // Keyboard shortcuts a host can remap or disable
 export type {
   PptxShortcutId,
