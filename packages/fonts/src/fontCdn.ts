@@ -37,10 +37,16 @@ interface ImplicitFontRequest {
 
 export type FontRequestPolicy = number | ImplicitFontRequest;
 
-export function implicitFontRequest(pack: Pack): ImplicitFontRequest {
+export function implicitFontRequest(pack: Pack, checkPack?: (pack: Pack) => void): ImplicitFontRequest {
   return {
-    check: checkImplicitUrlCooldown,
-    load: (file, url, decode, checkDependencies) => loadImplicitFontAsset(file, url, pack, decode, checkDependencies),
+    check: (url) => {
+      checkPack?.(pack);
+      checkImplicitUrlCooldown(url);
+    },
+    load: (file, url, decode, checkDependencies) => loadImplicitFontAsset(file, url, pack, decode, () => {
+      checkPack?.(pack);
+      checkDependencies?.();
+    }),
   };
 }
 

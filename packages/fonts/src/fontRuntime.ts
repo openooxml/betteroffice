@@ -5,7 +5,7 @@ import { loadFontBytes } from './bytes';
 import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, packFor, sliceDecoder, sliceRefOf } from './packed';
 import type { SliceLocation } from './progressive';
 import { checkInstalledPacks } from './packDiagnostics';
-import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnReporter } from '../../../shared/fontCdnDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnDiagnostic, type FontCdnReporter } from '../../../shared/fontCdnDiagnostics';
 import type { FontPackDiagnostic } from '../../../shared/fontPackDiagnostics';
 import {
   checkImplicitSliceCooldown, fontCdnAssetUrl, fontCdnCacheKey, implicitAssetCooldown, implicitFontRequest,
@@ -42,6 +42,8 @@ type FontLoadOptions = {
   retain?: boolean;
   strict?: boolean | 'except-optional-cdn-failure';
   reportCdnFailure?: FontCdnReporter;
+  checkImplicitCdnPack?: (pack: FontCdnDiagnostic['pack']) => void;
+  onSubstitute?: (bytes: ArrayBuffer, error: unknown) => void;
 };
 type RuntimeFontSource = BundledFontSource & {
   /** @internal */
@@ -78,12 +80,13 @@ export function createFontRuntime(lookup: FontPackLookup, {
 
   function cdnAssetUrl(
     face: BundledFontFace, file: string, kind: FontPack, cdn: FontCdnConfiguration | undefined,
+    runtime?: FontLoadOptions,
   ): URL | undefined {
     if (!cdn?.baseUrl || kind === 'base') return undefined;
     const pack = packFor(face);
     if (!pack.faces.some((entry) => entry.file === face.file)) return undefined;
     const url = fontCdnAssetUrl(pack, file, cdn.implicit ? undefined : cdn.baseUrl);
-    cdnRequests.set(url, cdn.implicit ? implicitFontRequest(kind) : cdn.timeoutMs);
+    cdnRequests.set(url, cdn.implicit ? implicitFontRequest(kind, runtime?.checkImplicitCdnPack) : cdn.timeoutMs);
     return url;
   }
 
@@ -112,6 +115,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     face: BundledFontFace,
     baseUrl: URL | undefined,
     skipImplicit = false,
+    runtime?: FontLoadOptions,
   ): Promise<URL> {
     const { file, script } = face;
     if (baseUrl !== undefined) return new URL(file, baseUrl);
@@ -121,7 +125,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
       const { urls, cdn } = await lookup(pack);
       const installed = urls?.[file];
       if (installed) return installed();
-      const fallback = cdnAssetUrl(face, file, pack, skipImplicit && cdn?.implicit ? undefined : cdn);
+      const fallback = cdnAssetUrl(face, file, pack, skipImplicit && cdn?.implicit ? undefined : cdn, runtime);
       if (fallback) return fallback;
       if (pack === 'latin' && !urls) {
         throw new MissingFontAddonError(
@@ -142,9 +146,10 @@ export function createFontRuntime(lookup: FontPackLookup, {
     throw new Error(`Unknown bundled font asset: ${file}`);
   }
 
-  function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets): URL {
+  function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets, runtime?: FontLoadOptions): URL {
     const installed = urls?.[file];
     if (installed) return installed();
+    if (cdn?.implicit && cdn.baseUrl) runtime?.checkImplicitCdnPack?.('cjk');
     const fallback = cdnAssetUrl(face, file, 'cjk', cdn);
     if (fallback) return fallback;
     throw new MissingCjkAddonError(urls
@@ -167,7 +172,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
       url: async (file) => {
         const root = base instanceof Promise ? await base : base;
         if (root) return new URL(file, root);
-        return sliceAssetUrl(face, file, await lookup('cjk'));
+        return sliceAssetUrl(face, file, await lookup('cjk'), runtime);
       },
       prepareUrls: baseUrl ? undefined : async () => {
         if (base instanceof Promise) {
@@ -177,11 +182,11 @@ export function createFontRuntime(lookup: FontPackLookup, {
         }
         const assets = await lookup('cjk');
         const current = localCdn ? { urls: assets.urls, cdn: localCdn() } : assets;
-        const indexUrl = sliceAssetUrl(face, ref.index, current);
+        const indexUrl = sliceAssetUrl(face, ref.index, current, runtime);
         return {
           base: typeof requestPolicy(indexUrl) === 'object' ? `${indexUrl.href}#implicit` : indexUrl.href,
           url: Object.assign(
-            async (file: string) => file === ref.index ? indexUrl : sliceAssetUrl(face, file, current),
+            async (file: string) => file === ref.index ? indexUrl : sliceAssetUrl(face, file, current, runtime),
             { implicitCdn: (file: string) => current.cdn?.implicit === true && !current.urls?.[file] },
           ),
           timeoutMs: requestTimeout(indexUrl),
@@ -259,7 +264,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     const substituteOptionalCdnFailure = runtime?.strict === 'except-optional-cdn-failure';
     let implicitCdnFace: string | undefined;
     const resolve = async (dependency: BundledFontFace) => {
-      const url = await assetUrl(dependency, baseUrl, skipImplicit);
+      const url = await assetUrl(dependency, baseUrl, skipImplicit, runtime);
       const implicit = typeof requestPolicy(url) === 'object';
       if (substituteOptionalCdnFailure && implicit && dependency === face) implicitCdnFace = url.href;
       const slices = runtime?.strict && implicit && sliceRefOf(dependency.file);
@@ -284,12 +289,15 @@ export function createFontRuntime(lookup: FontPackLookup, {
         (runtime?.reportCdnFailure ?? reportImplicitCdnFailure)(error);
         onCdnFailure?.();
         const bytes = await substituteFontBytes(face, packed, runtime, optional);
+        runtime?.onSubstitute?.(bytes, error);
         if (implicitCdnFace && optional) substitutedCdnFaces.add(implicitCdnFace);
         return bytes;
       }
       if (runtime?.strict === true) throw error;
       if (error instanceof MissingCjkAddonError || error instanceof MissingIntlAddonError) {
-        return substituteFontBytes(face, packed, runtime, true);
+        const bytes = await substituteFontBytes(face, packed, runtime, true);
+        runtime?.onSubstitute?.(bytes, error);
+        return bytes;
       }
       throw error;
     }
