@@ -498,7 +498,7 @@ function drawGlyphRun(
   }
   if (cache) {
     try {
-      const outlines = run.glyphs.map((g) => cache.get(run.fontId, g.id));
+      const outlines = run.glyphs.map((g) => cache.get(run.fontId, g.id, run.syntheticBold === true));
       const effects = run.modernEffects;
       const paint = modernTextFillStyle(ctx, effects, rect, run.color);
       const paintOutlines = (): void => {

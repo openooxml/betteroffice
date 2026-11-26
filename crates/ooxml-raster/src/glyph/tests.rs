@@ -27,6 +27,24 @@ fn cached_glyph<'a>(
     )
 }
 
+fn cached_emboldened<'a>(
+    cache: &'a mut GlyphCache,
+    fonts: &FontStore,
+    font: FontId,
+    glyph_id: u32,
+) -> Result<&'a CachedGlyph, String> {
+    cache.lookup_emboldened(
+        fonts,
+        font,
+        glyph_id,
+        || {
+            u16::try_from(glyph_id)
+                .map_err(|_| format!("glyph id {glyph_id} exceeds the font outline range"))
+        },
+        strict_outline_path,
+    )
+}
+
 fn strict_outline_path(commands: &[PathCmd]) -> Result<Option<Path>, String> {
     if commands.is_empty() {
         return Ok(None);
@@ -66,6 +84,81 @@ fn a_hit_reuses_the_path_without_converting_or_extracting_again() {
 }
 
 #[test]
+fn an_emboldened_lookup_builds_and_reuses_the_widened_path() {
+    let (fonts, font) = store();
+    let id = fonts.glyph_id(font, 'A').unwrap().unwrap();
+    let mut cache = GlyphCache::default();
+    let crisp = cached_glyph(&mut cache, &fonts, font, u32::from(id)).unwrap();
+    assert!(crisp.path.is_some());
+    assert!(crisp.bold_path.is_none(), "a crisp lookup does not widen");
+    assert!(!crisp.bold_resolved);
+
+    let first = cached_emboldened(&mut cache, &fonts, font, u32::from(id)).unwrap();
+    let widened_points = first
+        .bold_path
+        .as_ref()
+        .expect("'A' widens")
+        .points()
+        .as_ptr();
+    assert!(first.bold_resolved);
+    assert!(first.path.is_some());
+
+    let second = cache
+        .lookup_emboldened(
+            &fonts,
+            font,
+            u32::from(id),
+            || panic!("a widened hit must not convert the glyph id"),
+            |_| panic!("a widened hit must not rebuild either outline"),
+        )
+        .unwrap();
+    assert_eq!(
+        second.bold_path.as_ref().unwrap().points().as_ptr(),
+        widened_points
+    );
+}
+
+#[test]
+fn a_blank_glyph_has_no_widened_geometry_to_fall_back_to() {
+    let (fonts, font) = store();
+    let space = fonts.glyph_id(font, ' ').unwrap().unwrap();
+    let mut cache = GlyphCache::default();
+    let cached = cached_emboldened(&mut cache, &fonts, font, u32::from(space)).unwrap();
+    assert!(cached.path.is_none());
+    assert!(cached.bold_path.is_none());
+    assert!(cached.bold_resolved);
+}
+
+#[test]
+fn a_rejected_widened_path_keeps_the_crisp_path() {
+    let (fonts, font) = store();
+    let id = fonts.glyph_id(font, 'A').unwrap().unwrap();
+    let mut cache = GlyphCache::default();
+    let calls = std::cell::Cell::new(0_u32);
+    let cached = cache
+        .lookup_emboldened(
+            &fonts,
+            font,
+            u32::from(id),
+            || Ok(id),
+            |commands| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call == 1 {
+                    Err("widened path rejected".to_string())
+                } else {
+                    strict_outline_path(commands)
+                }
+            },
+        )
+        .unwrap();
+    assert!(cached.path.is_some());
+    assert!(cached.bold_path.is_none());
+    assert!(cached.bold_resolved);
+    assert_eq!(calls.get(), 2);
+}
+
+#[test]
 fn eviction_is_fifo_even_after_a_hit_or_replacement() {
     let (fonts, font) = store();
     let id = fonts.glyph_id(font, 'A').unwrap().unwrap();
@@ -89,6 +182,8 @@ fn eviction_is_fifo_even_after_a_hit_or_replacement() {
         CachedGlyph {
             path: None,
             upem: 1_000.0,
+            bold_path: None,
+            bold_resolved: false,
         },
     );
     assert_eq!(cache.entries.len(), MAX_CACHED_GLYPH_OUTLINES);
@@ -253,6 +348,8 @@ fn the_glyph_cache_evicts_its_oldest_entries_past_the_cap() {
             CachedGlyph {
                 path: None,
                 upem: 1000.0,
+                bold_path: None,
+                bold_resolved: false,
             },
         );
     }
@@ -296,17 +393,24 @@ fn an_evicted_glyph_outline_is_extracted_again_on_demand() {
     assert!(cache.entries.contains_key(&(ids[0].to_u32(), 0)));
 }
 
-/// A new outline revision of the bound store drops every cached path, so a
-/// glyph cached blank before its outline arrived is extracted again; a
-/// different store is still refused.
+/// A new outline revision of the bound store drops every cached path and its
+/// widened copy, so a glyph cached blank before its outline arrived is
+/// extracted again; a different store is still refused.
 #[test]
 fn a_new_outline_revision_drops_cached_paths() {
     let (fonts, font) = store();
     let mut cache = GlyphCache::default();
-    for gid in [36, 37] {
-        cached_glyph(&mut cache, &fonts, font, gid).unwrap();
+    for character in ['A', 'B'] {
+        let gid = fonts.glyph_id(font, character).unwrap().unwrap();
+        cached_emboldened(&mut cache, &fonts, font, u32::from(gid)).unwrap();
     }
     assert_eq!(cache.entries.len(), 2);
+    assert!(
+        cache
+            .entries
+            .values()
+            .all(|cached| cached.bold_resolved && cached.bold_path.is_some())
+    );
     cache.bind(fonts.id(), 0).unwrap();
     assert_eq!(cache.entries.len(), 2);
     cache.bind(fonts.id(), 1).unwrap();

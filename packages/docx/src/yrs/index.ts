@@ -1226,7 +1226,7 @@ export interface YrsSession extends CollaborationReplica {
     to: number
   ): string;
   /** Read a glyph outline from the session's resident font store. */
-  outlineGlyphJson(fontId: number, glyphId: number): string;
+  outlineGlyphJson(fontId: number, glyphId: number, syntheticBold?: boolean): string;
 
   // -- lifecycle --
 

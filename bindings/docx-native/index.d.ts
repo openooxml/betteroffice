@@ -67,7 +67,7 @@ export declare class EditSession {
   display_range_rects_on_pages_json(from: number, to: number, firstPage: number, lastPage: number): string
   display_range_rects_region_json(region: string, partId: string, from: number, to: number): string
   display_range_rects_batch(region: string, partId: string, ranges: Float64Array): Float64Array
-  outline_glyph_json(fontId: number, glyphId: number): string
+  outline_glyph_json(fontId: number, glyphId: number, syntheticBold?: boolean | undefined | null): string
   echo_glyph_set_json(fontId: number, size: number, kern: boolean, alphabet: string): string
   accept_change(targetJson: string): string
   add_comment(rangesJson: string, author: string, date: string, bodyJson: string): string
@@ -338,7 +338,7 @@ export declare function measure_paragraph_json(input: string): string
 
 export declare function open_display_list(displayList: string): number
 
-export declare function outline_glyph_json(fontId: number, glyphId: number): string
+export declare function outline_glyph_json(fontId: number, glyphId: number, syntheticBold?: boolean | undefined | null): string
 
 export declare function paragraphPatchWriterVersion(): number
 

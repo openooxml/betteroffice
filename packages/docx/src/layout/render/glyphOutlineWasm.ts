@@ -6,11 +6,13 @@
  * display-list builder (`buildRustDisplayList`) and the measure engine
  * (`getRustTextEngine`) use, so all three resolve to ONE wasm module instance —
  * i.e. one measurement `FontStore`. That shared identity is load-bearing:
- * `outlineGlyphJson(fontId, glyphId)` must read glyph outlines from the very
- * store `registerMeasureFont` populated during measurement, otherwise the ids
- * in a GlyphRun would resolve against an empty store and every glyph would
- * rasterize as `.notdef`. Keeping the import dynamic also keeps the ~800KB
- * inlined wasm out of the default bundle (see `layout/wasm/index.ts`).
+ * `outlineGlyphJson(fontId, glyphId, syntheticBold)` must read glyph outlines
+ * from the very store `registerMeasureFont` populated during measurement,
+ * otherwise the ids in a GlyphRun would resolve against an empty store and
+ * every glyph would rasterize as `.notdef`. `syntheticBold` selects the widened
+ * geometry a regular face is painted with. Keeping the import dynamic also
+ * keeps the ~800KB inlined wasm out of the default bundle (see
+ * `layout/wasm/index.ts`).
  *
  */
 

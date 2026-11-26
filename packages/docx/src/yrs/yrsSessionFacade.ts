@@ -876,7 +876,8 @@ export function wrapSession(
     },
     displayRangeRectsRegionJson: (region, rId, from, to) =>
       session.display_range_rects_region_json(region, rId, from, to),
-    outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
+    outlineGlyphJson: (fontId, glyphId, syntheticBold) =>
+      session.outline_glyph_json(fontId, glyphId, syntheticBold),
 
     loadState: (update) => {
       markDirty('all');

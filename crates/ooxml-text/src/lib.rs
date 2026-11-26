@@ -40,6 +40,8 @@
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
+//! - [`embolden`] — synthetic bold ([`embolden_glyph_outline`]): real contour
+//!   widening for faces that ship no bold cut.
 //!
 //! Design constraint (load-bearing): callers hand this crate font *bytes* plus
 //! a fallback chain of [`FontId`]s. Resolving a `w:rFonts` name to bytes —
@@ -53,6 +55,7 @@ pub mod auto_space;
 pub mod bidi;
 pub mod caps;
 pub mod echo;
+pub mod embolden;
 pub mod family_metrics;
 pub mod font_store;
 pub mod line_break;
@@ -77,6 +80,7 @@ pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use echo::{EchoGlyphSet, echo_glyph_set};
+pub use embolden::embolden_glyph_outline;
 pub use font_store::{
     FontError, FontId, FontMetrics, FontStore, OutlineUpdateError, RequestedLineMetrics,
     covered_character,

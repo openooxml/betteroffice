@@ -983,6 +983,9 @@ pub struct GlyphRunPrimitive {
     pub small_caps: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    /// Requested bold painted from a regular face without changing its advance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub synthetic_bold: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_shadow: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -4414,6 +4417,7 @@ fn emit_text_watermark(
             all_caps: false,
             small_caps: false,
             hidden: false,
+            synthetic_bold: false,
             text_shadow: None,
             text_outline: false,
             emphasis_mark: None,
@@ -9305,6 +9309,7 @@ fn glyph_run_primitive(
         all_caps: fmt.all_caps == Some(true),
         small_caps: fmt.small_caps == Some(true),
         hidden: fmt.hidden == Some(true),
+        synthetic_bold: fmt.bold == Some(true) && !store.face_is_bold(font).unwrap_or(false),
         text_shadow: text_shadow_of(fmt),
         text_outline: fmt.text_outline == Some(true),
         emphasis_mark: fmt.emphasis_mark.clone(),

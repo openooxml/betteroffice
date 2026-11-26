@@ -1181,6 +1181,52 @@ fn synthetic_measurement_emits_a_horizontal_paint_clip() {
 }
 
 #[test]
+fn bold_without_a_bold_face_marks_the_run_synthetic() {
+    let mut store = FontStore::new();
+    let regular = store.register(LIBERATION.to_vec()).unwrap();
+    let bold = store
+        .register(include_bytes!("../../../packages/fonts/assets/LiberationSans-Bold.ttf").to_vec())
+        .unwrap();
+    let build = |key: &str, face: FontId| -> String {
+        let mut input: serde_json::Value =
+            serde_json::from_str(&build_input("Bold text", FRAG_WIDTH, None, false, None)).unwrap();
+        input["measured"][0]["block"]["runs"][0]["bold"] = serde_json::json!(true);
+        input["fontChains"] = serde_json::json!({ key: [face.to_u32()] });
+        input.to_string()
+    };
+
+    // a bold request the chain answers with the regular face: Word-style
+    // substitution, so the browser must embolden the outlines
+    let synthetic_json =
+        build_display_list_json_with_fonts(&build("liberation sans|1|0", regular), &store)
+            .expect("builds");
+    let dl: DisplayList = serde_json::from_str(&synthetic_json).unwrap();
+    let synthetic = glyph_runs(&dl)[0];
+    assert_eq!(synthetic.font_id, regular.to_u32());
+    assert!(synthetic.synthetic_bold);
+    assert!(synthetic_json.contains(r#""syntheticBold":true"#));
+
+    // the same request answered by a face that is itself bold needs no second pass
+    let real_json = build_display_list_json_with_fonts(&build("liberation sans|1|0", bold), &store)
+        .expect("builds");
+    let dl: DisplayList = serde_json::from_str(&real_json).unwrap();
+    assert_eq!(glyph_runs(&dl)[0].font_id, bold.to_u32());
+    assert!(!glyph_runs(&dl)[0].synthetic_bold);
+    assert!(!real_json.contains("syntheticBold"));
+
+    // synthetic weight never moves the pen: the regular face's glyph positions
+    // and advances are exactly the non-bold run's
+    let mut plain: serde_json::Value =
+        serde_json::from_str(&build_input("Bold text", FRAG_WIDTH, None, false, None)).unwrap();
+    plain["fontChains"] = serde_json::json!({ "liberation sans|0|0": [regular.to_u32()] });
+    let plain_json = build_display_list_json_with_fonts(&plain.to_string(), &store).unwrap();
+    let dl: DisplayList = serde_json::from_str(&plain_json).unwrap();
+    let plain = glyph_runs(&dl)[0];
+    assert!(!plain.synthetic_bold);
+    assert_eq!(plain.glyphs, synthetic.glyphs);
+}
+
+#[test]
 fn justified_line_glyph_x_reaches_usable_width() {
     let mut store = FontStore::new();
     let id = store.register(LIBERATION.to_vec()).unwrap();

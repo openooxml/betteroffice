@@ -1173,7 +1173,15 @@ pub(crate) fn min_content_width_typed_resident(
 }
 
 pub fn outline_glyph_json_str(font_id: u32, glyph_id: u32) -> Result<String, String> {
-    with_module_fonts(|| outline_glyph_json_resident(font_id, glyph_id))
+    outline_glyph_json_str_with_weight(font_id, glyph_id, false)
+}
+
+pub fn outline_glyph_json_str_with_weight(
+    font_id: u32,
+    glyph_id: u32,
+    synthetic_bold: bool,
+) -> Result<String, String> {
+    with_module_fonts(|| outline_glyph_json_resident_with_weight(font_id, glyph_id, synthetic_bold))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
@@ -1181,22 +1189,40 @@ pub fn outline_glyph_json_str(font_id: u32, glyph_id: u32) -> Result<String, Str
 /// `{"upem":2048,"cmds":[{"t":"M","x":..,"y":..},{"t":"L","x":..,"y":..},
 /// {"t":"Q","cx":..,"cy":..,"x":..,"y":..},
 /// {"t":"C","c1x":..,"c1y":..,"c2x":..,"c2y":..,"x":..,"y":..},{"t":"Z"}]}`.
-/// The canvas caches this per `(fontId, glyphId)` and scales by `size/upem`,
-/// flipping y at draw time. `cmds` is empty for a blank glyph (space).
+/// The canvas caches normal and synthetic-bold outlines separately and scales
+/// them by `size/upem`, flipping y at draw time. Blank glyphs have no commands.
+/// `synthetic_bold` widens the contours of a regular face that has no bold cut
+/// (it does not change metrics); the widened path is lines only.
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
-pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
-    outline_glyph_json_str(font_id, glyph_id).map_err(js_error)
+pub fn outline_glyph_json(
+    font_id: u32,
+    glyph_id: u32,
+    synthetic_bold: Option<bool>,
+) -> Result<String, JsValue> {
+    outline_glyph_json_str_with_weight(font_id, glyph_id, synthetic_bold.unwrap_or(false))
+        .map_err(js_error)
 }
 
 /// Reads a glyph outline from the current measurement font store.
 pub fn outline_glyph_json_resident(font_id: u32, glyph_id: u32) -> Result<String, String> {
+    outline_glyph_json_resident_with_weight(font_id, glyph_id, false)
+}
+
+/// Reads the outline used to paint this weight from the resident font store.
+pub fn outline_glyph_json_resident_with_weight(
+    font_id: u32,
+    glyph_id: u32,
+    synthetic_bold: bool,
+) -> Result<String, String> {
     let glyph_id = u16::try_from(glyph_id)
         .map_err(|_| format!("glyph id {glyph_id} out of range for this font"))?;
     with_measure_fonts(|store| {
-        store
-            .borrow()
-            .outline_glyph_json(ooxml_text::FontId::from_u32(font_id), glyph_id)
+        store.borrow().outline_glyph_json_with_weight(
+            ooxml_text::FontId::from_u32(font_id),
+            glyph_id,
+            synthetic_bold,
+        )
     })
     .map_err(|e| e.to_string())
 }
@@ -1250,9 +1276,10 @@ mod tests {
             );
             let glyph =
                 with_measure_fonts(|store| store.borrow().glyph_id(id, 'A').unwrap().unwrap());
-            let outline: serde_json::Value =
-                serde_json::from_str(&outline_glyph_json(id.to_u32(), u32::from(glyph)).unwrap())
-                    .unwrap();
+            let outline: serde_json::Value = serde_json::from_str(
+                &outline_glyph_json_str(id.to_u32(), u32::from(glyph)).unwrap(),
+            )
+            .unwrap();
             assert!(!outline["cmds"].as_array().unwrap().is_empty());
             assert_eq!(measure_fonts_generation().1, 0);
             assert_eq!(register_measure_font_bytes(LIBERATION_SANS).unwrap(), 0);
@@ -1364,7 +1391,7 @@ mod tests {
         let font_id = register_measure_font(LIBERATION_SANS).expect("register fixture font");
 
         // 'A' is glyph 36 in LiberationSans (cross-checked in ooxml-text tests).
-        let json = outline_glyph_json(font_id, 36).expect("outline json");
+        let json = outline_glyph_json_str(font_id, 36).expect("outline json");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
 
         assert_eq!(v["upem"], 2048);
@@ -1373,6 +1400,20 @@ mod tests {
         assert_eq!(cmds[0]["t"], "M");
         assert!(cmds[0]["x"].is_number() && cmds[0]["y"].is_number());
         assert_eq!(cmds.last().unwrap()["t"], "Z");
+
+        let bold = with_module_fonts(|| outline_glyph_json_resident_with_weight(font_id, 36, true))
+            .expect("synthetic outline json");
+        let bold: serde_json::Value = serde_json::from_str(&bold).expect("valid json");
+        assert_eq!(bold["upem"], v["upem"]);
+        let left_edge = |outline: &serde_json::Value| {
+            outline["cmds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|cmd| cmd["x"].as_f64())
+                .fold(f64::INFINITY, f64::min)
+        };
+        assert!(left_edge(&bold) < left_edge(&v));
 
         clear_measure_fonts();
     }
@@ -1450,7 +1491,7 @@ mod tests {
         assert_eq!(substitute, 1);
         let measured = measure_paragraph_json(&font_measurement_input(substitute)).unwrap();
         assert!(!measured.is_empty());
-        assert_eq!(outline_glyph_json(0, 36).unwrap(), session_outline);
+        assert_eq!(outline_glyph_json_str(0, 36).unwrap(), session_outline);
         clear_measure_fonts_wasm().unwrap();
         assert_ne!(with_module_fonts(measure_store_id), module_id);
         assert_eq!(with_module_fonts(measure_fonts_generation).1, 0);
@@ -1473,7 +1514,7 @@ mod tests {
         assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
         let module_generation = measure_fonts_generation();
         let module_measurement = measure_paragraph_json(&font_measurement_input(0)).unwrap();
-        let module_outline = outline_glyph_json(0, 36).unwrap();
+        let module_outline = outline_glyph_json_str(0, 36).unwrap();
         let session = MeasureFonts::default();
         {
             let _scope = session.enter();
@@ -1492,7 +1533,7 @@ mod tests {
                 measure_paragraph_json_resident(&input).unwrap()
             );
             assert_eq!(
-                outline_glyph_json(1, 36).unwrap(),
+                outline_glyph_json_str(1, 36).unwrap(),
                 outline_glyph_json_resident(1, 36).unwrap()
             );
             clear_measure_fonts_wasm().unwrap();
@@ -1508,7 +1549,7 @@ mod tests {
             measure_paragraph_json(&font_measurement_input(0)).unwrap(),
             module_measurement
         );
-        assert_eq!(outline_glyph_json(0, 36).unwrap(), module_outline);
+        assert_eq!(outline_glyph_json_str(0, 36).unwrap(), module_outline);
         clear_measure_fonts_wasm().unwrap();
     }
 

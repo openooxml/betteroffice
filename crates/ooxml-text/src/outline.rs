@@ -168,10 +168,23 @@ impl FontStore {
 
     /// [`FontStore::outline_glyph`] serialized to the pinned JSON wire shape
     /// (see [`PathCmd`]). The wasm facade in `docx-layout` calls this; the
-    /// canvas caches the result per `(fontId, glyphId)` and scales by
-    /// `size/upem`.
+    /// canvas caches the crisp and synthetic-bold variants separately and
+    /// scales each by `size/upem`.
     pub fn outline_glyph_json(&self, id: FontId, glyph_id: u16) -> Result<String, FontError> {
-        let outline = self.outline_glyph(id, glyph_id)?;
+        self.outline_glyph_json_with_weight(id, glyph_id, false)
+    }
+
+    /// Serializes the outline used to paint this weight, without changing its metrics.
+    pub fn outline_glyph_json_with_weight(
+        &self,
+        id: FontId,
+        glyph_id: u16,
+        synthetic_bold: bool,
+    ) -> Result<String, FontError> {
+        let mut outline = self.outline_glyph(id, glyph_id)?;
+        if synthetic_bold && let Some(cmds) = crate::embolden_glyph_outline(&outline) {
+            outline.cmds = cmds;
+        }
         // Our own well-formed struct (finite font-unit floats); a serializer
         // failure is not reachable from valid outlines but is surfaced rather
         // than unwrapped to keep the untrusted-font path panic-free.

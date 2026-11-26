@@ -127,7 +127,8 @@ export function createPngExporter(session: YrsSession) {
         if (!page) throw new RangeError(`page index ${index} out of range for ${display.pageCount} page(s)`);
         const bytes = await renderEnginePng({
           displayList: display.displayList, fontChains, page, session: copy,
-          outlineGlyph: (fontId, glyphId) => copy.outlineGlyphJson(fontId, glyphId),
+          outlineGlyph: (fontId, glyphId, syntheticBold) =>
+            copy.outlineGlyphJson(fontId, glyphId, syntheticBold),
           media: (token) => copy.mediaSource(token),
         }, options);
         assertAlive();

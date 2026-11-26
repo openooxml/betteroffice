@@ -54,11 +54,21 @@ impl EditSessionCore {
         docx_layout::update_measure_font_outlines(font_id, bytes).map_err(EngineError::message)
     }
 
-    /// The outline of one glyph as JSON in font units, y-up. Errors when the
-    /// glyph cannot be extracted.
+    /// Returns the glyph outline in font units as JSON.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> EngineResult<String> {
+        self.outline_glyph_json_with_weight(font_id, glyph_id, false)
+    }
+
+    /// Returns the outline used to paint the requested weight.
+    pub fn outline_glyph_json_with_weight(
+        &self,
+        font_id: u32,
+        glyph_id: u32,
+        synthetic_bold: bool,
+    ) -> EngineResult<String> {
         let _fonts = self.fonts.enter();
-        docx_layout::outline_glyph_json_resident(font_id, glyph_id).map_err(EngineError::message)
+        docx_layout::outline_glyph_json_resident_with_weight(font_id, glyph_id, synthetic_bold)
+            .map_err(EngineError::message)
     }
 
     pub fn decode_font(&self, bytes: &[u8]) -> EngineResult<Vec<u8>> {
