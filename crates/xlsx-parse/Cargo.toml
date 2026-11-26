@@ -22,4 +22,5 @@ test-oracle = []
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 quick-xml = "0.41"
 serde = { version = "1", features = ["derive"] }
+xlsx-calc.workspace = true
 xlsx-model.workspace = true

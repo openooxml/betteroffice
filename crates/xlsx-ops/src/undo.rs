@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use xlsx_model::Workbook;
 
-use crate::apply::{OpError, apply_ops};
+use crate::apply::{OpError, apply_history_ops, apply_ops};
 use crate::op::{Op, Transaction};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ impl UndoStack {
         let Some(ops) = self.undo.last().cloned() else {
             return Ok(None);
         };
-        let redo_inverse = apply_ops(wb, &ops)?;
+        let redo_inverse = apply_history_ops(wb, &ops)?;
         self.undo.pop();
         self.redo.push(redo_inverse);
         Ok(Some(ops))
@@ -95,7 +95,7 @@ impl UndoStack {
         let Some(ops) = self.redo.last().cloned() else {
             return Ok(None);
         };
-        let undo_inverse = apply_ops(wb, &ops)?;
+        let undo_inverse = apply_history_ops(wb, &ops)?;
         self.redo.pop();
         self.undo.push(undo_inverse);
         Ok(Some(ops))

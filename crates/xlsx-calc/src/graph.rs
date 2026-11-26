@@ -19,7 +19,7 @@ use xlsx_model::{
 
 use crate::TableSpec;
 use crate::deps::{offset_target, positional_argument, range_join_span, references};
-use crate::eval::{ParseCache, parse_cached};
+use crate::eval::{ParseCache, parse_cached, parse_definition_cached};
 use crate::functions::Func;
 use crate::parser::Expr;
 use crate::reference::table_rect;
@@ -409,10 +409,11 @@ impl DepGraph {
                             continue;
                         };
                         let defined = &self.defined_names[index];
+                        let owner = defined.local_sheet.unwrap_or(sheet);
                         if expanded.insert((sheet, index))
-                            && let Some(parsed) = parse_cached(asts, definition_source(defined))
+                            && let Some(parsed) = self.parse_definition(asts, owner, defined)
                         {
-                            bodies.push((defined.local_sheet.unwrap_or(sheet), parsed));
+                            bodies.push((owner, parsed));
                         }
                     }
                     Expr::FuncCall { func, args, .. } => {
@@ -889,6 +890,29 @@ impl DepGraph {
         &self.asts
     }
 
+    fn is_sheet_span(&self, owner: SheetId, first: &str, last: &str) -> bool {
+        self.names.contains_key(&first.to_lowercase())
+            && self.names.contains_key(&last.to_lowercase())
+            && self.defined_name(owner, first).is_none()
+    }
+
+    fn parse_formula(&self, owner: SheetId, source: &str) -> Option<Arc<Expr>> {
+        parse_cached(&self.asts, source, &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })
+    }
+
+    fn parse_definition(
+        &self,
+        asts: &ParseCache,
+        owner: SheetId,
+        defined: &DefinedName,
+    ) -> Option<Arc<Expr>> {
+        parse_definition_cached(asts, definition_source(defined), &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })
+    }
+
     /// the node's parsed ast; `None` when the cell carries no (parseable)
     /// formula.
     pub(crate) fn ast(&self, sheet: SheetId, cell: CellRef) -> Option<Arc<Expr>> {
@@ -899,7 +923,7 @@ impl DepGraph {
 
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Some(expr) = parse_cached(&self.asts, formula_source(src)) else {
+        let Some(expr) = self.parse_formula(key.sheet, formula_source(src)) else {
             return;
         };
         let edges = self.resolve_edges(key, &expr);
@@ -1017,10 +1041,11 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             self.add_references(definition_sheet, &expression, out, seen);
             // a name's body reads structured references of its own
             self.add_table_references(node, &expression, out, seen);
@@ -1094,10 +1119,11 @@ impl DepGraph {
             if !expanded.insert((lookup_sheet, name.to_ascii_lowercase())) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             push_uncomputable_calls(definition_sheet, &expression, &mut found, &mut pending);
         }
         found.into_iter().collect()
@@ -1118,10 +1144,11 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             if push_volatile_name_uses(definition_sheet, &expression, &mut pending) {
                 return true;
             }

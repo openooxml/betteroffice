@@ -414,6 +414,16 @@ define_ops! {
         SetTables => "setTables" {
             tables: Vec<Table>,
         },
+        #[doc(hidden)]
+        RestoreTableColumn => "restoreTableColumn" {
+            sheet: SheetId,
+            at: CellRef,
+            table: String,
+            caption: String,
+            cell: CellState,
+            formulas: Vec<(SheetId, CellRef, (String, String))>,
+            defined_names: Vec<(DefinedName, String)>,
+        },
     }
 }
 

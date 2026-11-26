@@ -12,10 +12,13 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
+use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::{RecalcResult, recalc_after_with_seed};
 use xlsx_model::numfmt::format_renders_date;
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
-use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
+use xlsx_ops::{
+    CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty, table_header_at,
+};
 use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 use xlsx_render::{display_text, format_code_for_cell};
 
@@ -23,9 +26,9 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    committed_formula, current_cell_state, edit_cell_state, entered_formula, entered_text,
-    typed_formula_fails, validate_cell_state, validate_model_sheets, validate_op,
-    written_cell_style,
+    cell_write_is_unchanged, committed_formula, current_cell_state, edit_cell_state,
+    entered_formula, entered_text, typed_formula_fails, validate_cell_input_state,
+    validate_model_sheets, validate_op, written_cell_style,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -677,7 +680,11 @@ fn replacement_match(
     Some(next)
 }
 
-fn validate_formula(source: &str) -> std::result::Result<(), String> {
+fn validate_formula(
+    source: &str,
+    workbook: &xlsx_model::Workbook,
+    sheet: SheetId,
+) -> std::result::Result<(), String> {
     if source.is_empty() {
         return Err("is empty".to_owned());
     }
@@ -690,7 +697,7 @@ fn validate_formula(source: &str) -> std::result::Result<(), String> {
     if xlsx_ops::is_formula_source(source) {
         return Ok(());
     }
-    parse_formula(source)
+    parse_formula_for_cell(source, workbook, sheet)
         .map(|_| ())
         .map_err(|error| format!("does not parse: {error}"))
 }
@@ -925,7 +932,7 @@ impl Workbook {
         }
         if let EditOperation::SetFormulas { formulas, .. } = &step.operation {
             for (cell, source) in resolved.iter().zip(formulas.iter().flatten()) {
-                validate_formula(source).map_err(|problem| {
+                validate_formula(source, &self.model, resolved.sheet).map_err(|problem| {
                     at(
                         EditFailureCode::InvalidStep,
                         format!("the formula for {} {problem}", cell.to_a1()),
@@ -971,6 +978,8 @@ impl Workbook {
             EditOperation::SetCellInputs { inputs, .. } => {
                 let mut states = Vec::new();
                 for (cell, input) in resolved.iter().zip(inputs.iter().flatten()) {
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let (mut state, format) = edit_cell_state(
                         &self.model,
                         &defined,
@@ -982,15 +991,21 @@ impl Workbook {
                     entered_formula(&self.model, resolved.sheet, cell, state.formula.take())
                         .and_then(|formula| {
                             state.formula = formula;
-                            validate_cell_state(&state)
+                            validate_cell_input_state(&state, header)
                         })
                         .map_err(|error| {
-                            at(
-                                EditFailureCode::InvalidStep,
-                                format!("the input for {}: {error}", cell.to_a1()),
-                            )
+                            let message = if matches!(
+                                error,
+                                Error::Operation(OpError::TableHeaderUnsupported(_))
+                            ) {
+                                error.to_string()
+                            } else {
+                                format!("the input for {}: {error}", cell.to_a1())
+                            };
+                            at(EditFailureCode::InvalidStep, message)
                         })?;
                     if format.is_some()
+                        || header
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1005,23 +1020,30 @@ impl Workbook {
                 let mut states = Vec::new();
                 for (cell, value) in resolved.iter().zip(values.iter().flatten()) {
                     let current = current_cell_state(&self.model, resolved.sheet, cell);
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     let state = CellState {
-                        value: value.clone(),
+                        value: match value {
+                            CellValue::Empty if header => CellValue::Text {
+                                value: String::new(),
+                            },
+                            value => value.clone(),
+                        },
                         formula: None,
                         style: written_cell_style(
                             &self.model,
                             resolved.sheet,
                             cell,
-                            matches!(value, CellValue::Empty),
+                            !header && matches!(value, CellValue::Empty),
                         ),
                     };
-                    validate_cell_state(&state).map_err(|error| {
+                    validate_cell_input_state(&state, header).map_err(|error| {
                         at(
                             EditFailureCode::InvalidStep,
                             format!("the value for {}: {error}", cell.to_a1()),
                         )
                     })?;
-                    if !cell_states_semantically_equal(&current, &state) {
+                    if header || !cell_states_semantically_equal(&current, &state) {
                         states.push((cell, state, None));
                     }
                 }
@@ -1042,10 +1064,15 @@ impl Workbook {
                         )),
                     )
                     .map_err(|error| {
-                        at(
-                            EditFailureCode::InvalidStep,
-                            format!("the formula for {}: {error}", cell.to_a1()),
-                        )
+                        let message = if matches!(
+                            error,
+                            Error::Operation(OpError::TableHeaderUnsupported(_))
+                        ) {
+                            error.to_string()
+                        } else {
+                            format!("the formula for {}: {error}", cell.to_a1())
+                        };
+                        at(EditFailureCode::InvalidStep, message)
                     })?;
                     let state = CellState {
                         value: CellValue::Empty,
@@ -1163,6 +1190,8 @@ impl Workbook {
                         continue;
                     }
                     let input = format!("{prefix}{next}");
+                    let header =
+                        table_header_at(&self.model.tables, resolved.sheet, cell).is_some();
                     *units = units.saturating_add(utf16_units(&input));
                     if *units > MAX_TEXT_UNITS {
                         return Err(at(
@@ -1172,7 +1201,7 @@ impl Workbook {
                             ),
                         ));
                     }
-                    if typed_formula_fails(&self.model, resolved.sheet, cell, &input) {
+                    if !header && typed_formula_fails(&self.model, resolved.sheet, cell, &input) {
                         let reason = format!("{place}: the new formula {input} does not parse");
                         refuse_cell(&mut stats, cell, reason);
                         continue;
@@ -1189,13 +1218,17 @@ impl Workbook {
                     let stored_as = entered_formula(&self.model, resolved.sheet, cell, typed)
                         .and_then(|formula| {
                             state.formula = formula;
-                            validate_cell_state(&state)
+                            validate_cell_input_state(&state, header)
                         });
                     if let Err(error) = stored_as {
+                        if matches!(error, Error::Operation(OpError::TableHeaderUnsupported(_))) {
+                            return Err(at(EditFailureCode::InvalidStep, error.to_string()));
+                        }
                         refuse_cell(&mut stats, cell, format!("{place}: {error}"));
                         continue;
                     }
                     if format.is_some()
+                        || header
                         || !cell_states_semantically_equal(
                             &current_cell_state(&self.model, resolved.sheet, cell),
                             &state,
@@ -1335,42 +1368,64 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut changed: Vec<BTreeSet<(u32, u32)>> = vec![BTreeSet::new(); steps.len()];
         let mut per_op = Vec::with_capacity(ops.len());
-        for (step, op) in &ops {
-            validate_op(&preview, op)?;
+        let mut staged_ops = Vec::with_capacity(ops.len());
+        for (step, op) in ops {
+            validate_op(&preview, &op)?;
             let formats = preview.styles.cell_xfs.len();
-            let inverse = match xlsx_ops::apply_in_place(&mut preview, op) {
-                Ok(inverse) => inverse.0,
-                Err(error @ (OpError::InvalidStyle(_) | OpError::NumFmtTableFull)) => {
+            let staged = (|| -> Result<_> {
+                if let Op::SetCell { sheet, at, cell } = &op
+                    && table_header_at(&preview.tables, *sheet, *at).is_some()
+                {
+                    self.ensure_table_header_write(&preview, &self.preserved.origins, &op)?;
+                    if cell_write_is_unchanged(&preview, *sheet, *at, cell)? {
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(xlsx_ops::apply_in_place(&mut preview, &op)?.0))
+            })();
+            let inverse = match staged {
+                Ok(Some(inverse)) => inverse,
+                Ok(None) => continue,
+                Err(Error::Operation(
+                    error @ (OpError::InvalidStyle(_)
+                    | OpError::NumFmtTableFull
+                    | OpError::TableHeaderUnsupported(_)),
+                )) => {
                     let code = match error {
                         OpError::NumFmtTableFull => EditFailureCode::LimitExceeded,
                         _ => EditFailureCode::InvalidStep,
                     };
-                    let planned = &steps[*step as usize];
+                    let planned = &steps[step as usize];
                     return refuse(
-                        failure(code, error.to_string(), Some(planned.target.clone())).at(*step),
+                        failure(code, error.to_string(), Some(planned.target.clone())).at(step),
                     );
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             };
             if (formats..preview.styles.cell_xfs.len())
                 .any(|index| !cell_format_fits(&preview.styles.cell_format(Some(index as u32))))
             {
-                let planned = &steps[*step as usize];
+                let planned = &steps[step as usize];
                 return refuse(
                     failure(
                         EditFailureCode::LimitExceeded,
                         "a resulting cell format exceeds the size a workbook can share".to_owned(),
                         Some(planned.target.clone()),
                     )
-                    .at(*step),
+                    .at(step),
                 );
             }
-            for undone in &inverse {
-                if let Op::SetCell { at, .. } = undone {
-                    changed[*step as usize].insert((at.row, at.col));
+            if let Op::SetCell { at, .. } = &op {
+                changed[step as usize].insert((at.row, at.col));
+            } else {
+                for undone in &inverse {
+                    if let Op::SetCell { at, .. } = undone {
+                        changed[step as usize].insert((at.row, at.col));
+                    }
                 }
             }
             per_op.push(inverse);
+            staged_ops.push(op);
         }
         if changed.iter().all(BTreeSet::is_empty) {
             return unchanged(steps);
@@ -1385,7 +1440,7 @@ impl Workbook {
             EditHistory::None => CommitHistory::None,
         };
         let prepared = match self.prepare_commit(
-            ops.into_iter().map(|(_, op)| op).collect(),
+            staged_ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::User,
             history,
@@ -1395,6 +1450,13 @@ impl Workbook {
             Err(error @ Error::CollaborationDataTooLarge { .. }) => {
                 return refuse(failure(
                     EditFailureCode::LimitExceeded,
+                    error.to_string(),
+                    None,
+                ));
+            }
+            Err(error @ Error::Operation(OpError::TableHeaderUnsupported(_))) => {
+                return refuse(failure(
+                    EditFailureCode::InvalidStep,
                     error.to_string(),
                     None,
                 ));
@@ -1529,18 +1591,34 @@ impl Workbook {
             Some(previous) => graph.adopt_unevaluated(previous),
             None => super::assume_unevaluated(&graph, &self.last_calculation),
         }
-        let recalculated = recalc_after_with_seed(
-            &mut prepared.model,
-            &mut graph,
-            &seeds,
-            request.calculation.now_serial,
-            self.rand_seed,
-        );
+        let recalculated = if prepared.table_references_rewritten()
+            || self.model.tables != prepared.model.tables
+        {
+            xlsx_calc::engine::recalc_all_kept(
+                &mut prepared.model,
+                &mut graph,
+                request.calculation.now_serial,
+                self.rand_seed,
+            )
+        } else {
+            recalc_after_with_seed(
+                &mut prepared.model,
+                &mut graph,
+                &seeds,
+                request.calculation.now_serial,
+                self.rand_seed,
+            )
+        };
         let changed_sheets = steps
             .iter()
             .zip(&changed)
             .filter(|(_, cells)| !cells.is_empty())
             .map(|(planned, _)| planned.resolved.sheet)
+            .chain(prepared.rewritten_table_cells().filter_map(|(sheet, at)| {
+                (super::stored_formula(&self.model, sheet, at)
+                    != super::stored_formula(&prepared.model, sheet, at))
+                .then_some(sheet)
+            }))
             .chain(recalculated.changed.iter().map(|(sheet, _)| *sheet))
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -1737,4 +1815,55 @@ fn capped_targets(keys: &[String], cells: &[(SheetId, CellRef)]) -> (Vec<CellTar
         .map(|(sheet, cell)| cell_target(keys, *sheet, *cell))
         .collect();
     (targets, cells.len() > MAX_DIAGNOSTIC_CELLS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::CELL_WRITE_CHECKS;
+    use super::*;
+    use crate::RangeAddress;
+
+    #[test]
+    fn a_table_free_batch_skips_the_header_write_comparison() {
+        let mut model = xlsx_model::Workbook::default();
+        model.sheets.push(Sheet::new("Sheet1"));
+        let mut workbook = Workbook::from_model(model).unwrap();
+        let sheet = SheetId(0);
+        workbook
+            .edit_cell(
+                sheet,
+                CellRef::new(0, 0),
+                "old",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        workbook
+            .edit_cell(
+                sheet,
+                CellRef::new(0, 1),
+                "=1+1",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+
+        let before = CELL_WRITE_CHECKS.get();
+        let applied = workbook
+            .apply_edits(&EditRequest {
+                expect_version: workbook.version(),
+                source: Default::default(),
+                history: Default::default(),
+                calculation: Default::default(),
+                steps: vec![EditStep::new(EditOperation::SetCellValues {
+                    target: RangeTarget {
+                        sheet_id: "sheet:0".into(),
+                        range: RangeAddress::A1 { a1: "A1:B1".into() },
+                    },
+                    values: vec![vec![CellValue::Number { value: 3.0 }; 2]],
+                })],
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.receipts[0].changed_cells.len(), 2);
+        assert_eq!(CELL_WRITE_CHECKS.get(), before);
+    }
 }

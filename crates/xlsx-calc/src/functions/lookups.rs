@@ -8,7 +8,7 @@ use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::graph::formula_source;
-use crate::parser::Expr;
+use crate::parser::{Expr, parse_released_definition};
 use crate::reference::{offset_rect, r1c1_rect};
 
 use super::{nth_int, nth_int_lifted, nth_number};
@@ -411,8 +411,8 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     if !a1 {
         let (sheet, reference) = match text.rsplit_once('!') {
             Some((prefix, reference)) => {
-                let qualifier =
-                    crate::parse_formula(&format!("{prefix}!A1")).map_err(|_| ErrorValue::Ref)?;
+                let qualifier = parse_released_definition(&format!("{prefix}!A1"))
+                    .map_err(|_| ErrorValue::Ref)?;
                 let Expr::Ref {
                     sheet: Some(sheet), ..
                 } = qualifier
@@ -426,7 +426,7 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
         let range = r1c1_rect(reference, ctx.cell).ok_or(ErrorValue::Ref)?;
         return as_area(&Expr::Range { sheet, range }, ctx).ok_or(ErrorValue::Ref);
     }
-    let expr = crate::parse_formula(&text).map_err(|_| {
+    let expr = parse_released_definition(&text).map_err(|_| {
         if text.contains('[') {
             ctx.record_unsupported_function();
         }

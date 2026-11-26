@@ -167,7 +167,7 @@ test('registers Carlito regular and bold as Calibri and repaints once after the 
   expect(added).toHaveLength(2);
 });
 
-test('requests script-restricted pack faces for Hebrew and Devanagari cells and uses device fallback for Arabic', async () => {
+test('requests script-restricted pack faces for Hebrew, Devanagari and Arabic cells', async () => {
   const { added } = browser();
   const { context, painted } = canvasText();
   const { scriptFace, scriptLoads } = provider();
@@ -186,8 +186,11 @@ test('requests script-restricted pack faces for Hebrew and Devanagari cells and 
     const loading = painter.load(frame);
     const ready = painter.paint(frame, () => {});
     await loading;
-    expect(scriptLoads.mock.calls.map(([face]) => face.family).sort()).toEqual(['Noto Sans Devanagari', 'Noto Sans Hebrew']);
-    expect(added.map(({ family }) => family).sort()).toEqual(['Arial', 'bo-xlsx-editor-Noto Sans Devanagari', 'bo-xlsx-editor-Noto Sans Hebrew']);
+    expect(scriptLoads.mock.calls.map(([face]) => face.family).sort()).toEqual(['Noto Naskh Arabic', 'Noto Sans Devanagari', 'Noto Sans Hebrew']);
+    expect(added.map(({ family }) => family).sort()).toEqual([
+      'Arial', 'bo-xlsx-editor-Noto Naskh Arabic', 'bo-xlsx-editor-Noto Sans Devanagari', 'bo-xlsx-editor-Noto Sans Hebrew',
+    ]);
+    expect(added.find(({ family }) => family.endsWith('Noto Naskh Arabic'))?.descriptors.unicodeRange ?? '').toMatch(/U\+0?600-0?6FF/i);
     expect(added.find(({ family }) => family.endsWith('Noto Sans Hebrew'))?.descriptors.unicodeRange ?? '').toMatch(/U\+0?590-0?5FF/i);
     expect(added.find(({ family }) => family.endsWith('Noto Sans Devanagari'))?.descriptors.unicodeRange ?? '').toMatch(/U\+0?900-0?97F/i);
     expect(ready).toBe(false);
@@ -195,10 +198,11 @@ test('requests script-restricted pack faces for Hebrew and Devanagari cells and 
     expect(painted).toEqual([
       { text: 'שלום', font: '16px "Arial", "bo-xlsx-editor-Noto Sans Hebrew", sans-serif' },
       { text: 'नमस्ते', font: '16px "Arial", "bo-xlsx-editor-Noto Sans Devanagari", sans-serif' },
-      { text: 'مرحبا', font: '16px "Arial", sans-serif' },
+      { text: 'مرحبا', font: '16px "Arial", "bo-xlsx-editor-Noto Naskh Arabic", sans-serif' },
       { text: 'שלום', font: '16px "Arial", "bo-xlsx-editor-Noto Sans Hebrew", sans-serif' },
     ]);
-    expect(scriptFace).toHaveBeenCalledTimes(2);
+    expect(scriptFace).toHaveBeenCalledTimes(3);
+    expect(scriptFace).toHaveBeenCalledWith('arabic', false, false, 'Arial');
     expect(repaint).toHaveBeenCalledTimes(2);
   } finally { painter.dispose(); }
 });
@@ -226,13 +230,13 @@ test.each([
     numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'م' }] },
   })],
   ['rich-text runs', cellText('A مرحبا', { runs: [{ start: 2, end: 7, bold: true }] })],
-] as const)('Arabic in %s makes no script face request', async (_source, command) => {
+] as const)('Arabic in %s requests Noto Naskh Arabic', async (_source, command) => {
   browser();
-  const { scriptFace } = provider();
+  const { scriptLoads } = provider();
   const painter = createDefaultFontPainter(decoder(), () => {});
   try {
     await painter.load(cells(command));
-    expect(scriptFace).not.toHaveBeenCalled();
+    expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual(['Noto Naskh Arabic']);
   } finally { painter.dispose(); }
 });
 
@@ -371,7 +375,7 @@ describe.skipIf(engineKind === 'native')('editor PNG fonts', () => {
 
   test.each([
     ['Hebrew', 'שלום', 'hebrew', 'Noto Sans Hebrew'],
-    ['Arabic', 'مرحبا', 'arabic', undefined],
+    ['Arabic', 'مرحبا', 'arabic', 'Noto Naskh Arabic'],
   ] as const)('an editor PNG uses the engine fallback for %s in Calibri', async (_name, text, script, canvasFamily) => {
     const handle = await singleCellWorkbook();
     const { added, remove } = browser();
@@ -395,10 +399,9 @@ describe.skipIf(engineKind === 'native')('editor PNG fonts', () => {
       await painter.load(frame);
       painter.paint(frame, (list) => paintDisplayList(context, list, 1));
       const engineFace = fonts.resolveScriptFallbackFace(script, false, false, 'Calibri')!;
-      expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual(canvasFamily ? [canvasFamily] : []);
-      const editorFamily = canvasFamily ? `bo-xlsx-editor-${canvasFamily}` : undefined;
-      expect(painted).toContainEqual({ text, font: editorFamily
-        ? expect.stringContaining(`"${editorFamily}"`) : expect.stringMatching(/px "Calibri", sans-serif$/) });
+      expect(scriptLoads.mock.calls.map(([face]) => face.family)).toEqual([canvasFamily]);
+      const editorFamily = `bo-xlsx-editor-${canvasFamily}`;
+      expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${editorFamily}"`) });
       painted.length = 0;
 
       const api = createInThreadAsyncEditorApi({ handle, commands: createXlsxCommandController().store,
@@ -408,9 +411,7 @@ describe.skipIf(engineKind === 'native')('editor PNG fonts', () => {
       const exported = remove.mock.calls.map(([face]) => face).filter(({ bytes }) =>
         new TextDecoder().decode(bytes.slice(0, engineFace.file.length)) === engineFace.file);
       expect(exported).toHaveLength(1);
-      if (editorFamily) {
-        expect<ArrayBuffer | undefined>(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
-      }
+      expect<ArrayBuffer | undefined>(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
       expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${exported[0]!.family}"`) });
     } finally { painter.dispose(); handle.dispose(); }
   }, 30_000);
