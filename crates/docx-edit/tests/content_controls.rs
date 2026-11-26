@@ -1698,7 +1698,7 @@ fn locks_are_read_by_namespace_whatever_the_prefix() {
         )
     };
     let bytes = package(&format!(
-        "{}{}",
+        "{}{}{}",
         para(
             "0F000001",
             &alternate("alternate", r#"<q:lock q:val="contentLocked"/>"#)
@@ -1706,6 +1706,13 @@ fn locks_are_read_by_namespace_whatever_the_prefix() {
         para(
             "0F000002",
             &alternate("mixed", r#"<w:lock q:val="contentLocked"/>"#)
+        ),
+        para(
+            "0F000003",
+            &alternate(
+                "foreign",
+                r#"<x:lock xmlns:x="urn:other" x:val="contentLocked"/>"#
+            )
         )
     ));
     let doc = open(&bytes);
@@ -1722,6 +1729,13 @@ fn locks_are_read_by_namespace_whatever_the_prefix() {
     );
     assert_eq!(
         reason(&doc, vec![by_tag_step("mixed", "y")]),
+        (
+            EditFailureCode::LockedTarget,
+            Some(EditFailureReason::ContentLocked)
+        )
+    );
+    assert_eq!(
+        reason(&doc, vec![by_tag_step("foreign", "y")]),
         (
             EditFailureCode::Unsupported,
             Some(EditFailureReason::UnknownLock)

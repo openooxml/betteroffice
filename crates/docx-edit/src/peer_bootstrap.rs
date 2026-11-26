@@ -2607,8 +2607,8 @@ mod tests {
             control("<w:p><w:r><w:t>Source only</w:t></w:r></w:p>"),
         );
         let uncertain = concat!(
-            "<w:p xmlns:q=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" w14:paraId=\"00000073\">",
-            "<w:sdt><w:sdtPr><w:id w:val=\"73\"/><w:lock q:val=\"contentLocked\"/></w:sdtPr>",
+            "<w:p xmlns:x=\"urn:other\" w14:paraId=\"00000073\">",
+            "<w:sdt><w:sdtPr><w:id w:val=\"73\"/><x:lock x:val=\"contentLocked\"/></w:sdtPr>",
             "<w:sdtContent><w:r><w:t>Uncertain policy</w:t></w:r></w:sdtContent></w:sdt></w:p>",
         );
         body.1 = String::from_utf8(body.1.clone())

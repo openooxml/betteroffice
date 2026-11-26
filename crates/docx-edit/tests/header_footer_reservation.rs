@@ -97,6 +97,39 @@ fn a_tall_first_page_header_shortens_only_the_first_page() {
     );
 }
 
+/// `title-page-header` with its body rewritten under generated prefixes, as
+/// Python's ElementTree writes it.
+fn title_page_header_under_generated_prefixes() -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&fixture("title-page-header"))
+        .unwrap()
+        .into_iter()
+        .map(|(name, bytes)| {
+            if name != "word/document.xml" {
+                return (name, bytes);
+            }
+            let xml = String::from_utf8(bytes)
+                .unwrap()
+                .replace("<w:", "<ns0:")
+                .replace("</w:", "</ns0:")
+                .replace(" w:", " ns0:")
+                .replace(" r:id=", " ns4:id=")
+                .replace("xmlns:w=", "xmlns:ns0=")
+                .replace("xmlns:r=", "xmlns:ns4=");
+            assert!(!xml.contains("<w:") && xml.contains("ns4:id="));
+            (name, xml.into_bytes())
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn headers_referenced_under_generated_prefixes_reserve_as_written() {
+    assert_eq!(
+        page_lines(&title_page_header_under_generated_prefixes()),
+        [(1, 53), (54, 111), (112, 169), (170, 227), (228, 280)]
+    );
+}
+
 #[test]
 fn a_blank_first_page_band_leaves_the_first_page_its_full_height() {
     assert_eq!(
