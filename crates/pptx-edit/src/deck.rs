@@ -1360,20 +1360,6 @@ struct PlaceholderSpec {
     transform: pptx_parse::ShapeTransform,
 }
 
-fn master_placeholder_type_by_index(shapes: &[ShapeNode], index: u32) -> Option<&str> {
-    shapes.iter().find_map(|node| {
-        if let Some(placeholder) = shape_base(node).placeholder.as_ref()
-            && placeholder.index == Some(index)
-        {
-            return placeholder.placeholder_type.as_deref();
-        }
-        if let ShapeNode::Group(group) = node {
-            return master_placeholder_type_by_index(&group.children, index);
-        }
-        None
-    })
-}
-
 fn layout_placeholder_specs(
     package: &PptxPackage,
     layout: Option<&SlideLayout>,
@@ -1390,17 +1376,7 @@ fn layout_placeholder_specs(
         let Some(placeholder) = &shape.base.placeholder else {
             continue;
         };
-        let master_type = placeholder.placeholder_type.is_none().then(|| {
-            placeholder.index.and_then(|index| {
-                context
-                    .master
-                    .and_then(|master| master_placeholder_type_by_index(&master.shapes, index))
-            })
-        });
-        let raw_type = placeholder
-            .placeholder_type
-            .as_deref()
-            .or_else(|| master_type.flatten());
+        let raw_type = placeholder.placeholder_type.as_deref();
         let normalized = crate::paragraph::normalize_placeholder_type(raw_type);
         if !matches!(normalized, "title" | "subTitle" | "body") {
             continue;
@@ -5102,7 +5078,7 @@ mod tests {
                 hidden: false,
                 placeholder: Some(Placeholder {
                     placeholder_type: Some("ftr".to_owned()),
-                    index: Some(11),
+                    index: Some(1),
                     orientation: None,
                     size: None,
                 }),
@@ -5131,16 +5107,52 @@ mod tests {
             title.geometry = "roundRect".to_owned();
             title.adjust_values.insert("adj".to_owned(), 0.25);
         }
+        // OOXML omits `type` on default `obj` content placeholders; a colliding master footer
+        // `idx` must not suppress it, whereas an explicit layout `ftr` placeholder is skipped.
         layout.shapes.push(ShapeNode::Shape(pptx_parse::Shape {
             base: pptx_parse::ShapeBase {
                 id: 91,
-                name: "Untyped Footer".to_owned(),
+                name: "Content Placeholder 2".to_owned(),
                 title: None,
                 description: None,
                 decorative: false,
                 hidden: false,
                 placeholder: Some(Placeholder {
                     placeholder_type: None,
+                    index: Some(1),
+                    orientation: None,
+                    size: None,
+                }),
+                transform: pptx_parse::ShapeTransform {
+                    x: 100_000,
+                    y: 1_500_000,
+                    width: 4_000_000,
+                    height: 2_000_000,
+                    ..pptx_parse::ShapeTransform::default()
+                },
+            },
+            geometry: "rect".to_owned(),
+            has_preset_geometry: true,
+            adjust_values: BTreeMap::new(),
+            paths: Vec::new(),
+            fill: None,
+            picture_fill: None,
+            use_bg_fill: false,
+            outline: None,
+            effects: None,
+            style: None,
+            text: None,
+        }));
+        layout.shapes.push(ShapeNode::Shape(pptx_parse::Shape {
+            base: pptx_parse::ShapeBase {
+                id: 92,
+                name: "Footer Placeholder".to_owned(),
+                title: None,
+                description: None,
+                decorative: false,
+                hidden: false,
+                placeholder: Some(Placeholder {
+                    placeholder_type: Some("ftr".to_owned()),
                     index: Some(11),
                     orientation: None,
                     size: None,
@@ -5167,9 +5179,10 @@ mod tests {
         }));
 
         let specs = layout_placeholder_specs(&package, Some(&package.layouts[0])).unwrap();
-        assert_eq!(specs.len(), 1);
+        assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].geometry, "roundRect");
         assert!(specs[0].adjust_values_json.is_some());
+        assert_eq!(specs[1].name, "Content Placeholder 2");
 
         let ctr = default_placeholder_transform("ctrTitle", 12_192_000, 6_858_000);
         let sub = default_placeholder_transform("subTitle", 12_192_000, 6_858_000);

@@ -25,14 +25,8 @@ function promptBaseFontSize(placeholderType: string): number {
 }
 
 function cssTransform(guide: EmptyPlaceholderGuide): string | undefined {
-  const transform = guide.transform;
-  if (!transform) return undefined;
-  const parts: string[] = [];
-  if (transform.rotationDeg) parts.push(`rotate(${transform.rotationDeg}deg)`);
-  if (transform.flipH || transform.flipV) {
-    parts.push(`scale(${transform.flipH ? -1 : 1}, ${transform.flipV ? -1 : 1})`);
-  }
-  return parts.length ? parts.join(' ') : undefined;
+  const rotationDeg = guide.transform?.rotationDeg;
+  return rotationDeg ? `rotate(${rotationDeg}deg)` : undefined;
 }
 
 export function PlaceholderGuides({

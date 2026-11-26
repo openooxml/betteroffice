@@ -13,7 +13,7 @@ import type {
 } from '@betteroffice/pptx';
 import { presentationMetadata, presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import { useTranslation } from './i18n';
-import { defaultInsertLayoutPath } from './slideLayouts';
+import { defaultInsertLayoutPath, isEmptyEditablePlaceholder } from './slideLayouts';
 import { PlaceholderGuides } from './components/PlaceholderGuides';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
@@ -1833,6 +1833,39 @@ export function PptxEditorContent({
           shapeId: hit.shapeId,
           storyId: hit.storyId,
           anchor,
+          focus: hit.position,
+          focusLine: hitLocation?.lineIndex,
+          granularity: 'character',
+          clickCount,
+          clickShapeId: shape?.id ?? hit.shapeId,
+          startClientX: event.clientX,
+          startClientY: event.clientY,
+          dragging: false,
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } else if (
+        !readOnly &&
+        slide &&
+        hit?.kind === 'text' &&
+        isEmptyEditablePlaceholder(current.frame, hit.shapeId, hit.storyId)
+      ) {
+        handle.story(hit.storyId);
+        setSelection({
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor: hit.position,
+          focus: hit.position,
+          focusLine: hitLocation?.lineIndex,
+        });
+        setShapeSelection(null);
+        setDragPreview(null);
+        pointerGestureRef.current = {
+          kind: 'text',
+          pointerId: event.pointerId,
+          slideId: slide.id,
+          shapeId: hit.shapeId,
+          storyId: hit.storyId,
+          anchor: hit.position,
           focus: hit.position,
           focusLine: hitLocation?.lineIndex,
           granularity: 'character',

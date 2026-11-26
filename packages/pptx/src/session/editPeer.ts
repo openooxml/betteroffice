@@ -1,7 +1,7 @@
 import type { PresentationEditorConnection } from './client';
 import type { DeckSnapshot, HitTestResult } from '../types';
 import {
-  PresentationPeerError, replayPresentation,
+  PresentationPeerError, presentationPeerMetadata, replayPresentation,
   type PresentationHandle, type PresentationPeerHandle, type PresentationReplayEnvelope,
 } from '../wasm/loader';
 import { presentationEditPeerInternals } from './editPeerInternals';
@@ -176,6 +176,8 @@ export function createPresentationEditPeer(options: {
     .map((method) => [method, guardedRead(cache, method)]))) as unknown as PptxWorkerEditorInteractionAccess;
   Object.defineProperty(access, 'interaction', { enumerable: true, value: interaction });
   Object.defineProperty(access, cacheSymbol, { value: interaction });
+  const metadataSymbol = Symbol.for('@betteroffice/pptx/presentation-metadata');
+  Object.defineProperty(access, metadataSymbol, { value: () => { guard(); return presentationPeerMetadata(peer); } });
   for (const method of Object.keys(PRESENTATION_REPLAY_MUTATORS) as PptxWorkerEditorOperation['method'][]) {
     Object.defineProperty(access, method, { enumerable: true, value: (...args: unknown[]) =>
       apply({ method, args } as PptxWorkerEditorOperation).outcome.result });

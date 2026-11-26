@@ -1,7 +1,12 @@
 import { expect, test } from 'bun:test';
 import type { SlideDisplayList } from '@betteroffice/pptx';
 import { createT, en, zhCN, deepMerge, type LocaleStrings } from '@betteroffice/pptx-i18n';
-import { defaultInsertLayoutPath, emptyPlaceholderGuides, slideLayoutChoices } from './slideLayouts';
+import {
+  defaultInsertLayoutPath,
+  emptyPlaceholderGuides,
+  isEmptyEditablePlaceholder,
+  slideLayoutChoices,
+} from './slideLayouts';
 
 const tEn = createT(en);
 const tZh = createT(deepMerge(en, zhCN) as LocaleStrings);
@@ -137,4 +142,21 @@ test('emptyPlaceholderGuides filters out non-text placeholders and preserves anc
     align: 'left',
     transform: { rotationDeg: 5 },
   });
+  expect(isEmptyEditablePlaceholder(list, 's-title', 'story:s-title:0')).toBe(true);
+  expect(isEmptyEditablePlaceholder(list, 's-footer', 'story:s-footer:0')).toBe(false);
+
+  const multiParagraphList: SlideDisplayList = {
+    ...list,
+    primitives: [
+      {
+        ...(list.primitives[0] as Extract<SlideDisplayList['primitives'][number], { kind: 'textBox' }>),
+        paragraphs: [
+          { align: 'left', level: 0, runs: [] },
+          { align: 'left', level: 0, runs: [] },
+        ],
+      },
+    ],
+  };
+  expect(emptyPlaceholderGuides(multiParagraphList, tEn)).toHaveLength(0);
+  expect(isEmptyEditablePlaceholder(multiParagraphList, 's-title', 'story:s-title:0')).toBe(false);
 });

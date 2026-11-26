@@ -8,6 +8,7 @@ use pptx_edit::{
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const GRADIENT_OUTLINE_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/gradient-outline.pptx");
+const PROPOSAL_SLIDE_PROPS_FIXTURE: &[u8] = include_bytes!("fixtures/proposal-slide-props.pptx");
 const NUMBERED_FIXTURE: &[u8] =
     include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
 
@@ -950,4 +951,46 @@ fn width_edits_preserve_authored_gradient_geometry() {
     assert_eq!(xml.matches("scaled=\"0\"").count(), 2);
     assert_eq!(xml.matches("<a:tileRect").count(), 2);
     assert_eq!(xml.matches("rotWithShape=\"0\"").count(), 2);
+}
+
+#[test]
+fn instantiated_rotated_flipped_placeholder_round_trips_on_save() {
+    let mut archive_parts = ooxml_opc::unzip_parts(PROPOSAL_SLIDE_PROPS_FIXTURE).unwrap();
+    let (_, layout_xml) = archive_parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slideLayouts/slideLayout1.xml")
+        .unwrap();
+    let patched = String::from_utf8(layout_xml.clone()).unwrap().replace(
+        "<p:spPr/>",
+        "<p:spPr><a:xfrm rot=\"1800000\" flipH=\"1\" flipV=\"1\"><a:off x=\"457200\" y=\"274638\"/><a:ext cx=\"8229600\" cy=\"1143000\"/></a:xfrm></p:spPr>",
+    );
+    assert!(patched.contains("rot=\"1800000\""));
+    *layout_xml = patched.into_bytes();
+    let source = ooxml_opc::rezip_parts(&archive_parts).unwrap();
+
+    let session = DeckSession::open(&source, 32209).unwrap();
+    session
+        .insert_slide_with_placeholders(&context(), 1, Some("ppt/slideLayouts/slideLayout1.xml"))
+        .unwrap();
+    let live = session.snapshot().unwrap().slides[1].shapes[0].clone();
+    assert!((live.rotation_deg - 30.0).abs() < 1e-6);
+    assert!(live.flip_h);
+    assert!(live.flip_v);
+
+    let reopened = reopen(&session);
+    let saved_shape = &reopened.snapshot().unwrap().slides[1].shapes[0];
+    assert!(
+        (saved_shape.rotation_deg - 30.0).abs() < 0.01,
+        "expected rotation 30.0 after reopen, got {}",
+        saved_shape.rotation_deg
+    );
+    assert!(saved_shape.flip_h, "expected flip_h preserved after reopen");
+    assert!(saved_shape.flip_v, "expected flip_v preserved after reopen");
+    assert_eq!(
+        saved_shape
+            .placeholder
+            .as_ref()
+            .and_then(|ph| ph.placeholder_type.as_deref()),
+        Some("title")
+    );
 }

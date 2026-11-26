@@ -329,6 +329,40 @@ test('insertSlide_command_instantiates_layout_placeholders_with_single_undo', as
   } finally { await session.dispose(); }
 });
 
+test('invoke_insertSlide_accepts_unused_layout_and_forwards_instantiatePlaceholders', async () => {
+  const bytes = await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url));
+  const session = await open(bytes);
+  try {
+    const usedLayouts = new Set(session.state.slides.map((slide) => slide.layoutPartPath));
+    const unusedLayout = session.state.layouts!.find((layout) => !usedLayouts.has(layout.partPath))!;
+    expect(unusedLayout).toBeDefined();
+
+    const invalid = await session.command(session.state, 1, {
+      kind: 'invoke',
+      payload: {
+        ...input,
+        method: 'insertSlide',
+        args: [1, unusedLayout.partPath, { bogus: true } as unknown as { instantiatePlaceholders?: boolean }],
+      },
+    });
+    expect(invalid.outcomes[0]).toMatchObject({ status: 'refused', committed: false });
+
+    const invoked = await session.command(invalid, 2, {
+      kind: 'invoke',
+      payload: {
+        ...input,
+        method: 'insertSlide',
+        args: [1, unusedLayout.partPath, { instantiatePlaceholders: true }],
+      },
+    });
+    expect(invoked.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    const inserted = session.handle().snapshot().slides[1]!;
+    expect(inserted.layoutPartPath).toBe(unusedLayout.partPath);
+    expect(inserted.shapes.length).toBeGreaterThan(0);
+    expect(inserted.shapes[0]!.placeholder).toMatchObject({ placeholderType: 'title' });
+  } finally { await session.dispose(); }
+});
+
 test('undoing_a_deleted_slide_reselects_it', async () => {
   const session = await open();
   try {

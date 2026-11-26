@@ -1139,7 +1139,6 @@ export interface PresentationCommandAck extends PresentationCommandIdentity {
     activeSlideId?: string | null;
     historyThroughSeq?: number;
     slides?: PresentationSlideSummary[];
-    layouts?: PresentationSlideLayoutSummary[];
     size?: {
         width: number;
         height: number;
@@ -1604,7 +1603,6 @@ export type PresentationSessionState = Omit<SessionState, 'stage'> & {
     format: 'pptx';
     stage: 'preview' | 'ready' | 'failed';
     slides: PresentationSlideSummary[];
-    layouts?: PresentationSlideLayoutSummary[];
     size: {
         width: number;
         height: number;

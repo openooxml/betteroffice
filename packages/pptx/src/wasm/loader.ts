@@ -500,10 +500,16 @@ export function presentationDeleteTextJoiningParagraphs(
   })), true);
 }
 
+const metadataSymbol = Symbol.for('@betteroffice/pptx/presentation-metadata');
+
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
   const context = presentationContexts.get(handle);
-  if (!context) throw new Error('Presentation metadata is unavailable');
-  return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
+  if (context) {
+    return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
+  }
+  const read = (handle as unknown as Record<symbol, (() => PresentationMetadata) | undefined>)[metadataSymbol];
+  if (read) return read();
+  throw new Error('Presentation metadata is unavailable');
 }
 
 /** @experimental */

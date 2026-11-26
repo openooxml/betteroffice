@@ -2624,4 +2624,59 @@ describe('PptxEditor edit batches', () => {
       images.restore();
     }
   }, 30_000);
+
+  it('instantiates layout placeholders and enters caret editing on first interior click in legacy sync mode', async () => {
+    const deckBytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx'));
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        legacySyncApi
+        experimentalWorkerOpen={false}
+        file={deckBytes}
+        fonts={fonts()}
+        clientId={9135}
+        onReady={(ready) => { api = ready; }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined(), MOUNTED);
+    await act(async () => {
+      await api!.commands.execute('insertSlide', { layoutPartPath: 'ppt/slideLayouts/slideLayout1.xml' });
+    });
+    await waitFor(() => expect(view.getAllByTestId('pptx-placeholder-guide')).toHaveLength(1));
+
+    const frame = api!.handle.layoutSlide(1);
+    const titleBox = frame.primitives.find(
+      (primitive): primitive is Extract<SlideDisplayList['primitives'][number], { kind: 'textBox' }> =>
+        primitive.kind === 'textBox' && primitive.placeholderType === 'title'
+    )!;
+    expect(titleBox).toBeDefined();
+
+    const canvas = view.getByTestId('pptx-slide-canvas');
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+    canvas.setPointerCapture = () => {};
+    canvas.releasePointerCapture = () => {};
+    const clickX = titleBox.x + titleBox.w / 2;
+    const clickY = titleBox.y + titleBox.h / 2;
+
+    await act(async () => {
+      fireEvent.pointerDown(canvas, {
+        isPrimary: true, button: 0, pointerId: 1, clientX: clickX, clientY: clickY,
+      });
+      fireEvent.pointerUp(canvas, {
+        isPrimary: true, button: 0, pointerId: 1, clientX: clickX, clientY: clickY,
+      });
+    });
+
+    // First interior click hides the guide and puts the caret in the empty placeholder immediately.
+    await waitFor(() => expect(view.queryAllByTestId('pptx-placeholder-guide')).toHaveLength(0));
+
+    const stage = view.getByRole('application');
+    await act(async () => {
+      for (const ch of 'Hello') {
+        fireEvent.keyDown(stage, { key: ch });
+      }
+    });
+    const insertedSlide = api!.handle.snapshot().slides[1]!;
+    expect(insertedSlide.shapes[0]!.textStories[0]!.paragraphs[0]!.runs.map((r) => r.text).join('')).toBe('Hello');
+  }, 30_000);
 });

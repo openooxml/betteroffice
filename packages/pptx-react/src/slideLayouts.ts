@@ -108,7 +108,28 @@ export interface EmptyPlaceholderGuide {
 }
 
 function isEmptyTextBox(box: TextBoxPrimitive): boolean {
-  return !box.paragraphs.some((paragraph) => paragraph.runs.some((run) => run.text.length > 0));
+  return (
+    box.paragraphs.length <= 1 &&
+    !box.paragraphs.some((paragraph) => paragraph.runs.some((run) => run.text.length > 0))
+  );
+}
+
+/** Whether the targeted text box is an empty editable placeholder ready for first-click typing. */
+export function isEmptyEditablePlaceholder(
+  list: SlideDisplayList,
+  shapeId: string,
+  storyId?: string,
+): boolean {
+  return list.primitives.some(
+    (primitive) =>
+      primitive.kind === 'textBox' &&
+      primitive.shapeId === shapeId &&
+      (storyId === undefined || primitive.storyId === storyId) &&
+      Boolean(
+        primitive.placeholderType && EDITABLE_PLACEHOLDER_TYPES.has(primitive.placeholderType),
+      ) &&
+      isEmptyTextBox(primitive),
+  );
 }
 
 function placeholderPromptKey(placeholderType: string): TranslationKey {

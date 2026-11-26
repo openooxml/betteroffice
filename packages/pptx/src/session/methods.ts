@@ -81,7 +81,6 @@ export type PresentationSessionState = Omit<SessionState, 'stage'> & {
   format: 'pptx';
   stage: 'preview' | 'ready' | 'failed';
   slides: PresentationSlideSummary[];
-  layouts?: PresentationSlideLayoutSummary[];
   size: { width: number; height: number };
 };
 

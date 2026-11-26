@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { initWasm, openPresentation } from '../wasm/loader';
+import { initWasm, openPresentation, presentationMetadata, type PresentationHandle } from '../wasm/loader';
 import { engineKind, PptxDocument, PptxRenderer } from '../wasm/engine';
 import { createPresentationEditorSession } from './editorSession';
 import { createPresentationSessionHost } from './host';
@@ -500,5 +500,22 @@ test('in-thread paragraph proposals replay, preview and undo with the worker rep
     access.undo();
     await equal(context);
     expect(access.snapshot()).toEqual(before);
+  } finally { await owner.dispose(); }
+});
+
+test('worker editor access exposes layout metadata and replays insertSlide with placeholders', async () => {
+  const bytes = await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url));
+  const context = await setup(bytes);
+  const { access, owner } = context;
+  try {
+    const metadata = presentationMetadata(access as unknown as PresentationHandle);
+    expect(metadata.layouts?.length).toBe(3);
+    const layoutPath = metadata.layouts![0]!.partPath;
+    const receipt = access.insertSlide(1, layoutPath, { instantiatePlaceholders: true });
+    await equal(context);
+    const inserted = access.snapshot().slides.find((slide) => slide.id === receipt.slideId)!;
+    expect(inserted.layoutPartPath).toBe(layoutPath);
+    expect(inserted.shapes).toHaveLength(1);
+    expect(inserted.shapes[0]!.placeholder).toMatchObject({ placeholderType: 'title' });
   } finally { await owner.dispose(); }
 });
