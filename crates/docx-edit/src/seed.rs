@@ -511,6 +511,14 @@ impl SourceMetadata {
         false
     }
 
+    pub(crate) fn seed_identity(&self, story: &str) -> Option<(u32, u32)> {
+        self.structure.seeded_content.get(story).copied()
+    }
+
+    pub(crate) fn has_seed_identities(&self) -> bool {
+        !self.structure.seeded_content.is_empty()
+    }
+
     pub(crate) fn seed_identities(&self) -> BTreeMap<String, (u32, u32)> {
         self.structure
             .seeded_content
