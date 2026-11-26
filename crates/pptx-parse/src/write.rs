@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use ooxml_drawingml::{
-    ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme,
-    resolve_color_value_to_hex_with_theme, resolve_theme_font_ref,
+    ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
 };
 
 use crate::PptxError;
@@ -3187,15 +3186,11 @@ fn span_elements(
                 text: &remaining[..length],
                 ..*segment
             };
-            let intact = offset == range_start && offset + length == range.end;
-            let element =
-                if intact && source.local_name() == "r" && segment_matches(source, &piece, theme) {
-                    source.clone()
-                } else if range.field && intact {
-                    field_element(source, &piece, theme, prefixes)
-                } else {
-                    segment_element(&piece, source.child("rPr"), theme, prefixes)
-                };
+            let element = if range.field && offset == range_start && offset + length == range.end {
+                field_element(source, &piece, theme, prefixes)
+            } else {
+                segment_element(&piece, source.child("rPr"), theme, prefixes)
+            };
             let previous = output.last_mut().and_then(|node| match node {
                 XmlNode::Element(previous)
                     if last_source == Some(range.source)
@@ -3494,31 +3489,14 @@ fn segment_properties(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> Option<XmlElement> {
-    let mut properties = if let Some(template) = template {
-        let mut base = template.clone();
-        apply_run_properties(&mut base, segment.properties, theme, prefixes);
-        base
-    } else {
-        run_properties_element(segment.properties, prefixes)?
-    };
-    let source_family = template
-        .and_then(|element| element.child("latin"))
-        .and_then(|latin| latin.attribute("typeface"));
-    if let Some(source) = source_family
-        && let Some(family) = segment.properties.font_family.as_deref()
-        && source != family
-        && !(source.starts_with('+') && resolve_theme_font_ref(theme, source) == family)
-        && ooxml_text::font_slot_characters(segment.text, false, false).any(|(_, slot)| slot == 2)
-    {
-        apply_font_typeface(
-            &mut properties,
-            "ea",
-            family,
-            &POST_LATIN_ELEMENTS[1..],
-            prefixes,
-        );
+    match template {
+        Some(template) => {
+            let mut base = template.clone();
+            apply_run_properties(&mut base, segment.properties, theme, prefixes);
+            Some(base)
+        }
+        None => run_properties_element(segment.properties, prefixes),
     }
-    Some(properties)
 }
 
 fn segment_element(
@@ -3707,21 +3685,13 @@ fn apply_run_properties(
         });
         return;
     };
-    apply_font_typeface(base, "latin", family, &POST_LATIN_ELEMENTS, prefixes);
-}
-
-fn apply_font_typeface(
-    base: &mut XmlElement,
-    name: &str,
-    family: &str,
-    following: &[&str],
-    prefixes: &Prefixes,
-) {
-    if let Some(font) = base.child_mut(name) {
-        if font.attribute("typeface") != Some(family) {
-            font.attributes
+    if let Some(latin) = base.child_mut("latin") {
+        if latin.attribute("typeface") != Some(family.as_str()) {
+            // panose, pitchFamily and charset describe the old face.
+            latin
+                .attributes
                 .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
-            font.set_attribute("typeface", family);
+            latin.set_attribute("typeface", family.clone());
         }
     } else {
         let position = base
@@ -3731,14 +3701,15 @@ fn apply_font_typeface(
                 matches!(
                     child,
                     XmlNode::Element(element)
-                        if following.contains(&element.local_name())
+                        if POST_LATIN_ELEMENTS.contains(&element.local_name())
                 )
             })
             .unwrap_or(base.children.len());
         base.children.insert(
             position,
             XmlNode::Element(
-                XmlElement::new(prefixes.drawing(name)).with_attribute("typeface", family),
+                XmlElement::new(prefixes.drawing("latin"))
+                    .with_attribute("typeface", family.clone()),
             ),
         );
     }
@@ -4254,46 +4225,6 @@ mod tests {
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
-
-    fn assert_east_asian_font_pick(text: &str, expected: Option<&str>) {
-        let mut root = XmlElement::new("p:sld");
-        let prefixes = Prefixes::from_root(&mut root);
-        let template = XmlElement::new("a:rPr")
-            .with_child(XmlElement::new("a:latin").with_attribute("typeface", "Arial"));
-        let properties = RunProperties {
-            font_family: Some("Microsoft YaHei".to_owned()),
-            ..RunProperties::default()
-        };
-        let segment = RunSegment {
-            line_break: false,
-            text,
-            properties: &properties,
-        };
-        let written = segment_element(&segment, Some(&template), None, &prefixes);
-        assert_eq!(
-            written
-                .child("rPr")
-                .unwrap()
-                .child("ea")
-                .and_then(|font| font.attribute("typeface")),
-            expected,
-            "{text:?}"
-        );
-    }
-
-    #[test]
-    fn east_asian_font_pick_writes_fullwidth_and_cjk_punctuation_typefaces() {
-        for text in ["￥100", "、。", "ｶﾀｶﾅ", "ㅎㅏ"] {
-            assert_east_asian_font_pick(text, Some("Microsoft YaHei"));
-        }
-    }
-
-    #[test]
-    fn east_asian_font_pick_follows_the_shared_font_slot_rule() {
-        for text in ["A", "🦀", "𠮷"] {
-            assert_east_asian_font_pick(text, None);
-        }
-    }
 
     #[test]
     fn a_labelled_ellipse_is_not_written_as_a_text_box() {
@@ -4869,14 +4800,6 @@ mod tests {
     const FIELD_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t> of </a:t></a:r><a:fld id="{B}" type="datetime1"><a:rPr lang="en-US"/><a:t>2024</a:t></a:fld></a:p>"#;
 
     fn rebuilt_paragraph(xml: &[u8], runs: &[(&str, RunProperties)]) -> String {
-        rebuilt_paragraph_with_theme(xml, runs, None)
-    }
-
-    fn rebuilt_paragraph_with_theme(
-        xml: &[u8],
-        runs: &[(&str, RunProperties)],
-        theme: Option<&Theme>,
-    ) -> String {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
@@ -4898,89 +4821,8 @@ mod tests {
                 })
                 .collect(),
         };
-        let paragraph = build_paragraph(&write, Some(root), theme, &prefixes);
+        let paragraph = build_paragraph(&write, Some(root), None, &prefixes);
         String::from_utf8(serialize_xml(&paragraph)).unwrap()
-    }
-
-    #[test]
-    fn picking_the_resolved_direct_latin_font_cannot_replace_the_east_asian_typeface() {
-        let mut theme = Theme::default();
-        theme.font_scheme.minor_font.latin = "Aptos".to_owned();
-        theme.font_scheme.major_font.ea = "Yu Gothic".to_owned();
-        for (token, resolved) in [("+mn-lt", "Aptos"), ("+mj-ea", "Yu Gothic")] {
-            let source = format!(
-                r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr><a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t></a:r></a:p>"#
-            );
-            for (family, east_asia) in
-                [(resolved, "SimSun"), ("Microsoft YaHei", "Microsoft YaHei")]
-            {
-                let xml = rebuilt_paragraph_with_theme(
-                    source.as_bytes(),
-                    &[
-                        (
-                            "x",
-                            RunProperties {
-                                font_family: Some(token.to_owned()),
-                                ..RunProperties::default()
-                            },
-                        ),
-                        (
-                            "中",
-                            RunProperties {
-                                font_family: Some(family.to_owned()),
-                                ..RunProperties::default()
-                            },
-                        ),
-                    ],
-                    Some(&theme),
-                );
-                let original = format!(
-                    r#"<a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t>"#
-                );
-                let appended = format!(
-                    r#"<a:latin typeface="{family}"/><a:ea typeface="{east_asia}"/></a:rPr><a:t>中</a:t>"#
-                );
-                assert!(xml.contains(&original), "{xml}");
-                assert!(xml.contains(&appended), "{xml}");
-            }
-        }
-    }
-
-    fn rebuild_run_with_inherited_latin(text: &str, family: &str) -> String {
-        let mut theme = Theme::default();
-        theme.font_scheme.minor_font.latin = "Aptos".to_owned();
-        let source = r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:pPr><a:defRPr><a:latin typeface="+mn-lt"/></a:defRPr></a:pPr><a:r><a:rPr><a:ea typeface="SimSun"/></a:rPr><a:t>中</a:t></a:r></a:p>"#;
-        rebuilt_paragraph_with_theme(
-            source.as_bytes(),
-            &[(
-                text,
-                RunProperties {
-                    font_family: Some(family.to_owned()),
-                    ..RunProperties::default()
-                },
-            )],
-            Some(&theme),
-        )
-    }
-
-    #[test]
-    fn typing_with_inherited_latin_keeps_the_source_east_asian_typeface() {
-        let xml = rebuild_run_with_inherited_latin("中文", "Aptos");
-        assert!(
-            xml.contains(r#"<a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t>"#),
-            "{xml}"
-        );
-    }
-
-    #[test]
-    fn a_font_pick_without_direct_latin_cannot_replace_the_east_asian_typeface() {
-        let xml = rebuild_run_with_inherited_latin("中", "Microsoft YaHei");
-        assert!(
-            xml.contains(
-                r#"<a:latin typeface="Microsoft YaHei"/><a:ea typeface="SimSun"/></a:rPr><a:t>中</a:t>"#
-            ),
-            "{xml}"
-        );
     }
 
     #[test]
