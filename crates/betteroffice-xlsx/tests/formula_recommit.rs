@@ -1,6 +1,7 @@
 use betteroffice_xlsx::{
     CalculationOptions, CellInput, CellRange, CellRef, CellState, CellValue, EditRequest, Op,
-    ProposalEditInput, ProposalRequest, SheetId, Workbook,
+    ProposalEditInput, ProposalRequest, SheetId, SnapshotBudget, Workbook, WorkbookSnapshotBuilder,
+    WorkbookSnapshotEncoder,
 };
 use serde_json::{Value, json};
 use xlsx_model::ErrorValue;
@@ -588,7 +589,7 @@ fn indirect_with_spaced_external_qualifiers_recalculates_to_release_values() {
 }
 
 #[test]
-fn unreadable_defined_names_keep_callers_cached_and_refuse_authoring() {
+fn rejected_defined_names_preserve_release_caller_values_and_refuse_authoring() {
     let sheet_data = concat!(
         r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Target_1</f><v>41</v></c>"#,
         r#"<c r="C1"><f>IFERROR(Target_1,0)</f><v>42</v></c><c r="D1"><f>A1*2</f><v>-1</v></c></row>"#,
@@ -697,6 +698,48 @@ fn a_definition_read_by_the_release_keeps_its_incremental_dependencies() {
         .edit_cell(SheetId(0), cell("A1"), "8", options())
         .unwrap();
     assert_eq!(stored(&workbook, "B1").1, number(8.0));
+}
+
+#[test]
+fn snapshot_restores_dependencies_and_volatility_of_released_definitions() {
+    let source = package(
+        concat!(
+            r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Target_1</f><v>7</v></c>"#,
+            r#"<c r="C1"><f>Clock_1</f><v>46000</v></c></row>"#,
+        ),
+        concat!(
+            r#"<definedNames><definedName name="Target_1">A1+IFERROR('C:\Books\Data.xlsx'!A1,0)</definedName>"#,
+            r#"<definedName name="Clock_1">NOW()+IFERROR('C:\Books\Data.xlsx'!A1,0)</definedName></definedNames>"#,
+        ),
+    );
+    let workbook = Workbook::open_recalculated(
+        &source,
+        CalculationOptions {
+            now_serial: Some(46_000.0),
+        },
+    )
+    .unwrap();
+    let budget = SnapshotBudget::new(8, 65_536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    let values = |book: &Workbook| [stored(book, "B1").1, stored(book, "C1").1];
+    assert_eq!(values(&restored), [number(7.0), number(46_000.0)]);
+    restored
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "8",
+            CalculationOptions {
+                now_serial: Some(46_001.0),
+            },
+        )
+        .unwrap();
+    assert_eq!(values(&restored), [number(8.0), number(46_001.0)]);
 }
 
 #[test]

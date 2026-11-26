@@ -101,6 +101,38 @@ fn indirect_r1c1_absolute_and_relative_recalculate() {
 }
 
 #[test]
+fn indirect_r1c1_bracketed_workbook_paths_keep_the_cache_for_valid_references() {
+    let ref_error = CellValue::Error {
+        value: ErrorValue::Ref,
+    };
+    for (reference, expected) in [
+        ("'D:/Books/[Data.xlsx]Sheet1'!R1C1", n(42.0)),
+        (r"'C:\Books\[1]Sheet1'!R1C1", n(42.0)),
+        ("'D:/Books/[Data.xlsx]Sheet1'!R0C1", ref_error.clone()),
+        ("'D:/Books/[Data.xlsx]Sheet1' !R1C1", ref_error.clone()),
+        ("'D:/Books/Data.xlsx'!R1C1", ref_error),
+    ] {
+        let mut wb = workbook();
+        let at = CellRef::parse_a1("D4").unwrap();
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(format!(r#"INDIRECT("{reference}",FALSE)"#)),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(wb.value(SheetId(0), at), expected, "{reference}");
+        assert_eq!(
+            graph.unevaluated_cells().is_empty(),
+            matches!(expected, CellValue::Error { .. }),
+            "{reference}"
+        );
+    }
+}
+
+#[test]
 fn indirect_r1c1_whole_rows_and_columns_recalculate() {
     check(&[
         ("SUM(INDIRECT(\"R5\",FALSE))", n(11.0)),
