@@ -5,10 +5,14 @@ import * as fonts from '@betteroffice/fonts';
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdnRuntime';
+import * as fontModules from '../../../../shared/office-session/fontModules';
 import * as progressive from '@betteroffice/fonts/progressive';
 import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
-import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
-import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces } from './commandDefaultFonts';
+import type { FontCdnDiagnostic, FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
+import type { DefaultFontFace, DefaultFontLanding } from '../../../../shared/pptxDefaultFonts';
+import type { DefaultFontPaintFace } from '../../../../shared/office-session/render/pptxWorkerRender';
+import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
+import { commandFontProvider, createCommandDefaultFonts, prefetchCoverageFaces, UNCOVERED_EDITOR_SCRIPTS } from './commandDefaultFonts';
 import { createSlicedFontFaces } from './commandSlicedFonts';
 import { decodeFontFace } from '../wasm/loader';
 import { engineKind } from '../wasm/engine';
@@ -24,7 +28,7 @@ const bytes = new Uint8Array([1, 2, 3]).buffer;
 
 function provider(
   load: (family: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined,
-  script: (script: string, bold: boolean, italic: boolean) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
+  script: (script: string, bold: boolean, italic: boolean, family?: string) => (() => Promise<ArrayBuffer>) | undefined = () => undefined,
 ) {
   const resolve = mock(load);
   const resolveFamily = mock(() => undefined);
@@ -52,6 +56,29 @@ function retryClock() {
 }
 
 afterEach(() => { for (const restore of restorers.splice(0).reverse()) restore(); });
+
+function packDiagnostics(): FontCdnDiagnostic[] {
+  const diagnostics: FontCdnDiagnostic[] = [];
+  const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  Object.defineProperty(globalThis, 'dispatchEvent', {
+    configurable: true,
+    value(event: CustomEvent<FontCdnDiagnostic>) {
+      if (event.type === 'betteroffice:font-pack-diagnostic') diagnostics.push(event.detail);
+      return true;
+    },
+  });
+  restorers.push(() => {
+    if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
+    else Reflect.deleteProperty(globalThis, 'dispatchEvent');
+  });
+  return diagnostics;
+}
+
+function implicitFontFailure(pack: FontCdnDiagnostic['pack'], cause: Error) {
+  return Object.assign(new Error(cause.message), {
+    cause, diagnostic: { pack, reason: 'cdn-unavailable' as const, detail: cause.message }, retryAt: Date.now() + 60_000,
+  });
+}
 
 test('the manager decodes packed faces with the worker engine', async () => {
   const create = spyOn(fonts, 'createFontProvider');
@@ -109,6 +136,45 @@ test('coverage prefetch without scripts loads nothing', async () => {
   prefetchCoverageFaces([], Promise.resolve(), () => commandFontProvider.load());
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(imported).not.toHaveBeenCalled();
+});
+
+test('coverage prefetch loads Arabic by default', async () => {
+  const load = mock(async () => bytes);
+  const { imported, resolveScriptFallback } = provider(() => undefined, (script) => script === 'arabic' ? load : undefined);
+  prefetchCoverageFaces(['arabic'], Promise.resolve(), () => commandFontProvider.load());
+  await sleep(0);
+  expect(imported).toHaveBeenCalledTimes(1);
+  expect(resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false);
+  expect(load).toHaveBeenCalledTimes(1);
+});
+
+test('disabled Arabic coverage emits no CDN diagnostics or retries', async () => {
+  if (!UNCOVERED_EDITOR_SCRIPTS.has('arabic')) {
+    UNCOVERED_EDITOR_SCRIPTS.add('arabic');
+    restorers.push(() => { UNCOVERED_EDITOR_SCRIPTS.delete('arabic'); });
+  }
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const loadArabic = mock(async () => { throw implicitFontFailure('latin', new Error('Offline')); });
+  const loadJapanese = mock(async () => bytes);
+  const { resolveScriptFallback } = provider(() => undefined, (script) =>
+    script === 'arabic' ? loadArabic : script === 'cjk-jp' ? loadJapanese : undefined);
+  let source: ReturnType<typeof commandFontProvider.load> | undefined;
+  const shared = () => (source ??= commandFontProvider.load());
+  const manager = createCommandDefaultFonts([regular], () => [{ ...regular, scripts: ['arabic'] }],
+    () => {}, () => {}, undefined, undefined, shared);
+  try {
+    prefetchCoverageFaces(['arabic', 'cjk-jp'], Promise.resolve(), shared);
+    await sleep(0);
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(manager.hasPending('next')).toBe(false);
+    expect(await manager.load('next')).toEqual([]);
+    expect(diagnostics).toEqual([]);
+    expect(resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+    expect(loadJapanese).toHaveBeenCalledTimes(1);
+    expect(loadArabic).not.toHaveBeenCalled();
+  } finally { manager.dispose(); }
 });
 
 test('app families exclude all styles without importing the manager', async () => {
@@ -249,6 +315,324 @@ test('a transient failure retries after backoff and registers the second load', 
   } finally { fonts.dispose(); }
 });
 
+test.each(['primary', 'last-resort'] as const)('a transient CDN failure retries the %s after the cooldown', async (kind) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const load = mock(async () => bytes).mockRejectedValueOnce(implicitFontFailure('latin', new Error('Offline')));
+  const primary = kind === 'primary' ? regular : { ...regular, family: 'Simplified Arabic', scripts: ['arabic'] };
+  const source = provider(() => kind === 'primary' ? load : async () => bytes);
+  if (kind === 'last-resort') source.resolveLastResort.mockReturnValue(load);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {});
+  try {
+    const { family, bold, italic } = primary;
+    expect(await manager.load()).toEqual(kind === 'primary' ? [] : [{ family, bold, italic }]);
+    advance(59_999);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1);
+    expect(manager.hasPending()).toBe(true);
+    const landing: DefaultFontLanding = kind === 'primary' ? regular : { ...regular, family: 'Carlito', kind: 'coverage' };
+    expect(await manager.load()).toEqual([landing]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenLastCalledWith({ ...landing, bytes });
+    expect(manager.hasPending()).toBe(false);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
+});
+
+test.each([403, 404, 410])('a Naskh HTTP %s miss uses the available last resort as the primary', async (status) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const naskh = mock(async () => bytes).mockRejectedValueOnce(
+    implicitFontFailure('latin', Object.assign(new Error(`HTTP ${status}`), { status })));
+  const source = provider(() => undefined, () => naskh);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { ...regular, family: 'Simplified Arabic' };
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], register, () => {});
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    expect(register).toHaveBeenCalledWith({ ...primary, bytes, paintFamily: expect.any(String) });
+    advance(60_000);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(naskh).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
+});
+
+test.each([403, 404, 410])('an HTTP %s retry keeps the installed substitute without reinstalling it', async (status) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  let cause = new Error('Offline');
+  const load = mock(async () => bytes.slice(0));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation((_options, runtime) => ({
+    resolve: () => async () => {
+      const hooks = runtime as (NonNullable<typeof runtime> & {
+        reportCdnFailure?: FontCdnReporter;
+        onSubstitute?: (bytes: ArrayBuffer, error: unknown) => void;
+      }) | undefined;
+      const substitute = await load();
+      const error = implicitFontFailure('intl', cause);
+      hooks?.reportCdnFailure?.(error);
+      hooks?.onSubstitute?.(substitute, error);
+      return substitute;
+    },
+    resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined,
+    resolveLastResort: () => async () => bytes,
+  }));
+  restorers.push(() => create.mockRestore());
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {}, install);
+  try {
+    expect(await manager.load()).toEqual([primary]);
+    cause = Object.assign(new Error(`HTTP ${status}`), { status });
+    advance(60_000);
+    const additions = await manager.load();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(additions).toEqual([]);
+    advance(60_000);
+    expect(manager.hasPending()).toBe(false);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'intl', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
+});
+
+test.each([false, true])('an absent intl pack settles without fetching a substitute (CDN blocked: %s)', async (blocked) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const requests: string[] = [];
+  const fetch = spyOnFontFetch(async (input) => {
+    requests.push(String(input));
+    if (String(input).includes('/fonts-intl@')) return new Response(null, { status: 403 });
+    return fontAssetResponse(input);
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const runtime = fontRuntimeWithoutPacks(new URL('https://script-fallback.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const register = mock(() => {});
+  const manager = createCommandDefaultFonts([regular], () => [{ ...regular, scripts: ['thai'] }], register, () => {},
+    undefined, undefined, () => commandFontProvider.load(blocked ? cdn : { baseUrl: false, timeoutMs: 10_000 }));
+  try {
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(register).not.toHaveBeenCalled();
+    expect(requests).toEqual(blocked ? [expect.stringContaining('/fonts-intl@')] : []);
+    expect(warn).toHaveBeenCalledTimes(blocked ? 1 : 0);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('primary and coverage misses emit one diagnostic per pack in each session', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const runtime = fontRuntimeWithoutPacks(new URL('https://primary-coverage.example/'));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const fetch = spyOnFontFetch((input) => String(input).includes('/fonts-intl@')
+    ? Promise.resolve(new Response(null, { status: 403 })) : fontAssetResponse(input));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const diagnostic = expect.objectContaining({ pack: 'intl', reason: 'cdn-unavailable' });
+  try {
+    for (let session = 1; session <= 2; session += 1) {
+      const manager = createCommandDefaultFonts([regular], () => [primary, { ...regular, scripts: ['thai'] }],
+        () => {}, () => {}, undefined, undefined, () => commandFontProvider.load(cdn));
+      try {
+        expect(await manager.load()).toEqual([primary]);
+        expect(diagnostics).toEqual(Array(session).fill(diagnostic));
+      } finally { manager.dispose(); }
+    }
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/fonts-intl@'))).toHaveLength(1);
+  } finally {
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test.each([403, 404, 410])('an implicit HTTP %s miss settles the preferred Arabic primary', async (status) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const fetch = spyOnFontFetch(async () => new Response(null, { status }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const manager = createCommandDefaultFonts([], () => [{ ...regular, family: 'Simplified Arabic', scripts: ['arabic'] }],
+    () => {}, () => {}, undefined, undefined, () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([]);
+    const requests = fetch.mock.calls.length;
+    expect(requests).toBeGreaterThan(0);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(requests);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('a primary installed with substitute bytes installs the requested face after the CDN recovers', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  let online = false;
+  const fetch = spyOnFontFetch(async (input) => {
+    if (!online && String(input).includes('/fonts-intl@')) throw new TypeError('Offline');
+    return fontAssetResponse(input);
+  });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {}, install,
+    undefined, () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([primary]);
+    expect(install).toHaveBeenCalledTimes(1);
+    advance(59_999);
+    expect(manager.hasPending()).toBe(false);
+    advance(1);
+    expect(await manager.load()).toEqual([]);
+    expect(install).toHaveBeenCalledTimes(1);
+    online = true;
+    advance(60_000);
+    expect(await manager.load()).toEqual([primary]);
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenCalledTimes(2);
+    expect(install.mock.calls[1][0][0].bytes).not.toEqual(install.mock.calls[0][0][0].bytes);
+    expect(manager.hasPending()).toBe(false);
+  } finally {
+    manager.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+test('an implicit HTTP 403 settles other faces in the same pack after the CDN cooldown', async () => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const cdn = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+  const advance = retryClock();
+  const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const runtime = fontRuntimeWithoutPacks();
+  const decoder: fonts.FontDecoder = (data, options) => decodeFontFace(data, options);
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation((options, loadOptions) =>
+    runtime.createFontProvider(options, { ...loadOptions, decoder }));
+  const collect = (slide?: string) => [{ ...regular, scripts: [slide === 'next' ? 'devanagari' : 'thai'] }];
+  const manager = createCommandDefaultFonts([regular], collect, () => {}, () => {}, undefined, undefined,
+    () => commandFontProvider.load(cdn));
+  const nextSession = createCommandDefaultFonts([regular], collect, () => {}, () => {}, undefined, undefined,
+    () => commandFontProvider.load(cdn));
+  try {
+    expect(await manager.load()).toEqual([]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([expect.stringContaining('/NotoSansThai-Regular.ttf.zst')]);
+    advance(60_001);
+    expect(await manager.load('next')).toEqual([]);
+    expect(manager.hasPending('next')).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toHaveLength(1);
+
+    expect(await nextSession.load('next')).toEqual([]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining('/NotoSansThai-Regular.ttf.zst'), expect.stringContaining('/NotoSansDevanagari-Regular.ttf.zst'),
+    ]);
+    expect(warning).toHaveBeenCalledTimes(2);
+    expect(diagnostics).toHaveLength(2);
+  } finally {
+    manager.dispose();
+    nextSession.dispose();
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
+const slicedMisses = [403, 404, 410].flatMap<[number, boolean, boolean]>((status) => [
+  [status, false, true], [status, false, false], [status, true, false],
+]);
+
+test.each(slicedMisses)('a sliced HTTP %s miss tries the whole face when allowed (implicit: %s, whole available: %s)', async (status, implicit, wholeAvailable) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals(false);
+  const runtime = fontRuntimeWithoutPacks();
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+  const whole = fonts.resolveScriptFallbackFace('cjk-jp', false, false)!.file;
+  const fetch = spyOnFontFetch(async (input) => wholeAvailable && String(input).endsWith(`/${whole}`)
+    ? fontAssetResponse(input) : new Response(null, { status }));
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const diagnostics = packDiagnostics();
+  const sliced = createSlicedFontFaces();
+  const navigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  const advance = retryClock();
+  const wanted = { ...regular, scripts: ['cjk-jp'] };
+  const cdn = implicit ? { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit }
+    : { baseUrl: `https://sliced-miss.example/${status}/${wholeAvailable ? 'whole' : 'missing'}/`, timeoutMs: 10_000 };
+  let source: ReturnType<typeof commandFontProvider.load> | undefined;
+  const shared = () => (source ??= commandFontProvider.load(cdn));
+  const manager = createCommandDefaultFonts([regular], () => [wanted], () => {}, () => {},
+    undefined, undefined, shared, sliced);
+  try {
+    prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), shared, true);
+    await sleep(0);
+    expect(await manager.load()).toEqual(wholeAvailable ? [{ ...regular, family: 'Noto Sans JP', kind: 'coverage' }] : []);
+    advance(60_001);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringMatching(/\/slices\.json$/), ...(implicit ? [] : [expect.stringContaining(`/${whole}`)]),
+    ]);
+    expect(diagnostics).toEqual(implicit ? [expect.objectContaining({ pack: 'cjk', reason: 'cdn-unavailable' })] : []);
+  } finally {
+    manager.dispose();
+    sliced.dispose();
+    if (navigator) Object.defineProperty(globalThis, 'navigator', navigator);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+    create.mockRestore();
+    fetch.mockRestore();
+    warning.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+});
+
 test('coverage prefetch and slide switches share a CDN failure and retry in the same session', async () => {
   const previous = getFontCdnConfiguration();
   configureTestFontCdn({ baseUrl: false });
@@ -280,6 +664,8 @@ test('coverage prefetch and slide switches share a CDN failure and retry in the 
     expect(await manager.load('next')).toEqual([]);
     expect(requests).toHaveLength(1);
     expect(register).not.toHaveBeenCalled();
+    expect(manager.hasPending('opening')).toBe(false);
+    expect(manager.hasPending('next')).toBe(false);
 
     online = true;
     advance(60_000);
@@ -416,29 +802,111 @@ test('default font plumbing stays out of all package entries', async () => {
   }
 });
 
-test('script requests keep traits, fall back to regular and deduplicate across families and concurrent loads', async () => {
-  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+test('Arabic in bold italic Arial registers the shared regular Naskh face once', async () => {
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, (script, bold, italic) =>
     script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
   const register = mock(() => {});
   const settled = mock(() => {});
   const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
-  const requested = { ...regular, bold: true, italic: true, scripts: ['arabic', 'arabic'] };
-  const fonts = createCommandDefaultFonts([{ family: 'Calibri' }], () => [requested,
+  const requested = { family: 'Arial', bold: true, italic: true, scripts: ['arabic', 'arabic'] };
+  const fonts = createCommandDefaultFonts([{ family: 'Arial' }], () => [requested,
     { ...requested, family: 'Unknown Family' }], register, settled, install);
   try {
     expect(fonts.hasPending()).toBe(true);
     const results = await Promise.all([fonts.load(), fonts.load()]);
     expect(source.resolve.mock.calls).toEqual([['Unknown Family', true, true]]);
-    expect(source.resolveScriptFallback.mock.calls).toEqual([['arabic', true, true], ['arabic', false, false]]);
-    expect(results.flat()).toMatchObject([{ family: 'Noto Sans Arabic', bold: false, italic: false, kind: 'coverage' }]);
+    expect(source.resolveScriptFallback.mock.calls).toEqual([
+      ['arabic', true, true, 'Arial'], ['arabic', false, false, 'Arial'],
+      ['arabic', true, true, 'Unknown Family'], ['arabic', false, false, 'Unknown Family'],
+    ]);
+    const style: DefaultFontLanding = { family: 'Noto Naskh Arabic', bold: false, italic: false, kind: 'coverage' };
+    expect(results.flat()).toEqual([style]);
     expect(install).toHaveBeenCalledTimes(1);
-    expect(install.mock.calls[0][0][0].kind).toBe('coverage');
+    expect(install.mock.calls[0][0]).toEqual([{ ...style, bytes: arabic }]);
     expect(register).toHaveBeenCalledTimes(1);
     expect(settled).toHaveBeenCalledTimes(1);
     expect(fonts.hasPending()).toBe(false);
     expect(await fonts.load()).toEqual([]);
   } finally { fonts.dispose(); }
+});
+
+const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMap((family) =>
+  [[true, false], [false, true], [true, true]].map(([bold, italic]): [string, boolean, boolean] => [family, bold, italic]));
+
+test.each(preferredArabicStyles)('%s lets the browser synthesize missing styles (bold: %s, italic: %s)', async (family, bold, italic) => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const source = provider(() => undefined, () => async () => naskh);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const primary = { family, bold, italic };
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {}, install);
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    expect(install).toHaveBeenCalledWith([{ ...primary, bytes: naskh, face: { bold: false, italic: false } }]);
+  } finally { manager.dispose(); }
+});
+
+test.each([false, true])('Simplified Arabic uses its last resort while the Naskh face is unavailable (implicit: %s)', async (implicit) => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const advance = retryClock();
+  const delay = implicit ? 60_000 : 2000;
+  const outage = new Error('Offline');
+  if (implicit) Object.assign(outage, {
+    diagnostic: { pack: 'latin', reason: 'cdn-unavailable', detail: outage.message }, retryAt: Date.now() + delay,
+  });
+  const load = mock(async () => naskh).mockRejectedValueOnce(outage);
+  const source = provider(() => undefined, () => load);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { ...regular, family: 'Simplified Arabic' };
+  const registered: DefaultFontPaintFace[] = [];
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }],
+    (face) => registered.push(face), () => {});
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    const primaryFaces = () => registered.filter((face) => face.family === primary.family);
+    const paintFamily = primaryFaces()[0]?.paintFamily;
+    expect(paintFamily).toBeTypeOf('string');
+    const latin = { ...primary, bytes, paintFamily };
+    expect(primaryFaces()).toEqual([latin]);
+    advance(delay - 1);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1);
+    expect(manager.hasPending()).toBe(true);
+    expect(await manager.load()).toEqual([primary]);
+    expect(primaryFaces()).toEqual([latin, { ...primary, bytes: naskh }]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(manager.hasPending()).toBe(false);
+  } finally { manager.dispose(); }
+});
+
+test('retrying a styled Arabic default keeps the temporary Latin face in a separate paint family', async () => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const advance = retryClock();
+  const load = mock(async () => naskh).mockRejectedValueOnce(new Error('Offline'));
+  const source = provider(() => undefined, () => load);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { family: 'Simplified Arabic', bold: true, italic: true };
+  const installed: (DefaultFontPaintFace & Pick<PngFontFace, 'face'>)[] = [];
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {},
+    async (faces) => { installed.push(...faces); return faces; });
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(2000);
+    expect(await manager.load()).toEqual([primary]);
+    expect(load).toHaveBeenCalledTimes(2);
+    const requests = installed.filter((face) => face.family === primary.family);
+    expect(requests).toHaveLength(2);
+    const [latin, arabic] = requests;
+    expect(latin.paintFamily).toBeTypeOf('string');
+    expect(latin.paintFamily).not.toBe(primary.family);
+    expect(latin).toEqual({ ...primary, bytes, paintFamily: latin.paintFamily });
+    expect(arabic).toEqual({ ...primary, bytes: naskh, face: { bold: false, italic: false } });
+    expect(arabic).not.toHaveProperty('paintFamily');
+  } finally { manager.dispose(); }
 });
 
 test('script collection requests each style separately even when no script pack is available', async () => {
@@ -527,8 +995,8 @@ test('missing CJK packs never install Latin substitute bytes as coverage', async
 });
 
 test('browser refusal prevents coverage registration and settlement', async () => {
-  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
-  provider(() => undefined, () => async () => arabic);
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const source = provider(() => undefined, () => async () => arabic);
   const register = mock(() => {});
   const settled = mock(() => {});
   const beforeRegister = mock(() => {});
@@ -536,6 +1004,7 @@ test('browser refusal prevents coverage registration and settlement', async () =
     register, settled, async () => [], beforeRegister);
   try {
     expect(await fonts.load()).toEqual([]);
+    expect(source.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, 'Calibri');
     expect(register).not.toHaveBeenCalled();
     expect(settled).not.toHaveBeenCalled();
     expect(beforeRegister).not.toHaveBeenCalled();
@@ -567,6 +1036,34 @@ test('with sliced faces off, coverage prefetch fetches whole faces', async () =>
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(load).toHaveBeenCalledTimes(1);
   expect(open).not.toHaveBeenCalled();
+});
+
+test('coverage prefetch fetches no slices if it becomes stale while the progressive module loads', async () => {
+  let release!: (module: typeof progressive) => void;
+  const loading = new Promise<typeof progressive>((resolve) => { release = resolve; });
+  const imported = spyOn(fontModules, 'importProgressiveFonts').mockReturnValue(loading);
+  const fetch = spyOnFontFetch(async () => new Response(null, { status: 404 }));
+  const browser = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/149.0' } });
+  restorers.push(() => imported.mockRestore(), () => fetch.mockRestore(), () => {
+    if (browser) Object.defineProperty(globalThis, 'navigator', browser);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  const base = 'https://stale-prefetch.example/';
+  const load = Object.assign(mock(async () => bytes), { slices: {
+    ref: { format: 1, index: 'slices.json', indexSha256: '' }, base,
+    url: async (file: string) => new URL(file, base), decode: async (encoded: ArrayBuffer) => encoded,
+  } });
+  provider(() => undefined, () => load);
+  let current = true;
+  prefetchCoverageFaces(['cjk-jp'], Promise.resolve(), () => commandFontProvider.load(), true, () => current);
+  await sleep(0);
+  expect(imported).toHaveBeenCalledTimes(1);
+  current = false;
+  release(progressive);
+  await sleep(0);
+  expect(fetch).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
 });
 
 test('a host-supplied face under a coverage family is never sliced over', async () => {

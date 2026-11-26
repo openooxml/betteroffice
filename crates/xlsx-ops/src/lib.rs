@@ -8,10 +8,13 @@ mod input;
 mod op;
 mod proposals;
 mod remap;
+mod table_header;
 mod undo;
 
 #[doc(hidden)]
 pub use apply::InPlaceBatch;
+#[doc(hidden)]
+pub use apply::validate_defined_name_formula_in;
 pub use apply::{
     InvertedOp, OpError, apply, apply_in_place, apply_ops, ensure_op_available,
     filter_database_formula, remap_ref, validate_auto_filter_range, validate_conditional_format,
@@ -34,4 +37,8 @@ pub use op::OracleOp;
 pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::{ProposalSheets, insertion_keeps_chart_anchor_on_grid, remap_proposal_formula};
+#[doc(hidden)]
+pub use table_header::{
+    normalize_table_header, references_table_column, table_header_at, table_header_write_at,
+};
 pub use undo::UndoStack;

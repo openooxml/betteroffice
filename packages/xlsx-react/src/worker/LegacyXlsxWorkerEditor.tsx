@@ -247,7 +247,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     canvas.height = Math.round(request.height * request.dpr);
     canvas.style.width = `${request.width}px`;
     canvas.style.height = `${request.height}px`;
-    const settled = paintWithDefaultFonts(displayList, () => paintDisplayList(context, displayList, request.dpr * request.zoom));
+    const settled = paintWithDefaultFonts(displayList, (list) => paintDisplayList(context, list, request.dpr * request.zoom));
     heldPreview.current = settled ? null : { canvas, displayList, request };
     canvas.dataset.previewReady = settled ? 'true' : 'pending';
   };
@@ -786,7 +786,7 @@ export function LegacyXlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.style.width = `${request.width}px`;
         canvas.style.height = `${request.height}px`;
         canvas.dataset.defaultFonts = paintWithDefaultFonts(painted.displayList,
-          () => paintDisplayList(context, painted.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
+          (list) => paintDisplayList(context, list, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(painted.sequence);
         canvas.dataset.paintSource = painted.source;
         canvas.dataset.workerZoom = String(request.zoom);

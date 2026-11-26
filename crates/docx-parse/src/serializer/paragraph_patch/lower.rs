@@ -15,6 +15,7 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub(super) struct Attribute {
     pub name: String,
     pub identifier: bool,
+    pub run_revision: bool,
     pub value: Range<usize>,
     pub token: Range<usize>,
 }
@@ -36,6 +37,19 @@ pub(super) struct Node {
 impl Node {
     pub fn word(&self, name: &str) -> bool {
         self.namespace == WORD && self.local == name
+    }
+
+    pub fn is_range_marker(&self) -> bool {
+        self.namespace == WORD
+            && matches!(
+                self.local.as_str(),
+                "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "permStart"
+                    | "permEnd"
+            )
     }
 
     pub fn attr(&self, source: &str, name: &str) -> Option<String> {
@@ -99,6 +113,8 @@ impl Xml {
                 attributes.push(Attribute {
                     name: name.to_owned(),
                     identifier: is_identifier(name, &scope),
+                    run_revision: name.starts_with("w:rsid")
+                        && scope.get("w").map(String::as_str) == Some(WORD),
                     token: start..range.end + 1,
                     value: range,
                 });
@@ -311,17 +327,7 @@ fn visit(
             continue;
         } else if node.word("r") {
             lower_run(source, at, scope, units, result)?;
-        } else if node.namespace == WORD
-            && matches!(
-                node.local.as_str(),
-                "bookmarkStart"
-                    | "bookmarkEnd"
-                    | "commentRangeStart"
-                    | "commentRangeEnd"
-                    | "permStart"
-                    | "permEnd"
-            )
-        {
+        } else if node.is_range_marker() {
             result.markers.push(result.len);
         } else {
             return Err(Failure::structure(format!(

@@ -8310,7 +8310,7 @@ it('holds the commit preview until its default fonts settle and repaints it with
     return { createDefaultFontPainter: (_decoder: unknown, onRepaint: () => void) => {
       repaint = onRepaint;
       return { load: async () => {}, adopt: () => {}, dispose: () => {},
-        paint: (_list: DisplayList, paint: () => void) => { paint(); return facesSettled; } };
+        paint: (list: DisplayList, paint: (list: DisplayList) => void) => { paint(list); return facesSettled; } };
     } } as unknown as Awaited<ReturnType<typeof defaultFontPainterModule.load>>;
   });
   const hydration = deferred<WorkbookHandle>();
@@ -8389,7 +8389,7 @@ it('a commit preview held for default fonts settles when default fonts are turne
   const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
     await painterModule.promise;
     return { createDefaultFontPainter: () => ({ load: async () => {}, adopt: () => {}, dispose: () => {},
-      paint: (_list: DisplayList, paint: () => void) => { paint(); return false; } }) } as unknown as
+      paint: (list: DisplayList, paint: (list: DisplayList) => void) => { paint(list); return false; } }) } as unknown as
       Awaited<ReturnType<typeof defaultFontPainterModule.load>>;
   });
   const hydration = deferred<WorkbookHandle>();

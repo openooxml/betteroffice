@@ -19,6 +19,7 @@
 
 mod unit_matches;
 
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,8 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
-use docx_parse::paragraph_patch::{InheritanceStateV1, LegacyParagraphV1, ParagraphPatchV1};
-use docx_parse::serializer::S13TablePatch;
+use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::serializer::{ParagraphPatchSource, S13TablePatch};
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
@@ -58,7 +59,7 @@ pub(crate) const PARAGRAPH_IDS: &str = "paragraphIds";
 pub(crate) const SOURCE_PARAGRAPH_IDS: &str = "sourceParagraphIds";
 /// Root map holding the opening generation.
 pub(crate) const SESSION: &str = "session";
-const GENERATION: &str = "generation";
+pub(crate) const GENERATION: &str = "generation";
 
 /// A new opening generation: 128 bits, unique per call.
 fn fresh_generation() -> String {
@@ -592,51 +593,13 @@ impl SourceIndex {
         self.bytes.clone()
     }
 
-    /// Whether any of `ordinals` in `part` is a paragraph [`rewriting_loses_source_runs`]; an
-    /// unreadable part or paragraph counts as one.
-    fn rewrite_loses_source_runs(
-        &self,
-        part: &SourcePart,
-        ordinals: &[u32],
-        loses: fn(&str) -> bool,
-    ) -> bool {
-        if ordinals.is_empty() {
-            return false;
-        }
-        let read = || -> Option<String> {
-            let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
-            let position = package.parts().position(|(path, _)| path == part.path())?;
-            String::from_utf8(package.read(position).ok()?).ok()
-        };
-        let Some(xml) = read() else {
-            return true;
-        };
-        ordinals.iter().any(|&ordinal| {
-            let Some(start) = part
-                .occurrence(ordinal)
-                .map(|occurrence| occurrence.tag.start)
-            else {
-                return true;
-            };
-            docx_parse::serializer::element_span(&xml[start..], &[])
-                .is_none_or(|span| loses(&xml[start..][span]))
-        })
-    }
-
     fn part_xml(&self, part: &SourcePart) -> Option<String> {
         let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
         let position = package.parts().position(|(path, _)| path == part.path())?;
-        String::from_utf8(package.read(position).ok()?).ok()
-    }
-
-    fn paragraph_xml(&self, part: &SourcePart, ordinal: u32) -> Option<String> {
-        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
-        let position = package.parts().position(|(path, _)| path == part.path())?;
-        let xml = String::from_utf8(package.read(position).ok()?).ok()?;
-        let start = part.occurrence(ordinal)?.tag.start;
-        let paragraph = &xml[start..];
-        let span = docx_parse::serializer::element_span(paragraph, &[])?;
-        Some(paragraph[span].to_owned())
+        let xml = package.read(position).ok()?;
+        #[cfg(test)]
+        PART_XML_READS.with(|count| count.set(count.get() + 1));
+        String::from_utf8(xml).ok()
     }
 
     pub(crate) fn run_size_source(&self, key: &str, story: &str) -> Option<Arc<ParagraphSizes>> {
@@ -830,18 +793,24 @@ impl SourceIndex {
         self.parts.iter().find(|part| part.uri == uri)
     }
 
-    fn simple_table(&self, index: usize, ordinal: u32) -> bool {
+    fn simple_table<'a>(
+        &self,
+        index: usize,
+        ordinal: u32,
+        load_xml: impl FnOnce() -> Option<&'a str>,
+    ) -> bool {
         let part = &self.parts[index];
         part.simple_tables
-            .get_or_init(|| self.simple_table_paragraphs(part).unwrap_or_default())
+            .get_or_init(|| {
+                load_xml()
+                    .and_then(|xml| Self::simple_table_paragraphs(part, xml))
+                    .unwrap_or_default()
+            })
             .contains(&ordinal)
     }
 
-    fn simple_table_paragraphs(&self, part: &SourcePart) -> Option<BTreeSet<u32>> {
-        let package = ooxml_opc::RetainedPackage::from_bytes(self.bytes()).ok()?;
-        let position = package.parts().position(|(path, _)| path == part.path())?;
-        let xml = String::from_utf8(package.read(position).ok()?).ok()?;
-        let spans = docx_parse::paragraph_identity::simple_table_spans(&xml)?;
+    fn simple_table_paragraphs(part: &SourcePart, xml: &str) -> Option<BTreeSet<u32>> {
+        let spans = docx_parse::paragraph_identity::simple_table_spans(xml)?;
         Some(
             part.occurrences
                 .iter()
@@ -1668,6 +1637,9 @@ thread_local! {
         std::cell::Cell::new(0)
     };
     static UNIT_PROJECTIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static PART_XML_READS: std::cell::Cell<usize> = const {
         std::cell::Cell::new(0)
     };
     pub(crate) static RUN_SIZE_FINGERPRINTS: std::cell::Cell<usize> = const {
@@ -3188,6 +3160,7 @@ impl EditingDoc {
     /// shared seed needs, and is otherwise freshly minted. System-origin and
     /// outside undo.
     pub fn begin_opening(&self, generation: Option<&str>) {
+        self.clear_edit_provenance();
         self.save_story_states.lock().unwrap().clear();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
@@ -4313,6 +4286,19 @@ impl EditingDoc {
     /// exactly what it gave as seeded (see [`StoryState`]), so that its source
     /// bytes are what a save would write, IDs aside.
     pub fn paragraph_save_plan(&self) -> ParagraphSavePlan {
+        self.paragraph_save_plan_with_local_provenance(false, &mut 0)
+    }
+
+    #[doc(hidden)]
+    pub fn paragraph_save_plan_from_records(&self) -> ParagraphSavePlan {
+        self.paragraph_save_plan_with_local_provenance(true, &mut 0)
+    }
+
+    pub(crate) fn paragraph_save_plan_with_local_provenance(
+        &self,
+        use_local_provenance: bool,
+        provenance_net: &mut u32,
+    ) -> ParagraphSavePlan {
         let Some(source) = self.source_index() else {
             return ParagraphSavePlan::default();
         };
@@ -4359,6 +4345,11 @@ impl EditingDoc {
             touched_parts: Vec::new(),
         };
         let metadata = self.source_metadata();
+        let provenance = if use_local_provenance {
+            self.provenance_snapshot()
+        } else {
+            crate::provenance::Provenance::default()
+        };
         let seeded = if let Some(ready) = ready {
             ready
         } else {
@@ -4366,6 +4357,29 @@ impl EditingDoc {
         };
         let seeded_units = ready_units.unwrap_or_else(|| units_by_key(seeded));
         let live_units = units_by_key(&live);
+        let mut equal_output: HashMap<usize, Vec<_>> = HashMap::new();
+        for key in provenance.equal_output_candidates() {
+            let Some(((index, ordinal), 0)) = source.view_of(key) else {
+                continue;
+            };
+            if !source.parts[index].as_written {
+                continue;
+            }
+            let Some((&(story, was), &(live_story, now))) =
+                seeded_units.get(key).zip(live_units.get(key))
+            else {
+                continue;
+            };
+            if story == live_story
+                && was.same_projection(now)
+                && let Some(proof) = provenance.prove(self, &txn, story, key)
+            {
+                equal_output
+                    .entry(index)
+                    .or_default()
+                    .push((ordinal, proof));
+            }
+        }
         let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
             part_stories(states, part)
                 .into_iter()
@@ -4376,47 +4390,162 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key)
+            let patch_source = OnceCell::new();
+            let load_source = || {
+                patch_source
+                    .get_or_init(|| source.part_xml(part).map(ParagraphPatchSource::new))
+                    .as_ref()
+            };
+            let load_xml = || load_source().map(ParagraphPatchSource::as_str);
+            let mut patched_equal = Vec::new();
+            if let Some((mut spliced, stale)) =
+                spliced_part(&source, index, seeded, &live, &by_key, load_xml)
             {
                 let same_stories = part_stories(seeded, part)
                     .keys()
                     .eq(part_stories(&live, part).keys());
                 if part.as_written {
-                    for &ordinal in &spliced.changed {
-                        let key = &part.backed[&ordinal][0];
-                        let (story, was) = seeded_units[key.as_str()];
-                        let (_, now) = live_units[key.as_str()];
+                    let inline_tail = ends_with_inline_tail(seeded, part);
+                    let source_at = |ordinal| {
+                        let start = part.occurrence(ordinal)?.tag.start;
+                        Some((load_source()?, start))
+                    };
+                    let source_paragraph = |ordinal| {
+                        let (source, start) = source_at(ordinal)?;
+                        source.paragraph_xml(start)
+                    };
+                    let rewrite_loses_source_runs = |ordinals: &[u32], loses: fn(&str) -> bool| {
+                        ordinals
+                            .iter()
+                            .any(|&ordinal| source_paragraph(ordinal).is_none_or(loses))
+                    };
+                    let mut part_provenance_net = 0;
+                    let equal =
+                        equal_output
+                            .get(&index)
+                            .into_iter()
+                            .flatten()
+                            .filter(|(ordinal, _)| {
+                                spliced
+                                    .paragraphs
+                                    .binary_search_by_key(ordinal, |(at, _)| *at)
+                                    .is_ok()
+                            });
+                    let mut equal_patches = Vec::new();
+                    for (ordinal, equal) in spliced
+                        .changed
+                        .iter()
+                        .map(|&ordinal| (ordinal, None))
+                        .chain(equal.map(|(ordinal, proof)| (*ordinal, Some(proof))))
+                    {
+                        let mut unavailable = || {
+                            if equal.is_none() {
+                                spliced
+                                    .legacy_paragraphs
+                                    .push(crate::paragraph_patch_plan::unproven_paragraph(ordinal));
+                            }
+                        };
+                        let Some(key) = part.backed.get(&ordinal).and_then(|keys| keys.first())
+                        else {
+                            unavailable();
+                            continue;
+                        };
+                        let Some((&(story, was), &(live_story, now))) = seeded_units
+                            .get(key.as_str())
+                            .zip(live_units.get(key.as_str()))
+                        else {
+                            unavailable();
+                            continue;
+                        };
+                        let recorded = provenance.has_records(key);
+                        let checked = if equal.is_none() && recorded {
+                            let proof = provenance
+                                .prove(self, &txn, live_story, key)
+                                .filter(|_| story == live_story);
+                            if proof.is_none() {
+                                self.mark_provenance_key(&txn, key);
+                            }
+                            proof
+                        } else {
+                            None
+                        };
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
-                        let source_paragraph = || source.paragraph_xml(part, ordinal);
+                        let paragraph = || source_paragraph(ordinal);
                         let context = crate::paragraph_patch_plan::PatchContext {
                             ordinal,
                             session_key: key,
                             story,
                             metadata: metadata.as_deref(),
-                            source_paragraph: Some(&source_paragraph),
+                            source_paragraph: Some(&paragraph),
                             source: Some(&source),
+                            stale_inheritance: stale.iter().any(|cell| {
+                                story
+                                    .strip_prefix(cell.as_str())
+                                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+                            }),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
-                        if same_stories && formatting_alone(was, now) {
+                        let Some(seeded) = was.segments.as_deref() else {
+                            unavailable();
+                            continue;
+                        };
+                        let Some(live) = now
+                            .segments
+                            .as_deref()
+                            .or_else(|| was.same_projection(now).then_some(seeded))
+                        else {
+                            unavailable();
+                            continue;
+                        };
+                        let recorded_patch = equal.or(checked.as_ref()).and_then(|proof| {
+                            crate::paragraph_patch_plan::diff_recorded_paragraph(
+                                seeded,
+                                live,
+                                context,
+                                proof,
+                                || source_at(ordinal),
+                            )
+                            .ok()
+                            .filter(|(patch, _)| {
+                                !inline_tail
+                                    || patch.run_edits.is_empty()
+                                    || !rewrite_loses_source_runs(
+                                        &[ordinal],
+                                        reformatting_loses_fields,
+                                    )
+                            })
+                        });
+                        if same_stories && equal.is_none() && formatting_alone(was, now) {
                             spliced.format_only.push(ordinal);
                         }
-                        match crate::paragraph_patch_plan::diff_paragraph_v1(
-                            was.segments.as_deref().expect("seeded segments retained"),
-                            now.segments.as_deref().expect("changed segments retained"),
-                            context,
-                        ) {
-                            Ok(mut patch) => {
-                                if stale.iter().any(|cell| {
-                                    story.strip_prefix(cell.as_str()).is_some_and(|rest| {
-                                        rest.is_empty() || rest.starts_with(':')
-                                    })
-                                }) {
-                                    patch.inheritance = InheritanceStateV1::Unknown;
+                        let patch = match recorded_patch {
+                            Some((patch, _))
+                                if equal.is_some()
+                                    && patch.text_edits.is_empty()
+                                    && patch.run_edits.is_empty()
+                                    && patch.para_deltas.is_empty() =>
+                            {
+                                continue;
+                            }
+                            Some((patch, used_base)) => {
+                                part_provenance_net += u32::from(used_base);
+                                Ok(patch)
+                            }
+                            None if equal.is_some() => continue,
+                            None => crate::paragraph_patch_plan::diff_paragraph_v1(
+                                seeded, live, context,
+                            ),
+                        };
+                        match patch {
+                            Ok(patch) => {
+                                if equal.is_some() {
+                                    equal_patches.push(patch);
+                                } else {
+                                    spliced.paragraph_patches.push(patch);
                                 }
-                                spliced.paragraph_patches.push(patch);
                             }
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
@@ -4438,17 +4567,22 @@ impl EditingDoc {
                         && spliced.removed.is_empty()
                         && spliced.table_patches.is_empty();
                     if formatting_alone
-                        || !ends_with_inline_tail(seeded, part)
-                        || (!source.rewrite_loses_source_runs(
-                            part,
-                            &rewritten,
-                            rewriting_loses_source_runs,
-                        ) && !source.rewrite_loses_source_runs(
-                            part,
-                            &reformatted,
-                            reformatting_loses_fields,
-                        ))
+                        || !inline_tail
+                        || (!rewrite_loses_source_runs(&rewritten, rewriting_loses_source_runs)
+                            && !rewrite_loses_source_runs(&reformatted, reformatting_loses_fields))
                     {
+                        for patch in equal_patches {
+                            patched_equal.push(patch.ordinal);
+                            spliced.changed.push(patch.ordinal);
+                            spliced.paragraph_patches.push(patch);
+                        }
+                        if !patched_equal.is_empty() {
+                            spliced.changed.sort_unstable();
+                            spliced
+                                .paragraph_patches
+                                .sort_unstable_by_key(|patch| patch.ordinal);
+                        }
+                        *provenance_net += part_provenance_net;
                         plan.spliced_parts.push(spliced);
                     }
                 } else {
@@ -4459,10 +4593,15 @@ impl EditingDoc {
                         .filter(|ordinal| !spliced.section_only.contains(ordinal))
                         .collect();
                     let formatting = formatted.iter().all(|ordinal| {
-                        let key = &part.backed[ordinal][0];
-                        let (_, was) = seeded_units[key.as_str()];
-                        let (_, now) = live_units[key.as_str()];
-                        formatting_alone(was, now)
+                        part.backed
+                            .get(ordinal)
+                            .and_then(|keys| keys.first())
+                            .is_some_and(|key| {
+                                seeded_units
+                                    .get(key.as_str())
+                                    .zip(live_units.get(key.as_str()))
+                                    .is_some_and(|((_, was), (_, now))| formatting_alone(was, now))
+                            })
                     });
                     if formatting && same_stories {
                         spliced.format_only = formatted;
@@ -4481,7 +4620,7 @@ impl EditingDoc {
                     }
                 }
             }
-            if stories_of(seeded, part) != stories_of(&live, part) {
+            if !patched_equal.is_empty() || stories_of(seeded, part) != stories_of(&live, part) {
                 let mut touched: Vec<u32> = part
                     .backed
                     .iter()
@@ -4498,6 +4637,7 @@ impl EditingDoc {
                     })
                     .map(|(ordinal, _)| *ordinal)
                     .collect();
+                touched.extend(patched_equal);
                 crate::sort::sort(&mut touched);
                 plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
@@ -4586,15 +4726,16 @@ fn part_stories<'a>(
         .collect()
 }
 
-fn separator_paragraphs(source: &SourceIndex, part: &SourcePart) -> Option<Vec<u32>> {
+fn separator_paragraphs<'a>(
+    part: &SourcePart,
+    load_xml: impl FnOnce() -> Option<&'a str>,
+) -> Option<Vec<u32>> {
     let note_name = match part.kind {
         SourceStoryKind::Footnote => "w:footnote",
         SourceStoryKind::Endnote => "w:endnote",
         _ => return Some(Vec::new()),
     };
-    let package = ooxml_opc::RetainedPackage::from_bytes(source.bytes()).ok()?;
-    let position = package.parts().position(|(path, _)| path == part.path())?;
-    let xml = String::from_utf8(package.read(position).ok()?).ok()?;
+    let xml = load_xml()?;
     let limits = docx_parse::xml::ParseLimits::default();
     let mut budget = docx_parse::xml::ParseBudget::new(&limits);
     let document = docx_parse::xml::parse_xml(xml.as_bytes(), part.path(), &mut budget).ok()?;
@@ -4605,7 +4746,7 @@ fn separator_paragraphs(source: &SourceIndex, part: &SourcePart) -> Option<Vec<u
         {
             continue;
         }
-        let span = docx_parse::serializer::element_span(&xml, &[index as u32])?;
+        let span = docx_parse::serializer::element_span(xml, &[index as u32])?;
         ordinals.extend(
             part.occurrences
                 .iter()
@@ -4698,6 +4839,7 @@ fn admit_row_splices(
     before: &BTreeMap<&String, &StoryState>,
     after: &BTreeMap<&String, &StoryState>,
     edits: &mut RowSplices,
+    simple_table: impl Fn(u32) -> bool,
 ) -> Option<()> {
     let (source, index, patch_tables) = origin;
     if was.blocks == now.blocks {
@@ -4749,7 +4891,7 @@ fn admit_row_splices(
                             .as_deref()
                             .and_then(|key| source.view_of(key))
                             .is_some_and(|((part, ordinal), _)| {
-                                part == index && source.simple_table(index, ordinal)
+                                part == index && simple_table(ordinal)
                             })
                     })
                 })
@@ -4883,12 +5025,13 @@ fn admit_row_splices(
 /// hold, each the only view of its source paragraph. Removed source paragraphs held no block
 /// embeds, and a paragraph the source lacks holds none and sits next to a source paragraph of
 /// its story with no block embed between them, unless it is an empty editor-only one.
-fn spliced_part(
+fn spliced_part<'a>(
     source: &SourceIndex,
     index: usize,
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
+    load_xml: impl Fn() -> Option<&'a str>,
 ) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
@@ -4896,6 +5039,7 @@ fn spliced_part(
     }
     let before = part_stories(seeded, part);
     let after = part_stories(live, part);
+    let simple_table = |ordinal| source.simple_table(index, ordinal, &load_xml);
     let admit = |patch_tables| {
         let mut rows = RowSplices::default();
         for (story, seed) in &before {
@@ -4910,6 +5054,7 @@ fn spliced_part(
                     &before,
                     &after,
                     &mut rows,
+                    simple_table,
                 )?;
             }
         }
@@ -5111,7 +5256,7 @@ fn spliced_part(
         return None;
     }
     paragraphs.extend(
-        separator_paragraphs(source, part)?
+        separator_paragraphs(part, load_xml)?
             .into_iter()
             .map(|ordinal| (ordinal, occurrence_owner(part, ordinal))),
     );
@@ -5499,8 +5644,8 @@ mod tests {
         EditCtx::local("", DATE)
     }
 
-    fn save_seed_session() -> crate::session::EditSessionCore {
-        let bytes = ooxml_opc::rezip_parts(&[
+    fn save_seed_package(body: &str) -> Vec<u8> {
+        ooxml_opc::rezip_parts(&[
             (
                 "[Content_Types].xml".to_owned(),
                 br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
@@ -5511,10 +5656,15 @@ mod tests {
             ),
             (
                 "word/document.xml".to_owned(),
-                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p></w:body></w:document>"#.to_vec(),
+                format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}</w:body></w:document>"#).into_bytes(),
             ),
         ])
-        .unwrap();
+        .unwrap()
+    }
+
+    fn save_seed_session() -> crate::session::EditSessionCore {
+        let bytes =
+            save_seed_package(r#"<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>"#);
         let session =
             crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
         session.open_docx(&bytes, true, None, None).unwrap();
@@ -5782,6 +5932,38 @@ mod tests {
         doc.paragraph_save_plan();
         STORY_FINGERPRINTS.with(|count| assert_eq!(count.get(), 1));
         save_plans_agree(&doc);
+    }
+
+    #[test]
+    fn save_plans_read_the_source_part_once_for_multiple_ambiguous_replacements() {
+        let body: String = (1..=3)
+            .map(|id| {
+                format!(
+                    r#"<w:p w14:paraId="{id:08X}"><w:r><w:t>k</w:t></w:r><w:r><w:t>AB</w:t></w:r><w:r><w:t>z</w:t></w:r></w:p>"#
+                )
+            })
+            .collect();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx(&doc, &save_seed_package(&body)).unwrap();
+        for start in [0, 5, 10] {
+            doc.replace_range(&ctx(), StoryRange::new("body", start, start + 4), "kBAz")
+                .unwrap();
+        }
+
+        for use_local_provenance in [true, false] {
+            let mut provenance_net = 0;
+            PART_XML_READS.with(|count| count.set(0));
+            let plan = doc.paragraph_save_plan_with_local_provenance(
+                use_local_provenance,
+                &mut provenance_net,
+            );
+            PART_XML_READS.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(provenance_net, if use_local_provenance { 3 } else { 0 });
+            let part = &plan.spliced_parts[0];
+            assert_eq!(part.part, "word/document.xml");
+            assert_eq!(part.paragraph_patches.len(), 3);
+            assert!(part.legacy_paragraphs.is_empty());
+        }
     }
 
     #[test]

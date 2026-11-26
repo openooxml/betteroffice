@@ -58,7 +58,7 @@ test('editors with default fonts off forward no faces and load no fonts', async 
 
 test('editor export omits optional faces when the default CDN fails', async () => {
   const runtime = fontRuntimeWithoutPacks();
-  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
   const fetch = spyOnFontFetch((input) =>
@@ -98,7 +98,7 @@ test('editor PNG export omits absent optional faces with the CDN disabled', asyn
       urls: urls && Object.fromEntries(Object.entries(urls).map(([file, href]) => [file, () => new URL(href)])),
     };
   });
-  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+  spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
   const fetch = spyOnFontFetch(fontAssetResponse);
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();

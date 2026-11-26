@@ -17,7 +17,7 @@ use crate::write::{
     SharedStringPlan, cell_value_markup, col_runs, fmt_num, fragment, shared_string_index,
     write_cell, write_col_run, write_cols, write_row,
 };
-use crate::xml::{attr, text_attribute, xml_err};
+use crate::xml::{attr, next_event, reader, text_attribute, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
 #[cfg(test)]
@@ -1043,6 +1043,132 @@ impl SheetPatch<'_> {
             self.axes.rows.source(at.row)?,
             self.axes.cols.source(at.col)?,
         ))
+    }
+}
+
+pub(crate) fn table_formula_rename_unsupported(
+    data: &[u8],
+    original: &Sheet,
+    dropped_array_ranges: bool,
+    has_alternate: bool,
+    affected: impl Fn(&str, CellRef) -> bool,
+) -> Result<bool, ParseError> {
+    let mut affected: HashSet<_> = original
+        .iter_cells()
+        .filter_map(|(at, cell)| {
+            cell.formula
+                .as_deref()
+                .is_some_and(|formula| affected(formula, at))
+                .then_some(at)
+        })
+        .collect();
+    if affected.is_empty() {
+        return Ok(false);
+    }
+    let Some((_, rows)) = scan_sheet_data(data)? else {
+        return Ok(dropped_array_ranges || sheet_data_regeneration_loss(data)?.is_some());
+    };
+    let cells = rows.iter().flat_map(|row| &row.cells);
+    let groups: HashSet<_> = cells
+        .clone()
+        .filter(|cell| affected.contains(&cell.at))
+        .filter_map(|cell| cell.formula.as_ref()?.group)
+        .collect();
+    for cell in cells {
+        let in_dirty_group = cell
+            .formula
+            .as_ref()
+            .and_then(|formula| formula.group)
+            .is_some_and(|group| groups.contains(&group));
+        if (affected.remove(&cell.at) || in_dirty_group)
+            && formula_regeneration_loses_markup(data, cell, original.array_formula(cell.at))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(!affected.is_empty()
+        || (has_alternate && !groups.is_empty() && alternate_shared_formula(data, &groups)?))
+}
+
+fn alternate_shared_formula(data: &[u8], groups: &HashSet<u32>) -> Result<bool, ParseError> {
+    alternate_content_matches(data, |element| {
+        Ok(element.local_name().as_ref() == b"f"
+            && attr(element, b"t")?.as_deref() == Some("shared")
+            && attr(element, b"si")?
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .is_some_and(|group| groups.contains(&group)))
+    })
+}
+
+pub(crate) fn alternate_content_matches(
+    data: &[u8],
+    matches: impl Fn(&BytesStart) -> Result<bool, ParseError>,
+) -> Result<bool, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut alternate = None;
+    loop {
+        match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) => {
+                if alternate.is_none() && element.local_name().as_ref() == b"AlternateContent" {
+                    alternate = Some(depth);
+                }
+                if alternate.is_some() && matches(&element)? {
+                    return Ok(true);
+                }
+            }
+            Event::End(_) if alternate.is_some_and(|start| depth < start) => alternate = None,
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+fn formula_regeneration_loses_markup(
+    data: &[u8],
+    cell: &SourceCell,
+    array_range: Option<CellRange>,
+) -> Result<bool, ParseError> {
+    let mut reader = Reader::from_reader(&data[cell.span.clone()]);
+    reader.config_mut().expand_empty_elements = false;
+    let mut depth = 0;
+    let mut source_array_range = None;
+    loop {
+        let event = reader.read_event().map_err(xml_err)?;
+        let start = matches!(&event, Event::Start(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let allowed: &[&[u8]] = match (depth, element.local_name().as_ref()) {
+                    (0, b"c") => &[b"r", b"s", b"t"],
+                    (1, b"f") => {
+                        if attr(&element, b"t")?.as_deref() == Some("array") {
+                            source_array_range = attr(&element, b"ref")?
+                                .and_then(|reference| CellRange::parse_a1(&reference).ok());
+                            if source_array_range.is_none() {
+                                return Ok(true);
+                            }
+                        }
+                        &[b"t", b"ref", b"si"]
+                    }
+                    (_, b"AlternateContent") => return Ok(true),
+                    (1, b"v" | b"is") => &[],
+                    (1, _) => return Ok(true),
+                    _ => &[],
+                };
+                if !allowed.is_empty() {
+                    for attribute in element.attributes() {
+                        if !allowed.contains(&attribute.map_err(xml_err)?.key.as_ref()) {
+                            return Ok(true);
+                        }
+                    }
+                }
+                depth += usize::from(start);
+            }
+            Event::End(_) => depth -= 1,
+            Event::Eof => return Ok(source_array_range != array_range),
+            _ => {}
+        }
     }
 }
 

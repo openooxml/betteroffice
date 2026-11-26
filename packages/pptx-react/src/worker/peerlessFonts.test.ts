@@ -107,6 +107,35 @@ test('a slow default browser face times out without a late installation', async 
   }
 });
 
+test('keeps a styled Latin substitute out of the browser family used by an Arabic default', async () => {
+  const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  class Face {
+    constructor(readonly family: string, _source: ArrayBuffer, readonly descriptors: FontFaceDescriptors) {}
+    async load() { return this; }
+  }
+  const added = new Set<Face>();
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: Face });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { fonts: added } });
+  const family = 'Simplified Arabic';
+  const latin = { family, paintFamily: 'bo-pptx-editor-Carlito', bold: true, italic: true,
+    bytes: sfnt({ weight: 700, selection: 1 }).buffer as ArrayBuffer };
+  const arabic = { family, bold: true, italic: true, bytes: sfnt().buffer as ArrayBuffer };
+  const installed: FontFace[] = [];
+  try {
+    expect(await installDefaultFonts([latin], installed, () => true, () => {}, (name) => name === family)).toEqual([latin]);
+    expect(await installDefaultFonts([arabic], installed, () => true, () => {}, (name) => name === family)).toEqual([arabic]);
+    expect([...added].map((face) => [face.family, face.descriptors])).toEqual([
+      [latin.paintFamily, { weight: '700', style: 'italic' }],
+      [family, { weight: '400', style: 'normal' }],
+    ]);
+  } finally {
+    for (const [key, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
 test('installs fonts using the face weight and style instead of request flags', async () => {
   const descriptors = ['FontFace', 'document'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
   const created: { family: string; descriptors: FontFaceDescriptors }[] = [];

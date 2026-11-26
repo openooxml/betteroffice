@@ -108,6 +108,50 @@ afterEach(async () => {
 });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
+function setWorkerRendering() {
+  for (const [target, property, value] of [
+    [globalThis, 'navigator', { userAgent: 'Chrome/149.0' }],
+    [globalThis, 'createImageBitmap', () => {}],
+    [HTMLCanvasElement.prototype, 'transferControlToOffscreen', () => {}],
+  ] as const) {
+    const original = Object.getOwnPropertyDescriptor(target, property);
+    Object.defineProperty(target, property, { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(target, property, original);
+      else Reflect.deleteProperty(target, property);
+    });
+  }
+}
+
+test('the editor defaults to sliced fonts with worker rendering support and honors an explicit opt-out', async () => {
+  const opener = spyOn(peerlessSessionOpener, 'open');
+  setWorkerRendering();
+  for (const [supported, option, expected] of [
+    [true, undefined, true], [true, false, false], [false, undefined, false], [false, true, false],
+  ] as const) {
+    if (!supported) Reflect.deleteProperty(globalThis, 'createImageBitmap');
+    const file = await deck(0);
+    const view = render(<PptxEditor file={file} fonts={[]} experimentalSlicedFonts={option} />);
+    try {
+      await waitFor(() => expect(opener).toHaveBeenCalledWith(file, expect.anything()));
+      expect(opener.mock.calls.find(([source]) => source === file)?.[1]?.slicedFonts === true).toBe(expected);
+    } finally { view.unmount(); }
+  }
+});
+
+test('changing the slice option reopens the editor on the same file', async () => {
+  const opener = spyOn(peerlessSessionOpener, 'open');
+  setWorkerRendering();
+  const file = await deck(0);
+  const fonts = [] as const;
+  const view = render(<PptxEditor file={file} fonts={fonts} experimentalSlicedFonts />);
+  try {
+    await waitFor(() => expect(opener).toHaveBeenCalledWith(file, expect.objectContaining({ slicedFonts: true })));
+    await act(async () => { view.rerender(<PptxEditor file={file} fonts={fonts} experimentalSlicedFonts={false} />); });
+    await waitFor(() => expect(opener).toHaveBeenCalledWith(file, expect.objectContaining({ slicedFonts: false })));
+  } finally { view.unmount(); }
+});
+
 test('default fonts gate the initial paint and background navigation on browser installation', async () => {
   const active = deferred<void>();
   const background = deferred<void>();

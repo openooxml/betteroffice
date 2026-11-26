@@ -5,9 +5,9 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer};
 use xlsx_model::sort::sort_by_shared;
-use xlsx_model::{CellRef, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
-use crate::read::{SharedStringCells, SourceCellFacts, WorksheetCellFacts};
+use crate::read::{IndexedWorkbook, SharedStringCells, SourceCellFacts, WorksheetCellFacts};
 use crate::reference::UnpatchableReference;
 use crate::xml::{
     PartNames, attr, collect_text, find_part, local_name, next_event, reader, resolve_part_name,
@@ -34,6 +34,7 @@ pub struct PreservedPackage {
     pub(crate) calc_chains: Vec<PartReference>,
     pub(crate) stylesheet_template: Option<XmlTemplate>,
     pub(crate) original_workbook: Workbook,
+    pub(crate) table_parts: Vec<String>,
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
     /// Per source sheet, the drawings holding anchors no chart claims; read on first use.
@@ -50,14 +51,14 @@ impl PreservedPackage {
     /// and the save path borrows from it rather than holding a second copy.
     pub(crate) fn capture(
         parts: Vec<(String, Vec<u8>)>,
-        workbook: &Workbook,
-        active_sheet: SheetId,
-        shared_string_cells: &[SharedStringCells],
-        declined_parts: &[String],
-        rich_shared_strings: BTreeSet<usize>,
-        cell_facts: Vec<WorksheetCellFacts>,
+        parsed: &mut IndexedWorkbook,
     ) -> Result<Self, ParseError> {
-        let mut cell_facts = cell_facts.into_iter();
+        let workbook = &parsed.workbook;
+        let active_sheet = parsed.active_sheet;
+        let shared_string_cells = &parsed.shared_string_cells;
+        let declined_parts = &parsed.declined_parts;
+        let rich_shared_strings = std::mem::take(&mut parsed.rich_shared_strings);
+        let mut cell_facts = std::mem::take(&mut parsed.cell_facts).into_iter();
         let workbook_xml = find_part(&parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
@@ -197,6 +198,7 @@ impl PreservedPackage {
             calc_chains,
             stylesheet_template,
             original_workbook: workbook.clone(),
+            table_parts: std::mem::take(&mut parsed.table_parts),
             active_sheet,
             unpatchable_references,
             drawing_anchors: Arc::new(OnceLock::new()),
@@ -440,7 +442,11 @@ impl PreservedPackage {
                 #[cfg(test)]
                 MOVE_GUARD_READS.set(MOVE_GUARD_READS.get() + 1);
                 let unsupported = if table {
-                    table_move_unsupported(bytes, |formula| formula_affected(index, formula))
+                    contains_formula(
+                        bytes,
+                        &[b"calculatedColumnFormula", b"totalsRowFormula"],
+                        |formula| formula_affected(index, formula),
+                    )
                 } else {
                     comment_move_unsupported(bytes, |at| comment_affected(index, at))
                 };
@@ -450,6 +456,107 @@ impl PreservedPackage {
             }
         }
         None
+    }
+
+    #[doc(hidden)]
+    pub fn validate_table_header_cell(&self, origin: usize, at: CellRef) -> Result<(), ParseError> {
+        if let Some(sheet) = self.sheets.get(origin)
+            && sheet.cell_facts.alternate_cells.contains(&(at.row, at.col))
+        {
+            return Err(ParseError::UnsupportedEdit(format!(
+                "table header {} in {} is inside AlternateContent",
+                at.to_a1(),
+                sheet.path
+            )));
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn table_header_reference(
+        &self,
+        origin: Option<usize>,
+        range: CellRange,
+        matches: impl Fn(&str, bool) -> bool,
+        rewrites_sheet: impl Fn(usize) -> bool,
+    ) -> Result<Option<&str>, ParseError> {
+        for (index, sheet) in self.sheets.iter().enumerate() {
+            for child in &sheet.template.children {
+                if child.local_name == "sheetData" {
+                    let local = origin == Some(index);
+                    let alternate = b"AlternateContent";
+                    let has_alternate = child
+                        .bytes
+                        .windows(alternate.len())
+                        .any(|bytes| bytes == alternate);
+                    if (has_alternate
+                        && rewrites_sheet(index)
+                        && crate::patch::alternate_content_matches(&child.bytes, |_| Ok(true))?)
+                        || (has_alternate
+                            && contains_formula_in(
+                                &child.bytes,
+                                &[b"f", b"formula"],
+                                Some(alternate),
+                                |formula| matches(formula, local),
+                            )?)
+                        || crate::patch::table_formula_rename_unsupported(
+                            &child.bytes,
+                            &self.original_workbook.sheets[index],
+                            sheet.cell_facts.source.dropped_array_ranges,
+                            has_alternate,
+                            |formula, at| matches(formula, local && range.contains(at)),
+                        )?
+                    {
+                        return Ok(Some(&sheet.path));
+                    }
+                    continue;
+                }
+                if !matches!(
+                    child.local_name.as_str(),
+                    "dataValidations" | "extLst" | "AlternateContent"
+                ) {
+                    continue;
+                }
+                if contains_formula(
+                    &child.bytes,
+                    &[b"formula1", b"formula2", b"formula", b"f"],
+                    |formula| matches(formula, origin == Some(index)),
+                )? {
+                    return Ok(Some(&sheet.path));
+                }
+            }
+        }
+        let model_charts = self
+            .original_workbook
+            .sheets
+            .iter()
+            .flat_map(|sheet| &sheet.charts)
+            .map(|chart| normalized_part_name(&chart.part))
+            .collect::<HashSet<_>>();
+        for (path, bytes) in &self.parts {
+            let Some(kind) = effective_content_type(&self.content_types, path)
+                .map(|resolved| resolved.value.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            if !kind.ends_with("+xml") && !matches!(kind.as_str(), "application/xml" | "text/xml") {
+                continue;
+            }
+            let normalized = normalized_part_name(path);
+            let affected = |formula: &str| matches(formula, false);
+            let referenced = if model_charts.contains(&normalized) {
+                crate::chart::extension_formula_reference(bytes, affected)?
+            } else {
+                (normalized.starts_with("xl/charts/")
+                    || kind.ends_with(".chart+xml")
+                    || kind.ends_with(".chartex+xml"))
+                    && contains_formula(bytes, &[b"f", b"formula", b"sqref"], affected)?
+            };
+            if referenced {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// What of source sheet `index` a fill cannot keep, if anything.
@@ -655,20 +762,46 @@ pub(crate) fn take_move_guard_reads() -> usize {
     MOVE_GUARD_READS.replace(0)
 }
 
-fn table_move_unsupported(
+fn contains_formula(
     bytes: &[u8],
+    elements: &[&[u8]],
+    affected: impl Fn(&str) -> bool,
+) -> Result<bool, ParseError> {
+    contains_formula_in(bytes, elements, None, affected)
+}
+
+fn contains_formula_in(
+    bytes: &[u8],
+    elements: &[&[u8]],
+    ancestor: Option<&[u8]>,
     affected: impl Fn(&str) -> bool,
 ) -> Result<bool, ParseError> {
     let mut xml = reader(bytes);
     let mut buffer = Vec::new();
     let mut depth = 0;
+    let mut ancestor_depth = None;
     loop {
         match next_event(&mut xml, &mut buffer, &mut depth)? {
             Event::Start(start)
-                if matches!(
-                    local_name(&start).as_slice(),
-                    b"calculatedColumnFormula" | b"totalsRowFormula"
-                ) =>
+                if ancestor_depth.is_none() && ancestor == Some(start.local_name().as_ref()) =>
+            {
+                ancestor_depth = Some(depth);
+            }
+            Event::End(_) if ancestor_depth.is_some_and(|start| depth < start) => {
+                ancestor_depth = None;
+            }
+            Event::Start(start)
+                if (ancestor.is_none() || ancestor_depth.is_some())
+                    && elements.contains(&b"formula".as_slice())
+                    && start.local_name().as_ref() == b"cfvo"
+                    && attr(&start, b"type")?.as_deref() == Some("formula")
+                    && attr(&start, b"val")?.as_deref().is_some_and(&affected) =>
+            {
+                return Ok(true);
+            }
+            Event::Start(start)
+                if (ancestor.is_none() || ancestor_depth.is_some())
+                    && elements.contains(&start.local_name().as_ref()) =>
             {
                 let formula = collect_text(&mut xml, &mut buffer, &mut depth)?;
                 if affected(&formula) {

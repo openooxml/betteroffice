@@ -63,8 +63,8 @@ function Diff({ run, id, slideId, onPreview, onError, onTarget }: { run: Peerles
         sizeCanvasForSlide(buffer, diff.frame, 1, scale);
         const images = proposalImages(diff, source.resolveImage, decodeImageError);
         try {
-          await run.ensureWholeFonts?.();
-          await paintSlide(context, diff.frame, 1, scale, { resolveImage: images.resolveImage, textChanges: diff.textChanges, shapeChanges: proposalPaintChanges(diff) });
+          await paintSlide(context, diff.frame, 1, scale, { resolveImage: images.resolveImage, fontCoverage: run.fontCoverage,
+            textChanges: diff.textChanges, shapeChanges: proposalPaintChanges(diff) });
         } finally { images.release(); }
         if (!cancelled && canvas.current && run.current) {
           sizeCanvasForSlide(canvas.current, diff.frame, 1, scale);
@@ -94,10 +94,7 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
   const selected = useRef(state.selectedId);
   selected.current = state.diff ? state.selectedId : null;
   const onPreview = useCallback((proposal: Proposal | null) => setReviewed(proposal), [run]);
-  const frameSource = useCallback(async (index: number) => {
-    await run.ensureWholeFonts?.();
-    return peerlessFrameSource(run, index);
-  }, [run]);
+  const frameSource = useCallback((index: number) => peerlessFrameSource(run, index), [run]);
   const subscribeRevision = useCallback((listener: () => void) => {
     const offStructure = run.store.subscribeStructure(listener);
     const offPresentation = run.store.subscribePresentation(listener);
@@ -209,7 +206,8 @@ export function PeerlessReview({ run, diffHost, state, proposals, commands, onEr
       </section>)}
     </aside>}
     {state.diff && state.selectedId && diffHost.current && createPortal(<Diff key={previewGeneration} run={run} id={state.selectedId} slideId={state.slideVersion && state.slideVersion !== run.client.state.version ? null : state.slideId} onPreview={onPreview} onError={onError} onTarget={() => { void commands.execute('proposalsPanel', { open: true }); }} />, diffHost.current)}
-    {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} subscribeRevision={subscribeRevision} revision={revision}
+    {state.presenting && <PeerlessPresentationOverlay frameSource={frameSource} fontCoverage={run.fontCoverage}
+      subscribeRevision={subscribeRevision} revision={revision}
       slideCount={run.client.state.slides.length} startIndex={run.client.state.slides.findIndex((slide) => slide.id === run.client.state.activeSlideId)}
       label={t('presentation.label')} counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
       previousLabel={t('presentation.previousSlide')} nextLabel={t('presentation.nextSlide')} exitLabel={t('presentation.exit')}
