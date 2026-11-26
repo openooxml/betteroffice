@@ -4286,6 +4286,11 @@ impl EditingDoc {
     /// exactly what it gave as seeded (see [`StoryState`]), so that its source
     /// bytes are what a save would write, IDs aside.
     pub fn paragraph_save_plan(&self) -> ParagraphSavePlan {
+        self.paragraph_save_plan_with_local_provenance(false, &mut 0)
+    }
+
+    #[doc(hidden)]
+    pub fn paragraph_save_plan_from_records(&self) -> ParagraphSavePlan {
         self.paragraph_save_plan_with_local_provenance(true, &mut 0)
     }
 

@@ -183,7 +183,7 @@ impl EditSessionCore {
     /// whose session keys the caller resolves to the model paragraphs it marks
     /// with their ordinals.
     pub fn paragraph_save_plan(&self) -> EngineResult<String> {
-        self.paragraph_save_plan_with_local_provenance(true)
+        self.paragraph_save_plan_with_local_provenance(false)
     }
 
     #[doc(hidden)]

@@ -43,6 +43,10 @@ fn document_xml(content: &str) -> String {
 }
 
 fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
+    package_with_document(document_xml(content), custom_styles)
+}
+
+fn package_with_document(document: String, custom_styles: Option<&str>) -> Vec<u8> {
     let styles = format!(
         r#"<w:styles {NS}><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Slant"><w:name w:val="Slant"/><w:rPr><w:i/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Strong"><w:name w:val="Strong"/><w:pPr><w:keepNext/></w:pPr><w:rPr><w:b/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Right"><w:name w:val="Right"/><w:pPr><w:jc w:val="right"/></w:pPr></w:style></w:styles>"#
     );
@@ -63,7 +67,7 @@ fn package_with_styles(content: &str, custom_styles: Option<&str>) -> Vec<u8> {
             "word/_rels/document.xml.rels",
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_owned(),
         ),
-        ("word/document.xml", document_xml(content)),
+        ("word/document.xml", document),
         ("word/styles.xml", styles),
         ("word/header1.xml", header),
     ];
@@ -222,12 +226,11 @@ fn language_only_edits_patch_runs_and_marks_with_revisions_intact() {
 }
 
 fn patch(doc: &EditingDoc) -> ParagraphPatchV1 {
-    let plan = doc.paragraph_save_plan();
-    let part = plan
-        .spliced_parts
-        .iter()
-        .find(|part| part.part == "word/document.xml")
-        .unwrap();
+    patch_from_plan(doc.paragraph_save_plan())
+}
+
+fn patch_from_plan(plan: docx_edit::ParagraphSavePlan) -> ParagraphPatchV1 {
+    let part = body_plan(&plan);
     assert_eq!(part.changed, vec![0]);
     assert!(part.legacy_paragraphs.is_empty());
     assert_eq!(part.paragraph_patches.len(), 1);
@@ -312,6 +315,11 @@ fn save_paragraph_with_bytes(
     save_planned(&plan, Some(part), bytes, edit_model)
 }
 
+fn save_recorded_paragraph(doc: &EditingDoc, content: &str) -> (String, Vec<String>) {
+    let plan = doc.paragraph_save_plan_from_records();
+    save_planned(&plan, Some(body_plan(&plan)), &package(content), |_| {})
+}
+
 fn save_planned(
     plan: &docx_edit::ParagraphSavePlan,
     part: Option<&docx_edit::SplicedPart>,
@@ -335,17 +343,6 @@ fn save_planned_bytes(
     bytes: &[u8],
     document: impl FnOnce(&docx_parse::S9DocumentBodyWire) -> serde_json::Value,
 ) -> (Vec<u8>, Vec<String>) {
-    let package = docx_parse::parse_docx_s9_wire(
-        bytes,
-        docx_parse::S9ParseOptions {
-            source_ordinals: true,
-            ..Default::default()
-        },
-    )
-    .unwrap()
-    .document
-    .package;
-    let document = document(&package.document);
     let mut spliced = Vec::new();
     if let Some(part) = part {
         let paragraphs: Vec<_> = part.paragraphs.iter().map(|(ordinal, _)| ordinal).collect();
@@ -369,13 +366,36 @@ fn save_planned_bytes(
             "legacyParagraphs": part.legacy_paragraphs
         }));
     }
+    save_with_paragraph_ids(
+        bytes,
+        json!({"patchedParts": patched_parts(plan), "splicedParts": spliced}),
+        document,
+    )
+}
+
+fn save_with_paragraph_ids(
+    bytes: &[u8],
+    paragraph_ids: serde_json::Value,
+    document: impl FnOnce(&docx_parse::S9DocumentBodyWire) -> serde_json::Value,
+) -> (Vec<u8>, Vec<String>) {
+    let package = docx_parse::parse_docx_s9_wire(
+        bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let document = document(&package.document);
     let request = serde_json::from_value(json!({
         "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
         "document": document,
         "headerEntries": package.header_entries.unwrap_or_default(),
         "relationshipEntries": package.relationship_entries,
         "options": {"updateModifiedDate": false},
-        "paragraphIds": {"patchedParts": patched_parts(plan), "splicedParts": spliced}
+        "paragraphIds": paragraph_ids
     }))
     .unwrap();
     let (saved, warnings) = write_docx_s13_with_warnings(request, bytes).unwrap();
@@ -578,7 +598,7 @@ fn recorded_replacements_use_each_runs_properties() {
     replace(&doc, 12, 16, "ZULU");
     replace(&doc, 5, 11, "YANKEE");
     assert_splices(&doc, &[(5, 11, 5, "YANKEE"), (12, 16, 12, "ZULU")]);
-    let (saved, warnings) = save_paragraph(&doc, source, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&doc, source);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(saved.matches("</w:r>").count(), 2, "{saved}");
     for (run, (text, property, color)) in saved.split("</w:r>").zip([
@@ -629,7 +649,7 @@ fn recorded_splices_remove_emptied_runs_and_preserve_surrounding_xml() {
         replace(&doc, start + 14, start + 15, "");
         replace(&doc, start + 6, start + 14, "12345678");
         replace(&doc, start, start + 1, "");
-        let (saved, warnings) = save_paragraph(&doc, &source, |_| {});
+        let (saved, warnings) = save_recorded_paragraph(&doc, &source);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(
             saved.contains(&format!("<w:pPr/>{expected}</w:p>")),
@@ -2184,7 +2204,7 @@ fn one_replacement_over_runs_with_unmodelled_properties_keeps_no_middle_donor() 
     );
     let doc = open(content);
     replace(&doc, 0, 6, "r1s2MM34");
-    let plan = doc.paragraph_save_plan();
+    let plan = doc.paragraph_save_plan_from_records();
     let part = plan
         .spliced_parts
         .iter()
@@ -2192,7 +2212,7 @@ fn one_replacement_over_runs_with_unmodelled_properties_keeps_no_middle_donor() 
         .unwrap();
     assert!(part.legacy_paragraphs.is_empty());
     assert_splices(&doc, &[(0, 6, 0, "r1s2MM34")]);
-    let (saved, _) = save_paragraph(&doc, content, |_| {});
+    let (saved, _) = save_planned(&plan, Some(part), &package(content), |_| {});
     assert!(!saved.contains("<w:noProof/>"), "{saved}");
     assert!(!saved.contains("<w:bCs/>"), "{saved}");
 }
@@ -2211,7 +2231,7 @@ fn a_shared_edge_across_unmodelled_properties_keeps_the_untouched_run() {
     replace(&doc, 2, 3, "y");
     doc.delete_range(&ctx(), StoryRange::new("body", 0, 1))
         .unwrap();
-    let plan = doc.paragraph_save_plan();
+    let plan = doc.paragraph_save_plan_from_records();
     let part = plan
         .spliced_parts
         .iter()
@@ -2219,7 +2239,7 @@ fn a_shared_edge_across_unmodelled_properties_keeps_the_untouched_run() {
         .unwrap();
     assert!(part.legacy_paragraphs.is_empty());
     assert_splices(&doc, &[(0, 1, 0, ""), (2, 3, 2, "y"), (8, 10, 8, "qq")]);
-    let (saved, _) = save_paragraph(&doc, &content, |_| {});
+    let (saved, _) = save_planned(&plan, Some(part), &package(&content), |_| {});
     assert!(saved.contains(untouched), "{saved}");
     assert!(!saved.contains("<w:bdr "), "{saved}");
     assert!(
@@ -2265,13 +2285,13 @@ fn replacements_in_runs_with_unmodeled_source_properties_patch_each_run() {
         let doc = open(&content);
         replace(&doc, 0, 1, "A");
         replace(&doc, 11, 12, "C");
-        let edits: Vec<_> = patch(&doc)
+        let edits: Vec<_> = patch_from_plan(doc.paragraph_save_plan_from_records())
             .text_edits
             .iter()
             .map(|edit| (edit.from, edit.to))
             .collect();
         assert_eq!(edits, [(0, 1), (11, 12)]);
-        let (saved, _) = save_paragraph(&doc, &content, |_| {});
+        let (saved, _) = save_recorded_paragraph(&doc, &content);
         let expected = content
             .replacen("<w:t>aaaa</w:t>", "<w:t>Aaaa</w:t>", 1)
             .replacen("<w:t>cccc</w:t>", "<w:t>cccC</w:t>", 1);
@@ -2373,7 +2393,7 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
         }
         completed += 1;
 
-        let plan = doc.paragraph_save_plan();
+        let plan = doc.paragraph_save_plan_from_records();
         let part = plan
             .spliced_parts
             .iter()
@@ -2405,7 +2425,7 @@ fn several_replacements_keep_untouched_runs_or_take_the_whole_paragraph_path() {
         assert_recorded_or_preserving_base(patch, &content, &exact, &case_info);
         minimal += 1;
 
-        let (saved, _) = save_paragraph(&doc, &content, |_| {});
+        let (saved, _) = save_planned(&plan, Some(part), &package(&content), |_| {});
         for (index, (_, xml)) in runs.iter().enumerate() {
             if edits.iter().all(|(touched, _, _)| *touched != index) {
                 assert!(
@@ -2453,7 +2473,7 @@ fn ambiguous_replacements_keep_identical_source_run_properties() {
     let doc = open(&content);
     replace(&doc, 0, 1, "A");
     replace(&doc, 11, 12, "C");
-    let patch = patch(&doc);
+    let patch = patch_from_plan(doc.paragraph_save_plan_from_records());
     let edits: Vec<_> = patch
         .text_edits
         .iter()
@@ -2481,8 +2501,8 @@ fn successive_saves_keep_records_against_the_opening_seed() {
     let content = text("abc");
     let doc = open(&content);
     replace(&doc, 1, 2, "X");
-    let first = patch(&doc);
-    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    let first = patch_from_plan(doc.paragraph_save_plan_from_records());
+    let (saved, warnings) = save_recorded_paragraph(&doc, &content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(saved.contains(">aXc</w:t>"), "{saved}");
     assert!(
@@ -2490,11 +2510,11 @@ fn successive_saves_keep_records_against_the_opening_seed() {
             .is_empty()
     );
     replace(&doc, 2, 3, "Y");
-    let second = patch(&doc);
+    let second = patch_from_plan(doc.paragraph_save_plan_from_records());
     assert_eq!(first.seed, second.seed);
     assert!(matches!(&second.seed.units[0], UnitV1::Text { text, .. } if text == "abc"));
     assert_splices(&doc, &[(1, 2, 1, "X"), (2, 3, 2, "Y")]);
-    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&doc, &content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(saved.contains(">aXY</w:t>"), "{saved}");
 }
@@ -3131,7 +3151,7 @@ fn owned_splices(expected: &[(u32, u32, u32, &str)]) -> Vec<(u32, u32, DonorV1, 
 }
 
 fn assert_splices(doc: &EditingDoc, expected: &[(u32, u32, u32, &str)]) {
-    let patch = patch(doc);
+    let patch = patch_from_plan(doc.paragraph_save_plan_from_records());
     assert_eq!(splice_summary(&patch), owned_splices(expected));
     assert!(patch.run_edits.is_empty());
 }
@@ -3283,7 +3303,7 @@ fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
     replace(&control, 9, 14, "Γάμμα 😀");
     replace(&control, 6, 9, "");
     replace(&control, 1, 1, " longer a");
-    let (expected, warnings) = save_paragraph(&control, source, |_| {});
+    let (expected, warnings) = save_recorded_paragraph(&control, source);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(expected.contains("<w:t>Γάμμα 😀</w:t>"), "{expected}");
 
@@ -3335,7 +3355,7 @@ fn batched_run_rewrites_save_the_same_bytes_as_proposal_replacements() {
                 (9, 14, 9, "Γάμμα 😀"),
             ],
         );
-        let (saved, warnings) = save_paragraph(&owner, source, |_| {});
+        let (saved, warnings) = save_recorded_paragraph(&owner, source);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(saved, expected);
     }
@@ -3356,7 +3376,7 @@ fn one_update_carries_adjacent_replacements_with_distinct_source_donors() {
     assert_splices(&sender, &expected);
     assert_splices(&receiver, &expected);
 
-    let (saved, warnings) = save_paragraph(&receiver, ADJACENT_SOURCE, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&receiver, ADJACENT_SOURCE);
     assert!(warnings.is_empty(), "{warnings:?}");
     let expected = ADJACENT_SOURCE
         .replace(">abc<", ">X<")
@@ -3377,7 +3397,7 @@ fn three_adjacent_replacements_keep_their_boundaries_with_only_rsid_differences(
     replace(&doc, 1, 2, "Y");
     replace(&doc, 0, 1, "X");
     assert_splices(&doc, &[(0, 1, 0, "X"), (1, 2, 1, "Y"), (2, 3, 2, "ZZ")]);
-    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&doc, content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(saved.contains(r#"<w:r w:rsidR="00000004"><w:t>&#x64;</w:t></w:r>"#));
 }
@@ -3392,7 +3412,7 @@ fn a_word_replaced_as_one_token_takes_the_replacement_formatting_through_its_unc
     let doc = open(content);
     replace(&doc, 0, 6, "bKEEPy");
     assert_splices(&doc, &[(0, 6, 0, "bKEEPy")]);
-    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&doc, content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(saved.contains("<w:r><w:t>bKEEPy</w:t></w:r>"), "{saved}");
 }
@@ -3409,8 +3429,8 @@ fn swapping_equal_text_keeps_each_source_donor() {
     replace(&doc, 0, 4, "echo");
     let expected = [(0, 4, 0, "echo"), (4, 8, 4, "echo")];
     assert_recorded_replacements(&doc, &expected);
-    assert_eq!(doc.paragraph_save_plan(), before);
-    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert_eq!(doc.paragraph_save_plan_from_records(), before);
+    let (saved, warnings) = save_recorded_paragraph(&doc, content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(saved, document_xml(content));
 }
@@ -3452,9 +3472,9 @@ fn an_empty_equal_output_patch_keeps_the_unchanged_save_plan() {
     replace(&doc, 1, 2, "b");
     let expected = [(1, 2, 1, "b")];
     assert_recorded_replacements(&doc, &expected);
-    assert_eq!(doc.paragraph_save_plan(), before);
+    assert_eq!(doc.paragraph_save_plan_from_records(), before);
     let source = document_xml(&content);
-    let (saved, warnings) = save_paragraph(&doc, &content, |_| {});
+    let (saved, warnings) = save_recorded_paragraph(&doc, &content);
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(saved, source);
 
@@ -3479,14 +3499,14 @@ fn equal_output_records_beside_math_keep_source_bytes() {
     let proof = provenance_state(&doc);
     assert!(proof["entries"][paragraphs[0].para_id.as_str()]["recorded"].is_object());
 
-    let plan = doc.paragraph_save_plan();
+    let plan = doc.paragraph_save_plan_from_records();
     assert_eq!(plan, before);
     assert!(
         plan.patched_parts
             .iter()
             .any(|(part, _)| part == "word/document.xml")
     );
-    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    let (saved, warnings) = save_planned(&plan, Some(body_plan(&plan)), &package(content), |_| {});
     assert!(saved.contains(content), "{saved}");
     assert!(warnings.is_empty(), "{warnings:?}");
 }
@@ -3679,8 +3699,12 @@ fn a_projected_seed_without_item_ids_uses_alignment_for_local_text_edits() {
         .insert_text("body", "00000001", 1, "X", None, None)
         .unwrap();
 
-    let plan: serde_json::Value =
-        serde_json::from_str(&projected.paragraph_save_plan().unwrap()).unwrap();
+    let plan: serde_json::Value = serde_json::from_str(
+        &projected
+            .paragraph_save_plan_with_local_provenance(true)
+            .unwrap(),
+    )
+    .unwrap();
     let body = plan["splicedParts"]
         .as_array()
         .unwrap()
@@ -3737,6 +3761,90 @@ fn editor_save_uses_alignment_for_ambiguous_single_typing() {
         editor.contains("ambiguous: nonunique content alignment"),
         "{editor}"
     );
+}
+
+#[test]
+fn recorded_splice_preserves_smart_tag_and_custom_xml_in_unchanged_paragraphs() {
+    let smart_tag = r#"<w:smartTag w:uri="urn:pr1" w:element="place"><w:r><w:t>Ancient</w:t></w:r></w:smartTag>"#;
+    let custom_xml = r#"<w:customXml w:uri="urn:pr1" w:element="tagged"><w:r><w:t>Tagged</w:t></w:r></w:customXml>"#;
+    let document = format!(
+        r#"<w:document {NS}><w:body><w:p w14:paraId="0000000A">{}{smart_tag}</w:p><w:p w14:paraId="0000000B">{custom_xml}</w:p><w:p w14:paraId="0000000D"><w:r><w:t>a</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#,
+        text("Near ")
+    );
+    let source = package_with_document(document, None);
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let session = EditSessionCore::new(71, host);
+    session.open_docx(&source, true, None, None).unwrap();
+    session
+        .replace_range("body", "0000000D", 0, "0000000D", 1, "aaa", None, None)
+        .unwrap();
+
+    let plan: serde_json::Value = serde_json::from_str(
+        &session
+            .paragraph_save_plan_with_local_provenance(true)
+            .unwrap(),
+    )
+    .unwrap();
+    let part = plan["splicedParts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["part"] == "word/document.xml")
+        .unwrap();
+    assert_eq!(part["changed"], json!([2]));
+    assert_eq!(part["legacyParagraphs"], json!([]));
+    assert_eq!(part["paragraphPatches"][0]["ordinal"], json!(2));
+    assert!(
+        plan["wholeParts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|part| part["part"] != "word/document.xml")
+    );
+
+    let paragraphs: Vec<_> = part["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry[0])
+        .collect();
+    let (saved, warnings) = save_with_paragraph_ids(
+        &source,
+        json!({"splicedParts": [{
+            "part": part["part"], "sha256": part["sha256"], "paragraphs": paragraphs,
+            "changed": part["changed"], "paragraphPatches": part["paragraphPatches"]
+        }]}),
+        |source| {
+            save_document(source, |document| {
+                document["content"][2]["content"][0]["content"][0]["text"] = json!("aaa");
+            })
+        },
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    let written = std::str::from_utf8(&xml).unwrap();
+    assert!(written.contains(smart_tag), "{written}");
+    assert!(written.contains(custom_xml), "{written}");
+    let limits = docx_parse::ParseLimits::default();
+    let xml = docx_parse::parse_xml(
+        &xml,
+        "word/document.xml",
+        &mut docx_parse::ParseBudget::new(&limits),
+    )
+    .unwrap();
+    let edited = xml
+        .root()
+        .unwrap()
+        .child("w", "body")
+        .unwrap()
+        .children_named("w", "p")
+        .find(|paragraph| paragraph.attribute(Some("w14"), "paraId") == Some("0000000D"))
+        .unwrap();
+    assert_eq!(edited.text_content(), "aaa");
 }
 
 #[test]
@@ -3817,7 +3925,7 @@ fn reopening_saved_bytes_starts_without_records() {
     let doc = EditingDoc::new(71);
     seed_from_docx(&doc, &source).unwrap();
     replace(&doc, 1, 2, "X");
-    let plan = doc.paragraph_save_plan();
+    let plan = doc.paragraph_save_plan_from_records();
     let (saved, warnings) = save_planned_bytes(&plan, Some(body_plan(&plan)), &source, |source| {
         save_document(source, |_| {})
     });
@@ -4071,7 +4179,7 @@ fn invalid_sidecar_leaves_another_occurrences_records_intact() {
         .apply_local_update_with_provenance(&update, &sidecar)
         .unwrap();
     assert_unproven(&receiver);
-    let plan = receiver.paragraph_save_plan();
+    let plan = receiver.paragraph_save_plan_from_records();
     let part = body_plan(&plan);
     assert_eq!(part.changed, [0, 1]);
     assert!(part.legacy_paragraphs.is_empty());
@@ -4336,12 +4444,18 @@ fn editor_save_plans_agree_after_unpaired_text_updates() {
     let update = author.encode_diff(&peer.encode_state_vector()).unwrap();
     peer.apply_update(&update).unwrap();
 
-    let local = author.paragraph_save_plan().unwrap();
+    let local = author
+        .paragraph_save_plan_with_local_provenance(true)
+        .unwrap();
     let editor = author
         .paragraph_save_plan_with_local_provenance(false)
         .unwrap();
     assert_eq!(local, editor);
-    assert_eq!(editor, peer.paragraph_save_plan().unwrap());
+    assert_eq!(
+        editor,
+        peer.paragraph_save_plan_with_local_provenance(true)
+            .unwrap()
+    );
     assert_eq!(
         editor,
         peer.paragraph_save_plan_with_local_provenance(false)
