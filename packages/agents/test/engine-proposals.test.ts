@@ -1075,6 +1075,8 @@ for (const { name, original, first, second, expectedStart, expectedSpliceStart, 
     first: ['alpha center omega', 'ALPHA center OMEGA'], second: ['center', 'CENTER'], expectedStart: 6, expectedSpliceStart: 6, expectedText: 'ALPHA CENTER OMEGA' },
   { name: 'rebases the reported change and its splice past a boundary insertion', original: 'alpha beta',
     first: ['alpha', 'alpha!'], second: [' beta', ' BETA'], expectedStart: 6, expectedSpliceStart: 7, expectedText: 'alpha! BETA' },
+  { name: 'rebases a replacement when an insertion shares its start', original: 'alpha beta',
+    first: ['alpha ', 'alpha !'], second: ['beta', 'BETA'], expectedStart: 7, expectedSpliceStart: 7, expectedText: 'alpha !BETA' },
 ] as const) test(`attached DOCX peer ${name}`, async () => {
   const owner = await proposalRaceFixture(original);
   const doc = attachDocx(owner.session, { editPeer: {
@@ -1088,9 +1090,35 @@ for (const { name, original, first, second, expectedStart, expectedSpliceStart, 
     const accepted = await doc.proposeAsync({ author: 'First', edits: [{ ...p, oldText: first[0], newText: first[1] }] });
     await doc.accept(accepted.id);
     expect(doc.review(pending.id)).toMatchObject({ staleRefs: [], changes: [{ start: expectedStart }] });
-    expect(doc['proposals'].get(pending.id)?.splices).toMatchObject([{ start: expectedSpliceStart }]);
+    const held = doc['proposals'].get(pending.id)!;
+    expect(held.splices).toMatchObject([{ start: expectedSpliceStart }]);
+    const { pendingSpan, splices: [splice] } = held.spliceGroups[0]!;
+    expect(pendingSpan).toMatchObject({ start: expectedSpliceStart, end: expectedSpliceStart + splice!.oldText.length });
     expect(await doc.accept(pending.id)).toMatchObject({ status: 'accepted' });
     expect(doc.read(p.ref).text).toBe(expectedText);
+  } finally { doc.close(); owner.close(); }
+});
+
+for (const { original, newText, offset } of [
+  { original: 'alpha', newText: 'alpha!', offset: 5 },
+  { original: 'alpha beta', newText: 'START alpha beta END', offset: 0 },
+  { original: 'alpha beta', newText: 'START alpha beta END', offset: 10 },
+]) test(`attached DOCX peer stales ${JSON.stringify(newText)} after an insertion at ${offset}`, async () => {
+  const owner = await proposalRaceFixture(original);
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const p = doc.list({ story: 'body' }).items[0];
+    const pending = await doc.proposeAsync({ author: 'Agent', edits: [{ ...p, oldText: original, newText }] });
+    const accepted = await doc.proposeAsync({ author: 'Editor', edits: [{ ...p, start: offset, oldText: '', newText: '?' }] });
+    expect(doc.review(pending.id).staleRefs).toEqual([]);
+    expect(await doc.accept(accepted.id)).toMatchObject({ status: 'accepted' });
+    expect(doc.read(p.ref).text).toBe(`${original.slice(0, offset)}?${original.slice(offset)}`);
+    expect(doc.review(pending.id).staleRefs).toEqual([p.ref]);
+    await expect(doc.accept(pending.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
   } finally { doc.close(); owner.close(); }
 });
 

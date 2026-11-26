@@ -2559,7 +2559,7 @@ impl EditSession {
     pub fn paragraph_save_plan(&self, env: Env, use_local_provenance: Option<bool>) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(true))
+            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))
             .map_err(|error| map_error(env, error))
     }
 

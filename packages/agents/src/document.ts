@@ -134,9 +134,14 @@ function spliceSpan(splices: ProposalChange[]) {
   return { ref, start, end: last.start + last.oldText.length };
 }
 
-function touchesChange(left: ReturnType<typeof spliceSpan>, right: ReturnType<typeof spliceSpan>): boolean {
+function touchesChange(
+  { pendingSpan: left, splices }: HeldProposal['spliceGroups'][number],
+  right: ReturnType<typeof spliceSpan>,
+): boolean {
   if (left.ref !== right.ref) return false;
-  if (left.start === left.end && right.start === right.end) return left.start === right.start;
+  if (right.start === right.end && (right.start === left.start || right.start === left.end)) {
+    return splices.some(splice => !splice.oldText && splice.start === right.start);
+  }
   return left.start < right.end && right.start < left.end;
 }
 
@@ -1073,8 +1078,8 @@ export class DocxAgentDocument {
         if (target?.fingerprint !== previous.fingerprint) continue;
         if (accepted && held !== accepted && held.value.status === 'pending') {
           if (!this.proposalPeer && changes.some(change => change.ref === p.ref)) continue;
-          if (held.spliceGroups.some(({ pendingSpan }) => pendingSpan.ref === p.ref &&
-            acceptedSpans.some(edit => touchesChange(pendingSpan, edit)))) {
+          if (held.spliceGroups.some(group => group.pendingSpan.ref === p.ref &&
+            acceptedSpans.some(edit => touchesChange(group, edit)))) {
             target.fingerprint = '\u0000stale';
             continue;
           }

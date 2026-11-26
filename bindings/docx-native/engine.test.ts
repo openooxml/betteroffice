@@ -1226,6 +1226,28 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('paragraph save plans use local provenance only when requested', () => {
+    const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+    const part = 'word/document.xml';
+    const xml = new TextDecoder().decode(parts[part]);
+    const runs = '<w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r>';
+    parts[part] = new TextEncoder().encode(xml.replace('<w:r><w:t>Engine text</w:t></w:r>', runs));
+    const bytes = wasm.rezip_docx(parts);
+    for (const engine of [wasm, native]) {
+      const session = new engine.EditSession(17);
+      try {
+        session.open_docx(bytes, true, 'opening');
+        const paraId = paragraphId(session);
+        session.replace_range('body', paraId, 0, paraId, 6, 'bKEEPy');
+        const base = JSON.parse(session.paragraph_save_plan(false));
+        expect(JSON.parse(session.paragraph_save_plan())).toEqual(base);
+        expect(JSON.parse(session.paragraph_save_plan(true))).toEqual({ ...base, provenanceNet: 1 });
+      } finally {
+        session.free();
+      }
+    }
+  });
+
   test('an unreadable relationships part warns the same way in both engines', () => {
     const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
     const damaged = wasm.rezip_docx({ ...parts, 'word/_rels/header1.xml.rels': new TextEncoder().encode('<Relationships><not closed') });
