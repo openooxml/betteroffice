@@ -442,8 +442,10 @@ class Presentation:
         baseline_pct: "float | None" = None,
         kern_pt: "float | None" = None,
         caps: "Literal['none', 'small', 'all'] | None" = None,
+        autofit: "Literal['normal', 'none'] | None" = None,
+        text_insets: "Mapping[str, int | None] | None" = None,
     ) -> ShapeEdit:
-        """Add a text box. Geometry is in EMU."""
+        """Add a text box. Geometry and ``text_insets`` are in EMU."""
         return self._inner.add_text_box(
             slide,
             x=x,
@@ -463,6 +465,8 @@ class Presentation:
             baseline_pct=baseline_pct,
             kern_pt=kern_pt,
             caps=caps,
+            autofit=autofit,
+            text_insets=None if text_insets is None else dict(text_insets),
         )
 
     def add_shape(

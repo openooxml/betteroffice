@@ -23,6 +23,8 @@ fn unicode_simple_folding_preserves_matches_and_utf16_offsets() {
                 },
                 text: text.to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();

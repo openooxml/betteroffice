@@ -23,9 +23,9 @@ use betteroffice_pptx::{
     ProposalRequest, ReadRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFill,
     ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TableColumnWidth, TableEdit,
-    TableInsertPosition, TextParagraphDraft, TextReceipt, TextRunSnapshot, TextStyle,
-    TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateOrigin,
-    UpdateSubscription, export_outcome_json, outcome_json, oversized_request,
+    TableInsertPosition, TextAutofitMode, TextInsets, TextParagraphDraft, TextReceipt,
+    TextRunSnapshot, TextStyle, TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent,
+    UpdateOrigin, UpdateSubscription, export_outcome_json, outcome_json, oversized_request,
     snapshot_outcome_json,
 };
 
@@ -315,6 +315,75 @@ fn table_width(width: Option<&str>) -> PyResult<TableColumnWidth> {
         Some("copy") => Ok(TableColumnWidth::Copy),
         _ => Err(PyValueError::new_err("width must be split or copy")),
     }
+}
+
+fn parse_autofit(autofit: Option<&str>) -> PyResult<Option<TextAutofitMode>> {
+    autofit
+        .map(|value| match value {
+            "normal" => Ok(TextAutofitMode::Normal),
+            "none" => Ok(TextAutofitMode::None),
+            other => Err(PyValueError::new_err(format!(
+                "autofit must be normal or none, not {other:?}"
+            ))),
+        })
+        .transpose()
+}
+
+fn autofit_name(autofit: TextAutofitMode) -> &'static str {
+    match autofit {
+        TextAutofitMode::Normal => "normal",
+        TextAutofitMode::None => "none",
+    }
+}
+
+fn parse_text_insets(insets: Option<&Bound<'_, PyDict>>) -> PyResult<Option<TextInsets>> {
+    let Some(insets) = insets else {
+        return Ok(None);
+    };
+    let mut parsed = TextInsets::default();
+    for (key, value) in insets.iter() {
+        let key = key
+            .extract::<String>()
+            .map_err(|_| PyTypeError::new_err("text_insets keys must be strings"))?;
+        let emu = if value.is_none() {
+            None
+        } else if value.is_instance_of::<PyBool>() {
+            return Err(PyTypeError::new_err(format!(
+                "text_insets[{key:?}] must be an integer, not bool"
+            )));
+        } else {
+            Some(value.extract::<i64>()?)
+        };
+        match key.as_str() {
+            "left" => parsed.left = emu,
+            "top" => parsed.top = emu,
+            "right" => parsed.right = emu,
+            "bottom" => parsed.bottom = emu,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown text_insets side {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(Some(parsed))
+}
+
+fn text_insets_map(insets: &TextInsets) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    if let Some(left) = insets.left {
+        out.insert("left".to_owned(), left);
+    }
+    if let Some(top) = insets.top {
+        out.insert("top".to_owned(), top);
+    }
+    if let Some(right) = insets.right {
+        out.insert("right".to_owned(), right);
+    }
+    if let Some(bottom) = insets.bottom {
+        out.insert("bottom".to_owned(), bottom);
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -656,6 +725,10 @@ pub struct PyShape {
     #[pyo3(get)]
     media_path: Option<String>,
     #[pyo3(get)]
+    autofit: Option<&'static str>,
+    #[pyo3(get)]
+    text_insets: Option<BTreeMap<String, i64>>,
+    #[pyo3(get)]
     stories: Vec<PyStory>,
     #[pyo3(get)]
     children: Vec<PyShape>,
@@ -693,6 +766,8 @@ impl PyShape {
                 .as_ref()
                 .and_then(|placeholder| placeholder.placeholder_type.clone()),
             media_path: shape.media_part_path.clone(),
+            autofit: shape.autofit.map(autofit_name),
+            text_insets: shape.text_insets.as_ref().map(text_insets_map),
             stories,
             children,
             text,
@@ -1864,7 +1939,8 @@ impl PyPresentation {
         slide, *, x, y, width, height, text = String::new(), name = None,
         bold = None, italic = None, font_size = None,
         color = None, font_family = None, underline = None, strike = None,
-        spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None
+        spacing_pt = None, baseline_pct = None, kern_pt = None, caps = None,
+        autofit = None, text_insets = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn add_text_box(
@@ -1887,6 +1963,8 @@ impl PyPresentation {
         baseline_pct: Option<f64>,
         kern_pt: Option<f64>,
         caps: Option<&str>,
+        autofit: Option<&str>,
+        text_insets: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyShapeEdit> {
         let slide_id = self.resolve_slide_id(slide)?;
         let draft = ShapeDraft {
@@ -1906,6 +1984,8 @@ impl PyPresentation {
                 kern_pt,
                 caps,
             )?,
+            autofit: parse_autofit(autofit)?,
+            text_insets: parse_text_insets(text_insets)?,
         };
         let receipt = self.committed(self.presentation.add_text_box(
             &self.edit_ctx(),

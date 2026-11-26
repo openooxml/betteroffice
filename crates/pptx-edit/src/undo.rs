@@ -589,6 +589,8 @@ mod tests {
                     },
                     text: "alpha".to_owned(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap();
@@ -653,6 +655,8 @@ mod tests {
                         },
                         text: "alpha".to_owned(),
                         style: TextStyle::default(),
+                        autofit: None,
+                        text_insets: None,
                     },
                 )
                 .unwrap();

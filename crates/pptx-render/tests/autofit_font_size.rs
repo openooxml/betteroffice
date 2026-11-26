@@ -192,7 +192,7 @@ fn right_aligned_refit(text: &str, typed: &str) -> (f32, Option<TextAutofit>) {
     let ShapeNode::Shape(shape) = &reopened.package().slides[0].shapes[0] else {
         panic!("text shape");
     };
-    (size, shape.text.as_ref().unwrap().autofit.clone())
+    (size, shape.text.as_ref().unwrap().autofit)
 }
 
 fn assert_full_size((size, autofit): (f32, Option<TextAutofit>)) {

@@ -25,6 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             text: "persisted on v2".to_owned(),
             style: TextStyle::default(),
+            autofit: None,
+            text_insets: None,
         },
     )?;
     session.insert_text(

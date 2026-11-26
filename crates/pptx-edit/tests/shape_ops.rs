@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ooxml_drawingml::{ColorValue, ShapeFill, ShapeOutline};
 use pptx_edit::{
-    DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, ShapeSnapshot, ShapeStroke,
+    DeckSession, EditCtx, EditError, PresetShapeDraft, ProposalEdit, ProposalRequest, ShapeDraft,
+    ShapeRect, ShapeSnapshot, ShapeStroke, TextAutofitMode, TextInsets, TextStyle,
 };
-use pptx_parse::ShapeNode;
+use pptx_parse::{ShapeNode, TextAutofit};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 
@@ -484,4 +485,218 @@ fn layered_presets_can_be_inserted() {
             geometry
         );
     }
+}
+
+#[test]
+fn text_box_autofit_and_insets_validate_roundtrip_and_sync() {
+    let session = DeckSession::open(FIXTURE, 741).unwrap();
+    let peer = DeckSession::open(FIXTURE, 742).unwrap();
+    let context = EditCtx::local("test");
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+
+    assert!(
+        session
+            .add_text_box(
+                &context,
+                &slide_id,
+                &ShapeDraft {
+                    name: "NegativeInset".to_owned(),
+                    rect: ShapeRect {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 500_000,
+                    },
+                    text: "Hi".to_owned(),
+                    style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: Some(TextInsets {
+                        left: Some(-1),
+                        ..TextInsets::default()
+                    }),
+                },
+            )
+            .is_err()
+    );
+
+    let zero_insets = TextInsets {
+        left: Some(0),
+        top: Some(0),
+        right: Some(0),
+        bottom: Some(0),
+    };
+    let hero = session
+        .add_text_box(
+            &context,
+            &slide_id,
+            &ShapeDraft {
+                name: "Hero Metric".to_owned(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 100_000,
+                    width: 3_800_000,
+                    height: 914_400,
+                },
+                text: "62%".to_owned(),
+                style: TextStyle {
+                    font_size_pt: Some(88.0),
+                    ..TextStyle::default()
+                },
+                autofit: Some(TextAutofitMode::Normal),
+                text_insets: Some(zero_insets),
+            },
+        )
+        .unwrap();
+
+    let horizontal_insets = TextInsets {
+        left: Some(19_050),
+        top: None,
+        right: Some(19_050),
+        bottom: None,
+    };
+    let fixed = session
+        .add_text_box(
+            &context,
+            &slide_id,
+            &ShapeDraft {
+                name: "Fixed Label".to_owned(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 1_200_000,
+                    width: 600_000,
+                    height: 300_000,
+                },
+                text: "02".to_owned(),
+                style: TextStyle {
+                    font_size_pt: Some(12.0),
+                    ..TextStyle::default()
+                },
+                autofit: Some(TextAutofitMode::None),
+                text_insets: Some(horizontal_insets),
+            },
+        )
+        .unwrap();
+
+    let snap = session.snapshot().unwrap();
+    let hero_snap = snap.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == hero.shape_id)
+        .unwrap();
+    assert_eq!(hero_snap.autofit, Some(TextAutofitMode::Normal));
+    assert_eq!(hero_snap.text_insets, Some(zero_insets));
+
+    let fixed_snap = snap.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == fixed.shape_id)
+        .unwrap();
+    assert_eq!(fixed_snap.autofit, Some(TextAutofitMode::None));
+    assert_eq!(fixed_snap.text_insets, Some(horizontal_insets));
+
+    let update = session.encode_state_as_update_v1();
+    peer.apply_update_v1(&update).unwrap();
+    let peer_snap = peer.snapshot().unwrap();
+    assert_eq!(
+        peer_snap.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == hero.shape_id)
+            .unwrap(),
+        hero_snap
+    );
+    assert_eq!(
+        peer_snap.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == fixed.shape_id)
+            .unwrap(),
+        fixed_snap
+    );
+
+    let proposal = session
+        .propose(ProposalRequest {
+            agent_id: "layout-agent".to_owned(),
+            note: Some("Add autofit box".to_owned()),
+            edits: vec![ProposalEdit::AddTextBox {
+                reference: Some("box".to_owned()),
+                slide_id: slide_id.clone(),
+                draft: ShapeDraft {
+                    name: "Proposed Box".to_owned(),
+                    rect: ShapeRect {
+                        x: 200_000,
+                        y: 1_600_000,
+                        width: 2_000_000,
+                        height: 400_000,
+                    },
+                    text: "Proposed".to_owned(),
+                    style: TextStyle::default(),
+                    autofit: Some(TextAutofitMode::Normal),
+                    text_insets: Some(zero_insets),
+                },
+            }],
+        })
+        .unwrap();
+    let accepted = session.accept_proposal(&proposal.id, false).unwrap();
+    assert!(accepted.applied);
+    let proposed_snap = session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Proposed Box")
+        .cloned()
+        .unwrap();
+    assert_eq!(proposed_snap.autofit, Some(TextAutofitMode::Normal));
+    assert_eq!(proposed_snap.text_insets, Some(zero_insets));
+
+    let saved = session.save().unwrap();
+    let parts: BTreeMap<String, Vec<u8>> = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .collect();
+    let slide_xml = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    assert!(
+        slide_xml.contains(
+            r#"<a:bodyPr bIns="0" lIns="0" rIns="0" tIns="0"><a:normAutofit/></a:bodyPr>"#
+        ),
+        "{slide_xml}"
+    );
+    assert!(
+        slide_xml.contains(r#"<a:bodyPr lIns="19050" rIns="19050"><a:noAutofit/></a:bodyPr>"#),
+        "{slide_xml}"
+    );
+
+    let parsed = pptx_parse::parse_pptx(&saved).unwrap();
+    let hero_body = parsed.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            ShapeNode::Shape(shape) if shape.base.name == "Hero Metric" => shape.text.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(hero_body.inset_left, Some(0));
+    assert_eq!(hero_body.inset_top, Some(0));
+    assert_eq!(hero_body.inset_right, Some(0));
+    assert_eq!(hero_body.inset_bottom, Some(0));
+    assert_eq!(
+        hero_body.autofit,
+        Some(TextAutofit::Normal {
+            font_scale: None,
+            line_space_reduction: None,
+        })
+    );
+
+    let fixed_body = parsed.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            ShapeNode::Shape(shape) if shape.base.name == "Fixed Label" => shape.text.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(fixed_body.inset_left, Some(19_050));
+    assert_eq!(fixed_body.inset_top, None);
+    assert_eq!(fixed_body.inset_right, Some(19_050));
+    assert_eq!(fixed_body.inset_bottom, None);
+    assert_eq!(fixed_body.autofit, Some(TextAutofit::None));
 }

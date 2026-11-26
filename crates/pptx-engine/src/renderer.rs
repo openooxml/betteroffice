@@ -824,6 +824,8 @@ mod tests {
                         font_size_pt: Some(24.0),
                         ..TextStyle::default()
                     },
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap();

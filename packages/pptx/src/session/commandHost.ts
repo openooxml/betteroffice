@@ -985,6 +985,22 @@ export function registerPresentationCommandHandlers(
       if (command.kind === 'insertTextBox') {
         const draft = command.payload.draft;
         if (!validText(draft.text) || !validStyle(draft.style)) return 'invalid-payload';
+        if (draft.autofit !== undefined && draft.autofit !== 'normal' && draft.autofit !== 'none') {
+          return 'invalid-payload';
+        }
+        if (draft.textInsets !== undefined) {
+          if (!draft.textInsets || typeof draft.textInsets !== 'object' || Array.isArray(draft.textInsets)) {
+            return 'invalid-payload';
+          }
+          for (const [side, value] of Object.entries(draft.textInsets)) {
+            if (side !== 'left' && side !== 'top' && side !== 'right' && side !== 'bottom') {
+              return 'invalid-payload';
+            }
+            if (value !== undefined && (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000_000_000_000)) {
+              return 'invalid-payload';
+            }
+          }
+        }
         return { kind: 'insertion', slideId, draft };
       }
       if (command.kind === 'insertShape') {

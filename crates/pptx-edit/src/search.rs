@@ -234,6 +234,8 @@ mod tests {
                     },
                     text: "😀Σςσ [a]\n[A]".to_owned(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap();

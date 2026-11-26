@@ -1131,6 +1131,8 @@ fn session_exports_read_the_current_deck_and_change_nothing() {
                 },
                 text: "Fresh text".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
@@ -1195,6 +1197,8 @@ fn session_exports_read_the_current_deck_and_change_nothing() {
         },
         text: String::new(),
         style: TextStyle::default(),
+        autofit: None,
+        text_insets: None,
     };
     let fresh = witness.slide_ids().unwrap();
     witness.move_slide(&context, &fresh[2], 0).unwrap();
@@ -1482,6 +1486,8 @@ fn limits_are_checked_before_slides_and_stories_are_read() {
         },
         text: "x".repeat(2_000_000),
         style: TextStyle::default(),
+        autofit: None,
+        text_insets: None,
     };
     session.add_text_box(&context, &slide, &draft).unwrap();
     draft.text = "y".repeat(10);

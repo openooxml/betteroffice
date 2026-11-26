@@ -25,9 +25,9 @@ pub use pptx_edit::{
     ShapeDraft, ShapeFill, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot,
     ShapeStroke, ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt, SlideDateText,
     SlideHeaderFooter, SlideHeaderFooterText, SlideLayoutSnapshot, SlideReceipt, SlideSnapshot,
-    StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt,
-    TextParagraphDraft, TextReceipt, TextRunDraft, TextRunSnapshot, TextSearchMatch, TextStyle,
-    TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateOrigin,
+    StorySnapshot, TableColumnWidth, TableEdit, TableInsertPosition, TableReceipt, TextAutofitMode,
+    TextInsets, TextParagraphDraft, TextReceipt, TextRunDraft, TextRunSnapshot, TextSearchMatch,
+    TextStyle, TextStylePatch, TransformReceipt, UndoCaptureMode, UpdateEvent, UpdateOrigin,
     UpdateSubscription,
 };
 pub use pptx_edit::{

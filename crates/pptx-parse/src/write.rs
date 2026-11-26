@@ -192,6 +192,11 @@ pub struct ShapeAdd {
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
+    pub autofit: Option<TextAutofit>,
+    pub inset_left: Option<i64>,
+    pub inset_top: Option<i64>,
+    pub inset_right: Option<i64>,
+    pub inset_bottom: Option<i64>,
     pub paragraphs: Option<Vec<ParagraphWrite>>,
     /// A picture instead of an autoshape; mints its own media part and relationship.
     pub picture: Option<PictureAdd>,
@@ -3909,8 +3914,45 @@ fn shape_element(
         .with_child(non_visual)
         .with_child(properties);
     if let Some(paragraphs) = &add.paragraphs {
+        let mut body_properties = XmlElement::new(prefixes.drawing("bodyPr"));
+        if let Some(left) = add.inset_left {
+            body_properties.set_attribute("lIns", left.to_string());
+        }
+        if let Some(top) = add.inset_top {
+            body_properties.set_attribute("tIns", top.to_string());
+        }
+        if let Some(right) = add.inset_right {
+            body_properties.set_attribute("rIns", right.to_string());
+        }
+        if let Some(bottom) = add.inset_bottom {
+            body_properties.set_attribute("bIns", bottom.to_string());
+        }
+        match &add.autofit {
+            Some(TextAutofit::Normal {
+                font_scale,
+                line_space_reduction,
+            }) => {
+                let mut autofit = XmlElement::new(prefixes.drawing("normAutofit"));
+                if let Some(scale) = font_scale {
+                    autofit.set_attribute("fontScale", format_fixed(scale * 100_000.0));
+                }
+                if let Some(reduction) = line_space_reduction {
+                    autofit.set_attribute("lnSpcReduction", format_fixed(reduction * 100_000.0));
+                }
+                body_properties = body_properties.with_child(autofit);
+            }
+            Some(TextAutofit::None) => {
+                body_properties =
+                    body_properties.with_child(XmlElement::new(prefixes.drawing("noAutofit")));
+            }
+            Some(TextAutofit::Shape) => {
+                body_properties =
+                    body_properties.with_child(XmlElement::new(prefixes.drawing("spAutoFit")));
+            }
+            None => {}
+        }
         let mut body = XmlElement::new(prefixes.presentation("txBody"))
-            .with_child(XmlElement::new(prefixes.drawing("bodyPr")))
+            .with_child(body_properties)
             .with_child(XmlElement::new(prefixes.drawing("lstStyle")));
         for paragraph in paragraphs {
             body = body.with_child(build_paragraph(paragraph, None, None, prefixes));
@@ -4239,6 +4281,11 @@ mod tests {
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
+            autofit: None,
+            inset_left: None,
+            inset_top: None,
+            inset_right: None,
+            inset_bottom: None,
             paragraphs: Some(vec![ParagraphWrite {
                 source_paragraphs: Vec::new(),
                 source_index: None,

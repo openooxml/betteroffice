@@ -147,6 +147,32 @@ def test_add_text_box_creates_an_editable_story(deck):
     assert added.stories[0].paragraphs[0].runs[0].bold is True
 
 
+def test_add_text_box_supports_autofit_and_text_insets(deck):
+    edit = deck.add_text_box(
+        0,
+        x=100,
+        y=200,
+        width=914400,
+        height=457200,
+        text="62%",
+        font_size=72.0,
+        autofit="normal",
+        text_insets={"left": 0, "top": 0, "right": 0, "bottom": 0},
+    )
+    added = deck[0].shapes[edit.index]
+    assert added.autofit == "normal"
+    assert added.text_insets == {"left": 0, "top": 0, "right": 0, "bottom": 0}
+
+    with pytest.raises(ValueError, match="autofit"):
+        deck.add_text_box(0, x=0, y=0, width=100, height=100, text="x", autofit="shrink")
+    with pytest.raises(ValueError, match="text_insets"):
+        deck.add_text_box(0, x=0, y=0, width=100, height=100, text="x", text_insets={"bad": 0})
+    with pytest.raises(TypeError, match="bool"):
+        deck.add_text_box(0, x=0, y=0, width=100, height=100, text="x", text_insets={"left": True})
+    with pytest.raises(PptxError):
+        deck.add_text_box(0, x=0, y=0, width=100, height=100, text="x", text_insets={"left": -1})
+
+
 def test_add_shape_applies_preset_defaults(deck):
     edit = deck.add_shape(
         0, "roundRect", x=0, y=0, width=1000, height=1000, fill="#123456"

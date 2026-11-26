@@ -32,7 +32,7 @@ use crate::{
     PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
     ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
     ShapeStrokeReceipt, ShapeZOrderReceipt, SlideBackgroundReceipt, SlideReceipt, SlideScope,
-    SlideSnapshot, TransformReceipt,
+    SlideSnapshot, TextAutofitMode, TextInsets, TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.4;
@@ -695,6 +695,7 @@ impl DeckSession {
         validate_rect(draft.rect)?;
         crate::model::validate_xml_text(&draft.name)?;
         crate::model::validate_xml_text(&draft.text)?;
+        validate_text_insets(draft.text_insets.as_ref())?;
         crate::story::validate_style_values(
             draft.style.font_family.as_deref(),
             draft.style.underline.as_deref(),
@@ -705,6 +706,13 @@ impl DeckSession {
             draft.style.baseline_pct,
             draft.style.kern_pt,
         )?;
+        let text_insets_json = draft
+            .text_insets
+            .filter(|insets| !insets.is_empty())
+            .map(|insets| {
+                serde_json::to_string(&insets).map_err(|error| EditError::Json(error.to_string()))
+            })
+            .transpose()?;
         let fill_json = serde_json::to_string(&ShapeFill::named("none"))
             .map_err(|error| EditError::Json(error.to_string()))?;
         let (order, index, shapes, stories) = {
@@ -736,6 +744,12 @@ impl DeckSession {
         shape.insert(&mut txn, "sourceId", 0_f64);
         shape.insert(&mut txn, "kind", "shape");
         shape.insert(&mut txn, "textBox", true);
+        if let Some(autofit) = draft.autofit {
+            shape.insert(&mut txn, "autofit", autofit.as_str());
+        }
+        if let Some(insets_json) = text_insets_json {
+            shape.insert(&mut txn, "textInsetsJson", insets_json);
+        }
         shape.insert(&mut txn, "name", draft.name.as_str());
         shape.insert(&mut txn, "x", draft.rect.x as f64);
         shape.insert(&mut txn, "y", draft.rect.y as f64);
@@ -2753,6 +2767,12 @@ pub(crate) fn shape_parts<T: ReadTxn>(
     let resolved_outline_color = outline
         .as_ref()
         .and_then(|outline| resolve_color_value_to_hex_with_theme(outline.color.as_ref(), theme));
+    let autofit = map_string(&shape, txn, "autofit")
+        .map(|value| parse_autofit_mode(&value))
+        .transpose()?;
+    let text_insets: Option<TextInsets> = optional_json(&shape, txn, "textInsetsJson")?
+        .filter(|insets: &TextInsets| !insets.is_empty());
+    validate_text_insets(text_insets.as_ref())?;
     let snapshot = ShapeSnapshot {
         id: shape_id.to_owned(),
         source_id: required_u32(&shape, txn, "sourceId")?,
@@ -2771,6 +2791,8 @@ pub(crate) fn shape_parts<T: ReadTxn>(
         inherited: None,
         hidden: map_bool(&shape, txn, "hidden").unwrap_or_default(),
         text_box: map_bool(&shape, txn, "textBox").unwrap_or_default(),
+        autofit,
+        text_insets,
         aspect_ratio_locked: map_bool(&shape, txn, "aspectRatioLocked").unwrap_or_default(),
         geometry: required_string(&shape, txn, "geometry")?,
         adjust_values: optional_json(&shape, txn, "adjustValuesJson")?.unwrap_or_default(),
@@ -2986,6 +3008,8 @@ fn baseline_shape(
         inherited: None,
         hidden: base.hidden,
         text_box: false,
+        autofit: None,
+        text_insets: None,
         aspect_ratio_locked: matches!(shape, ShapeNode::Picture(picture) if picture.aspect_ratio_locked),
         geometry,
         adjust_values,
@@ -3036,6 +3060,37 @@ fn parse_shape_kind(value: &str) -> EditResult<ShapeKind> {
             "unknown shape kind {value}"
         ))),
     }
+}
+
+fn parse_autofit_mode(value: &str) -> EditResult<TextAutofitMode> {
+    match value {
+        "normal" => Ok(TextAutofitMode::Normal),
+        "none" => Ok(TextAutofitMode::None),
+        other => Err(EditError::InvalidState(format!(
+            "unknown autofit mode {other:?}"
+        ))),
+    }
+}
+
+fn validate_text_insets(insets: Option<&TextInsets>) -> EditResult<()> {
+    let Some(insets) = insets else {
+        return Ok(());
+    };
+    for (side, value) in [
+        ("left", insets.left),
+        ("top", insets.top),
+        ("right", insets.right),
+        ("bottom", insets.bottom),
+    ] {
+        if let Some(emu) = value
+            && !(0..=MAX_GEOMETRY).contains(&emu)
+        {
+            return Err(EditError::InvalidGeometry(format!(
+                "textInsets.{side} ({emu}) must be between 0 and {MAX_GEOMETRY}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn required_order<T: ReadTxn>(txn: &T) -> EditResult<ArrayRef> {
@@ -3692,6 +3747,8 @@ mod tests {
             rect,
             text: "Created".into(),
             style: TextStyle::default(),
+            autofit: None,
+            text_insets: None,
         };
         let shape = PresetShapeDraft {
             name: "Shape".into(),
@@ -4161,6 +4218,8 @@ mod tests {
                     rect,
                     text: "Text".into(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
         });
@@ -4741,6 +4800,8 @@ mod tests {
             },
             text: "Text".to_owned(),
             style: TextStyle::default(),
+            autofit: None,
+            text_insets: None,
         }
     }
 

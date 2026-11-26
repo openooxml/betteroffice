@@ -1564,6 +1564,8 @@ fn added_text_boxes_save_their_identity_without_changing_existing_shapes() {
                     rect,
                     text: text.to_owned(),
                     style: TextStyle::default(),
+                    autofit: None,
+                    text_insets: None,
                 },
             )
             .unwrap();
@@ -1630,6 +1632,8 @@ fn a_remote_labelled_shape_without_a_text_box_marker_saves_as_a_shape() {
                 },
                 text: "Ellipse label".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
@@ -1683,6 +1687,8 @@ fn a_shape_added_to_an_emptied_slide_lands_after_the_group_properties() {
                 },
                 text: "on an empty slide".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
@@ -2684,6 +2690,8 @@ fn a_shape_added_after_a_trailing_connector_lands_on_top() {
                 },
                 text: "above the connector".to_owned(),
                 style: TextStyle::default(),
+                autofit: None,
+                text_insets: None,
             },
         )
         .unwrap();
