@@ -11569,7 +11569,8 @@ mod tests {
                 outline: None,
                 text: None,
             }));
-        let Some(ShapeNode::Shape(mut connector)) = package.masters[0].shapes.last().cloned() else {
+        let Some(ShapeNode::Shape(mut connector)) = package.masters[0].shapes.last().cloned()
+        else {
             unreachable!()
         };
         connector.base.id = 9_003;
@@ -11597,10 +11598,21 @@ mod tests {
         };
         assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
         assert!(tile.is_some());
-        assert!(rendered.display_list.primitives.iter().any(|primitive| matches!(
-            primitive,
-            Primitive::Shape { object_id: 9_003, fill: None, stroke: Some(_), .. }
-        )));
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape {
+                        object_id: 9_003,
+                        fill: None,
+                        stroke: Some(_),
+                        ..
+                    }
+                ))
+        );
     }
 
     #[test]
@@ -12011,11 +12023,17 @@ mod tests {
         let rendered = SlideRenderer::new()
             .layout_slide(&PptxPackage::default(), &snapshot, 0)
             .unwrap();
-        assert!(rendered.display_list.primitives.iter().any(|primitive| matches!(
-            primitive,
-            Primitive::Shape { shape_id: Some(id), fill: None, stroke: Some(_), .. }
-                if id == &added.shape_id
-        )));
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape { shape_id: Some(id), fill: None, stroke: Some(_), .. }
+                        if id == &added.shape_id
+                ))
+        );
         assert_eq!(
             rendered.hit_test(150.0, 53.5),
             Some(HitTestResult::Shape {

@@ -16,7 +16,8 @@ pub fn clip_dashed_polyline(
         ]
     };
     let padding = |a: f32, b: f32| {
-        2.0 + f64::from(stroke.width) * f64::from(stroke.miter_limit.max(1.0))
+        2.0 + f64::from(stroke.width)
+            * f64::from(stroke.miter_limit.max(1.0))
             * f64::from(a).hypot(f64::from(b))
     };
     let pad_x = padding(transform.sx, transform.kx);
@@ -75,8 +76,7 @@ pub fn clip_dashed_polyline(
         } else {
             active = false;
         }
-        if !active
-            && let Some(path) = std::mem::replace(&mut builder, PathBuilder::new()).finish()
+        if !active && let Some(path) = std::mem::replace(&mut builder, PathBuilder::new()).finish()
         {
             fragments.push((path, phase));
         }
@@ -89,12 +89,7 @@ pub fn clip_dashed_polyline(
     Some(fragments)
 }
 
-fn clip_interval(
-    a: [f64; 2],
-    b: [f64; 2],
-    low: [f64; 2],
-    high: [f64; 2],
-) -> Option<(f64, f64)> {
+fn clip_interval(a: [f64; 2], b: [f64; 2], low: [f64; 2], high: [f64; 2]) -> Option<(f64, f64)> {
     let (mut enter, mut exit) = (0.0_f64, 1.0_f64);
     for axis in 0..2 {
         let delta = b[axis] - a[axis];

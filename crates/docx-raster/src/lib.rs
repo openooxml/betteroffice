@@ -28,8 +28,8 @@ use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
-    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point,
-    RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
+    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient,
+    Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use font::{FontSpecCache, PaintContext};
@@ -896,8 +896,9 @@ fn paint_shape<'k>(
         );
         budget.charge_path(ends.len() as u64)?;
     }
-    type Draw<'d> =
-        Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>, &mut PageBudget) -> Result<(), String> + 'd>;
+    type Draw<'d> = Box<
+        dyn Fn(&mut Pixmap, Transform, Option<&Mask>, &mut PageBudget) -> Result<(), String> + 'd,
+    >;
     let mut parts: Vec<Draw<'_>> = Vec::new();
     if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
         let path = &path;
@@ -945,7 +946,8 @@ fn paint_shape<'k>(
                         period,
                     ) {
                         for (fragment, _) in &fragments {
-                            budget.charge_path(dash_segments(stroke_path_length(fragment), dash))?;
+                            budget
+                                .charge_path(dash_segments(stroke_path_length(fragment), dash))?;
                         }
                         let mut stroke = stroked.stroke.clone();
                         for (fragment, phase) in fragments {
