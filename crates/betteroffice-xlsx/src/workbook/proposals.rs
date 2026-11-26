@@ -145,7 +145,8 @@ impl Workbook {
                     .edits
                     .iter()
                     .map(|edit| {
-                        let style = self.model.sheet(SheetId(edit.sheet)).and_then(|sheet| {
+                        let owner = SheetId(edit.sheet);
+                        let style = self.model.sheet(owner).and_then(|sheet| {
                             sheet.effective_style(CellRef::new(edit.row, edit.col))
                         });
                         let format = self
@@ -161,7 +162,11 @@ impl Workbook {
                                 None,
                             )
                             .0,
-                            xlsx_ops::ParsedInput::Formula(source) if xlsx_ops::is_formula_source(&source)
+                            xlsx_ops::ParsedInput::Formula(source)
+                                if xlsx_ops::is_formula_source(&source)
+                                    || xlsx_calc::parser::parse_formula_for_cell(
+                                        &source, &self.model, owner,
+                                    ).is_ok()
                         )
                     })
                     .collect()
