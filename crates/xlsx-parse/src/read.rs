@@ -86,11 +86,10 @@ pub(crate) fn parse_workbook_indexed_subset(
     let rels = wb_rels.map(parse_rels).transpose()?.unwrap_or_default();
 
     let [strings_path, styles_path, theme_path] = workbook_style_and_string_paths(wb_rels)?;
-    let (shared_strings, rich_shared_strings) =
-        match find_part(parts, &strings_path) {
-            Some(bytes) => parse_shared_strings(bytes)?,
-            None => Default::default(),
-        };
+    let (shared_strings, rich_shared_strings) = match find_part(parts, &strings_path) {
+        Some(bytes) => parse_shared_strings(bytes)?,
+        None => Default::default(),
+    };
     let styles_bytes = find_part(parts, &styles_path);
     let theme_bytes = find_part(parts, &theme_path);
     let (mut styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;

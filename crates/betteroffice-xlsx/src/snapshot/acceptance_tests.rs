@@ -3032,7 +3032,10 @@ fn legacy_package_facts_restore_the_deferred_alternate_content_guard() {
             let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
             for (col, value) in [(0, 1.0), (1, 5.0)] {
                 assert_eq!(
-                    reopened.model().sheets[2].cell(CellRef::new(0, col)).unwrap().value,
+                    reopened.model().sheets[2]
+                        .cell(CellRef::new(0, col))
+                        .unwrap()
+                        .value,
                     CellValue::Number { value }
                 );
             }

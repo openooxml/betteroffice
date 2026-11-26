@@ -239,9 +239,7 @@ impl PackageSlot {
                 let facts = PackageFactsView::from_facts(facts);
                 let included = (0..facts.source_sheet_count())
                     .filter(|&index| self.sheet_has_alternate_content(index))
-                    .filter_map(|index| {
-                        facts.source_sheet_part(index).map(|path| (index, path))
-                    })
+                    .filter_map(|index| facts.source_sheet_part(index).map(|path| (index, path)))
                     .collect::<Vec<_>>();
                 let mut loaded = HashSet::new();
                 let mut remaining = ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES;

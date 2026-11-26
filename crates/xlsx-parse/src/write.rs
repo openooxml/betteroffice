@@ -3202,9 +3202,8 @@ impl AlternateContentSources {
         }
         let mut parts = load(paths)?;
         let workbook_rels = find_part(&parts, "xl/_rels/workbook.xml.rels");
-        let mut paths = BTreeSet::from(crate::read::workbook_style_and_string_paths(
-            workbook_rels,
-        )?);
+        let mut paths =
+            BTreeSet::from(crate::read::workbook_style_and_string_paths(workbook_rels)?);
         let mut drawing_paths = BTreeSet::new();
         for &(_, path) in sheets {
             if let Some(rels) = find_part(&parts, &relationship_part_path(path)) {
