@@ -19,6 +19,7 @@ import { checkedProjection } from './commentRangeCheck';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
+import { sectionSavePlanTestSeam } from './sectionSavePlanTestSeam';
 import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
 import { refuseUnavailableTables } from './tableUnavailable';
 import type {
@@ -565,6 +566,10 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits: placed }, lossy: lossy(), strict: structural && !contiguous && edits.some(edit => edit.paragraph !== null) };
 }
 
+sectionSavePlanTestSeam.reference = {
+  plan: sectionSavePlan, metadata: sectionSaveMetadata, withoutSynthetic: withoutSyntheticParagraphs,
+};
+
 /**
  * Writes `document`, projected from `session` when `capture` was taken, and
  * records the Word paragraph IDs the bytes hold as saved. `patches` selects
@@ -617,7 +622,10 @@ export async function writeSessionSave(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = options.commentDeletion ? undefined : await (
+    sectionSavePlanTestSeam.hook?.check(session, output, capture, sourceBuffer, !!options.useLocalProvenance)
+    ?? sectionSavePlan(session, output, capture, sourceBuffer)
+  );
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);

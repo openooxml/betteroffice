@@ -45,6 +45,7 @@ import type {
 import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
+import { sectionSavePlanTestSeam } from './sectionSavePlanTestSeam';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
@@ -1906,6 +1907,7 @@ export function wrapSession(
     failComparedDocx: (message) => session.fail_compared_docx_json(message),
   });
 
+  sectionSavePlanTestSeam.hook?.attach(facade, session);
   return facade;
 }
 

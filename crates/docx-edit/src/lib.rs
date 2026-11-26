@@ -116,6 +116,8 @@ mod read_state;
 pub mod read_types;
 mod remote_cleanup;
 mod repeating_controls;
+#[doc(hidden)]
+pub mod save;
 mod script_fonts;
 mod search;
 mod section_margins;
