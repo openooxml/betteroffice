@@ -421,7 +421,7 @@ for (const cdn of ['disabled', 'implicit', 'explicit'] as const) {
     const previous = getFontCdnConfiguration();
     const restore = withBrowserFontGlobals();
     const runtime = fontRuntimeWithoutPacks();
-    const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+    const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, ...runtime });
     const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const decode = decoder();
