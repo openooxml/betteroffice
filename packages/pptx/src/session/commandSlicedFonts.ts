@@ -255,7 +255,10 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
     },
-    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>, reportCdnFailure = reportImplicitCdnFailure): void {
+    add(
+      family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>,
+      reportCdnFailure: FontCdnReporter = reportImplicitCdnFailure,
+    ): void {
       if (!disposed && !entries.has(keyOf(family))) {
         entries.set(keyOf(family), { family, face, whole, reportCdnFailure, installed: [] });
       }

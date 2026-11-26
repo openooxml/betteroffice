@@ -1329,6 +1329,7 @@ export declare const presentationSharedInputs: {
 };
 
 // ---- session/commandSlicedFonts.d.ts ----
+import { type FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 /** What the session needs from a progressive face. */
 export interface SlicedFontFace {
@@ -1402,7 +1403,7 @@ export declare function createSlicedFontFaces(quietMs?: number): {
         bytes: ArrayBuffer;
         kind: "coverage";
     }[]>;
-    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void;
+    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>, reportCdnFailure?: FontCdnReporter): void;
     has: (family: string) => boolean;
     prefetch(text: string): void;
     /** The face with `text` loaded, for a realm that keeps its own copy at revision `have`. */
@@ -2041,6 +2042,39 @@ export declare function validPipeCursor(cursor: unknown, maxFrameBytes: number):
 export declare function validPipePayload<C = PipeCursor>(payload: unknown, maxFrameBytes: number, shape: PipePayloadShape): payload is PipeCommandPayload<C>;
 /** Epoch time of this context's provider clock zero: performance.now() when present, else Date.now(). */
 export declare function clockOrigin(): number;
+
+// ---- shared/fontCdnDiagnostics.d.ts ----
+import type { FontPackDiagnostic } from './fontPackDiagnostics';
+export type FontCdnDiagnostic = Omit<FontPackDiagnostic, 'reason'> & {
+    reason: 'cdn-unavailable';
+};
+export type FontCdnReporter = (error: {
+    diagnostic: FontCdnDiagnostic;
+}) => void;
+export declare function isImplicitFontCdnError(error: unknown): error is Error & {
+    diagnostic: FontCdnDiagnostic;
+    cause?: unknown;
+    retryAt?: number;
+};
+export declare function reportImplicitCdnFailure({ diagnostic }: {
+    diagnostic: FontCdnDiagnostic;
+}): void;
+
+// ---- shared/fontPackDiagnostics.d.ts ----
+/** An installed font pack that cannot be used, so its faces are substituted. */
+export interface FontPackDiagnostic {
+    /** The add-on package: `@betteroffice/fonts-latin`, `-intl` or `-cjk`. */
+    pack: 'latin' | 'intl' | 'cjk';
+    /** `version-mismatch`: another release is installed; `missing-file`: files are absent; `invalid-manifest`: its manifest cannot be read. */
+    reason: 'version-mismatch' | 'missing-file' | 'invalid-manifest';
+    /** A sentence naming the package and what is wrong. */
+    detail: string;
+}
+/**
+ * Emits each diagnostic once per pack and process as a Node process warning with code `BETTEROFFICE_FONT_PACK`,
+ * so server hosts can filter it. Does nothing outside Node.
+ */
+export declare function warnFontPackDiagnostics(diagnostics: readonly FontPackDiagnostic[]): void;
 
 // ---- shared/host-contracts/edits.d.ts ----
 /**

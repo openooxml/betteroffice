@@ -68,7 +68,7 @@ const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
-export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+export const commandDefaultFontModule = { load: (): Promise<FontModule> => import('./commandDefaultFonts') };
 const sessionDecodeFontFace = sessionFontDecoder((bytes, options) => decodeFontFace(bytes, options));
 const COVERAGE_SCRIPTS = new Set<unknown>(['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc']);
 

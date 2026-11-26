@@ -97,7 +97,9 @@ function fontSession(source: object) {
 
 export const commandFontProvider = {
   /** @internal */
-  async load(...configuration: [fontCdn?: FontCdnConfiguration]) {
+  async load(
+    ...configuration: [fontCdn?: FontCdnConfiguration]
+  ): Promise<ReturnType<typeof import('@betteroffice/fonts').createFontProvider>> {
     if (configuration.length) setFontCdnConfiguration(configuration[0]);
     const fonts = await importFonts();
     const session = createFontSession();
