@@ -71,6 +71,12 @@ function packDiagnostics(): FontCdnDiagnostic[] {
   return diagnostics;
 }
 
+function implicitFontFailure(pack: FontCdnDiagnostic['pack'], cause: Error) {
+  return Object.assign(new Error(cause.message), {
+    cause, diagnostic: { pack, reason: 'cdn-unavailable' as const, detail: cause.message }, retryAt: Date.now() + 60_000,
+  });
+}
+
 test('the manager decodes packed faces with the worker engine', async () => {
   const create = spyOn(fonts, 'createFontProvider');
   restorers.push(() => create.mockRestore());
@@ -265,6 +271,91 @@ test('a transient failure retries after backoff and registers the second load', 
     expect(settled).toHaveBeenCalledTimes(1);
     expect(settled).toHaveBeenCalledWith([regular]);
   } finally { fonts.dispose(); }
+});
+
+test.each(['primary', 'last-resort'] as const)('a transient CDN failure retries the %s after the cooldown', async (kind) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const load = mock(async () => bytes).mockRejectedValueOnce(implicitFontFailure('latin', new Error('Offline')));
+  const primary = kind === 'primary' ? regular : { ...regular, family: 'Simplified Arabic', scripts: ['arabic'] };
+  const source = provider(() => kind === 'primary' ? load : async () => bytes);
+  if (kind === 'last-resort') source.resolveLastResort.mockReturnValue(load);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {});
+  try {
+    const { family, bold, italic } = primary;
+    expect(await manager.load()).toEqual(kind === 'primary' ? [] : [{ family, bold, italic }]);
+    advance(59_999);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(load).toHaveBeenCalledTimes(1);
+    advance(1);
+    expect(manager.hasPending()).toBe(true);
+    const landing = kind === 'primary' ? regular : { ...regular, family: 'Carlito', kind: 'coverage' };
+    expect(await manager.load()).toEqual([landing]);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(register).toHaveBeenLastCalledWith({ ...landing, bytes });
+    expect(manager.hasPending()).toBe(false);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
+});
+
+test.each([403, 404, 410])('a Naskh HTTP %s miss uses the available last resort as the primary', async (status) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const naskh = mock(async () => bytes).mockRejectedValueOnce(
+    implicitFontFailure('latin', Object.assign(new Error(`HTTP ${status}`), { status })));
+  const source = provider(() => undefined, () => naskh);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { ...regular, family: 'Simplified Arabic' };
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], register, () => {});
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    expect(register).toHaveBeenCalledWith({ ...primary, bytes });
+    advance(60_000);
+    expect(manager.hasPending()).toBe(false);
+    expect(await manager.load()).toEqual([]);
+    expect(naskh).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'latin', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
+});
+
+test.each([403, 404, 410])('an HTTP %s retry keeps the installed substitute without reinstalling it', async (status) => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  let cause = new Error('Offline');
+  const load = mock(async () => bytes.slice(0));
+  const create = spyOn(fonts, 'createFontProvider').mockImplementation((_options, runtime) => ({
+    resolve: () => async () => {
+      const substitute = await load();
+      const error = implicitFontFailure('intl', cause);
+      runtime?.reportCdnFailure?.(error);
+      runtime?.onSubstitute?.(substitute, error);
+      return substitute;
+    },
+    resolveFamily: () => undefined,
+    resolveScriptFallback: () => undefined,
+    resolveLastResort: () => async () => bytes,
+  }));
+  restorers.push(() => create.mockRestore());
+  const primary = { ...regular, family: 'Noto Sans Devanagari' };
+  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
+  const register = mock((_face: DefaultFontFace) => {});
+  const manager = createCommandDefaultFonts([], () => [primary], register, () => {}, install);
+  try {
+    expect(await manager.load()).toEqual([primary]);
+    cause = Object.assign(new Error(`HTTP ${status}`), { status });
+    advance(60_000);
+    const additions = await manager.load();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(additions).toEqual([]);
+    advance(60_000);
+    expect(manager.hasPending()).toBe(false);
+    expect(diagnostics).toEqual([expect.objectContaining({ pack: 'intl', reason: 'cdn-unavailable' })]);
+  } finally { manager.dispose(); }
 });
 
 test.each([false, true])('an absent intl pack settles without fetching a substitute (CDN blocked: %s)', async (blocked) => {
