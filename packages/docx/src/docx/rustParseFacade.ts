@@ -221,6 +221,13 @@ function decodeS9Package(value: unknown): DocxPackage {
   return pkg;
 }
 
+/** @internal */
+export function decodeS9Blocks(value: unknown, path: string): DocumentBody['content'] {
+  if (!Array.isArray(value)) throw new TypeError(`${path} must be an array`);
+  value.forEach((block, index) => objectAt(block, `${path}[${index}]`));
+  return value as DocumentBody['content'];
+}
+
 function decodeS9DocumentBody(value: unknown): DocumentBody {
   const path = 'wire.document.package.document';
   const body = objectAt(value, path);
@@ -230,11 +237,7 @@ function decodeS9DocumentBody(value: unknown): DocumentBody {
     path,
     ['sections', 'finalSectionProperties', 'customRootBindings', 'comments']
   );
-  if (!Array.isArray(body.content)) throw new TypeError(`${path}.content must be an array`);
-  body.content.forEach((block, index) => objectAt(block, `${path}.content[${index}]`));
-  const documentBody: DocumentBody = {
-    content: body.content as DocumentBody['content'],
-  };
+  const documentBody: DocumentBody = { content: decodeS9Blocks(body.content, `${path}.content`) };
   if (body.sections !== undefined) {
     if (!Array.isArray(body.sections)) throw new TypeError(`${path}.sections must be an array`);
     documentBody.sections = body.sections.map((value, index) => {
