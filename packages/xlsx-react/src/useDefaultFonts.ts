@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useRef } from 'react';
-import type { DisplayList, WorkbookSession, XlsxFontFace, XlsxPngFont } from '@betteroffice/xlsx';
+import type { DisplayList, WorkbookSession, XlsxFontFace, XlsxPngFont, XlsxPngTarget } from '@betteroffice/xlsx';
 import type { RemoteFontProvider } from '@betteroffice/fonts/remote';
 import type { createDefaultFontPainter } from './defaultFonts';
 
@@ -58,8 +58,15 @@ export function useDefaultFonts(
 /** The faces a PNG export should paint `fonts` with, as the editor paints them; none when default fonts are off. */
 export async function editorExportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined, defaultFonts: boolean | undefined,
+  target?: XlsxPngTarget,
 ): Promise<XlsxFontFace[] | undefined> {
   if (defaultFonts === false || fonts.length === 0) return undefined;
   const { exportFaces } = await defaultFontPainterModule.load();
-  return exportFaces(fonts, decoder);
+  const reported = new Set<Error>();
+  const faces = await exportFaces(fonts, decoder, reported);
+  if (faces.length) return faces;
+  if (target && reported.size) {
+    Object.defineProperty(target, Symbol.for('@betteroffice/xlsx/reportedFontCdnErrors'), { value: reported });
+  }
+  return undefined;
 }

@@ -1,6 +1,9 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, jest, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, jest, mock, spyOn, test } from 'bun:test';
 import * as fontManager from '@betteroffice/fonts';
+import { fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -172,6 +175,62 @@ test('a mapped CJK family registers its bundled equivalent under the equivalent 
   expect(await loadFontWithMapping('SimSun')).toBe(true);
   expect(new Set(added.map((face) => face.family))).toEqual(new Set(['Noto Serif SC']));
   expect(googleLinks()).toHaveLength(0);
+});
+
+test.each([
+  { family: 'Noto Sans JP', pack: 'cjk' },
+  { family: 'Noto Sans Devanagari', pack: 'intl' },
+])('a blocked default CDN leaves $family on fallback without an editor error', async ({ family, pack }) => {
+  const previous = getFontCdnConfiguration();
+  const restoreBrowser = withBrowserFontGlobals();
+  const create = spyOn(fontManager, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+  const failure = new TypeError('Failed to fetch');
+  const fetch = spyOnFontFetch(async () => { throw failure; });
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const dispatch = Object.getOwnPropertyDescriptor(globalThis, 'dispatchEvent');
+  const diagnostic = mock((_event: Event) => true);
+  Object.defineProperty(globalThis, 'dispatchEvent', { configurable: true, value: diagnostic });
+  const scope = createFontLoadScope();
+  const onError = mock((_error: Error) => {});
+  scope.onFontError(onError);
+  const load = () => loadFont(family, { weights: [400], styles: ['normal'] });
+  const explicitCdn = 'https://configured-fonts.example/';
+  try {
+    fontManager.configureFontCdn({ baseUrl: explicitCdn });
+    expect(await load()).toBe(false);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([expect.stringContaining(`${explicitCdn}${pack}/`)]);
+    expect(warning).not.toHaveBeenCalled();
+    expect(diagnostic).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+
+    fetch.mockClear();
+    setFontCdnConfiguration(undefined);
+    expect(await load()).toBe(false);
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining(`https://cdn.jsdelivr.net/npm/@betteroffice/fonts-${pack}@`),
+    ]);
+    const detail = `Cannot load @betteroffice/fonts-${pack} from cdn.jsdelivr.net: Failed to fetch. To opt out, install @betteroffice/fonts-${pack} or call configureFontCdn({ baseUrl: false }).`;
+    expect(warning.mock.calls).toEqual([[detail]]);
+    expect(diagnostic.mock.calls).toEqual([[expect.objectContaining({
+      type: 'betteroffice:font-pack-diagnostic', detail: { pack, reason: 'cdn-unavailable', detail },
+    })]]);
+    expect(onError).not.toHaveBeenCalled();
+
+    configureDefaultFonts({ baseUrl: explicitCdn });
+    expect(await load()).toBe(false);
+    expect(onError.mock.calls).toEqual([[expect.objectContaining({
+      message: `[font] failed to register bundled "${family}": Failed to fetch`, cause: failure,
+    })]]);
+  } finally {
+    scope.dispose();
+    if (dispatch) Object.defineProperty(globalThis, 'dispatchEvent', dispatch);
+    else Reflect.deleteProperty(globalThis, 'dispatchEvent');
+    warning.mockRestore();
+    fetch.mockRestore();
+    create.mockRestore();
+    restoreBrowser();
+    setFontCdnConfiguration(previous);
+  }
 });
 
 test('a family without italics registers only its upright faces, leaving italics to synthesis', async () => {

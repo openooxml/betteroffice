@@ -169,6 +169,7 @@ export declare class TextMeasureFontRegistry {
     private viewBases;
     private readonly progressive?;
     private readonly standInTail;
+    private readonly baseLatinStandIn;
     /** `progressive` opens sliced faces, which register from their skeleton and core. */
     constructor(sink: TextEngineFontSink, opts?: {
         bundled?: BundledFontProviderSource;
@@ -176,6 +177,7 @@ export declare class TextMeasureFontRegistry {
         progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
         /** Explicit stand-ins always append the last-resort face. */
         standInTail?: boolean;
+        baseLatinStandIn?: boolean;
     });
     /** The sliced faces registered from their skeleton and core, by font id. */
     progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace>;

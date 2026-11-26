@@ -23,6 +23,16 @@ const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 const fixtureDirectories: string[] = [];
 const fonts = { name: '@betteroffice/fonts', version: '1.2.3' };
 const latin = { name: '@betteroffice/fonts-latin', version: '1.2.3' };
+const intl = { name: '@betteroffice/fonts-intl', version: '1.2.3' };
+const cjk = { name: '@betteroffice/fonts-cjk', version: '1.2.3' };
+const fontPackNames = new Set([latin.name, intl.name, cjk.name]);
+
+function firstFontAsset(directory: string) {
+  return JSON.parse(readFileSync(join(directory, 'assets', 'manifest.json'), 'utf8')).faces[0].file as string;
+}
+
+const packagedAsset = new Map(workspaceEntries().filter(({ manifest }) => fontPackNames.has(manifest.name))
+  .map(({ directory, manifest }) => [manifest.name, firstFontAsset(directory)]));
 
 afterEach(() => {
   for (const directory of fixtureDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
@@ -34,6 +44,11 @@ function workspaceFixture(manifests: Array<{ name: string; version: string; [key
   return manifests.map((manifest) => {
     const directory = join(root, manifest.name.split('/').pop()!);
     mkdirSync(join(directory, 'src'), { recursive: true });
+    const file = packagedAsset.get(manifest.name);
+    if (file) {
+      mkdirSync(join(directory, 'assets'));
+      writeFileSync(join(directory, 'assets', 'manifest.json'), JSON.stringify({ faces: [{ file }, { file: 'ignored.zst' }] }));
+    }
     return { directory, manifest };
   });
 }
@@ -723,9 +738,27 @@ describe('published npm and CDN targets', () => {
     expect(result.stderr).toBe('');
     expect([...heads.entries()].sort()).toEqual([
       [`${latin.name}@${latin.version}/package.json`, 2],
+      [`${releaseTag(latin)}/assets/${packagedAsset.get(latin.name)}`, 2],
       [`${fonts.name}@${fonts.version}/package.json`, 2]
     ].sort());
     expect(result.elapsed).toBeGreaterThanOrEqual(200);
+  });
+
+  test('fails when any font pack is published without its first compressed asset', async () => {
+    const packs = [latin, intl, cjk];
+    const assets = packs.map((pack) => `${releaseTag(pack)}/assets/${packagedAsset.get(pack.name)}`);
+    const missing = assets[1]!;
+    const heads = new Set<string>();
+    const result = await check('--verify-published', (path, request) => {
+      if (request.method === 'GET') return Response.json({});
+      heads.add(path);
+      return path === missing ? notFound() : new Response(null);
+    }, { packages: packs, workspaces: workspaceFixture(packs), maxWaitMs: 500 });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(missing);
+    expect([...heads].sort()).toEqual([
+      ...packs.map((pack) => `${releaseTag(pack)}/package.json`), ...assets,
+    ].sort());
   });
 
   test('names CDN versions that stay missing within a shared retry budget', async () => {
@@ -1051,7 +1084,11 @@ describe('the mode argument', () => {
     });
     expect(result.status).toBe(0);
     expect(gets.sort()).toEqual(packages.map(({ name, version }) => `${name}/${version}`).sort());
-    expect(heads.sort()).toEqual(packages.map(({ name, version }) => `${name}@${version}/package.json`).sort());
+    expect(heads.sort()).toEqual(packages.flatMap((pack) => {
+      const tag = releaseTag(pack);
+      const asset = packagedAsset.get(pack.name);
+      return [`${tag}/package.json`, ...(asset ? [`${tag}/assets/${asset}`] : [])];
+    }).sort());
   }, SPAWN_BUDGET_MS);
 
   test('--verify-published on GitHub Actions annotates and summarizes what is missing', async () => {
@@ -1108,5 +1145,76 @@ describe('release plan', () => {
     expect(unaskedMajors(asked, fixture('workspace:*'), [['@betteroffice/fonts', '@betteroffice/fonts-cjk']])).toEqual([]);
     expect(unaskedMajors(plan('major'), fixture('workspace:*'), [['@betteroffice/fonts', '@betteroffice/fonts-cjk']]).map(({ name }) => name))
       .toEqual(['@betteroffice/fonts', '@betteroffice/fonts-cjk']);
+  });
+});
+
+describe('npm fallback token', () => {
+  const nativePublish = Bun.YAML.parse(
+    readFileSync(fileURLToPath(new URL('../.github/workflows/publish-native.yml', import.meta.url)), 'utf8')
+  ) as any;
+  const fallback = '${{ secrets.NPM_FALLBACK_TOKEN }}';
+  const note = 'if [ "$FALLBACK" = true ]; then echo "npm fallback token present: publishing may use it"; fi\n';
+  const steps = release.jobs.release.steps;
+  const names = steps.map((step: any) => step.name);
+
+  function stepsReading(workflow: any, secret: string) {
+    return Object.entries(workflow.jobs).flatMap(([job, body]: [string, any]) =>
+      (body.steps ?? [])
+        .filter((step: any) => JSON.stringify(step).includes(`secrets.${secret}`))
+        .map((step: any) => `${job}: ${step.name}`)
+    );
+  }
+
+  test('reaches only the npm publish steps and the notes before them', () => {
+    expect(stepsReading(release, 'NPM_FALLBACK_TOKEN')).toEqual([
+      'release: Note the npm fallback token',
+      'release: Release PR or publish',
+      'held-npm: Note the npm fallback token',
+      'held-npm: Publish held packages and create releases'
+    ]);
+    expect(stepsReading(nativePublish, 'NPM_FALLBACK_TOKEN')).toEqual([
+      'publish: Note the npm fallback token',
+      'publish: Publish packages'
+    ]);
+  });
+
+  test('is passed as NODE_AUTH_TOKEN, only on the publish path, with provenance on', () => {
+    const changesets = steps.find((step: any) => step.name === 'Release PR or publish');
+    expect(changesets.env.NODE_AUTH_TOKEN).toBe(
+      "${{ steps.pending.outputs.publishing == 'true' && secrets.NPM_FALLBACK_TOKEN || '' }}"
+    );
+    expect(changesets.env.NPM_CONFIG_PROVENANCE).toBe('true');
+    expect(changesets.env.NPM_TOKEN).toBeUndefined();
+    const held = release.jobs['held-npm'].steps.find((step: any) => step.name === 'Publish held packages and create releases');
+    expect(held.env.NODE_AUTH_TOKEN).toBe(fallback);
+    const upload = nativePublish.jobs.publish.steps.find((step: any) => step.name === 'Publish packages');
+    expect(upload.env).toEqual({ NODE_AUTH_TOKEN: fallback, NPM_CONFIG_PROVENANCE: 'true' });
+    expect(upload.if).toBe('${{ !inputs.dry_run }}');
+  });
+
+  test('each note sees only whether the secret is set, prints a fixed line, and runs right before publishing', () => {
+    const jobs: Array<[any, string, string | undefined]> = [
+      [release.jobs.release, 'Release PR or publish', "steps.pending.outputs.publishing == 'true'"],
+      [release.jobs['held-npm'], 'Publish held packages and create releases', undefined],
+      [nativePublish.jobs.publish, 'Publish packages', '${{ !inputs.dry_run }}']
+    ];
+    for (const [job, publish, gate] of jobs) {
+      const jobNames = job.steps.map((step: any) => step.name);
+      const step = job.steps.find((candidate: any) => candidate.name === 'Note the npm fallback token');
+      expect(step.env).toEqual({ FALLBACK: "${{ secrets.NPM_FALLBACK_TOKEN != '' }}" });
+      expect(step.run).toBe(note);
+      expect(step.if).toBe(gate);
+      expect(jobNames.indexOf('Note the npm fallback token')).toBeLessThan(jobNames.indexOf(publish));
+    }
+    expect(JSON.stringify(release.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    expect(JSON.stringify(nativePublish.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    for (const job of [release.jobs.release, release.jobs['held-npm'], nativePublish.jobs.publish]) {
+      expect(JSON.stringify(job.env ?? {})).not.toContain('NPM_FALLBACK_TOKEN');
+    }
+  });
+
+  test('NPM_TOKEN stays refused and unused', () => {
+    expect(stepsReading(release, 'NPM_TOKEN')).toEqual([]);
+    expect(stepsReading(nativePublish, 'NPM_TOKEN')).toEqual(['publish: Refuse an npm token']);
   });
 });

@@ -53,5 +53,8 @@ export function createEngineLoader(native: Importers | undefined, wasm: Importer
       if (ready) return ready;
       throw new Error(`The ${format} engine has not loaded. Await open${format[0].toUpperCase()}${format.slice(1)} first.`);
     },
+    getIfLoaded<F extends EngineFormat>(format: F): Engine<EngineModules[F]> | undefined {
+      return loaded[format];
+    },
   };
 }

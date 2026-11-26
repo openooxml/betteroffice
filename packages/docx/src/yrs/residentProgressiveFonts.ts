@@ -1,3 +1,4 @@
+import { isImplicitFontCdnError } from '../../../../shared/fontCdnDiagnostics';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 
@@ -160,19 +161,24 @@ export class ResidentProgressiveFonts {
         if (view !== null && view !== undefined && rootSlot(slot) === spec.slot) this.ownerOf.set(view, owner);
       }
       if (known !== undefined) continue;
+      const source = spec.source as ProgressiveFontSource & { implicitCdnFiles?: string[] };
+      const implicitCdnFiles = new Set(source.implicitCdnFiles);
+      const url = Object.assign(async (file: string) => {
+        const href = spec.source.urls[file];
+        if (href === undefined) throw new Error(`Font slice ${file} has no URL`);
+        return new URL(href);
+      }, { implicitCdn: (file: string) => implicitCdnFiles.has(file) });
       let opening: Promise<OutlineFace> | undefined;
       const open = ({ openProgressiveFace, readFontAsset }: ProgressiveModule): Promise<OutlineFace> => {
         if (opening) return opening;
         let created = shared.get(face);
         if (created === undefined) {
-          created = openProgressiveFace(spec.source.ref, {
-            read: (file) => {
-              const url = spec.source.urls[file];
-              if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
-              return readFontAsset(file, new URL(url), spec.source.timeoutMs);
-            },
+          const transport = {
+            read: async (file: string) => readFontAsset(file, await url(file), spec.source.timeoutMs),
+            url,
             decode,
-          });
+          };
+          created = openProgressiveFace(spec.source.ref, transport);
           shared.set(face, created);
         }
         const attempt = created;
@@ -417,6 +423,7 @@ export class ResidentProgressiveFonts {
         await state.face?.ensureGlyphs(ids);
         return;
       } catch (error) {
+        if (isImplicitFontCdnError(error)) return;
         const pause = CHUNK_RETRY_DELAYS_MS[attempt];
         if (pause === undefined) {
           this.log(`[docx] font outline chunks failed to load after ${attempt + 1} attempts; their glyphs stay blank until a frame needs them again: ${error instanceof Error ? error.message : String(error)}`);

@@ -124,6 +124,7 @@ export function createRustMeasureSource(options: {
    * Chains and measurement stay as the requirements make them.
    */
   fill?: readonly FontScript[];
+  baseLatinStandIn?: boolean;
 }): RustMeasureSource {
   const engine = options.engine;
   const standIns = options.standIns !== false;
@@ -147,7 +148,7 @@ export function createRustMeasureSource(options: {
       const provider = excludeHostedFontFamilies(await resolveDefaultFontProvider(options.runtime, standIns), hosted);
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
-    }), standInTail: options.standIns === true, progressive: options.progressive
+    }), standInTail: options.standIns === true, baseLatinStandIn: options.baseLatinStandIn, progressive: options.progressive
       ? async (slices) => importProgressiveFonts().then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
         if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');

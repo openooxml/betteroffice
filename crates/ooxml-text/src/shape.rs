@@ -21,7 +21,7 @@ use std::str::FromStr;
 ///
 /// Advances and offsets are scaled to `size` (same unit the caller passed,
 /// e.g. CSS px or twips): `value_font_units * size / units_per_em`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShapedGlyph {
     pub glyph_id: u32,
     pub cluster: u32,

@@ -73,4 +73,5 @@ export declare function createRustMeasureSource(options: {
      * Chains and measurement stay as the requirements make them.
      */
     fill?: readonly FontScript[];
+    baseLatinStandIn?: boolean;
 }): RustMeasureSource;
