@@ -209,7 +209,8 @@ pub fn ensure_unambiguous_spaced_calls(input: &str, tokens: &[Token]) -> Result<
             .next()
             .unwrap_or_default()
             .trim_start();
-        if crate::functions::resolve(endpoint).is_none() && !crate::array::is_array_builtin(endpoint)
+        if crate::functions::resolve(endpoint).is_none()
+            && !crate::array::is_array_builtin(endpoint)
         {
             continue;
         }
@@ -1526,7 +1527,14 @@ mod tests {
             );
         }
         assert_eq!(
-            rewrite_table_column("SUM(Amt:MAX (1:2))+T[Old]", "T", "Data", false, "Old", "New"),
+            rewrite_table_column(
+                "SUM(Amt:MAX (1:2))+T[Old]",
+                "T",
+                "Data",
+                false,
+                "Old",
+                "New"
+            ),
             Ok(Some("SUM(Amt:MAX (1:2))+T[New]".into())),
         );
     }
@@ -1606,7 +1614,14 @@ mod tests {
             assert_eq!(lex(selector), error, "{selector}");
             assert_eq!(lex_for_rewrite(selector), error, "{selector}");
             assert_eq!(
-                rewrite_table_column(&format!("{selector}+T[Old]"), "T", "Data", true, "Old", "New"),
+                rewrite_table_column(
+                    &format!("{selector}+T[Old]"),
+                    "T",
+                    "Data",
+                    true,
+                    "Old",
+                    "New"
+                ),
                 Err(ParseError::new(0, "empty local structured reference")),
                 "{selector}"
             );

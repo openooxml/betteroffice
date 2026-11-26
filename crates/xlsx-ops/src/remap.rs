@@ -2502,7 +2502,11 @@ pub(crate) fn ensure_sheet_edit_references_rewritable(
             }
         }
         for chart in &sheet.charts {
-            if chart.refs.iter().any(|reference| blocked(&reference.formula)) {
+            if chart
+                .refs
+                .iter()
+                .any(|reference| blocked(&reference.formula))
+            {
                 return Err(OpError::ChartRefNotRewritable {
                     part: chart.part.clone(),
                 });
@@ -3126,10 +3130,7 @@ mod tests {
 
     #[test]
     fn a_short_dropped_table_name_before_if_or_let_is_rewritten() {
-        for source in [
-            "SUM(Amt:IF(C1,B1,B2))",
-            "SUM(Amt:LET(x,B1,x))",
-        ] {
+        for source in ["SUM(Amt:IF(C1,B1,B2))", "SUM(Amt:LET(x,B1,x))"] {
             assert_eq!(
                 remove_table_references(source, &["Amt".to_owned()], &[]),
                 Some(source.replace("Amt", "#REF!"))
@@ -3168,10 +3169,7 @@ mod tests {
         let dropped = ["Amt".to_owned()];
         for reference in ["LOG10 (1)", "Amt:IF (C1,B1,B2)", "Amt:LET (x,B1,x)"] {
             let source = format!("SUM({reference})+Amt[Old]");
-            assert!(
-                names_unrewritable_table(&source, &dropped, &[]),
-                "{source}"
-            );
+            assert!(names_unrewritable_table(&source, &dropped, &[]), "{source}");
             assert_eq!(
                 remove_table_references(&source, &dropped, &[]),
                 None,
@@ -4231,22 +4229,26 @@ mod tests {
             assert_sheet_edit_refuses(&workbook, op, &error, source);
         }
         workbook.sheets[3].charts.clear();
-        workbook.sheets[3].conditional_formats.push(ConditionalFormatting {
-            sqref: "A1".into(),
-            rules: vec![ConditionalFormatRule {
-                id: "rule".into(),
-                rule_type: "expression".into(),
-                operator: None,
-                formulas: vec![source.into()],
-                priority: 1,
-                dxf_id: None,
-                format: Default::default(),
-                raw_xml: Some(format!("<cfRule><formula>{source}</formula></cfRule>")),
-            }],
-        });
+        workbook.sheets[3]
+            .conditional_formats
+            .push(ConditionalFormatting {
+                sqref: "A1".into(),
+                rules: vec![ConditionalFormatRule {
+                    id: "rule".into(),
+                    rule_type: "expression".into(),
+                    operator: None,
+                    formulas: vec![source.into()],
+                    priority: 1,
+                    dxf_id: None,
+                    format: Default::default(),
+                    raw_xml: Some(format!("<cfRule><formula>{source}</formula></cfRule>")),
+                }],
+            });
         for op in &ops {
-            let error =
-                unrewritable_rule(&workbook.sheets[3].conditional_formats[0].rules[0], "Report");
+            let error = unrewritable_rule(
+                &workbook.sheets[3].conditional_formats[0].rules[0],
+                "Report",
+            );
             assert_sheet_edit_refuses(&workbook, op, &error, source);
         }
     }

@@ -508,7 +508,9 @@ fn reference_end(source: &str, start: usize) -> usize {
         return table_reference_end(source, end);
     }
     if let Some(further) = range_address_end(source, start, end)
-        && !source[further..].trim_start().starts_with([':', '!', '(', '['])
+        && !source[further..]
+            .trim_start()
+            .starts_with([':', '!', '(', '['])
     {
         return further;
     }
@@ -516,11 +518,12 @@ fn reference_end(source: &str, start: usize) -> usize {
 }
 
 fn reference_word_end(source: &str, start: usize) -> usize {
-    start + source[start..]
-        .chars()
-        .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '$' | '_' | '.' | '\\'))
-        .map(char::len_utf8)
-        .sum::<usize>()
+    start
+        + source[start..]
+            .chars()
+            .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '$' | '_' | '.' | '\\'))
+            .map(char::len_utf8)
+            .sum::<usize>()
 }
 
 fn range_address_end(source: &str, start: usize, end: usize) -> Option<usize> {
