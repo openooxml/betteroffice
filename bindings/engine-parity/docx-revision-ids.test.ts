@@ -236,10 +236,41 @@ async function saveStructuredFields() {
       { type: 'paragraph', content: [{ type: 'run', content: [{ type: 'shape', shape: textBox }] }] },
     ] } },
   };
+  await writeSyntheticDocument(document);
+}
+
+async function writeSyntheticDocument(document: Document) {
   const source = pack(new Map([['word/document.xml', toBytes(
     `<w:document xmlns:w="${W}"><w:body><w:p/></w:body></w:document>`
   )]]));
   await writeDocumentWithRust(document, Uint8Array.from(source).buffer, { updateModifiedDate: false });
+}
+
+async function saveArrayBufferViews() {
+  const placeholder = 2 ** 40;
+  const payload = Buffer.from([1]);
+  const withXml = Object.assign(Buffer.from([2]), {
+    toJSON: () => ({
+      type: 'Buffer', data: [2], xml: "w:id='90'", info: { id: placeholder, author: AUTHOR.name },
+    }),
+  });
+  const shape: Shape = {
+    type: 'shape',
+    shapeType: 'rect',
+    size: { width: 914400, height: 457200 },
+    drawingModel: {
+      frame: { 'payload/~': [payload, withXml], record: { type: 'Buffer', data: [1] } },
+      otherSha256: '',
+    },
+  };
+  await writeSyntheticDocument({ package: { document: { content: [
+    { type: 'paragraph', content: [{ type: 'run', content: [{ type: 'shape', shape }] }] },
+    { type: 'paragraph', content: [{
+      type: 'insertion',
+      info: markRevisionInfo({ id: placeholder, author: AUTHOR.name, date: AUTHOR.date }, true),
+      content: [],
+    }] },
+  ] } } });
 }
 
 function bodyEdits(session: YrsSession, mixed: boolean) {
@@ -375,5 +406,8 @@ describe.skipIf(!OUT)('session revision IDs for the Rust save request', () => {
   scriptedDocument('synthetic-separate-paragraphs', () => synthetic(120), true, false);
   test('synthetic-structured-field-results', async () => {
     expect(await recordRevisionIdCases('synthetic-structured-field-results', saveStructuredFields)).toBe(1);
+  }, 30_000);
+  test('synthetic-array-buffer-views', async () => {
+    expect(await recordRevisionIdCases('synthetic-array-buffer-views', saveArrayBufferViews)).toBe(1);
   }, 30_000);
 });

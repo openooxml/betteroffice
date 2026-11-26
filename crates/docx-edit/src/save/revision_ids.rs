@@ -25,6 +25,7 @@ const HYPERLINK_FIELDS: [&str; 2] = ["children", "structuredChildren"];
 const STRUCTURED_FIELDS: [&str; 2] = ["inline", "blocks"];
 const FIELD_TREE_FIELDS: [&str; 3] = ["code", "result", "children"];
 const SCENE_NODE_FIELDS: [&str; 2] = ["shape", "children"];
+const NO_VIEWS: BTreeSet<String> = BTreeSet::new();
 
 type FastMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
 type FastSet<T> = HashSet<T, foldhash::fast::RandomState>;
@@ -88,7 +89,7 @@ pub fn assign_session_revision_ids(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
-    assign(request, session, None, || {})
+    assign(request, session, None, &NO_VIEWS, || {})
 }
 
 #[doc(hidden)]
@@ -97,8 +98,18 @@ pub fn assign_session_revision_ids_with_paths(
     session: &BTreeSet<u64>,
     paths: &mut Vec<(String, u64)>,
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
+    assign_session_revision_ids_with_paths_skipping_views(request, session, paths, &NO_VIEWS)
+}
+
+#[doc(hidden)]
+pub fn assign_session_revision_ids_with_paths_skipping_views(
+    request: &mut S13SaveRequest,
+    session: &BTreeSet<u64>,
+    paths: &mut Vec<(String, u64)>,
+    skipped_views: &BTreeSet<String>,
+) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
     paths.clear();
-    assign(request, session, Some(paths), || {})
+    assign(request, session, Some(paths), skipped_views, || {})
 }
 
 #[doc(hidden)]
@@ -110,7 +121,7 @@ pub fn assign_session_revision_ids_with_timings(
     let mut passes = [Duration::ZERO; 3];
     let mut timings = passes.iter_mut();
     let mut started = Instant::now();
-    let ids = assign(request, session, None, || {
+    let ids = assign(request, session, None, &NO_VIEWS, || {
         let finished = Instant::now();
         *timings.next().unwrap() = finished.duration_since(started);
         started = finished;
@@ -122,13 +133,14 @@ fn assign(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
     paths: Option<&mut Vec<(String, u64)>>,
+    skipped_views: &BTreeSet<String>,
     mut pass_complete: impl FnMut(),
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
     if session.is_empty() {
         return Ok(BTreeMap::new());
     }
     let session_ids = SessionIds::new(session);
-    let mut found = collect::<false>(request, &session_ids);
+    let mut found = collect::<false>(request, &session_ids, skipped_views);
     pass_complete();
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
@@ -136,6 +148,7 @@ fn assign(
     let mut walker = SiteWalker::new(
         &session_ids,
         paths,
+        skipped_views,
         &found.blocks_with_sites,
         &found.body_blocks_with_sites,
         found.site_count,
@@ -156,6 +169,8 @@ fn assign(
         if count.assigned == 0 {
             count.assigned = next_id(&mut next, found.max, &found.used)?;
         }
+        #[cfg(test)]
+        count_work(|work| work.verified += 1);
         site.assigned = count.assigned;
         index = site.next;
     }
@@ -167,9 +182,6 @@ fn assign(
     {
         return Err(RevisionIdsError::Unassigned(id));
     }
-    for site in &mut walker.sites {
-        site.write();
-    }
     let mut assigned = Vec::with_capacity(found.sites.len());
     assigned.extend(
         session
@@ -178,19 +190,8 @@ fn assign(
     );
     let ids = assigned.into_iter().collect();
     pass_complete();
-
-    if let Some(id) = walker
-        .sites
-        .iter()
-        .filter_map(PendingSite::unassigned)
-        .chain(found.sites.values().filter_map(|count| {
-            count
-                .hidden
-                .filter(|_| !session_ids.contains(u64::from(count.assigned)))
-        }))
-        .min()
-    {
-        return Err(RevisionIdsError::Unassigned(id));
+    for site in &mut walker.sites {
+        site.write();
     }
     pass_complete();
     Ok(ids)
@@ -216,8 +217,9 @@ impl SessionIds {
         placeholder(number).filter(|id| self.ids.contains(id))
     }
 
-    fn contains(&self, id: u64) -> bool {
-        self.ids.contains(&id)
+    fn model_placeholder(&self, record: &Map<String, Value>) -> Option<u64> {
+        record.get("author").and_then(Value::as_str)?;
+        self.placeholder(record.get("id").and_then(Value::as_f64)?)
     }
 }
 
@@ -234,7 +236,16 @@ pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<RevisionIdReservations, RevisionIdsError> {
-    let found = collect::<true>(request, &SessionIds::new(session));
+    session_revision_id_reservations_skipping_views(request, session, &NO_VIEWS)
+}
+
+#[doc(hidden)]
+pub fn session_revision_id_reservations_skipping_views(
+    request: &S13SaveRequest,
+    session: &BTreeSet<u64>,
+    skipped_views: &BTreeSet<String>,
+) -> Result<RevisionIdReservations, RevisionIdsError> {
+    let found = collect::<true>(request, &SessionIds::new(session), skipped_views);
     Ok(RevisionIdReservations {
         used: found.used.into_iter().collect(),
         max: found.max,
@@ -265,7 +276,6 @@ fn placeholder(id: f64) -> Option<u64> {
 struct SiteCount {
     remaining: usize,
     assigned: u32,
-    hidden: Option<u64>,
 }
 
 #[derive(Default)]
@@ -278,10 +288,6 @@ struct Collected {
     site_count: usize,
     blocks_with_sites: FastSet<*const ()>,
     body_blocks_with_sites: Vec<usize>,
-}
-
-fn is_model_info(key: &str) -> bool {
-    matches!(key, "info" | "pPrIns" | "pPrDel")
 }
 
 fn block_key(block: &BlockContent) -> Option<*const ()> {
@@ -323,24 +329,6 @@ impl PendingSite<'_> {
             Site::Model(id) => **id = Value::from(self.assigned),
         }
     }
-
-    fn unassigned(&self) -> Option<u64> {
-        #[cfg(test)]
-        count_work(|work| work.verified += 1);
-        let assigned = match &self.site {
-            Site::Typed(id) => **id == f64::from(self.assigned),
-            Site::Model(id) => id.as_u64() == Some(u64::from(self.assigned)),
-        };
-        (!assigned).then_some(self.placeholder)
-    }
-}
-
-fn model_info_id(record: &Map<String, Value>) -> Option<f64> {
-    if record.get("author").is_some_and(Value::is_string) {
-        record.get("id").and_then(Value::as_f64)
-    } else {
-        None
-    }
 }
 
 struct SiteOrder {
@@ -359,6 +347,7 @@ impl Default for SiteOrder {
 
 struct SiteWalker<'a, 's, 'p> {
     session: &'s SessionIds,
+    skipped_views: &'s BTreeSet<String>,
     blocks_with_sites: &'s FastSet<*const ()>,
     body_blocks_with_sites: &'s [usize],
     sites: Vec<PendingSite<'a>>,
@@ -371,6 +360,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     fn new(
         session: &'s SessionIds,
         mut paths: Option<&'p mut Vec<(String, u64)>>,
+        skipped_views: &'s BTreeSet<String>,
         blocks_with_sites: &'s FastSet<*const ()>,
         body_blocks_with_sites: &'s [usize],
         site_count: usize,
@@ -380,6 +370,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         }
         Self {
             session,
+            skipped_views,
             blocks_with_sites,
             body_blocks_with_sites,
             sites: Vec::with_capacity(site_count),
@@ -395,7 +386,18 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         }
         let length = self.path.len();
         push_pointer(&mut self.path, key);
-        visit(self);
+        if !self.skipped_views.contains(&self.path) {
+            visit(self);
+        }
+        self.path.truncate(length);
+    }
+
+    fn index(&mut self, index: usize, visit: impl FnOnce(&mut Self)) {
+        let length = self.path.len();
+        write!(self.path, "/{index}").unwrap();
+        if !self.skipped_views.contains(&self.path) {
+            visit(self);
+        }
         self.path.truncate(length);
     }
 
@@ -406,10 +408,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     ) {
         if self.paths.is_some() {
             for (index, value) in values.into_iter().enumerate() {
-                let length = self.path.len();
-                write!(self.path, "/{index}").unwrap();
-                visit(self, value);
-                self.path.truncate(length);
+                self.index(index, |walker| visit(walker, value));
             }
         } else {
             for value in values {
@@ -480,10 +479,10 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                         &mut part.table_patches,
                         |walker, table| {
                             walker.at("before", |walker| {
-                                walker.model(&mut table.before, ModelKind::Any, false);
+                                walker.model(&mut table.before, ModelKind::Any);
                             });
                             walker.at("after", |walker| {
-                                walker.model(&mut table.after, ModelKind::Any, false);
+                                walker.model(&mut table.after, ModelKind::Any);
                             });
                         },
                     );
@@ -561,10 +560,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
             #[cfg(test)]
             count_work(|work| work.body_block_selections += 1);
             if self.paths.is_some() {
-                let length = self.path.len();
-                write!(self.path, "/{index}").unwrap();
-                self.block(block);
-                self.path.truncate(length);
+                self.index(index, |walker| walker.block(block));
             } else {
                 self.block(block);
             }
@@ -762,13 +758,13 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     fn shape(&mut self, shape: &'a mut Shape) {
         if let Some(model) = &mut shape.drawing_model {
             self.at("drawingModel", |walker| {
-                walker.model(model, ModelKind::Any, false)
+                walker.model(model, ModelKind::Any)
             });
         }
         if let Some(body) = &mut shape.text_body {
             self.at("textBody", |walker| {
                 walker.field_entries("content", &mut body.content, |walker, block| {
-                    walker.model(block, ModelKind::Any, false);
+                    walker.model(block, ModelKind::Any);
                 });
             });
         }
@@ -792,13 +788,10 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
         );
     }
 
-    fn model(&mut self, model: &'a mut Value, kind: ModelKind, info: bool) {
+    fn model(&mut self, model: &'a mut Value, kind: ModelKind) {
         match model {
             Value::Object(record) => {
-                if info
-                    && let Some(placeholder) =
-                        model_info_id(record).and_then(|id| self.session.placeholder(id))
-                {
+                if let Some(placeholder) = self.session.model_placeholder(record) {
                     self.push(placeholder, Site::Model(record.get_mut("id").unwrap()));
                     return;
                 }
@@ -826,15 +819,14 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                 }
             }
             Value::Array(items) => {
-                self.entries(items, |walker, item| walker.model(item, kind, false));
+                self.entries(items, |walker, item| walker.model(item, kind));
             }
-            _ => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 
     fn model_field(&mut self, parent: ModelKind, key: &str, value: &'a mut Value) {
-        let info = is_model_info(key);
-        self.at(key, |walker| walker.model(value, parent.child(key), info));
+        self.at(key, |walker| walker.model(value, parent.child(key)));
     }
 }
 

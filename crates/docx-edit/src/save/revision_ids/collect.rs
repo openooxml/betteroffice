@@ -1,17 +1,24 @@
+use std::collections::BTreeSet;
+
 use docx_parse::inline::PropertyChangeInfo;
 use docx_parse::paragraph::{CommentRange, RangeEnd, RangeStart, TrackedChangeInfo};
 
 use super::{
-    BlockContent, Collected, MAX_ID, Map, ModelKind, ParagraphContent, RunContent, SessionIds,
-    Value, Write, block_key, is_model_info, model_info_id, push_pointer,
+    BlockContent, Collected, MAX_ID, ModelKind, ParagraphContent, RunContent, SessionIds, Value,
+    Write, block_key, push_pointer,
 };
 
 #[cfg(test)]
 use super::count_work;
 
-pub(super) fn collect<const PATHS: bool>(value: &impl Visit, session: &SessionIds) -> Collected {
+pub(super) fn collect<const PATHS: bool>(
+    value: &impl Visit,
+    session: &SessionIds,
+    skipped_views: &BTreeSet<String>,
+) -> Collected {
     let mut collector = Collector::<PATHS> {
         session,
+        skipped_views,
         found: Collected::default(),
         path: String::new(),
     };
@@ -20,15 +27,20 @@ pub(super) fn collect<const PATHS: bool>(value: &impl Visit, session: &SessionId
 }
 
 pub(super) trait Visit {
+    const SCAN: bool = true;
+
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>);
 
     fn visit_field<const PATHS: bool>(&self, key: &str, collector: &mut Collector<PATHS>) {
-        collector.at(key, |collector| self.visit(collector));
+        if Self::SCAN {
+            collector.at(key, |collector| self.visit(collector));
+        }
     }
 }
 
 pub(super) struct Collector<'a, const PATHS: bool> {
     session: &'a SessionIds,
+    skipped_views: &'a BTreeSet<String>,
     found: Collected,
     path: String,
 }
@@ -37,10 +49,12 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
     fn at(&mut self, key: &str, visit: impl FnOnce(&mut Self)) {
         #[cfg(test)]
         count_work(|work| work.fields += 1);
-        if PATHS {
+        if PATHS || !self.skipped_views.is_empty() {
             let length = self.path.len();
             push_pointer(&mut self.path, key);
-            visit(self);
+            if !self.skipped_views.contains(&self.path) {
+                visit(self);
+            }
             self.path.truncate(length);
         } else {
             visit(self);
@@ -50,10 +64,12 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
     fn index(&mut self, index: usize, visit: impl FnOnce(&mut Self)) {
         #[cfg(test)]
         count_work(|work| work.fields += 1);
-        if PATHS {
+        if PATHS || !self.skipped_views.is_empty() {
             let length = self.path.len();
             write!(self.path, "/{index}").unwrap();
-            visit(self);
+            if !self.skipped_views.contains(&self.path) {
+                visit(self);
+            }
             self.path.truncate(length);
         } else {
             visit(self);
@@ -112,20 +128,16 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
         self.number("id", id, raises_base);
     }
 
-    fn site(&mut self, id: u64, hidden: Option<u64>) {
+    fn site(&mut self, id: u64) {
         #[cfg(test)]
         count_work(|work| work.site_inserts += 1);
         self.found.site_count += 1;
-        let count = self.found.sites.entry(id).or_default();
-        count.remaining += 1;
-        if let Some(hidden) = hidden {
-            count.hidden = Some(count.hidden.map_or(hidden, |prior| prior.min(hidden)));
-        }
+        self.found.sites.entry(id).or_default().remaining += 1;
     }
 
     fn info(&mut self, id: f64, author: &str, date: Option<&str>, rsid: Option<&str>) {
         if let Some(id) = self.session.placeholder(id) {
-            self.site(id, None);
+            self.site(id);
             return;
         }
         self.number("id", id, true);
@@ -215,15 +227,13 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
         }
     }
 
-    fn json(&mut self, value: &Value, model: Option<ModelKind>, info: bool) {
+    fn json(&mut self, value: &Value, model: Option<ModelKind>) {
         match value {
             Value::Object(record) => {
-                if info
-                    && let Some(id) =
-                        model_info_id(record).and_then(|id| self.session.placeholder(id))
+                if model.is_some()
+                    && let Some(id) = self.session.model_placeholder(record)
                 {
-                    let hidden = hidden_model_children(record, self.session);
-                    self.site(id, hidden);
+                    self.site(id);
                     return;
                 }
                 self.json_record(|key| record.get(key));
@@ -242,7 +252,7 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
             }
             Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
-                    self.index(index, |collector| collector.json(item, model, false));
+                    self.index(index, |collector| collector.json(item, model));
                 }
             }
             Value::String(text) => self.scan_xml(text),
@@ -252,39 +262,12 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
 
     fn json_field(&mut self, model: Option<ModelKind>, key: &str, value: &Value) {
         self.at(key, |collector| {
-            collector.json(
-                value,
-                model.map(|kind| kind.child(key)),
-                model.is_some() && is_model_info(key),
-            );
+            collector.json(value, model.map(|kind| kind.child(key)));
         });
     }
 
     fn model(&mut self, value: &Value) {
-        self.json(value, Some(ModelKind::Any), false);
-    }
-}
-
-fn hidden_model_children(record: &Map<String, Value>, session: &SessionIds) -> Option<u64> {
-    record
-        .iter()
-        .filter_map(|(key, value)| hidden_model_site(value, is_model_info(key), session))
-        .min()
-}
-
-fn hidden_model_site(value: &Value, info: bool, session: &SessionIds) -> Option<u64> {
-    match value {
-        Value::Object(record) => {
-            if info && let Some(id) = model_info_id(record).and_then(|id| session.placeholder(id)) {
-                return Some(id);
-            }
-            hidden_model_children(record, session)
-        }
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| hidden_model_site(item, false, session))
-            .min(),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+        self.json(value, Some(ModelKind::Any));
     }
 }
 
@@ -311,6 +294,8 @@ impl Visit for String {
 }
 
 impl<T: Visit> Visit for Option<T> {
+    const SCAN: bool = T::SCAN;
+
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         if let Some(value) = self {
             value.visit(collector);
@@ -325,14 +310,20 @@ impl<T: Visit> Visit for Option<T> {
 }
 
 impl<T: Visit> Visit for Vec<T> {
+    const SCAN: bool = T::SCAN;
+
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        for (index, value) in self.iter().enumerate() {
-            collector.index(index, |collector| value.visit(collector));
+        if T::SCAN {
+            for (index, value) in self.iter().enumerate() {
+                collector.index(index, |collector| value.visit(collector));
+            }
         }
     }
 }
 
 impl<T: Visit> Visit for Box<T> {
+    const SCAN: bool = T::SCAN;
+
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         self.as_ref().visit(collector);
     }
@@ -348,14 +339,32 @@ impl<T: Visit> Visit for (String, T) {
 
 impl Visit for (u32, String) {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        let (_, value) = self;
+        let (ordinal, value) = self;
+        scalar(ordinal);
         collector.index(1, |collector| value.visit(collector));
     }
 }
 
+trait Scalar {}
+
+impl Scalar for bool {}
+impl Scalar for f64 {}
+impl Scalar for u32 {}
+impl Scalar for usize {}
+impl<T: Scalar> Scalar for Option<T> {}
+impl<T: Scalar> Scalar for Vec<T> {}
+
+fn scalar(_: &impl Scalar) {}
+
+macro_rules! scalars {
+    ($($field:ident),+ $(,)?) => {
+        $(scalar($field);)+
+    };
+}
+
 impl Visit for Value {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        collector.json(self, None, false);
+        collector.json(self, None);
     }
 }
 
@@ -418,9 +427,12 @@ impl Visit for RunContent {
         match self {
             Self::Text {
                 text,
-                preserve_space: _,
+                preserve_space,
+            } => {
+                scalar(preserve_space);
+                collector.field("text", text);
             }
-            | Self::InstrText { text } => collector.field("text", text),
+            Self::InstrText { text } => collector.field("text", text),
             Self::Break { break_type, clear } => {
                 collector.field("breakType", break_type);
                 collector.field("clear", clear);
@@ -436,11 +448,12 @@ impl Visit for RunContent {
             }
             Self::FieldChar {
                 char_type,
-                fld_lock: _,
-                dirty: _,
+                fld_lock,
+                dirty,
                 form_data,
                 raw_form_data_xml: _,
             } => {
+                scalars!(fld_lock, dirty);
                 collector.field("charType", char_type);
                 collector.field("formData", form_data);
             }
@@ -481,15 +494,17 @@ impl Visit for RunContent {
                 collector.field("textBox", text_box);
                 collector.field("drawing", drawing_properties);
             }
-            Self::Tab
-            | Self::FootnoteRef {
-                id: _,
-                custom_mark_follows: _,
+            Self::FootnoteRef {
+                id,
+                custom_mark_follows,
             }
             | Self::EndnoteRef {
-                id: _,
-                custom_mark_follows: _,
+                id,
+                custom_mark_follows,
+            } => {
+                scalars!(id, custom_mark_follows);
             }
+            Self::Tab
             | Self::FootnoteRefMark
             | Self::EndnoteRefMark
             | Self::Separator
@@ -525,15 +540,17 @@ impl Visit for docx_parse::inline::BookmarkStart {
             node_type,
             id,
             name,
-            col_first: _,
-            col_last: _,
-            position: _,
+            col_first,
+            col_last,
+            position,
         } = self;
+        scalars!(col_first, col_last);
         if PATHS {
             collector.field("type", node_type);
         }
         collector.number("id", *id, true);
         collector.field("name", name);
+        collector.field("position", position);
     }
 }
 
@@ -542,12 +559,13 @@ impl Visit for docx_parse::inline::BookmarkEnd {
         let Self {
             node_type,
             id,
-            position: _,
+            position,
         } = self;
         if PATHS {
             collector.field("type", node_type);
         }
         collector.number("id", *id, true);
+        collector.field("position", position);
     }
 }
 
@@ -577,8 +595,9 @@ impl Visit for CommentRange {
         let Self {
             node_type,
             id,
-            offset: _,
+            offset,
         } = self;
+        scalar(offset);
         collector.annotation(node_type, *id);
         collector.field("type", node_type);
     }
@@ -623,10 +642,11 @@ impl Visit for docx_parse::vml::Watermark {
                 text,
                 font,
                 color,
-                semitransparent: _,
+                semitransparent,
                 layout,
-                font_size: _,
+                font_size,
             } => {
+                scalars!(semitransparent, font_size);
                 collector.field("text", text);
                 collector.field("font", font);
                 collector.field("color", color);
@@ -637,11 +657,12 @@ impl Visit for docx_parse::vml::Watermark {
                 media_path,
                 content_type,
                 data_url,
-                scale: _,
-                washout: _,
-                width_emu: _,
-                height_emu: _,
+                scale,
+                washout,
+                width_emu,
+                height_emu,
             } => {
+                scalars!(scale, washout, width_emu, height_emu);
                 collector.field("relId", relationship_id);
                 collector.field("mediaPath", media_path);
                 collector.field("contentType", content_type);
@@ -661,13 +682,24 @@ macro_rules! wire_name {
 }
 
 macro_rules! record {
+    ($ty:path; $($scalar:ident),+ $(,)?) => {
+        impl Visit for $ty {
+            const SCAN: bool = false;
+
+            fn visit<const PATHS: bool>(&self, _: &mut Collector<PATHS>) {
+                let Self { $($scalar,)* } = self;
+                $(scalar($scalar);)*
+            }
+        }
+    };
     ($ty:path {
         $($field:ident $(=> $name:literal)?),* $(,)?
     } $(tags { $($tag:ident => $tag_name:literal),+ $(,)? })?
       $(skip { $($ignored:ident),+ $(,)? })?) => {
         impl Visit for $ty {
             fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-                let Self { $($field,)* $($($tag,)*)? $($($ignored: _,)*)? } = self;
+                let Self { $($field,)* $($($tag,)*)? $($($ignored,)*)? } = self;
+                $($(scalar($ignored);)*)?
                 $(if PATHS {
                     $(collector.field($tag_name, $tag);)*
                 })?
@@ -738,66 +770,76 @@ impl Visit for docx_parse::paragraph_patch::InheritanceStateV1 {
 impl Visit for docx_parse::paragraph_patch::DonorV1 {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         match self {
-            Self::At { at: _ } | Self::Pilcrow => collector.tag("kind"),
+            Self::At { at } => scalar(at),
+            Self::Pilcrow => {}
         }
+        collector.tag("kind");
     }
 }
 
 impl Visit for ooxml_drawingml::GeometryPathCommand {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         match self {
-            Self::Move { x: _, y: _ }
-            | Self::Line { x: _, y: _ }
-            | Self::Quad {
-                cpx: _,
-                cpy: _,
-                x: _,
-                y: _,
+            Self::Move { x, y } | Self::Line { x, y } => {
+                scalars!(x, y);
             }
-            | Self::Cubic {
-                cp1x: _,
-                cp1y: _,
-                cp2x: _,
-                cp2y: _,
-                x: _,
-                y: _,
+            Self::Quad { cpx, cpy, x, y } => {
+                scalars!(cpx, cpy, x, y);
             }
-            | Self::Close => collector.tag("type"),
+            Self::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                scalars!(cp1x, cp1y, cp2x, cp2y, x, y);
+            }
+            Self::Close => {}
         }
+        collector.tag("type");
     }
 }
 
 impl Visit for ooxml_drawingml::ColorTransform {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         match self {
-            Self::Tint(_)
-            | Self::Shade(_)
-            | Self::Hue(_)
-            | Self::HueMod(_)
-            | Self::HueOff(_)
-            | Self::Sat(_)
-            | Self::SatMod(_)
-            | Self::SatOff(_)
-            | Self::Lum(_)
-            | Self::LumMod(_)
-            | Self::LumOff(_)
-            | Self::Red(_)
-            | Self::RedMod(_)
-            | Self::RedOff(_)
-            | Self::Green(_)
-            | Self::GreenMod(_)
-            | Self::GreenOff(_)
-            | Self::Blue(_)
-            | Self::BlueMod(_)
-            | Self::BlueOff(_)
-            | Self::Alpha(_)
-            | Self::AlphaMod(_)
-            | Self::AlphaOff(_)
-            | Self::Comp
-            | Self::Inv
-            | Self::Gray
-            | Self::Gamma
-            | Self::InvGamma => collector.tag("kind"),
+            Self::Tint(value)
+            | Self::Shade(value)
+            | Self::Hue(value)
+            | Self::HueMod(value)
+            | Self::HueOff(value)
+            | Self::Sat(value)
+            | Self::SatMod(value)
+            | Self::SatOff(value)
+            | Self::Lum(value)
+            | Self::LumMod(value)
+            | Self::LumOff(value)
+            | Self::Red(value)
+            | Self::RedMod(value)
+            | Self::RedOff(value)
+            | Self::Green(value)
+            | Self::GreenMod(value)
+            | Self::GreenOff(value)
+            | Self::Blue(value)
+            | Self::BlueMod(value)
+            | Self::BlueOff(value)
+            | Self::Alpha(value)
+            | Self::AlphaMod(value)
+            | Self::AlphaOff(value) => scalar(value),
+            Self::Comp | Self::Inv | Self::Gray | Self::Gamma | Self::InvGamma => {}
+        }
+        collector.tag("kind");
+    }
+}
+
+impl Visit for docx_parse::serializer::S13SpliceAnchor {
+    const SCAN: bool = false;
+
+    fn visit<const PATHS: bool>(&self, _: &mut Collector<PATHS>) {
+        match self {
+            Self::Before(ordinal) | Self::After(ordinal) => scalar(ordinal),
         }
     }
 }
@@ -837,8 +879,9 @@ impl Visit for docx_parse::notes::Note {
             content,
             custom_root_bindings,
             verbatim_xml,
-            source_ordinal: _,
+            source_ordinal,
         } = self;
+        scalar(source_ordinal);
         collector.annotation(story_type, *id);
         collector.field("type", story_type);
         collector.field("noteType", note_type);
@@ -856,16 +899,17 @@ impl Visit for docx_parse::comments::Comment {
             initials,
             date,
             content,
-            parent_id: _,
-            done: _,
+            parent_id,
+            done,
             status,
             author_id,
             durable_id,
             para_id,
             date_utc,
-            palette_index: _,
+            palette_index,
             block_content,
         } = self;
+        scalars!(parent_id, done, palette_index);
         collector.number("id", *id, false);
         collector.field("author", author);
         collector.field("initials", initials);
@@ -888,16 +932,16 @@ impl Visit for docx_parse::shape::Shape {
             drawing_xml,
             drawing_run_xml,
             drawing_model,
-            text_box: _,
+            text_box,
             id,
             name,
-            size: _,
-            offset: _,
+            size,
+            offset,
             position,
             wrap,
             fill,
             outline,
-            transform: _,
+            transform,
             text_body,
             geometry_path,
             children,
@@ -906,14 +950,15 @@ impl Visit for docx_parse::shape::Shape {
             fill_paint,
             stroke_paint,
             effects,
-            effect_extent: _,
+            effect_extent,
             text_body_properties,
             title,
             description,
-            decorative: _,
-            hidden: _,
-            relative_height: _,
+            decorative,
+            hidden,
+            relative_height,
         } = self;
+        scalars!(text_box, decorative, hidden, relative_height);
         if let Some(model) = drawing_model {
             collector.at("drawingModel", |collector| collector.model(model));
         }
@@ -923,10 +968,13 @@ impl Visit for docx_parse::shape::Shape {
         collector.field("drawingRunXml", drawing_run_xml);
         collector.field("id", id);
         collector.field("name", name);
+        collector.field("size", size);
+        collector.field("offset", offset);
         collector.field("position", position);
         collector.field("wrap", wrap);
         collector.field("fill", fill);
         collector.field("outline", outline);
+        collector.field("transform", transform);
         collector.field("textBody", text_body);
         if PATHS {
             collector.field("geometryPath", geometry_path);
@@ -937,6 +985,7 @@ impl Visit for docx_parse::shape::Shape {
         collector.field("fillPaint", fill_paint);
         collector.field("strokePaint", stroke_paint);
         collector.field("effects", effects);
+        collector.field("effectExtent", effect_extent);
         collector.field("textBodyProperties", text_body_properties);
         collector.field("title", title);
         collector.field("description", description);
@@ -946,16 +995,18 @@ impl Visit for docx_parse::shape::Shape {
 impl Visit for docx_parse::shape::ShapeTextBody {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
         let Self {
-            vertical: _,
-            rotation: _,
+            vertical,
+            rotation,
             anchor,
-            anchor_center: _,
+            anchor_center,
             auto_fit,
-            margins: _,
+            margins,
             content,
         } = self;
+        scalars!(vertical, rotation, anchor_center);
         collector.field("anchor", anchor);
         collector.field("autoFit", auto_fit);
+        collector.field("margins", margins);
         collector.at("content", |collector| {
             for (index, block) in content.iter().enumerate() {
                 collector.index(index, |collector| collector.model(block));
@@ -966,11 +1017,8 @@ impl Visit for docx_parse::shape::ShapeTextBody {
 
 impl Visit for docx_parse::serializer::S13TablePatch {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        let Self {
-            ordinal: _,
-            before,
-            after,
-        } = self;
+        let Self { ordinal, before, after } = self;
+        scalar(ordinal);
         collector.at("before", |collector| collector.model(before));
         collector.at("after", |collector| collector.model(after));
     }
@@ -991,6 +1039,34 @@ record!(docx_parse::serializer::S13SaveRequest {
     selective,
     paragraph_ids => "paragraphIds",
 });
+
+record!(docx_parse::formatting::ConditionalFormatStyle;
+    first_row, last_row, first_column, last_column, odd_h_band, even_h_band,
+    odd_v_band, even_v_band, nw_cell, ne_cell, sw_cell, se_cell,
+);
+record!(docx_parse::formatting::NumberingProperties; num_id, ilvl);
+record!(docx_parse::formatting::SpacingExplicit; before, after);
+record!(docx_parse::formatting::TextReflection;
+    blur_radius, start_opacity, end_opacity, distance, direction,
+);
+record!(docx_parse::image::ImageWrapPoint; x, y);
+record!(docx_parse::image::OptionalPoint; x, y);
+record!(docx_parse::inline::ContentPosition; offset);
+record!(docx_parse::numbering::LegacyLevel; legacy, legacy_space, legacy_indent);
+record!(docx_parse::numbering::PictureBulletSize; width, height);
+record!(docx_parse::section::Column; width, space);
+record!(docx_parse::serializer::S13SourceParagraph; path, block);
+record!(docx_parse::shape::RelativeRect; left, top, right, bottom);
+record!(docx_parse::shape::SceneTransform;
+    offset_x, offset_y, width, height, child_offset_x, child_offset_y, child_width,
+    child_height, rotation, flip_h, flip_v,
+);
+record!(docx_parse::shape::ShapeOffset; x, y);
+record!(ooxml_drawingml::ImageCrop; left, top, right, bottom);
+record!(ooxml_drawingml::ImagePadding; top, bottom, left, right);
+record!(ooxml_drawingml::ImageRotationBounds; width, height, offset_x, offset_y);
+record!(ooxml_drawingml::ImageSize; width, height);
+record!(ooxml_drawingml::Transform2D; rotation, flip_h, flip_v);
 
 record!(docx_parse::document::Section {
     id,
@@ -1213,13 +1289,14 @@ record!(docx_parse::chart::Chart {
     legend,
     series,
     axes,
+    size,
     wrap,
     position,
     plot_groups => "plotGroups",
     axis_list => "axisList",
     description,
     drawing_xml => "drawingXml",
-} skip { size, decorative, relative_height });
+} skip { decorative, relative_height });
 
 record!(ooxml_drawingml::chart::ChartAxes { category, value });
 
@@ -1341,12 +1418,13 @@ record!(docx_parse::shape::DrawingSceneNode {
     kind,
     id,
     name,
+    transform,
     shape,
     children,
     fill,
     effects,
     relationship_id => "relationshipId",
-} skip { transform });
+});
 
 record!(docx_parse::inline::FieldFormData {
     name,
@@ -1404,17 +1482,22 @@ record!(docx_parse::image::Image {
     filename,
     alt,
     title,
+    size,
+    original_size => "originalSize",
     wrap,
     position,
+    transform,
+    padding,
+    crop,
     shape_type => "shapeType",
     hlink_href => "hlinkHref",
     outline,
     effects,
+    rotation_bounds => "rotationBounds",
     hyperlink,
+    effect_extent => "effectExtent",
 } skip {
-    size, original_size, transform, padding, crop, opacity, decorative,
-    no_change_aspect, layout_in_cell, allow_overlap, rotation_bounds, effect_extent,
-    horizontal_rule,
+    opacity, decorative, no_change_aspect, layout_in_cell, allow_overlap, horizontal_rule,
 });
 
 record!(ooxml_drawingml::ImageEffect {
@@ -1433,13 +1516,14 @@ record!(ooxml_drawingml::ImageHyperlink {
 } skip { history });
 
 record!(docx_parse::image::ImagePosition {
+    simple_pos => "simplePos",
     horizontal,
     vertical,
-} skip { use_simple_pos, simple_pos, relative_height, behind_doc, hidden, locked });
+} skip { use_simple_pos, relative_height, behind_doc, hidden, locked });
 
 record!(docx_parse::image::ImageWrap {
-    wrap_type => "type", wrap_text => "wrapText",
-} skip { dist_t, dist_b, dist_l, dist_r, polygon });
+    wrap_type => "type", wrap_text => "wrapText", polygon,
+} skip { dist_t, dist_b, dist_l, dist_r });
 
 record!(docx_parse::paragraph_patch::InheritanceV1 {
     paragraph,
@@ -1474,7 +1558,8 @@ record!(docx_parse::numbering::ListLevel {
     suffix,
     p_pr => "pPr",
     r_pr => "rPr",
-} skip { ilvl, start, lvl_restart, is_lgl, legacy });
+    legacy,
+} skip { ilvl, start, lvl_restart, is_lgl });
 
 record!(docx_parse::numbering::ListRendering {
     marker,
@@ -1504,7 +1589,8 @@ record!(docx_parse::notes::NoteSeparatorReference {
 record!(docx_parse::numbering::NumberingDefinitions {
     abstract_nums => "abstractNums",
     nums,
-} skip { first_picture_bullet });
+    first_picture_bullet => "firstPictureBullet",
+});
 
 record!(docx_parse::numbering::NumberingInstance {
     level_overrides => "levelOverrides",
@@ -1555,12 +1641,15 @@ record!(docx_parse::formatting::ParagraphFormatting {
     frame,
     cnf_style => "cnfStyle",
     run_properties => "runProperties",
+    spacing_explicit => "spacingExplicit",
+    num_pr => "numPr",
+    num_pr_from_style => "numPrFromStyle",
 } skip {
     bidi, space_before, space_after, space_before_lines, space_after_lines,
-    line_spacing, before_autospacing, after_autospacing, spacing_explicit, indent_left,
+    line_spacing, before_autospacing, after_autospacing, indent_left,
     indent_right, indent_first_line, hanging_indent, indent_left_chars, indent_right_chars,
     indent_first_line_chars, hanging_indent_chars, keep_next, keep_lines, widow_control,
-    page_break_before, contextual_spacing, num_pr, num_pr_from_style, outline_level,
+    page_break_before, contextual_spacing, outline_level,
     suppress_line_numbers, suppress_auto_hyphens, snap_to_grid, auto_space_de,
     auto_space_dn, adjust_right_ind,
 });
@@ -1635,15 +1724,17 @@ record!(docx_parse::serializer::S13SelectiveSave {
 
 record!(docx_parse::serializer::S13SourceParagraphs {
     part_sha256 => "partSha256",
-} skip { paragraphs });
+    paragraphs,
+});
 
 record!(docx_parse::serializer::S13SplicedPart {
     part,
     sha256,
+    inserted,
     paragraph_patches => "paragraphPatches",
     legacy_paragraphs => "legacyParagraphs",
     table_patches => "tablePatches",
-} skip { paragraphs, changed, inserted, removed, format_only });
+} skip { paragraphs, changed, removed, format_only });
 
 record!(docx_parse::serializer::paragraph_ids::S13TouchedPart {
     part,
@@ -1734,10 +1825,11 @@ record!(docx_parse::section::SectionProperties {
     footnote_pr => "footnotePr",
     endnote_pr => "endnotePr",
     doc_grid => "docGrid",
+    columns,
 } skip {
     page_width, page_height, margin_top, margin_bottom, margin_left, margin_right,
     header_distance, footer_distance, gutter, column_count, column_space, equal_width,
-    separator, columns, footnote_columns, bidi, title_pg, even_and_odd_headers,
+    separator, footnote_columns, bidi, title_pg, even_and_odd_headers,
     paper_src_first, paper_src_other,
 });
 
@@ -1775,9 +1867,11 @@ record!(docx_parse::shape::ShapeFillPaint {
     picture,
     fill_mode => "fillMode",
     tile,
+    focus_rect => "focusRect",
+    src_rect => "srcRect",
+    stretch_rect => "stretchRect",
 } skip {
-    angle, focus_rect, rotate_with_shape, theme_ref_index, src_rect, stretch_rect,
-    picture_opacity,
+    angle, rotate_with_shape, theme_ref_index, picture_opacity,
 });
 
 record!(ooxml_drawingml::ShapeOutline {
@@ -1809,8 +1903,9 @@ record!(docx_parse::shape::ShapeTextBodyProperties {
     vertical_overflow => "verticalOverflow",
     auto_fit => "autoFit",
     preset_text_warp => "presetTextWarp",
+    margins,
 } skip {
-    rotation, upright, anchor_center, columns, column_spacing, margins, font_scale,
+    rotation, upright, anchor_center, columns, column_spacing, font_scale,
     line_spacing_reduction, from_word_art,
 });
 
@@ -1833,7 +1928,8 @@ record!(docx_parse::formatting::TableCellFormatting {
     vertical_align => "verticalAlign",
     text_direction => "textDirection",
     v_merge => "vMerge",
-} skip { grid_span, fit_text, no_wrap, hide_mark, conditional_format });
+    conditional_format => "conditionalFormat",
+} skip { grid_span, fit_text, no_wrap, hide_mark });
 
 record!(docx_parse::formatting::TableFormatting {
     caption,
@@ -1866,9 +1962,9 @@ record!(docx_parse::formatting::TableRowFormatting {
     justification,
     width_before => "widthBefore",
     width_after => "widthAfter",
+    conditional_format => "conditionalFormat",
 } skip {
-    header, cant_split, hidden, hidden_content_only, conditional_format, grid_before,
-    grid_after,
+    header, cant_split, hidden, hidden_content_only, grid_before, grid_after,
 });
 
 record!(docx_parse::paragraph_patch::TextEditV1 {
@@ -1909,9 +2005,10 @@ record!(docx_parse::formatting::TextGradientStop {
 record!(docx_parse::formatting::TextModernEffects {
     glow,
     shadow,
+    reflection,
     text_fill => "textFill",
     text_outline => "textOutline",
-} skip { reflection });
+});
 
 record!(docx_parse::formatting::TextOutline {
     color, dash,

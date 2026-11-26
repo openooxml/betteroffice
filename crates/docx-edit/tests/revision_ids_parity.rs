@@ -4,7 +4,8 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use docx_edit::save::revision_ids::{
-    RevisionIdsError, assign_session_revision_ids_with_paths, session_revision_id_reservations,
+    RevisionIdsError, assign_session_revision_ids_with_paths_skipping_views,
+    session_revision_id_reservations_skipping_views,
 };
 use docx_parse::S13SaveRequest;
 use serde::Deserialize;
@@ -25,6 +26,8 @@ struct Case {
     max: u32,
     #[serde(rename = "outOfRange")]
     out_of_range: BTreeSet<String>,
+    #[serde(rename = "skippedViews")]
+    skipped_views: BTreeSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,7 +68,11 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         .find(|site| typed_before.pointer(&site.path).is_none());
     census.dropped_site |= dropped.is_some();
 
-    let reservations = session_revision_id_reservations(&request, &case.session)?;
+    let reservations = session_revision_id_reservations_skipping_views(
+        &request,
+        &case.session,
+        &case.skipped_views,
+    )?;
     let mut ts_reservations = BTreeMap::new();
     for reservation in &case.reservations {
         let site = (reservation.path.clone(), reservation.id);
@@ -134,6 +141,7 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         .sites
         .iter()
         .map(|site| site.path.strip_suffix("/id").unwrap())
+        .chain(case.skipped_views.iter().map(String::as_str))
         .collect();
     let expected_strings = string_paths::json_string_paths(&typed_before, &skipped);
     if reservations.string_paths != expected_strings {
@@ -152,8 +160,12 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
     drop(typed_before);
 
     let mut paths = Vec::new();
-    let actual_ids =
-        assign_session_revision_ids_with_paths(&mut request, &case.session, &mut paths);
+    let actual_ids = assign_session_revision_ids_with_paths_skipping_views(
+        &mut request,
+        &case.session,
+        &mut paths,
+        &case.skipped_views,
+    );
     for index in 0..paths.len().max(case.sites.len()) {
         let native = paths.get(index).map(|(path, id)| (path.as_str(), *id));
         let ts = case
@@ -263,6 +275,7 @@ fn detects_dropped_reservation_with_matching_used_ids_and_max() {
         used: BTreeSet::from([40]),
         max: 40,
         out_of_range: BTreeSet::new(),
+        skipped_views: BTreeSet::new(),
     };
     let mut census = DocumentCensus::default();
     let error = check_case(&case, &mut census).unwrap_err();
@@ -302,6 +315,7 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
         used: BTreeSet::new(),
         max: 0,
         out_of_range: BTreeSet::new(),
+        skipped_views: BTreeSet::new(),
     };
     let mut census = DocumentCensus::default();
     check_case(&case, &mut census).unwrap();

@@ -38,6 +38,7 @@ if (out) {
     const reservations: Array<{ path: string; id: number }> = [];
     const used = new Set<number>();
     const outOfRange = new Set<string>();
+    const skippedViews: string[] = [];
     const path: string[] = [];
     let max = 0;
 
@@ -72,7 +73,11 @@ if (out) {
         }
         return;
       }
-      if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return;
+      if (value === null || typeof value !== 'object') return;
+      if (ArrayBuffer.isView(value)) {
+        skippedViews.push(pointer(path));
+        return;
+      }
       if (isSessionRevisionInfo(value)) {
         sites.push({ path: [...path, 'id'], placeholder: (value as { id: number }).id });
         return;
@@ -93,7 +98,7 @@ if (out) {
     }
 
     visit(tree);
-    return { sites, reservations, used: [...used], max, outOfRange: [...outOfRange] };
+    return { sites, reservations, used: [...used], max, outOfRange: [...outOfRange], skippedViews };
   }
 
   mock.module('../../packages/docx/src/docx/sessionRevisionIds', () => ({
@@ -101,7 +106,7 @@ if (out) {
     markRevisionInfo,
     withSessionRevisionIds<T>(tree: object, write: () => T): T {
       if (!('determinism' in tree)) return withSessionRevisionIds(tree, write);
-      const { sites, reservations, used, max, outOfRange } = inspect(tree);
+      const { sites, reservations, used, max, outOfRange, skippedViews } = inspect(tree);
       if (!sites.length) return withSessionRevisionIds(tree, write);
 
       const request = JSON.stringify(tree);
@@ -125,7 +130,9 @@ if (out) {
       mkdirSync(out, { recursive: true });
       writeFileSync(
         join(out, `${current?.name ?? 'save'}-${token}.json`),
-        JSON.stringify({ document, request, session, wire, sites: assignedSites, reservations, used, max, outOfRange })
+        JSON.stringify({
+          document, request, session, wire, sites: assignedSites, reservations, used, max, outOfRange, skippedViews,
+        })
       );
       if (current) current.count += 1;
       return wire;

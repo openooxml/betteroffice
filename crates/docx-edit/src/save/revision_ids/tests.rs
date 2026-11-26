@@ -16,7 +16,7 @@ const SECOND: u64 = 1 << 40;
 const DOCUMENT: &str = "word/document.xml";
 
 fn collect_for_test(value: &impl collect::Visit, session: &BTreeSet<u64>) -> Collected {
-    collect::<false>(value, &SessionIds::new(session))
+    collect::<false>(value, &SessionIds::new(session), &NO_VIEWS)
 }
 
 fn request(content: Value) -> S13SaveRequest {
@@ -835,6 +835,10 @@ fn scans_all_serialized_string_paths() {
         }]],
         "footnotes": [{"type": "footnote", "id": 1, "noteType": "normal", "content": [empty_paragraph]}],
         "endnotes": [{"type": "endnote", "id": 1, "noteType": "normal", "content": [raw]}],
+        "footnoteSeparators": [{"type": "footnote", "id": -1, "noteType": "separator", "content": [],
+            "verbatimXml": "<w:footnote w:id='90'/>"}],
+        "endnoteSeparators": [{"type": "endnote", "id": -1, "noteType": "separator", "content": [],
+            "verbatimXml": "<w:endnote w:id='92'/>"}],
         "relationshipEntries": [
             ["rId1", {"id": "rId1", "type": "header", "target": "header1.xml", "targetMode": "Internal"}],
             ["rId2", {"id": "rId2", "type": "hyperlink", "target": "https://example.com", "targetMode": "External"}]
@@ -862,7 +866,18 @@ fn scans_all_serialized_string_paths() {
     }
     let expected = string_paths::json_string_paths(&wire, &BTreeSet::from(skipped));
     assert_eq!(found.string_paths, expected, "{source}");
-    assert!(found.used.contains(&91));
+    assert!(BTreeSet::from([90, 91, 92]).is_subset(&found.used));
+}
+
+#[test]
+fn visits_source_paragraphs_exhaustively() {
+    let paragraph = docx_parse::serializer::S13SourceParagraph {
+        path: vec![0],
+        block: 0,
+    };
+    let found = collect_for_test(&paragraph, &BTreeSet::new());
+    assert!(found.used.is_empty());
+    assert!(found.sites.is_empty());
 }
 
 #[test]
@@ -1361,23 +1376,46 @@ fn assigns_ordered_model_fields_before_extra_fields() {
 }
 
 #[test]
-fn checks_model_sites_revealed_by_an_assignment() {
+fn assigns_model_revision_infos_under_arbitrary_keys() {
+    let mut shape = model_shape(json!([]));
+    shape["drawingModel"] = json!({"frame": {"revision": {"id": SECOND, "author": "A"}}});
+    let mut request = request(json!([
+        {"type": "paragraph", "content": [{
+            "type": "run", "content": [{"type": "shape", "shape": shape}]
+        }]},
+        {"type": "paragraph", "content": [change(FIRST)]}
+    ]));
+    let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST, SECOND])).unwrap();
+    assert_eq!(ids, BTreeMap::from([(SECOND, 1), (FIRST, 2)]));
+    let result = serde_json::to_value(&request).unwrap();
+    let body = &result["document"]["content"];
+    assert_eq!(
+        body.pointer("/0/content/0/content/0/shape/drawingModel/frame/revision/id"),
+        Some(&json!(1))
+    );
+    assert_eq!(body[1]["content"][0]["info"]["id"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn leaves_marked_descendants_untouched_when_a_sibling_shares_the_placeholder() {
+    let sibling = change(SECOND);
+    let mut first = change(FIRST);
+    first["info"]["info"] = sibling["info"].clone();
     let shape = model_shape(json!([{
-        "type": "insertion",
-        "content": [],
-        "info": {"id": FIRST, "author": "Reviewer", "info": {"id": SECOND, "author": "Reviewer"}}
+        "type": "paragraph", "content": [first, sibling]
     }]));
-    let original = request(json!([{"type": "paragraph", "content": [{
+    let mut request = request(json!([{"type": "paragraph", "content": [{
         "type": "run", "content": [{"type": "shape", "shape": shape}]
     }]}]));
-    assert_eq!(
-        assign_session_revision_ids(&mut original.clone(), &BTreeSet::from([FIRST, SECOND])),
-        Err(RevisionIdsError::Unassigned(SECOND))
-    );
-    assert_eq!(
-        assign_session_revision_ids(&mut original.clone(), &BTreeSet::from([1, FIRST, SECOND])),
-        Ok(BTreeMap::from([(FIRST, 1)]))
-    );
+    let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST, SECOND])).unwrap();
+    assert_eq!(ids, BTreeMap::from([(FIRST, 1), (SECOND, 2)]));
+    let result = serde_json::to_value(&request).unwrap();
+    let content = result
+        .pointer("/document/content/0/content/0/content/0/shape/textBody/content/0/content")
+        .unwrap();
+    assert_eq!(content[0]["info"]["id"], json!(1));
+    assert_eq!(content[0]["info"]["info"]["id"], json!(SECOND));
+    assert_eq!(content[1]["info"]["id"], json!(2));
 }
 
 #[test]
