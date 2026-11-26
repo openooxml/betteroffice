@@ -3716,9 +3716,6 @@ mod tests {
 
     #[test]
     fn preserves_shipping_format_sanitizer_goldens() {
-        // Compared as parts, not container bytes: zip records the writing host in
-        // every central directory header, so the same output differs byte for byte
-        // between a Windows and a Unix build.
         for (format, source, expected) in [
             (
                 "docx",
