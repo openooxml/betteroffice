@@ -2062,7 +2062,11 @@ impl WorkbookSnapshotBuilder {
             let source = source_container
                 .as_ref()
                 .ok_or_else(|| error("snapshot source container is missing"))?;
-            Some(PackageSlot::from_snapshot(source.clone(), facts, &model.styles)?)
+            Some(PackageSlot::from_snapshot(
+                source.clone(),
+                facts,
+                &model.styles,
+            )?)
         } else {
             None
         };

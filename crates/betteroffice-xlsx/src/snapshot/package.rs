@@ -27,7 +27,11 @@ pub(crate) enum PackageSlot {
 }
 
 impl PackageSlot {
-    pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts, styles: &Stylesheet) -> Self {
+    pub(crate) fn deferred(
+        source: SourceContainer,
+        facts: PackageFacts,
+        styles: &Stylesheet,
+    ) -> Self {
         let sheet_alternates = (0..PackageFactsView::from_facts(&facts).source_sheet_count())
             .map(|_| OnceLock::new())
             .collect();
@@ -338,7 +342,10 @@ fn load_sheet_alternates(
                 })
                 .map_err(xlsx_parse::ParseError::Malformed)?
             };
-            remaining -= parts.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+            remaining -= parts
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>();
             parts.extend(worksheet.take());
             Ok(parts)
         })?;

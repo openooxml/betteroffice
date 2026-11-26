@@ -2997,7 +2997,9 @@ fn deferred_wrapper_probe_is_per_worksheet() {
             },
         );
     }
-    model.sheets.extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
+    model
+        .sheets
+        .extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     let (_, xml) = parts
         .iter_mut()

@@ -935,7 +935,9 @@ fn grid_has_alternate_content(mut bytes: &[u8], grid_name: &[u8]) -> bool {
         } else if let Some(rest) = bytes.strip_prefix(b"![CDATA[") {
             Some((rest, b"]]>".as_slice()))
         } else {
-            bytes.strip_prefix(b"?").map(|rest| (rest, b"?>".as_slice()))
+            bytes
+                .strip_prefix(b"?")
+                .map(|rest| (rest, b"?>".as_slice()))
         };
         if let Some((rest, end)) = special {
             let Some(position) = memchr::memmem::find(rest, end) else {

@@ -3070,41 +3070,41 @@ impl Workbook {
         )?;
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
-        let staged_calculation = if scope != CalculationScope::Kept && self.needs_alternate_preview()
-        {
-            let previous = self.graph.as_ref().map(|previous| {
-                let graph = DepGraph::build(&self.model);
-                graph.adopt_unevaluated(previous);
-                graph.carry_answers(moved_answers);
-                Self::rebase_graph_answers(&graph, &self.sheet_names(), &prepared.ops);
-                graph
-            });
-            match (scope, previous) {
-                (CalculationScope::Renamed, Some(mut graph)) => {
-                    let seeds = graph.rename_sheets(&prepared.model, &rewritten);
-                    let (recalc, recomputed) = recalc_after_with_recomputed(
-                        &mut prepared.model,
-                        &mut graph,
-                        &seeds,
-                        options.now_serial,
-                        self.rand_seed,
-                    );
-                    let result = self.renamed_calculation_result(&recalc, recomputed);
-                    Some((graph, recalc, Some(result)))
+        let staged_calculation =
+            if scope != CalculationScope::Kept && self.needs_alternate_preview() {
+                let previous = self.graph.as_ref().map(|previous| {
+                    let graph = DepGraph::build(&self.model);
+                    graph.adopt_unevaluated(previous);
+                    graph.carry_answers(moved_answers);
+                    Self::rebase_graph_answers(&graph, &self.sheet_names(), &prepared.ops);
+                    graph
+                });
+                match (scope, previous) {
+                    (CalculationScope::Renamed, Some(mut graph)) => {
+                        let seeds = graph.rename_sheets(&prepared.model, &rewritten);
+                        let (recalc, recomputed) = recalc_after_with_recomputed(
+                            &mut prepared.model,
+                            &mut graph,
+                            &seeds,
+                            options.now_serial,
+                            self.rand_seed,
+                        );
+                        let result = self.renamed_calculation_result(&recalc, recomputed);
+                        Some((graph, recalc, Some(result)))
+                    }
+                    (_, previous) => {
+                        let (graph, recalc) = rebuild_and_recalc_all_after(
+                            &mut prepared.model,
+                            previous.as_ref(),
+                            options.now_serial,
+                            self.rand_seed,
+                        );
+                        Some((graph, recalc, None))
+                    }
                 }
-                (_, previous) => {
-                    let (graph, recalc) = rebuild_and_recalc_all_after(
-                        &mut prepared.model,
-                        previous.as_ref(),
-                        options.now_serial,
-                        self.rand_seed,
-                    );
-                    Some((graph, recalc, None))
-                }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_sheet);
         mark(EditStage::Applied);
@@ -4694,16 +4694,14 @@ impl Workbook {
                         .chain(&self.preserved.axes)
                         .flatten()
                         .any(|axes| !axes.is_identity()));
-            let changed_origins = origins
-                .iter()
-                .zip(&model.sheets)
-                .enumerate()
-                .filter_map(|(index, (&origin, sheet))| {
+            let changed_origins = origins.iter().zip(&model.sheets).enumerate().filter_map(
+                |(index, (&origin, sheet))| {
                     let origin = origin?;
                     (package.sheet_may_have_alternate_content(origin)
                         && (all_sheets_may_change || self.model.sheets.get(index) != Some(sheet)))
                     .then_some(origin)
-                });
+                },
+            );
             package.validate_alternate_content(
                 model,
                 origins,
@@ -4771,13 +4769,8 @@ impl Workbook {
         for (sheet, cell, formula) in touched {
             graph.set_formula(*sheet, *cell, formula.as_deref());
         }
-        let recalc = recalc_after_with_seed(
-            model,
-            &mut graph,
-            seeds,
-            options.now_serial,
-            self.rand_seed,
-        );
+        let recalc =
+            recalc_after_with_seed(model, &mut graph, seeds, options.now_serial, self.rand_seed);
         (graph, recalc)
     }
 
