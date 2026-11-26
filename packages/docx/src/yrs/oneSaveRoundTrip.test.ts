@@ -971,6 +971,50 @@ it('reports a conflicting verbatim note edit with its note ID', async () => {
     .rejects.toThrow('footnote 73 in word/footnotes.xml has verbatimXml that conflicts with its content');
 });
 
+it('keeps a cleared verbatim note cleared when another note changes', async () => {
+  const parts = unzipContainer(bookmarkedNotePackage());
+  changedPart(parts, FOOTNOTES, xml => xml
+    .replace('<w:p>', '<w:customXml w:element="note" w:uri="urn:note"><w:p>')
+    .replace('</w:p>', '</w:p></w:customXml>')
+    .replace('</w:footnotes>', '<w:footnote w:id="74"><w:p><w:r><w:t>Other note</w:t></w:r></w:p></w:footnote></w:footnotes>'));
+  const doc = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  const [first, second] = doc.package.footnotes!;
+  expect(first!.verbatimXml).toContain('<w:customXml');
+  delete first!.verbatimXml;
+  firstText(second!.content).text = 'Changed note';
+  const saved = unzipContainer(new Uint8Array(await repackDocx(doc, noStamp)));
+  expect(decodePart(saved[FOOTNOTES])).not.toContain('<w:customXml');
+  expect(decodePart(saved[FOOTNOTES])).toContain('Changed note');
+});
+
+it('keeps document bindings from a foreign thin envelope in a raw repack', async () => {
+  const parts = { ...sourceParts };
+  changedPart(parts, BODY, xml => xml.replace(/<w:document(?=\s)/, '<w:document xmlns:foreign="urn:foreign"'));
+  await withSession(fixture.bytes, async session => {
+    const foreign = await createYrsSession();
+    try {
+      const base = foreign.seedFromDocx(rezipContainer(parts)).document;
+      const projected = yrsToDocument(session, base);
+      const raw = { originalBuffer: Uint8Array.from(fixture.bytes).buffer } as RawDocxContent;
+      const saved = unzipContainer(new Uint8Array(await repackDocxFromRaw(projected, raw, noStamp)));
+      expect(decodePart(saved[BODY])).toContain('xmlns:foreign="urn:foreign"');
+    } finally {
+      foreign.destroy();
+    }
+  });
+});
+
+it('returns dangling drawing warnings on an unchanged save', async () => {
+  const parts = { ...sourceParts };
+  changedPart(parts, BODY, xml => xml.replace('</w:p>',
+    '<w:r><w:object xmlns:o="urn:schemas-microsoft-com:office:office"><o:OLEObject r:id="rIdMissing"/></w:object></w:r></w:p>'));
+  const doc = await parseDocx(rezipContainer(parts), { preloadFonts: false });
+  const unchanged = await repackDocxWithWarnings(doc, noStamp);
+  const compared = await repackDocxWithWarnings(structuredClone(doc), noStamp);
+  expect(unchanged.warnings).toEqual(compared.warnings);
+  expect(unchanged.warnings).toContain('opaque drawing references relationship "rIdMissing" absent from word/_rels/document.xml.rels; keeping the markup verbatim');
+});
+
 it('rejects a replacement numbering definition before rewriting the body', async () => {
   const parts = {
     ...sourceParts,

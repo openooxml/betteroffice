@@ -1,4 +1,4 @@
-import { rememberHostEnvelope } from './saveProjection';
+import { rememberHostEnvelope, rememberProjectionFormatEdit } from './saveProjection';
 import type { PngUnavailablePicture } from '../../../../shared/office-session/pngExportError';
 import { DocxSectionError, type SectionInfo } from './sections';
 import { formattingFailure } from './formattingError';
@@ -158,7 +158,9 @@ function peerMetadataFailure(error: unknown): unknown {
  * package `source` it opened. @internal
  */
 export function decodeDocxHostJson(json: string, source: Uint8Array): YrsDocxHost {
-  return decodeDocxHost(json, source);
+  const host = decodeDocxHost(json, source);
+  rememberHostEnvelope(host.document, hostPackageDigests.get(host));
+  return host;
 }
 
 const hostPackageDigests = new WeakMap<YrsDocxHost, string>();
@@ -506,9 +508,9 @@ export function wrapSession(
       mutate(() => seedDocxCommentMetadata(session, host.document.package.document.comments));
     }
     withHostMedia(host);
-    rememberHostEnvelope(host.document);
     docxSource = source;
     docxSourceDigest = hostPackageDigests.get(host);
+    rememberHostEnvelope(host.document, docxSourceDigest);
     docxSourceKeys = editorSaveKeys(host.document);
     sourceClosing = seedStories ? sectionClosingParaIds(facade) : null;
     partialDocument = false;
@@ -863,7 +865,7 @@ export function wrapSession(
         proposals.reset();
       });
       withHostMedia(host);
-      rememberHostEnvelope(host.document);
+      rememberHostEnvelope(host.document, docxSourceDigest);
       return host;
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
@@ -1371,6 +1373,11 @@ export function wrapSession(
     },
     setParagraphAttrs: (range, attrs, suggesting) => {
       ensureUndo(range.story);
+      const direct = !suggesting && range.story === 'body' && docxSourceDigest
+        ? Object.entries({ indentLeft: attrs.indentLeft, indentRight: attrs.indentRight, spaceAfter: attrs.spaceAfter, spaceBefore: attrs.spaceBefore })
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+        : [];
+      const previousVersion = direct.length ? facade.version() : '';
       mutate(() =>
         session.set_paragraph_attrs(
           range.story,
@@ -1383,6 +1390,13 @@ export function wrapSession(
           suggesting?.date
         )
       );
+      if (direct.length) {
+        rememberProjectionFormatEdit(facade, previousVersion, {
+          start: range.start.paraId,
+          end: range.end.paraId,
+          values: Object.fromEntries(direct),
+        });
+      }
     },
     insertImage: (at, image, suggesting) => {
       ensureUndo(at.story);
@@ -1904,6 +1918,6 @@ export function wrapOpenedEditSession(
     openedSources.set(buffer, exact);
   }
   const host = decodeDocxHost(hostJson, exact);
-  rememberHostEnvelope(host.document);
+  rememberHostEnvelope(host.document, hostPackageDigests.get(host));
   return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

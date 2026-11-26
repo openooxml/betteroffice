@@ -112,11 +112,17 @@ export function modelSaveFields(document: Document) {
 }
 
 const NO_BINDING_CHANGES = 'DOCX_SAVE_BINDINGS 0';
+const projectedBodyRewrites = new WeakSet<Document>();
+
+export function markProjectedBodyRewrite(document: Document): void {
+  projectedBodyRewrites.add(document);
+}
 
 const parsedModels = new WeakMap<Document, {
   body: string;
   fingerprint: string;
   sourceDigest: string;
+  saveWarnings: readonly string[];
 }>();
 
 function bodySaveFields({ content, finalSectionProperties, customRootBindings }: Document['package']['document']) {
@@ -179,12 +185,13 @@ export function sameSaveTree(left: unknown, right: unknown): boolean {
     fields.every(key => Object.hasOwn(b, key) && sameSaveTree(a[key], b[key]));
 }
 
-export function rememberParsedModel(document: Document, sourceDigest: string): void {
+export function rememberParsedModel(document: Document, sourceDigest: string, saveWarnings: readonly string[]): void {
   const fields = modelSaveFields(document);
   parsedModels.set(document, {
     body: saveTreeFingerprint(bodySaveFields(fields.document)),
     fingerprint: saveTreeFingerprint(fields),
     sourceDigest,
+    saveWarnings,
   });
 }
 
@@ -242,7 +249,7 @@ export async function writeDocumentWithRust(
       return {
         buffer: exactArrayBuffer(bytes),
         determinism: fixed,
-        warnings: [...(document.warnings ?? []), ...warnings],
+        warnings: [...(document.warnings ?? []), ...baseline.saveWarnings, ...warnings],
       };
     } catch (error) {
       if (String(error).replace(/^Error: /, '') !== 'DOCX_SOURCE_CHANGED') throw error;
@@ -258,6 +265,7 @@ export async function writeDocumentWithRust(
   const request = {
     ...fields,
     ...(unchangedBody ? { unchangedBodySha256: fixed.seed } : {}),
+    ...(guarded && projectedBodyRewrites.has(document) ? { rewriteBody: true } : {}),
     ...(modelMode === 'fresh' ? { freshPackage: true } : {}),
     reportBindings: true,
     determinism: fixed,

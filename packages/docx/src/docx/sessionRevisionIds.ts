@@ -15,13 +15,14 @@ const NON_STORY_FIELDS = new Set(['media', 'numbering', 'styles', 'theme', 'font
   'relationships', 'relationshipEntries']);
 const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 
-const sessionInfos = new WeakMap<object, unknown>();
+const sessionInfos = new WeakMap<object, { key: unknown; id: unknown }>();
 let marked = false;
 
 /** Notes `info` for the save; a `session` info's id is a placeholder until then. @internal */
 export function markRevisionInfo<T extends object>(info: T, session: boolean): T {
   if (session) {
-    sessionInfos.set(info, (info as { id?: unknown }).id);
+    const id = (info as { id?: unknown }).id;
+    sessionInfos.set(info, { key: id, id });
     marked = true;
   }
   return info;
@@ -48,7 +49,8 @@ function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number>
       return;
     }
     if (value === null || typeof value !== 'object' || ArrayBuffer.isView(value)) return;
-    if (sessionInfos.has(value)) {
+    const session = sessionInfos.get(value);
+    if (session && session.id === (value as Site['info']).id) {
       sites.push({ holder, key, info: value as Site['info'] });
       return;
     }
@@ -76,7 +78,7 @@ function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number>
   let next = max;
   const ids = new Map<unknown, number>();
   for (const { info } of sites) {
-    const key = sessionInfos.get(info);
+    const key = sessionInfos.get(info)?.key;
     if (ids.has(key)) continue;
     do {
       next = next + 1 < MAX_ID ? next + 1 : 1;
@@ -97,7 +99,7 @@ function revisionSites(tree: object): { sites: Site[]; ids: Map<unknown, number>
 export function withSessionRevisionIds<T>(tree: object, write: () => T): T {
   if (!marked) return write();
   const { sites, ids } = revisionSites(tree);
-  for (const site of sites) site.holder[site.key] = { ...site.info, id: ids.get(sessionInfos.get(site.info)) };
+  for (const site of sites) site.holder[site.key] = { ...site.info, id: ids.get(sessionInfos.get(site.info)?.key) };
   try {
     return write();
   } finally {
@@ -114,8 +116,9 @@ export function materializeSessionRevisionIds<T extends object>(
   if (!sites.length) return tree;
   const copies = new WeakMap<object, object>();
   for (const { info } of sites) {
-    const key = sessionInfos.get(info);
+    const key = sessionInfos.get(info)?.key;
     const copy = { ...info, id: ids.get(key) };
+    sessionInfos.set(copy, { key, id: copy.id });
     copies.set(info, copy);
   }
   const replace = (value: unknown): unknown => {

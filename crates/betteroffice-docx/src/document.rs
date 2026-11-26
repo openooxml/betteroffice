@@ -36,7 +36,7 @@ use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
-use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_native_model};
+use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_body_policy};
 use docx_parse::serializer::s13::save_core_only;
 use docx_parse::serializer::{
     S13ParagraphId, S13ParagraphIds, S13SaveOptions, S13SaveReport, S13SaveRequest,
@@ -576,7 +576,8 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
-        self.save_report_with_warnings_and_options(options).map(|(report, _)| report)
+        self.save_report_with_warnings_and_options(options)
+            .map(|(report, _)| report)
     }
 
     /// Returns the save report and non-fatal warnings.
@@ -613,41 +614,27 @@ impl Document {
             selective: None,
             paragraph_ids,
         };
-        let (bytes, report) = if self.dirty == Dirty::Clean {
-            let path = docx_parse::relationships::office_document_path(
+        let (bytes, report) = if self.dirty == Dirty::Clean
+            && let Ok(path) = docx_parse::relationships::office_document_path(
                 &self.original_parts,
                 &mut docx_parse::xml::ParseBudget::new(&self.parse_limits),
-            )?;
+            )
+        {
             save_core_only(&request, &path, &self.original_parts, &self.source)?
         } else {
             #[cfg(test)]
             session_save_tests::count_package_write();
-            write_native_model(
+            write_model_with_body_policy(
                 request,
                 &self.source,
                 &self.original_parts,
                 &self.parse_limits,
                 rewrite_body,
-                self.has_derived_list_edits().then_some("derived list rendering changed"),
             )?
         };
         let mut report = report;
         let saved = save_report(bytes, &mut report);
         Ok((saved, report.warnings))
-    }
-
-    fn has_derived_list_edits(&self) -> bool {
-        let Some(baseline) = &self.session_baseline else {
-            return false;
-        };
-        if self.dirty != Dirty::ModelChanged {
-            return false;
-        }
-        let original = baseline.paragraphs_by_ordinal();
-        self.paragraphs().into_iter().any(|paragraph| {
-            paragraph.source_ordinal.and_then(|ordinal| original.get(&ordinal))
-                .is_some_and(|before| paragraph.list_rendering != before.list_rendering)
-        })
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1351,7 +1338,10 @@ fn save_report(bytes: Vec<u8>, report: &mut S13SaveReport) -> SaveReport {
         .fold(0u32, |sum, count| sum.saturating_add(*count));
     SaveReport {
         bytes,
-        whole_model_write: report.warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)),
+        whole_model_write: report
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)),
         kept_unchanged: (structure > 0).then_some(KeptUnchanged {
             structure,
             paragraphs: std::mem::take(&mut report.kept_paragraphs),
@@ -1737,7 +1727,11 @@ mod session_save_tests {
         ));
         parts.push((
             header.to_owned(),
-            format!("<w:hdr {NAMESPACES}>{}</w:hdr>", paragraph("0000000F", &run("Header"))).into_bytes(),
+            format!(
+                "<w:hdr {NAMESPACES}>{}</w:hdr>",
+                paragraph("0000000F", &run("Header"))
+            )
+            .into_bytes(),
         ));
         let source = ooxml_opc::rezip_parts(&parts).unwrap();
         let mut document = Document::open(&source).unwrap();
@@ -1747,16 +1741,31 @@ mod session_save_tests {
 
         let saved = document.save().unwrap();
         let reopened = Document::open(&saved).unwrap();
-        assert_eq!(get_paragraph_text(reopened.paragraphs()[1]), "Charlie by model");
+        assert_eq!(
+            get_paragraph_text(reopened.paragraphs()[1]),
+            "Charlie by model"
+        );
         let other_parts = |parts: Vec<(String, Vec<u8>)>| {
-            parts.into_iter().filter(|(path, _)| path != "word/document.xml").collect::<Vec<_>>()
+            parts
+                .into_iter()
+                .filter(|(path, _)| path != "word/document.xml")
+                .collect::<Vec<_>>()
         };
-        assert_eq!(other_parts(ooxml_opc::unzip_parts(&saved).unwrap()), other_parts(parts));
+        assert_eq!(
+            other_parts(ooxml_opc::unzip_parts(&saved).unwrap()),
+            other_parts(parts)
+        );
     }
 
     #[test]
     fn a_guard_parse_budget_failure_falls_back_to_the_model_writer() {
-        let mut document = open();
+        let mut parts = ooxml_opc::unzip_parts(&package(&source())).unwrap();
+        let numbering = format!(
+            "<w:numbering {NAMESPACES}><w:abstractNum w:abstractNumId=\"0\"/></w:numbering>"
+        );
+        parts.push(("word/numbering.xml".to_owned(), numbering.into_bytes()));
+        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        let mut document = Document::open(&source).unwrap();
         document.replace_paragraph_text("0000000B", "Budget edit").unwrap();
         document.model_mut();
         document.parse_limits.max_xml_bytes = 128;
@@ -1764,9 +1773,18 @@ mod session_save_tests {
         assert!(report.whole_model_write);
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
-        assert!(warnings.iter().any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.starts_with(WHOLE_MODEL_WARNING))
+        );
+        let saved = ooxml_opc::unzip_parts(&report.bytes).unwrap();
+        assert!(saved.contains(parts.last().unwrap()));
         let reopened = Document::open(&report.bytes).unwrap();
-        assert_eq!(get_paragraph_text(reopened.paragraph("0000000B").unwrap()), "Budget edit");
+        assert_eq!(
+            get_paragraph_text(reopened.paragraph("0000000B").unwrap()),
+            "Budget edit"
+        );
     }
 
     #[test]

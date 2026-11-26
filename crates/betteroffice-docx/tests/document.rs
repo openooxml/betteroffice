@@ -359,8 +359,7 @@ fn stories(document: &Document) -> [Vec<BlockContent>; 3] {
     ]
 }
 
-/// A model edit the writer never reads, so the save takes the full write.
-fn take_the_full_write(document: &mut Document) {
+fn rewrite_body_from_model(document: &mut Document) {
     let BlockContent::Paragraph(paragraph) = &mut document.model_mut().body.content[0] else {
         panic!("paragraph");
     };
@@ -372,13 +371,8 @@ fn take_the_full_write(document: &mut Document) {
     );
 }
 
-/// A chart the parser did read is placed by its `w:drawing`, which a save
-/// replays verbatim: the chart part, its relationship and the drawing all
-/// come back on reopen, in the body, a header and a footnote alike. The one
-/// finding is the note writer moving the root's chart binding onto the
-/// `w:footnote` element, as it does for any foreign markup in a note.
 #[test]
-fn a_chart_survives_a_full_write_in_every_story() {
+fn a_chart_survives_a_body_rewrite_and_other_stories_keep_their_source() {
     let bytes = charted_story_docx(Some(BAR_CHART));
     let mut document = Document::open(&bytes).unwrap();
     assert!(!document.model().charts.is_empty());
@@ -386,14 +380,17 @@ fn a_chart_survives_a_full_write_in_every_story() {
         assert_eq!(chart_runs(&story), 1);
     }
 
-    take_the_full_write(&mut document);
+    rewrite_body_from_model(&mut document);
     let saved = document.save().unwrap();
     let before = ooxml_opc::unzip_parts(&bytes).unwrap();
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(
         ooxml_fidelity::roundtrip_findings(&before, &after).unwrap(),
-        vec!["fingerprint differs: word/footnotes.xml"]
+        Vec::<String>::new()
     );
+    for path in ["word/header1.xml", "word/footnotes.xml"] {
+        assert_eq!(saved_part(&before, path), saved_part(&after, path));
+    }
     for path in [
         "word/document.xml",
         "word/header1.xml",
@@ -411,7 +408,7 @@ fn a_chart_survives_a_full_write_in_every_story() {
         assert_eq!(chart_runs(&story), 1);
     }
 
-    take_the_full_write(&mut reopened);
+    rewrite_body_from_model(&mut reopened);
     reopened
         .replace_paragraph_text("11111111", "Edited natively")
         .unwrap();
@@ -507,7 +504,7 @@ fn text_box_docx() -> Vec<u8> {
 #[test]
 fn a_full_write_keeps_shape_text_box_bodies_and_character_unit_indents() {
     let mut document = Document::open(&text_box_docx()).unwrap();
-    take_the_full_write(&mut document);
+    rewrite_body_from_model(&mut document);
     let saved = document.save().unwrap();
     let parts = ooxml_opc::unzip_parts(&saved).unwrap();
     let xml = saved_part(&parts, "word/document.xml");
@@ -522,7 +519,7 @@ fn a_full_write_keeps_shape_text_box_bodies_and_character_unit_indents() {
     assert!(xml.contains(r#"<w:ind w:firstLine="0" w:firstLineChars="0"/>"#));
 
     let mut reopened = Document::open(&saved).unwrap();
-    take_the_full_write(&mut reopened);
+    rewrite_body_from_model(&mut reopened);
     let resaved = saved_part(
         &ooxml_opc::unzip_parts(&reopened.save().unwrap()).unwrap(),
         "word/document.xml",

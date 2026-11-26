@@ -1,12 +1,14 @@
 import type { RepackOptions, RepackResult } from '../docx/rezip';
 import {
-  modelSaveFields, parsedModelUnchanged, saveTreeFingerprint, sha256Hex,
+  markProjectedBodyRewrite, modelSaveFields, parsedModelUnchanged, saveTreeFingerprint, sha256Hex,
 } from '../docx/rustSaveFacade';
 import type { Document } from '../types/document';
 import type { YrsSession } from './index';
+import type { ProjectionFormatEdit } from './saveYrsDocx';
 import { sessionMaterializedSource, sessionSourceDigest, sessionSourcePackage } from './sessionInternals';
 
-const hostEnvelopes = new WeakMap<Document, string>();
+const hostEnvelopes = new WeakMap<Document, { fingerprint: string; sourceDigest: string | undefined }>();
+const formatEdits = new WeakMap<YrsSession, { version: string; edits: ProjectionFormatEdit[] }>();
 const projections = new WeakMap<Document, {
   session: YrsSession;
   version: string;
@@ -14,10 +16,19 @@ const projections = new WeakMap<Document, {
   base: Document;
   baseAtProjection: string | undefined;
   baseline: string;
+  formatEdits: readonly ProjectionFormatEdit[];
 }>();
 
-export function rememberHostEnvelope(document: Document): void {
-  hostEnvelopes.set(document, saveTreeFingerprint(modelSaveFields(document)));
+export function rememberProjectionFormatEdit(session: YrsSession, previousVersion: string, edit: ProjectionFormatEdit): void {
+  const previous = formatEdits.get(session);
+  formatEdits.set(session, {
+    version: session.version(),
+    edits: [...(previous?.version === previousVersion ? previous.edits : []), edit],
+  });
+}
+
+export function rememberHostEnvelope(document: Document, sourceDigest: string | undefined): void {
+  hostEnvelopes.set(document, { fingerprint: saveTreeFingerprint(modelSaveFields(document)), sourceDigest });
 }
 
 function sameBytes(bytes: Uint8Array, buffer: ArrayBuffer): boolean {
@@ -28,17 +39,27 @@ function sameBytes(bytes: Uint8Array, buffer: ArrayBuffer): boolean {
 export function rememberSaveProjection(session: YrsSession, base: Document, projection: Document): void {
   const source = sessionSourcePackage(session);
   const sourceDigest = sessionSourceDigest(session);
-  if (!base.originalBuffer || !source || !sourceDigest) return;
+  if (!base.originalBuffer) return;
+  if (!source) {
+    if (projection.package.document.content.some(block => block.type === 'paragraph' && block.renderedPageBreakBefore)) {
+      markProjectedBodyRewrite(projection);
+    }
+    return;
+  }
+  if (!sourceDigest) return;
   const host = hostEnvelopes.get(base);
   const baseFingerprint = saveTreeFingerprint(modelSaveFields(base));
-  if (host && host !== baseFingerprint) return;
+  if (host && (host.sourceDigest !== sourceDigest || host.fingerprint !== baseFingerprint)) return;
+  const version = session.version();
+  const formatting = formatEdits.get(session);
   projections.set(projection, {
     session,
-    version: session.version(),
+    version,
     sourceDigest,
     base,
     baseAtProjection: host ? undefined : baseFingerprint,
     baseline: saveTreeFingerprint(modelSaveFields(projection)),
+    formatEdits: formatting?.version === version ? formatting.edits : [],
   });
 }
 
@@ -66,9 +87,15 @@ export async function saveCurrentProjection(
     }
     if (baseAtProjection !== saveTreeFingerprint(modelSaveFields(base))) return undefined;
   }
-  const { saved, warnings } = await save.saveYrsDocxWithWarnings(session, options);
+  const { saved, warnings } = await save.saveYrsDocxWithWarnings(session, options, provenance.formatEdits);
   const published = save.publishedSaveVersion(saved);
-  if (published === session.version() && provenance.version === version) provenance.version = published;
+  if (published === session.version() && provenance.version === version) {
+    provenance.version = published;
+    const formatting = formatEdits.get(session);
+    if (formatting?.version === version && formatting.edits === provenance.formatEdits) {
+      formatting.version = published;
+    }
+  }
   return {
     buffer: Uint8Array.from(saved.bytes).buffer,
     warnings: [...(document.warnings ?? []).filter(warning => !warnings.includes(warning)), ...warnings],

@@ -789,7 +789,7 @@ fn is_browser_image(data: &[u8]) -> bool {
 }
 
 #[cfg(feature = "tiff")]
-fn is_tiff(data: &[u8]) -> bool {
+pub(crate) fn is_tiff(data: &[u8]) -> bool {
     matches!(data.first_chunk::<4>(), Some(b"II\x2a\x00" | b"MM\x00\x2a"))
 }
 

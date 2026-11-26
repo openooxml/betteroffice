@@ -15,6 +15,20 @@ const BOUNDED_TIFF_COMPRESSIONS: [u16; 8] = [1, 2, 3, 4, 5, 8, 32773, 32946];
 /// The most samples per pixel accepted, extra samples included.
 const MAX_TIFF_SAMPLES: u16 = 16;
 
+pub fn tiff_oriented_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    use tiff_crate::decoder::Decoder;
+    use tiff_crate::tags::Tag;
+
+    let mut decoder = Decoder::new(Cursor::new(data)).ok()?;
+    let (width, height) = decoder.dimensions().ok()?;
+    let orientation = tag_u16(&mut decoder, Tag::Orientation).ok()?.unwrap_or(1);
+    Some(if matches!(orientation, 5..=8) {
+        (height, width)
+    } else {
+        (width, height)
+    })
+}
+
 /// A TIFF's declared pixels, or `None` for one whose decode that size does not
 /// bound. Read without decoding any pixels.
 pub fn tiff_bounded_pixels(data: &[u8]) -> Option<u64> {

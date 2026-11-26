@@ -339,6 +339,7 @@ pub fn parse_docx_s9_json(data: &[u8], options_json: &str) -> Result<String, Str
             #[serde(flatten)]
             envelope: s9::S9WireEnvelope,
             source_digest: String,
+            save_warnings: Vec<String>,
         }
 
         let mut fields: serde_json::Map<String, serde_json::Value> =
@@ -346,13 +347,24 @@ pub fn parse_docx_s9_json(data: &[u8], options_json: &str) -> Result<String, Str
         if fields.remove("reportSourceDigest") != Some(serde_json::Value::Bool(true)) {
             return Err("reportSourceDigest must be true".to_owned());
         }
-        let mut options: S9ParseOptions = serde_json::from_value(fields.into())
-            .map_err(|error| error.to_string())?;
+        let mut options: S9ParseOptions =
+            serde_json::from_value(fields.into()).map_err(|error| error.to_string())?;
         let source_digest = format!("{:x}", Sha256::digest(data));
-        options.determinism_seed.get_or_insert_with(|| source_digest.clone());
-        let envelope = parse_docx_s9_wire(data, options).map_err(|error| error.to_string())?;
-        return serde_json::to_string(&SourceEnvelope { envelope, source_digest })
-            .map_err(|error| error.to_string());
+        options
+            .determinism_seed
+            .get_or_insert_with(|| source_digest.clone());
+        let (envelope, parts) =
+            s9::parse_docx_s9_wire_parts_with_limits(data, options, &xml::ParseLimits::default())
+                .map_err(|error| error.to_string())?;
+        let save_warnings =
+            serializer::s13::parsed_save_warnings(&envelope.document.package, &parts)
+                .map_err(|error| error.to_string())?;
+        return serde_json::to_string(&SourceEnvelope {
+            envelope,
+            source_digest,
+            save_warnings,
+        })
+        .map_err(|error| error.to_string());
     }
     let options = if options_json.is_empty() {
         S9ParseOptions::default()
@@ -442,7 +454,10 @@ pub fn write_docx_s13_with_warnings_json(
 }
 
 #[doc(hidden)]
-pub fn write_docx_s13_wire_json(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, String> {
+pub fn write_docx_s13_wire_json(
+    request_json: &str,
+    original_docx: &[u8],
+) -> Result<Vec<u8>, String> {
     serializer::model_save::write_json(request_json, original_docx, None).map(|(bytes, _)| bytes)
 }
 

@@ -9,7 +9,7 @@ import {
   isWrittenByCanonical,
   markHeaderFooterAlias,
 } from '../docx/headerFooterAliasProjection';
-import { type RustParagraphIds, sameSaveTree, sha256Hex, writeDocumentWithRust } from '../docx/rustSaveFacade';
+import { type RustParagraphIds, sha256Hex, writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { parseDocumentWithRust } from '../docx/rustParseFacade';
 import { preloadParseWasm } from '../docx/parseWasm';
 import type { Comment, Paragraph } from '../types/content';
@@ -422,6 +422,84 @@ function captureSaveState(session: YrsSession) {
 const saveStates = new WeakMap<DocxSessionSave, ReturnType<typeof captureSaveState>>();
 const publishedVersions = new WeakMap<DocxSavedDocument, string>();
 
+export interface ProjectionFormatEdit {
+  start: string;
+  end: string;
+  values: Partial<Record<'indentLeft' | 'indentRight' | 'spaceBefore' | 'spaceAfter', number>>;
+}
+
+async function withProjectedFormatting(
+  capture: DocxSessionSave,
+  base: Document,
+  projected: Document,
+  edits: readonly ProjectionFormatEdit[]
+): Promise<DocxParagraphSavePlan> {
+  const plan = capture.plan;
+  const partUri = capture.identities.paragraphs
+    .find(({ session, source }) => session?.story === 'body' && source)?.source?.partUri;
+  if (!partUri) return plan;
+  const part = partUri.slice(1);
+  const splice = plan.splicedParts?.find(entry => entry.part === part);
+  const patched = plan.patchedParts.some(entry => entry.part === part);
+  if (!splice && !patched) return plan;
+  const sourceByKey = new Map(capture.identities.paragraphs.flatMap(({ session, source }) =>
+    session && source?.partUri === partUri ? [[session.paraId, { source, story: session.story }] as const] : []
+  ));
+  const original = new Map<number, Paragraph>();
+  mapParagraphs(base.package.document.content, paragraph => {
+    if (paragraph.sourceOrdinal !== undefined) original.set(paragraph.sourceOrdinal, paragraph);
+    return paragraph;
+  });
+  const paragraphs: Array<{ key: string; ordinal: number | undefined; body: boolean; paragraph: Paragraph }> = [];
+  mapParagraphs(projected.package.document.content, paragraph => {
+    const key = projectedSessionKey(paragraph);
+    if (key !== undefined) {
+      const origin = sourceByKey.get(key);
+      paragraphs.push({ key, ordinal: origin?.source.paragraphOrdinal, body: origin?.story === 'body', paragraph });
+    }
+    return paragraph;
+  });
+  const changed = new Set<number>();
+  const spliceOrdinals = splice && new Set(splice.paragraphs.map(([ordinal]) => ordinal));
+  for (const { start, end, values } of edits) {
+    const first = paragraphs.findIndex(({ key }) => key === start);
+    const last = paragraphs.findIndex(({ key }) => key === end);
+    if (first < 0 || last < 0) continue;
+    const fields = Object.keys(values) as Array<keyof ProjectionFormatEdit['values']>;
+    for (const { ordinal, paragraph, body } of paragraphs.slice(Math.min(first, last), Math.max(first, last) + 1)) {
+      if (!body || ordinal === undefined || (spliceOrdinals && !spliceOrdinals.has(ordinal))) continue;
+      const before = original.get(ordinal);
+      if (before && fields.some(key => paragraph.formatting?.[key] === values[key] && before.formatting?.[key] !== values[key])) {
+        changed.add(ordinal);
+      }
+    }
+  }
+  if (!changed.size) return plan;
+  const ascending = (left: number, right: number) => left - right;
+  if (splice) {
+    return { ...plan, splicedParts: plan.splicedParts?.map(entry => entry !== splice ? entry : {
+      ...entry,
+      changed: [...new Set([...entry.changed, ...changed])].sort(ascending),
+      paragraphPatches: entry.paragraphPatches?.filter(({ ordinal }) => !changed.has(ordinal)),
+      legacyParagraphs: entry.legacyParagraphs?.filter(({ ordinal }) => !changed.has(ordinal)),
+      formatOnly: entry.formatOnly?.filter(ordinal => !changed.has(ordinal)),
+    }) };
+  }
+  const ordinals = paragraphs.flatMap(({ key, ordinal }) => ordinal === undefined ? [] : [[ordinal, key] as [number, string]]);
+  if (ordinals.length !== paragraphs.length || ordinals.length !== original.size ||
+      ordinals.some(([ordinal], index) => index > 0 && ordinal <= ordinals[index - 1]![0])) return plan;
+  await preloadOpcWasm();
+  const bytes = unzipContainer(new Uint8Array(base.originalBuffer!))[part];
+  if (!bytes) return plan;
+  return {
+    ...plan,
+    patchedParts: plan.patchedParts.filter(entry => entry.part !== part),
+    splicedParts: [...(plan.splicedParts ?? []), {
+      part, sha256: await sha256Hex(bytes), paragraphs: ordinals, changed: [...changed].sort(ascending),
+    }],
+  };
+}
+
 export function publishedSaveVersion(saved: DocxSavedDocument): string | undefined {
   return publishedVersions.get(saved);
 }
@@ -644,16 +722,8 @@ async function writeSessionSaveWithWarnings(
     console.debug('DOCX_MINIMAL_PATCH unspliced paragraphs', unspliced);
   }
   const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(openedModel, state.sections, output, capture, sourceBuffer);
-  const planned = capture.plan.splicedParts ?? [];
-  const formattingSplice = !sectionPlan && !options.commentDeletion && openedModel &&
-    patches(bodyPart) && splices(bodyPart) &&
-    capture.plan.patchedParts.some(({ part }) => part === bodyPart) &&
-    !planned.some(({ part }) => part === bodyPart)
-    ? await paragraphFormattingSplice(bodyPart, capture, openedModel, output, originalBuffer)
-    : undefined;
   const splicesFor = (edits: RustParagraphIds['sectionEdits']) =>
-    [...planned, ...(formattingSplice ? [formattingSplice] : []),
-      ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
+    [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   if (yieldSave) await yieldSave();
@@ -681,7 +751,7 @@ async function writeSessionSaveWithWarnings(
       assignments: capture.plan.assignments,
       ...(whole.length ? { wholeParts: whole.map(({ part, sha256, changed }) => ({ part, sha256, changed })) } : {}),
       ...(capture.plan.touchedParts?.length ? { touchedParts: capture.plan.touchedParts } : {}),
-      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && ((sectionPlan === undefined && !formattingSplice) || part !== bodyPart)),
+      patchedParts: capture.plan.patchedParts.filter(({ part }) => patches(part) && !rewritten(part) && (sectionPlan === undefined || part !== bodyPart)),
       ...(spliced.length === 0
         ? {}
         : {
@@ -797,44 +867,6 @@ async function writeSessionSaveWithWarnings(
   return { warnings, saved };
 }
 
-async function paragraphFormattingSplice(
-  part: string,
-  capture: DocxSessionSave,
-  source: Readonly<Document>,
-  output: Document,
-  originalBuffer: ArrayBuffer,
-): Promise<NonNullable<DocxParagraphSavePlan['splicedParts']>[number] | undefined> {
-  const original = new Map<number, Paragraph>();
-  mapParagraphs(source.package.document.content, paragraph => {
-    if (paragraph.sourceOrdinal !== undefined) original.set(paragraph.sourceOrdinal, paragraph);
-    return paragraph;
-  });
-  const ordinals = new Map(capture.identities.paragraphs.flatMap(({ session, source }) =>
-    session && source?.partUri === `/${part}` ? [[session.paraId, source.paragraphOrdinal] as const] : []
-  ));
-  const paragraphs: Array<[number, string]> = [];
-  const changed: number[] = [];
-  let complete = true;
-  mapParagraphs(output.package.document.content, paragraph => {
-    const key = projectedSessionKey(paragraph);
-    const ordinal = key === undefined ? undefined : ordinals.get(key);
-    const before = ordinal === undefined ? undefined : original.get(ordinal);
-    if (key === undefined || ordinal === undefined || before === undefined) {
-      complete = false;
-      return paragraph;
-    }
-    paragraphs.push([ordinal, key]);
-    if (!sameSaveTree(before.formatting ?? {}, paragraph.formatting ?? {})) changed.push(ordinal);
-    return paragraph;
-  });
-  if (!complete || !changed.length || paragraphs.length !== original.size ||
-      paragraphs.some(([ordinal], index) => index > 0 && paragraphs[index - 1]![0] >= ordinal)) return;
-  await preloadOpcWasm();
-  const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
-  if (!bytes) return;
-  return { part, sha256: await sha256Hex(bytes), paragraphs, changed };
-}
-
 /**
  * Saves a session opened from DOCX bytes and reports each saved paragraph's
  * persisted anchor, read from the same projection the bytes are written
@@ -857,7 +889,8 @@ export async function saveYrsDocx(
 
 export async function saveYrsDocxWithWarnings(
   session: YrsSession,
-  options: DocxSaveOptions
+  options: DocxSaveOptions,
+  projectedFormatting: readonly ProjectionFormatEdit[] = []
 ): Promise<{ saved: DocxSavedDocument; warnings: string[] }> {
   if (options.commentBaseline) await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   let base = session.materializeDocx();
@@ -903,6 +936,9 @@ export async function saveYrsDocxWithWarnings(
   const document = checkedProjection(session, () =>
     yrsToDocument(session, projectionBase, { commentIds: comments.sessionIds })
   );
+  if (projectedFormatting.length && !options.commentBaseline) {
+    capture.plan = await withProjectedFormatting(capture, base, document, projectedFormatting);
+  }
   return writeSessionSaveWithWarnings(
     session,
     document,

@@ -32,6 +32,7 @@ export interface RustS9Result {
   rustCanonicalBytes?: Uint8Array;
   rustCanonicalSha256?: string;
   sourceDigest?: string;
+  saveWarnings?: string[];
 }
 
 /** Rehydrates parser wire data into the public Document. */
@@ -59,9 +60,10 @@ export function decodeS9EnvelopeValue(value: unknown, originalBuffer: ArrayBuffe
       'canonicalBase64',
       'canonicalSha256',
       'sourceDigest',
+      'saveWarnings',
     ],
     'wire',
-    ['fontTableRelationshipsXml', 'canonicalBase64', 'canonicalSha256', 'sourceDigest']
+    ['fontTableRelationshipsXml', 'canonicalBase64', 'canonicalSha256', 'sourceDigest', 'saveWarnings']
   );
   if (envelope.wireVersion !== 1) throw new TypeError('wire.wireVersion must be 1');
   const document = decodeS9Document(envelope.document, originalBuffer);
@@ -87,6 +89,9 @@ export function decodeS9EnvelopeValue(value: unknown, originalBuffer: ArrayBuffe
     embeddedFonts,
     ...(envelope.sourceDigest === undefined ? {} : {
       sourceDigest: stringAt(envelope.sourceDigest, 'wire.sourceDigest'),
+    }),
+    ...(envelope.saveWarnings === undefined ? {} : {
+      saveWarnings: stringArrayAt(envelope.saveWarnings, 'wire.saveWarnings'),
     }),
     ...(envelope.fontTableRelationshipsXml === undefined
       ? {}

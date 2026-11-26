@@ -39,7 +39,9 @@ export async function parseDocx(input: DocxInput, options: ParseOptions = {}): P
   try {
     onProgress('Extracting DOCX...', 0);
     const parsed = parseDocumentWithRust(buffer, rustOptions(options));
-    if (parsed.sourceDigest) rememberParsedModel(parsed.document, parsed.sourceDigest);
+    if (parsed.sourceDigest && parsed.saveWarnings) {
+      rememberParsedModel(parsed.document, parsed.sourceDigest, parsed.saveWarnings);
+    }
     emitProgress(options, onProgress);
     await loadHostFonts(parsed, options.preloadFonts ?? true, onProgress);
     onProgress('Assembling document...', 95);

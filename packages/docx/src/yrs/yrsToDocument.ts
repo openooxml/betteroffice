@@ -5103,7 +5103,7 @@ function projectStories(
       const content = restoreNoteMarks(context.storyToBlocks(storyId), note.content);
       if (note.verbatimXml) {
         if (sameSaveTree(content, note.content)) return note;
-        if (options.storyIds === undefined && options.commentIds === undefined && sessionSourcePackage(session)) {
+        if (sessionSourcePackage(session)) {
           keptNotes ??= new Set(session.paragraphSavePlan().patchedParts.map(({ part }) => part.toLowerCase()));
           const part = prefix === 'fn:' ? 'word/footnotes.xml' : 'word/endnotes.xml';
           if (keptNotes.has(part)) return note;

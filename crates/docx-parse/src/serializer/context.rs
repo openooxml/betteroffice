@@ -52,7 +52,7 @@ pub struct DroppedStructure {
 /// A save's diagnostics: the text warnings and the typed values the save reports.
 #[derive(Clone, Debug, Default)]
 pub struct S13SaveReport {
-    /// User-facing diagnostics.
+    /// Text diagnostics, including the legacy strings for supplied save plans.
     pub warnings: Vec<String>,
     /// Paragraphs kept as their source bytes, counted per part.
     pub kept_unchanged: BTreeMap<String, u32>,
@@ -370,7 +370,7 @@ impl SerializerContext {
 
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.warnings)
+        self.take_report(true).warnings
     }
 
     fn write_wire_diagnostics(&self, wire: &mut Vec<String>) {
@@ -395,18 +395,21 @@ impl SerializerContext {
         if !self.paragraph_replace_counts.is_empty() {
             wire.push(format!(
                 "DOCX_MINIMAL_PATCH replace counts {}",
-                serde_json::to_string(&self.paragraph_replace_counts).expect("string keys and integer counts")
+                serde_json::to_string(&self.paragraph_replace_counts)
+                    .expect("string keys and integer counts")
             ));
         }
     }
 
     /// Drains the diagnostics recorded so far, typed beside their text.
-    pub(crate) fn take_report(&mut self, wire: Option<&mut Vec<String>>) -> S13SaveReport {
-        if let Some(wire) = wire {
-            self.write_wire_diagnostics(wire);
+    pub(crate) fn take_report(&mut self, legacy_diagnostics: bool) -> S13SaveReport {
+        let mut warnings = std::mem::take(&mut self.warnings);
+        if legacy_diagnostics {
+            self.write_wire_diagnostics(&mut warnings);
         }
+        self.paragraph_replace_counts.clear();
         S13SaveReport {
-            warnings: self.take_warnings(),
+            warnings,
             kept_unchanged: std::mem::take(&mut self.kept_unchanged),
             kept_paragraphs: std::mem::take(&mut self.kept_paragraphs),
             structure_dropped: std::mem::take(&mut self.structure_dropped),

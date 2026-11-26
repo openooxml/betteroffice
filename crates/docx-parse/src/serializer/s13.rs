@@ -160,18 +160,8 @@ pub fn write_docx_s13_with_warnings(
     original_docx: &[u8],
 ) -> Result<(Vec<u8>, Vec<String>), ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    let mut diagnostics = Vec::new();
-    let (bytes, mut report) = write_parts(
-        request,
-        &original_parts,
-        Some(original_docx),
-        WriteSettings {
-            wire: Some(&mut diagnostics),
-            ..WriteSettings::default()
-        },
-    )?;
-    report.warnings.extend(diagnostics);
-    Ok((bytes, report.warnings))
+    write_docx_s13_parts_with_report(request, &original_parts, Some(original_docx))
+        .map(|(bytes, report)| (bytes, report.warnings))
 }
 
 /// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
@@ -199,7 +189,7 @@ pub(super) struct WriteSettings<'a> {
     pub reuse_document_root: bool,
     pub empty_notes: [bool; 2],
     pub wire: Option<&'a mut Vec<String>>,
-    pub report_bindings: bool,
+    pub legacy_diagnostics: bool,
     pub product_save: bool,
 }
 
@@ -210,7 +200,7 @@ impl Default for WriteSettings<'_> {
             reuse_document_root: true,
             empty_notes: [false; 2],
             wire: None,
-            report_bindings: false,
+            legacy_diagnostics: true,
             product_save: false,
         }
     }
@@ -227,7 +217,7 @@ pub(super) fn write_parts(
         reuse_document_root,
         empty_notes,
         wire,
-        report_bindings,
+        legacy_diagnostics,
         product_save,
     } = settings;
     request.determinism.validate()?;
@@ -245,8 +235,8 @@ pub(super) fn write_parts(
         let styles = package
             .text(path)
             .ok_or_else(|| save_error("Language edits require a styles part"))?;
-        let xml = super::patch_style_languages(&styles, &languages.to_string())
-            .map_err(save_error)?;
+        let xml =
+            super::patch_style_languages(&styles, &languages.to_string()).map_err(save_error)?;
         package.set_text(path, xml);
     }
     let mut removed_comments = match (
@@ -276,9 +266,9 @@ pub(super) fn write_parts(
             part.table_patches.is_empty()
                 || (request.selective.is_none()
                     && package.plan_key(&part.part) != comments_path
-                    && !patched_parts
-                        .iter()
-                        .any(|patched| package.plan_key(&patched.part) == package.plan_key(&part.part))
+                    && !patched_parts.iter().any(|patched| {
+                        package.plan_key(&patched.part) == package.plan_key(&part.part)
+                    })
                     && package
                         .original_bytes(package.resolve_path(&part.part))
                         .is_some_and(|original| {
@@ -374,7 +364,7 @@ pub(super) fn write_parts(
         package.set_text("word/document.xml", patched);
         update_core_part(&request.options, &mut package, context.now());
         let bytes = rezip_package(&package, source)?;
-        return Ok((bytes, context.take_report(wire)));
+        return Ok((bytes, context.take_report(legacy_diagnostics)));
     }
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
     let reports_dropped = request.paragraph_ids.is_some();
@@ -548,9 +538,12 @@ pub(super) fn write_parts(
     if request.selective.is_some() {
         validate_selective_header_footer_parts(&package, &relationships)?;
     } else {
-        bound_relationships |= process_new_images(&mut request, &relationships, &mut package, preserved)?;
-        bound_relationships |= process_new_watermark_images(&mut request, &relationships, &mut package, preserved)?;
-        bound_relationships |= process_new_hyperlinks(&mut request, &relationships, &mut package, preserved)?;
+        bound_relationships |=
+            process_new_images(&mut request, &relationships, &mut package, preserved)?;
+        bound_relationships |=
+            process_new_watermark_images(&mut request, &relationships, &mut package, preserved)?;
+        bound_relationships |=
+            process_new_hyperlinks(&mut request, &relationships, &mut package, preserved)?;
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
@@ -699,9 +692,12 @@ pub(super) fn write_parts(
         if let Some(bytes) = patched_parts.remove(package.resolve_path("word/footnotes.xml")) {
             package.set("word/footnotes.xml", bytes);
         } else if !footnotes.is_empty() || empty_notes[0] {
-            let xml = stories.write(&package, package.resolve_path("word/footnotes.xml"), &mut context, |context| {
-                serialize_footnotes_part(&footnotes, context)
-            })?;
+            let xml = stories.write(
+                &package,
+                package.resolve_path("word/footnotes.xml"),
+                &mut context,
+                |context| serialize_footnotes_part(&footnotes, context),
+            )?;
             package.set_text("word/footnotes.xml", xml);
         }
         let mut endnotes = request.endnote_separators;
@@ -709,9 +705,12 @@ pub(super) fn write_parts(
         if let Some(bytes) = patched_parts.remove(package.resolve_path("word/endnotes.xml")) {
             package.set("word/endnotes.xml", bytes);
         } else if !endnotes.is_empty() || empty_notes[1] {
-            let xml = stories.write(&package, package.resolve_path("word/endnotes.xml"), &mut context, |context| {
-                serialize_endnotes_part(&endnotes, context)
-            })?;
+            let xml = stories.write(
+                &package,
+                package.resolve_path("word/endnotes.xml"),
+                &mut context,
+                |context| serialize_endnotes_part(&endnotes, context),
+            )?;
             package.set_text("word/endnotes.xml", xml);
         }
     }
@@ -753,7 +752,10 @@ pub(super) fn write_parts(
             .into_iter()
             .filter(|(path, bytes)| {
                 parts.contains(path)
-                    && (!product_save || bytes.windows(b"comment".len()).any(|window| window == b"comment"))
+                    && (!product_save
+                        || bytes
+                            .windows(b"comment".len())
+                            .any(|window| window == b"comment"))
             })
             .map(|(path, bytes)| {
                 clean_deleted_comment_markers(bytes, &removed_comments, product_save)
@@ -766,24 +768,21 @@ pub(super) fn write_parts(
     }
     update_core_part(&request.options, &mut package, context.now());
     let bytes = rezip_package(&package, source)?;
-    let report = if report_bindings {
-        if let Some(wire) = wire {
-            if !bound_relationships {
-                wire.push(super::model_save::NO_BINDING_CHANGES.to_owned());
-            }
-        }
-        context.take_report(None)
-    } else {
-        context.take_report(wire)
-    };
-    Ok((bytes, report))
+    if let Some(wire) = wire
+        && !bound_relationships
+    {
+        wire.push(super::model_save::NO_BINDING_CHANGES.to_owned());
+    }
+    Ok((bytes, context.take_report(legacy_diagnostics)))
 }
 
 fn localize_table_row_namespaces(xml: &str) -> Option<String> {
     use quick_xml::events::Event;
 
     let table_has_bindings = xml.match_indices("<w:tbl").any(|(start, tag)| {
-        xml.as_bytes().get(start + tag.len()).is_some_and(u8::is_ascii_whitespace)
+        xml.as_bytes()
+            .get(start + tag.len())
+            .is_some_and(u8::is_ascii_whitespace)
             && find_tag_end(xml.as_bytes(), start)
                 .is_some_and(|end| xml[start..end].contains("xmlns:"))
     });
@@ -875,16 +874,22 @@ fn clean_deleted_comment_markers(
         Err(error) if !product_save => Err(save_error(error.to_string())),
         Err(_) => {
             let mut reader = quick_xml::Reader::from_reader(bytes);
-            reader.read_event().map_err(|error| save_error(error.to_string()))?;
+            reader
+                .read_event()
+                .map_err(|error| save_error(error.to_string()))?;
             let decoder = reader.decoder();
-            let xml = decoder.decode(bytes).map_err(|error| save_error(error.to_string()))?;
+            let xml = decoder
+                .decode(bytes)
+                .map_err(|error| save_error(error.to_string()))?;
             let cleaned = remove(&xml)?;
             if cleaned == xml {
                 return Ok(bytes.to_vec());
             }
             let (encoded, _, unmappable) = decoder.encoding().encode(&cleaned);
             if unmappable {
-                return Err(save_error("comment marker cleanup could not preserve the source encoding"));
+                return Err(save_error(
+                    "comment marker cleanup could not preserve the source encoding",
+                ));
             }
             Ok(encoded.into_owned())
         }
@@ -896,19 +901,71 @@ fn collect_save_warnings(
     package: &Package<'_>,
     context: &mut SerializerContext,
 ) {
-    let relationships: HashMap<_, _> = request.relationship_entries.iter()
+    for warning in save_warnings(
+        &request.document.content,
+        [&request.header_entries, &request.footer_entries],
+        [
+            &request.footnote_separators,
+            &request.footnotes,
+            &request.endnote_separators,
+            &request.endnotes,
+        ],
+        &request.relationship_entries,
+        package,
+    ) {
+        context.warn(warning);
+    }
+}
+
+pub(crate) fn parsed_save_warnings(
+    model: &crate::s9::S9PackageWire,
+    parts: &[(String, Vec<u8>)],
+) -> Result<Vec<String>, ParseError> {
+    let limits = crate::xml::ParseLimits::default();
+    let path = crate::relationships::office_document_path(
+        parts,
+        &mut crate::xml::ParseBudget::new(&limits),
+    )?;
+    let package = Package::new(parts, path, true);
+    Ok(save_warnings(
+        &model.document.content,
+        [
+            model.header_entries.as_deref().unwrap_or_default(),
+            model.footer_entries.as_deref().unwrap_or_default(),
+        ],
+        [
+            model.footnote_separators.as_deref().unwrap_or_default(),
+            model.footnotes.as_deref().unwrap_or_default(),
+            model.endnote_separators.as_deref().unwrap_or_default(),
+            model.endnotes.as_deref().unwrap_or_default(),
+        ],
+        &model.relationship_entries,
+        &package,
+    ))
+}
+
+fn save_warnings(
+    body: &[BlockContent],
+    headers_and_footers: [&[(String, HeaderFooter)]; 2],
+    notes: [&[Note]; 4],
+    relationship_entries: &[(String, Relationship)],
+    package: &Package<'_>,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let relationships: HashMap<_, _> = relationship_entries
+        .iter()
         .map(|(id, relationship)| (id.as_str(), relationship))
         .collect();
     let document_rels = package
         .text(&package.document_relationships_path)
         .unwrap_or_default();
     warn_about_dangling_opaque_refs(
-        &request.document.content,
+        body,
         &document_rels,
         &package.document_relationships_path,
-        context,
+        &mut warnings,
     );
-    for entries in [&request.header_entries, &request.footer_entries] {
+    for entries in headers_and_footers {
         for (relationship_id, story) in entries {
             let Some(relationship) = relationships.get(relationship_id.as_str()) else {
                 continue;
@@ -917,23 +974,20 @@ fn collect_save_warnings(
                 continue;
             };
             let rels_xml = package.text(&rels_path).unwrap_or_default();
-            warn_about_dangling_opaque_refs(&story.content, &rels_xml, &rels_path, context);
+            warn_about_dangling_opaque_refs(&story.content, &rels_xml, &rels_path, &mut warnings);
         }
     }
-    for (notes, rels_path) in [
-        (
-            &request.footnote_separators,
-            "word/_rels/footnotes.xml.rels",
-        ),
-        (&request.footnotes, "word/_rels/footnotes.xml.rels"),
-        (&request.endnote_separators, "word/_rels/endnotes.xml.rels"),
-        (&request.endnotes, "word/_rels/endnotes.xml.rels"),
+    let [footnote_separators, footnotes, endnote_separators, endnotes] = notes;
+    for (separators, notes, rels_path) in [
+        (footnote_separators, footnotes, "word/_rels/footnotes.xml.rels"),
+        (endnote_separators, endnotes, "word/_rels/endnotes.xml.rels"),
     ] {
         let rels_xml = package.text(rels_path).unwrap_or_default();
-        for note in notes {
-            warn_about_dangling_opaque_refs(&note.content, &rels_xml, rels_path, context);
+        for note in separators.iter().chain(notes) {
+            warn_about_dangling_opaque_refs(&note.content, &rels_xml, rels_path, &mut warnings);
         }
     }
+    warnings
 }
 
 /// Authored chart placements in one story part, keyed by relationship id.
@@ -1071,7 +1125,9 @@ fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
         let Some(chart) = prefixed_tag(span, &chart_open) else {
             continue;
         };
-        if let Some(id) = exact_xml_attribute(chart, "r:id").or_else(|| exact_xml_attribute(chart, "id")) {
+        if let Some(id) =
+            exact_xml_attribute(chart, "r:id").or_else(|| exact_xml_attribute(chart, "id"))
+        {
             drawings
                 .entry(id.to_owned())
                 .or_insert_with(|| span.to_owned());
@@ -1196,7 +1252,10 @@ pub(super) fn save_unchanged_archive(
         return Ok(source.to_vec());
     };
     let mut parts = ooxml_opc::unzip_parts(source).map_err(ParseError::Container)?;
-    if let Some((_, bytes)) = parts.iter_mut().find(|(name, _)| name.as_str() == path.as_str()) {
+    if let Some((_, bytes)) = parts
+        .iter_mut()
+        .find(|(name, _)| name.as_str() == path.as_str())
+    {
         *bytes = updated;
     }
     ooxml_opc::rezip_parts_preserving(&parts, source).map_err(ParseError::Container)
@@ -1218,7 +1277,7 @@ pub fn save_core_only(
     } else {
         rezip_package(&package, Some(source))?
     };
-    Ok((bytes, context.take_report(None)))
+    Ok((bytes, context.take_report(false)))
 }
 
 fn update_core_part(options: &S13SaveOptions, package: &mut Package, now: &str) {
@@ -2422,7 +2481,8 @@ fn ensure_header_footer_parts(
     }
 
     let path = "word/_rels/document.xml.rels";
-    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, path), package.product_save);
+    let mut relationships =
+        RelationshipsIndex::parse(read_rels_or_stub(package, path), package.product_save);
     for (relationship_id, relationship_type, target, _) in parts {
         let registered = if package.product_save {
             relationships.contains_id(relationship_id)
@@ -2466,9 +2526,14 @@ fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut
     }
 
     let path = "word/_rels/document.xml.rels";
-    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, path), package.product_save);
+    let mut relationships =
+        RelationshipsIndex::parse(read_rels_or_stub(package, path), package.product_save);
     let registered = if package.product_save {
-        relationships.contains_part(&package.document_path, "word/numbering.xml", relationship_types::NUMBERING)
+        relationships.contains_part(
+            &package.document_path,
+            "word/numbering.xml",
+            relationship_types::NUMBERING,
+        )
     } else {
         relationships.xml_contains("Target=\"numbering.xml\"")
     };
@@ -2638,7 +2703,11 @@ fn ensure_comment_parts(package: &mut Package) {
     for (part_name, _, target, relationship_type) in parts {
         if !package.contains(part_name.trim_start_matches('/'))
             || if package.product_save {
-                relationships.contains_part(&package.document_path, part_name.trim_start_matches('/'), relationship_type)
+                relationships.contains_part(
+                    &package.document_path,
+                    part_name.trim_start_matches('/'),
+                    relationship_type,
+                )
             } else {
                 relationships.xml_contains(target)
             }
@@ -2777,7 +2846,7 @@ fn warn_about_dangling_opaque_refs(
     blocks: &[BlockContent],
     rels_xml: &str,
     rels_path: &str,
-    context: &mut SerializerContext,
+    warnings: &mut Vec<String>,
 ) {
     let mut reported = HashSet::new();
     visit_opaque_drawings(blocks, &mut |xml| {
@@ -2788,7 +2857,7 @@ fn warn_about_dangling_opaque_refs(
             {
                 continue;
             }
-            context.warn(format!(
+            warnings.push(format!(
                 "opaque drawing references relationship {id:?} absent from {rels_path}; keeping the markup verbatim"
             ));
         }
@@ -2814,7 +2883,9 @@ fn find_max_relationship_id(xml: &str) -> u64 {
 
 fn relationship_number(id: &str) -> Option<u64> {
     let suffix = id.strip_prefix("rId")?;
-    let digits = suffix.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(suffix.len());
+    let digits = suffix
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(suffix.len());
     suffix[..digits].parse().ok()
 }
 
@@ -2836,7 +2907,11 @@ struct RelationshipEntry {
 impl RelationshipEntry {
     fn parse(xml: &str, tag: &str, product_save: bool) -> Self {
         let attr = |name: &str| {
-            let value = if product_save { xml_attribute(tag, name) } else { exact_xml_attribute(tag, name) };
+            let value = if product_save {
+                xml_attribute(tag, name)
+            } else {
+                exact_xml_attribute(tag, name)
+            };
             value.map(|value| {
                 let start = value.as_ptr() as usize - xml.as_ptr() as usize;
                 Attr::Span(start, start + value.len())
@@ -2893,10 +2968,15 @@ impl RelationshipsIndex {
                 .collect()
         };
         let next_number = if product_save {
-            entries.iter().filter_map(|entry| match entry.id {
-                Some(Attr::Span(start, end)) => relationship_number(&xml[start..end]),
-                _ => None,
-            }).max().unwrap_or(0).saturating_add(1)
+            entries
+                .iter()
+                .filter_map(|entry| match entry.id {
+                    Some(Attr::Span(start, end)) => relationship_number(&xml[start..end]),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1)
         } else {
             find_max_relationship_id(&xml) + 1
         };
@@ -2941,7 +3021,11 @@ impl RelationshipsIndex {
             let mut map = HashMap::with_capacity(self.entries.len());
             for (position, entry) in self.entries.iter().enumerate() {
                 if let Some(id) = self.id(entry) {
-                    let id = if self.product_save { decode_xml_entities(id) } else { id.to_owned() };
+                    let id = if self.product_save {
+                        decode_xml_entities(id)
+                    } else {
+                        id.to_owned()
+                    };
                     map.entry(id).or_insert(position);
                 }
             }
@@ -3186,8 +3270,10 @@ fn process_image_part<'a>(
     image_number: &mut u64,
     extensions: &mut HashSet<String>,
 ) -> Result<bool, ParseError> {
-    let mut relationships =
-        RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path), package.product_save);
+    let mut relationships = RelationshipsIndex::parse(
+        read_rels_or_stub(package, relationships_path),
+        package.product_save,
+    );
     for blocks in stories {
         visit_new_images(blocks, &mut |image| {
             let Some(source) = image
@@ -3552,7 +3638,10 @@ fn process_new_watermark_images(
         let rels = rels_parts
             .entry(relationships_path.clone())
             .or_insert_with(|| {
-                RelationshipsIndex::parse(read_rels_or_stub(package, &relationships_path), package.product_save)
+                RelationshipsIndex::parse(
+                    read_rels_or_stub(package, &relationships_path),
+                    package.product_save,
+                )
             });
 
         if watermark_relationship_id
@@ -3688,7 +3777,8 @@ fn xml_tags<'a>(xml: &'a str, name: &'a str) -> impl Iterator<Item = &'a str> {
         let start = reader.buffer_position() as usize;
         match reader.read_event() {
             Ok(Event::Start(tag) | Event::Empty(tag))
-                if tag.name().as_ref() == name.as_bytes() || tag.local_name().as_ref() == name.as_bytes() =>
+                if tag.name().as_ref() == name.as_bytes()
+                    || tag.local_name().as_ref() == name.as_bytes() =>
             {
                 return xml.get(start..reader.buffer_position() as usize);
             }
@@ -3795,8 +3885,10 @@ fn process_hyperlink_part<'a>(
     stories: impl Iterator<Item = &'a mut Vec<BlockContent>>,
 ) -> bool {
     let mut bound = false;
-    let mut relationships =
-        RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path), package.product_save);
+    let mut relationships = RelationshipsIndex::parse(
+        read_rels_or_stub(package, relationships_path),
+        package.product_save,
+    );
     for blocks in stories {
         visit_hyperlinks(blocks, &mut |hyperlink| {
             // Bookmark anchors resolve inside the owning story and never need
