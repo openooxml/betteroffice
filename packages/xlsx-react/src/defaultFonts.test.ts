@@ -134,6 +134,61 @@ function canvasText() {
   return { context, painted };
 }
 
+test('an Aptos-only editor PNG uses the same bundled face as a plain PNG', async () => {
+  const { remove } = browser();
+  const { painted } = canvasText();
+  provider();
+  const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(async (face) => new TextEncoder().encode(face.file).buffer);
+  const installed = spyOn(fonts, 'bundledFaceInstalled').mockResolvedValue(true);
+  restorers.push(() => load.mockRestore(), () => installed.mockRestore());
+  const frame = cells(cellText('Total', { fontFamily: 'Aptos' }));
+  const readFrame = () => JSON.stringify(frame);
+  const engine = {
+    onSheet: <T,>(_sheet: number, read: () => T) => read(),
+    doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
+  };
+  const target = { sheet: 0, range: 'A1' };
+  await renderPng(engine, target, {});
+  expect(remove.mock.calls).toHaveLength(1);
+  const plainFace = remove.mock.calls[0]![0];
+  const plainFont = painted.pop()!.font.replace(plainFace.family, 'bundled');
+  remove.mockClear();
+
+  const faces = await editorExportFaces(sheetFonts(frame, true), decoder(), undefined);
+  await renderPng(engine, target, { fonts: structuredClone(faces) });
+  expect(remove.mock.calls).toHaveLength(1);
+  const editorFace = remove.mock.calls[0]![0];
+  expect(editorFace.bytes).toEqual(plainFace.bytes);
+  expect(painted).toEqual([{ text: 'Total', font: plainFont.replace('bundled', editorFace.family) }]);
+});
+
+test('mixed Aptos text paints with the editor Arabic face and the bundled Latin face', async () => {
+  const { remove } = browser();
+  const { painted } = canvasText();
+  provider();
+  const latin = fonts.resolveLastResortChoice('Aptos', false, false, 'word').face;
+  const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation(async (face) =>
+    new Uint8Array([face.file === latin.file ? 1 : 2]).buffer);
+  const installed = spyOn(fonts, 'bundledFaceInstalled').mockResolvedValue(true);
+  restorers.push(() => load.mockRestore(), () => installed.mockRestore());
+  const text = 'Total مرحبا';
+  const frame = cells(cellText(text, { fontFamily: 'Aptos' }));
+  const faces = await editorExportFaces(sheetFonts(frame, true), decoder(), undefined);
+  const readFrame = () => JSON.stringify(frame);
+  await renderPng({
+    onSheet: (_sheet, read) => read(),
+    doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
+  }, { sheet: 0, range: 'A1' }, { fonts: structuredClone(faces) });
+
+  const released = remove.mock.calls.map(([face]) => face);
+  const arabic = released.find(({ descriptors }) => descriptors.unicodeRange?.includes('U+600-6ff'));
+  const lastResort = released.find(({ bytes }) => new Uint8Array(bytes)[0] === 1);
+  expect(arabic).toBeDefined();
+  expect(lastResort).toBeDefined();
+  expect(painted[0]).toEqual({ text, font: expect.stringContaining(`"${arabic?.family}"`) });
+  expect(painted[0]!.font.indexOf(`"${lastResort?.family}"`)).toBeGreaterThan(painted[0]!.font.indexOf(`"${arabic?.family}"`));
+});
+
 test('registers Carlito regular and bold as Calibri and repaints once after the whole batch loads', async () => {
   const gate = deferred<void>();
   const { added } = browser(gate.promise);
@@ -222,6 +277,9 @@ test('editor PNG exports use a private, range-limited copy of the same script fa
   });
   const { context, painted } = canvasText();
   const { scriptLoads } = provider();
+  const load = spyOn(fonts, 'loadBundledFontBytes').mockResolvedValue(new ArrayBuffer(1));
+  const installed = spyOn(fonts, 'bundledFaceInstalled').mockResolvedValue(true);
+  restorers.push(() => load.mockRestore(), () => installed.mockRestore());
   const decode = decoder();
   const painter = createDefaultFontPainter(decode, () => {});
   const frame = cells(
@@ -276,11 +334,11 @@ test('editor PNG exports use a private, range-limited copy of the same script fa
     };
     const calibri = privateAlias('Calibri', 400, 'normal');
     const calibriBoldItalic = privateAlias('Calibri', 700, 'italic');
-    expect(painted.map(({ font }) => font)).toEqual([
-      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Arabic', 700, 'normal')}", sans-serif`,
+    expect(painted.map(({ font }) => font.split(', ').slice(0, 2).join(', '))).toEqual([
+      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Arabic', 700, 'normal')}"`,
       `16px "${privateAlias('Noto Sans Hebrew', 400, 'normal')}", sans-serif`,
-      `16px "${calibri}", "${privateAlias('Noto Sans Thai', 400, 'normal')}", sans-serif`,
-      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Thai', 700, 'normal')}", sans-serif`,
+      `16px "${calibri}", "${privateAlias('Noto Sans Thai', 400, 'normal')}"`,
+      `italic bold 16px "${calibriBoldItalic}", "${privateAlias('Noto Sans Thai', 700, 'normal')}"`,
     ]);
     expect(added).toEqual(editorFaces);
   } finally { allowScriptPaint.resolve(); painter.dispose(); }
@@ -365,34 +423,40 @@ test('painting more distinct script cells than the text cache scans each cell at
 });
 
 for (const cdn of ['disabled', 'implicit', 'explicit'] as const) {
-  test(`editor PNG preserves the workbook family with an unavailable intl pack and ${cdn} CDN`, async () => {
-    const { added } = browser();
+  test(`editor PNG uses bundled Latin with an unavailable intl pack and ${cdn} CDN`, async () => {
+    const { added, remove } = browser();
     const { context, painted } = canvasText();
     const previous = getFontCdnConfiguration();
     const restore = withBrowserFontGlobals();
     const runtime = fontRuntimeWithoutPacks();
     const manager = spyOn(xlsxDefaultFontManager, 'load').mockResolvedValue({ ...fonts, default: fonts, ...runtime });
+    const installed = spyOn(fonts, 'bundledFaceInstalled').mockImplementation(runtime.bundledFaceInstalled);
+    const load = spyOn(fonts, 'loadBundledFontBytes').mockImplementation((face) =>
+      face.script === 'thai' ? runtime.loadBundledFontBytes(face, undefined, { strict: true }) : Promise.resolve(new ArrayBuffer(1)));
+    restorers.push(() => installed.mockRestore(), () => load.mockRestore());
     const fetch = spyOnFontFetch(async () => new Response(null, { status: 403 }));
     const warn = spyOn(console, 'warn').mockImplementation(() => {});
     const decode = decoder();
     const painter = createDefaultFontPainter(decode, () => {}, { remoteFonts: 'off' });
-    const frame = cells(cellText('ภาษาไทย', { fontFamily: 'Aptos' }));
+    const text = 'Total ภาษาไทย';
+    const frame = cells(cellText(text, { fontFamily: 'Aptos' }));
     try {
       if (cdn === 'implicit') setFontCdnConfiguration(undefined);
       else configureFontCdn({ baseUrl: cdn === 'disabled' ? false : 'https://blocked-export.example/' });
       await painter.load(frame);
       expect(painter.paint(frame, (list) => paintDisplayList(context, list, 1))).toBe(true);
       const editor = painted.splice(0);
-      expect(editor).toEqual([{ text: 'ภาษาไทย', font: '16px "Aptos", sans-serif' }]);
+      expect(editor).toEqual([{ text, font: '16px "Aptos", sans-serif' }]);
 
-      const faces = editorExportFaces(sheetFonts(frame, true), decode, undefined);
-      await expect(faces).resolves.toEqual([]);
+      const faces = await editorExportFaces(sheetFonts(frame, true), decode, undefined);
+      expect(faces).toHaveLength(0);
       const readFrame = () => JSON.stringify(frame);
       await renderPng({
         onSheet: (_sheet, read) => read(),
         doc: { pngDisplayListJson: readFrame, rangePngDisplayListJson: readFrame },
-      }, { sheet: 0, range: 'A1' }, { fonts: structuredClone(await faces) });
-      expect(painted).toEqual(editor);
+      }, { sheet: 0, range: 'A1' }, { fonts: structuredClone(faces) });
+      expect(remove.mock.calls).toHaveLength(1);
+      expect(painted).toEqual([{ text, font: `16px "${remove.mock.calls[0]![0].family}", sans-serif` }]);
       expect(added).toEqual([]);
       if (cdn === 'disabled') expect(fetch).not.toHaveBeenCalled();
       else expect(fetch).toHaveBeenCalled();

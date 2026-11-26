@@ -52,7 +52,7 @@ test('a face whose bytes do not match the manifest is left out, as the editor le
 test('default fonts off and sheets without font requests load no fonts', async () => {
   const load = bundled(async () => new Uint8Array([1, 2, 3]).buffer);
   expect(await editorExportFaces([{ family: 'Calibri', bold: false, italic: false }], null, false)).toBeUndefined();
-  expect(await editorExportFaces([], null, undefined)).toEqual([]);
+  expect(await editorExportFaces([], null, undefined)).toBeUndefined();
   expect(load).not.toHaveBeenCalled();
 });
 
@@ -69,7 +69,7 @@ test('editor export omits optional faces when the default CDN fails', async () =
     setFontCdnConfiguration(undefined);
     await expect(exportFaces([calibri!], null)).rejects.toMatchObject({ code: 'font-unavailable' });
     await expect(exportFaces(optional, null)).resolves.toEqual([]);
-    await expect(editorExportFaces(optional, null, undefined)).resolves.toEqual([]);
+    await expect(editorExportFaces(optional, null, undefined)).resolves.toBeUndefined();
     expect(fetch.mock.calls.filter(([url]) => String(url).includes('cdn.jsdelivr.net'))).toHaveLength(requests.length);
     fonts.configureFontCdn({ baseUrl: false });
     for (const family of ['Calibri', 'Noto Sans Arabic', 'Noto Sans Hebrew']) {
@@ -117,7 +117,7 @@ test('editor PNG export omits absent optional faces with the CDN disabled', asyn
   try {
     fonts.configureFontCdn({ baseUrl: false });
     await expect(api.renderPng(target)).resolves.toBe(png);
-    expect(renderPng.mock.lastCall).toEqual([target, { fonts: [], signal: undefined }]);
+    expect(renderPng.mock.lastCall).toEqual([target, { fonts: undefined, signal: undefined }]);
     await expect(exportFaces(optional, null)).resolves.toEqual([]);
     expect(fetch).not.toHaveBeenCalled();
 
@@ -132,7 +132,7 @@ test('editor PNG export omits absent optional faces with the CDN disabled', asyn
   }
 });
 
-test('an editor export with no resolved faces forwards an empty font list', async () => {
+test('an editor export with no resolved faces leaves core font selection enabled', async () => {
   bundled(async () => new ArrayBuffer(3));
   const png = new Uint8Array([1]);
   const renderPng = mock(async (_target: XlsxPngTarget, _options?: XlsxPngOptions) => png);
@@ -143,7 +143,7 @@ test('an editor export with no resolved faces forwards an empty font list', asyn
   } as unknown as XlsxEditorApi;
   const api = createInThreadAsyncEditorApi(sync, false, () => {});
   await expect(api.renderPng({ sheet: 0, range: 'A1' })).resolves.toBe(png);
-  expect(renderPng.mock.lastCall?.[1]?.fonts).toEqual([]);
+  expect(renderPng.mock.lastCall?.[1]?.fonts).toBeUndefined();
 });
 
 test('an editor export tries a missing script file only once across font styles', async () => {

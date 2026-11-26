@@ -66,7 +66,7 @@ for (const method of ['renderPng', 'exportStructured', 'exportMarkdown', 'printD
     pngOptions.scale = 3;
     release();
     await work;
-    expect(operation.mock.calls[0]).toEqual(method === 'renderPng' ? [original[0], { ...original[1], fonts: [] }] : original);
+    expect(operation.mock.calls[0]).toEqual(original);
   });
 }
 

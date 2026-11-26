@@ -2175,7 +2175,7 @@ describe('XlsxEditor async API', () => {
     expect(api.commands.getState('exportPng').enabled).toBe(true);
     await act(async () => fireEvent.click(view.getByTestId('xlsx-export-png')));
     await waitFor(() => expect(downloads).toEqual([{ name: 'Report.png', href: 'blob:png' }]));
-    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, { fonts: [] }]);
+    expect(renderPng.mock.calls[0]).toEqual([{ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } }, {}]);
     expect(renderPngFonts.mock.calls[0]![0]).toEqual({ sheet: 0, viewport: { x: 0, y: 0, width: 800, height: 600 } });
     const blob = createUrl.mock.calls[0]![0];
     expect(blob.type).toBe('image/png');
@@ -2186,12 +2186,12 @@ describe('XlsxEditor async API', () => {
     const metrics = { dpi: 144, maxDigitWidth: 9, defaultRowHeightPt: 18,
       fontSizePt: 12, fontFamily: 'Arial', fontAscent: 12, fontDescent: 4 };
     await expect(api.renderPng({ sheet: 0, viewport })).resolves.toEqual(png);
-    expect(renderPng.mock.lastCall).toEqual([{ sheet: 0, viewport }, { fonts: [] }]);
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 0, viewport }, {}]);
     await expect(api.renderPng({ sheet: 'First', range: 'A1:B2' }, { scale: 2 })).resolves.toEqual(png);
     await expect(api.exportStructured(options)).resolves.toEqual(structured);
     await expect(api.exportMarkdown(options, { maxRows: 1 })).resolves.toEqual(markdown);
     await expect(api.printDisplayList(1, 'A1:B2', metrics, false)).resolves.toEqual(list);
-    expect(renderPng.mock.lastCall).toEqual([{ sheet: 'First', range: 'A1:B2' }, { scale: 2, fonts: [] }]);
+    expect(renderPng.mock.lastCall).toEqual([{ sheet: 'First', range: 'A1:B2' }, { scale: 2 }]);
     expect(exportStructured).toHaveBeenCalledWith(options);
     expect(exportMarkdown).toHaveBeenCalledWith(options, { maxRows: 1 });
     expect(printDisplayList).toHaveBeenCalledWith(1, 'A1:B2', metrics, false);
