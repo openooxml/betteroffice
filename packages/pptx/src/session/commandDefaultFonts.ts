@@ -132,9 +132,10 @@ export function prefetchCoverageFaces(
   sliced = false,
 ): void {
   decoderReady = wasmReady;
-  if (!scripts.length) return;
+  const coverage = scripts.filter((script) => !UNCOVERED_EDITOR_SCRIPTS.has(script));
+  if (!coverage.length) return;
   void provider().then(async (source) => {
-    for (const script of scripts) {
+    for (const script of coverage) {
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
       if (load?.slices && sliced && (await import('./commandSlicedFonts')).slicedFacesSupported()) {
         void fontSession(source).openSlices(load.slices).catch(() => {});
