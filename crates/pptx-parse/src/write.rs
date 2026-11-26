@@ -3505,7 +3505,7 @@ fn segment_properties(
         .and_then(|latin| latin.attribute("typeface"));
     if let Some(family) = segment.properties.font_family.as_deref()
         && source_family != Some(family)
-        && segment.text.chars().any(is_east_asian_character)
+        && ooxml_text::font_slot_characters(segment.text, false, false).any(|(_, slot)| slot == 2)
     {
         apply_font_typeface(
             &mut properties,
@@ -3516,27 +3516,6 @@ fn segment_properties(
         );
     }
     Some(properties)
-}
-
-fn is_east_asian_character(character: char) -> bool {
-    matches!(
-        character as u32,
-        0x1100..=0x11ff
-            | 0x3000..=0x30ff
-            | 0x3130..=0x318f
-            | 0x31f0..=0x31ff
-            | 0x3400..=0x4dbf
-            | 0x4e00..=0x9fff
-            | 0xa960..=0xa97f
-            | 0xac00..=0xd7ff
-            | 0xf900..=0xfaff
-            | 0xfe30..=0xfe4f
-            | 0xff00..=0xffdc
-            | 0x16fe0..=0x18dff
-            | 0x1aff0..=0x1b2ff
-            | 0x1f200..=0x1f2ff
-            | 0x20000..=0x3ffff
-    )
 }
 
 fn segment_element(
@@ -4273,30 +4252,47 @@ mod tests {
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
 
-    #[test]
-    fn east_asian_font_pick_recognizes_supplementary_cjk() {
-        for character in [
-            '\u{16fe0}',
-            '\u{17000}',
-            '\u{1aff0}',
-            '\u{1b000}',
-            '\u{1b150}',
-            '\u{1b16f}',
-            '\u{1b170}',
-            '\u{1f200}',
-            '𠮷',
-        ] {
-            assert!(
-                is_east_asian_character(character),
-                "U+{:04X}",
-                character as u32
-            );
-        }
-        assert!(!is_east_asian_character('A'));
-        assert!(!is_east_asian_character('🦀'));
+    fn assert_east_asian_font_pick(text: &str, expected: Option<&str>) {
+        let mut root = XmlElement::new("p:sld");
+        let prefixes = Prefixes::from_root(&mut root);
+        let template = XmlElement::new("a:rPr")
+            .with_child(XmlElement::new("a:latin").with_attribute("typeface", "Arial"));
+        let properties = RunProperties {
+            font_family: Some("Microsoft YaHei".to_owned()),
+            ..RunProperties::default()
+        };
+        let segment = RunSegment {
+            line_break: false,
+            text,
+            properties: &properties,
+        };
+        let written = segment_element(&segment, Some(&template), None, &prefixes);
+        assert_eq!(
+            written
+                .child("rPr")
+                .unwrap()
+                .child("ea")
+                .and_then(|font| font.attribute("typeface")),
+            expected,
+            "{text:?}"
+        );
     }
 
     #[test]
+    fn east_asian_font_pick_writes_fullwidth_and_cjk_punctuation_typefaces() {
+        for text in ["￥100", "、。", "ｶﾀｶﾅ", "ㅎㅏ"] {
+            assert_east_asian_font_pick(text, Some("Microsoft YaHei"));
+        }
+    }
+
+    #[test]
+    fn east_asian_font_pick_follows_the_shared_font_slot_rule() {
+        for text in ["A", "🦀", "𠮷"] {
+            assert_east_asian_font_pick(text, None);
+        }
+    }
+
+#[test]
     fn a_labelled_ellipse_is_not_written_as_a_text_box() {
         let add = ShapeAdd {
             name: "Labelled ellipse".to_owned(),

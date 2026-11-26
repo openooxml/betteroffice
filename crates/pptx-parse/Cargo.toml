@@ -21,6 +21,7 @@ test-counters = []
 base64 = "0.22"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
+ooxml-text.workspace = true
 quick-xml = { version = "0.41", features = ["encoding"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
