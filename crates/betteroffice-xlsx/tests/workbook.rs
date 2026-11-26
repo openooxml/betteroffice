@@ -13382,8 +13382,6 @@ fn assert_no_shared_hidden_sizes(workbook: &Workbook) {
     let json = shared_json(workbook).to_string();
     assert!(!json.contains("hiddenColWidths"), "{json}");
     assert!(!json.contains("hiddenRowHeights"), "{json}");
-    assert!(workbook.model().sheets[0].hidden_col_widths.is_empty());
-    assert!(workbook.model().sheets[0].hidden_row_heights.is_empty());
 }
 
 #[test]

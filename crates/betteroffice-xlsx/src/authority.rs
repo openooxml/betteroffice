@@ -8,6 +8,7 @@ use crate::sheet_json::{
     check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
     encode_charts, encode_hyperlinks,
 };
+use crate::workbook::hidden_sizes::{HiddenSizeSource, derive_hidden_sizes};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
@@ -1635,7 +1636,7 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         encode_update: bool,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
-        self.apply_ops_with_merge_edits(ops, origin, styles, encode_update, false)
+        self.apply_ops_with_merge_edits(ops, origin, styles, encode_update, false, None)
     }
 
     fn apply_ops_with_merge_edits(
@@ -1645,6 +1646,7 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         encode_update: bool,
         collaborative: bool,
+        replica: Option<(&WorkbookModel, &[String])>,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector =
             encode_update.then(|| (self.doc.transact().state_vector(), self.snapshot_revision()));
@@ -1679,7 +1681,17 @@ impl WorkbookAuthority {
             FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
             return Ok(self.encode_ops_update(state_vector));
         }
-        let mut model = self.materialize()?;
+        let (mut model, structure) = self
+            .materialize_internal(false)
+            .map_err(AuthorityError::InvalidState)?;
+        if let Some((replica, keys)) = replica {
+            derive_hidden_sizes(
+                &mut model,
+                &structure.sheet_keys,
+                None,
+                Some(HiddenSizeSource::Replica(replica, keys)),
+            );
+        }
         let plain_cell_baseline = if let [Op::SetCell { sheet, at, .. }] = ops {
             let was_plain = model
                 .sheet(*sheet)
@@ -2476,31 +2488,25 @@ impl WorkbookAuthority {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_local_ops_v1(
         &self,
         ops: &[Op],
         origin: SyncOrigin,
         styles: &Stylesheet,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        self.stage_local_ops_from_validated_v1(
-            ops,
-            origin,
-            styles,
-            &self.encode_state_as_update_v1(),
-            self.projection_valid.load(Ordering::Relaxed),
-            true,
-        )
+        self.stage_ops_v1(ops, origin, styles, None, true, None)
     }
 
-    /// [`Self::stage_local_ops_v1`] from this replica's already-encoded state.
-    pub(crate) fn stage_local_ops_from_v1(
+    pub(crate) fn stage_replica_ops_v1(
         &self,
         ops: &[Op],
         origin: SyncOrigin,
         styles: &Stylesheet,
-        baseline: &[u8],
+        baseline: Option<&[u8]>,
+        replica: (&WorkbookModel, &[String]),
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        self.stage_local_ops_from_validated_v1(ops, origin, styles, baseline, false, true)
+        self.stage_ops_v1(ops, origin, styles, baseline, true, Some(replica))
     }
 
     pub(crate) fn stage_standalone_ops_v1(
@@ -2509,6 +2515,18 @@ impl WorkbookAuthority {
         origin: SyncOrigin,
         styles: &Stylesheet,
         baseline: Option<&[u8]>,
+    ) -> Result<StagedLocalUpdate, AuthorityError> {
+        self.stage_ops_v1(ops, origin, styles, baseline, false, None)
+    }
+
+    fn stage_ops_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+        baseline: Option<&[u8]>,
+        collaborative: bool,
+        replica: Option<(&WorkbookModel, &[String])>,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
         let projection_valid = baseline.is_none() && self.projection_valid.load(Ordering::Relaxed);
         let encoded;
@@ -2519,25 +2537,6 @@ impl WorkbookAuthority {
                 &encoded
             }
         };
-        self.stage_local_ops_from_validated_v1(
-            ops,
-            origin,
-            styles,
-            baseline,
-            projection_valid,
-            false,
-        )
-    }
-
-    fn stage_local_ops_from_validated_v1(
-        &self,
-        ops: &[Op],
-        origin: SyncOrigin,
-        styles: &Stylesheet,
-        baseline: &[u8],
-        projection_valid: bool,
-        collaborative: bool,
-    ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
         let mut staged = self.hydrated_alike(staged_doc);
@@ -2553,7 +2552,7 @@ impl WorkbookAuthority {
         // `apply_ops` already encoded the same diff: the staged doc is the
         // hydrated baseline, so its pre-op state vector is this replica's own.
         let update = staged
-            .apply_ops_with_merge_edits(ops, origin, styles, true, collaborative)?
+            .apply_ops_with_merge_edits(ops, origin, styles, true, collaborative, replica)?
             .unwrap_or_else(|| Update::EMPTY_V1.to_vec());
         let state = staged.encode_state_as_update_v1();
         let state_vector_entries = staged.doc.transact().state_vector().len();
@@ -3957,7 +3956,7 @@ fn observe_projection(doc: &Doc, revision: Arc<AtomicU64>) -> Arc<AtomicBool> {
 /// base order and a replica mints `replica:...`, so a legacy state whose sheets
 /// were reordered still reads its own fallback features rather than whichever
 /// sheet now sits at that position.
-fn base_sheet_index(key: &str) -> Option<usize> {
+pub(crate) fn base_sheet_index(key: &str) -> Option<usize> {
     key.strip_prefix("sheet:")?.parse().ok()
 }
 

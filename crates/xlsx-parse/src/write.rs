@@ -500,6 +500,51 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<SerializedParts<'p>, ParseError> {
+    serialize_package(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        sheet_axes,
+        edits,
+        active_sheet,
+        false,
+    )
+}
+
+#[doc(hidden)]
+pub fn serialize_collaborative_workbook_with_package<'p>(
+    wb: &Workbook,
+    package: &'p PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    sheet_axes: &[Option<SheetAxes>],
+    edits: SaveEdits,
+    active_sheet: SheetId,
+) -> Result<SerializedParts<'p>, ParseError> {
+    serialize_package(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        sheet_axes,
+        edits,
+        active_sheet,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serialize_package<'p>(
+    wb: &Workbook,
+    package: &'p PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    sheet_axes: &[Option<SheetAxes>],
+    edits: SaveEdits,
+    active_sheet: SheetId,
+    check_hidden_sizes: bool,
+) -> Result<SerializedParts<'p>, ParseError> {
     validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
@@ -710,6 +755,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                                 axes_changed,
                                 Some(&defined_names),
                                 &style_match,
+                                check_hidden_sizes,
                             )
                         })
                     })
@@ -1311,6 +1357,7 @@ fn sheet_body_matches(
     axes_changed: bool,
     defined_names: Option<&[&str]>,
     styles: &StyleMatch<'_>,
+    check_hidden_sizes: bool,
 ) -> bool {
     if !source_coordinates::unchanged_with_defined_names(
         source,
@@ -1331,6 +1378,9 @@ fn sheet_body_matches(
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
+        && (!check_hidden_sizes
+            || (sheet.hidden_col_widths == original.hidden_col_widths
+                && sheet.hidden_row_heights == original.hidden_row_heights))
         && sheet.col_styles == original.col_styles
         && sheet.row_styles == original.row_styles
         && sheet.array_formulas().eq(original.array_formulas())

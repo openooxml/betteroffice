@@ -12,6 +12,7 @@ mod format_calculation_tests;
 mod format_facets_tests;
 mod formula_entry;
 mod geometry;
+pub(crate) mod hidden_sizes;
 #[cfg(test)]
 mod graph_reuse_tests;
 mod preserved_fragments;
@@ -29,6 +30,7 @@ pub(crate) mod target;
 #[cfg(test)]
 mod update_tests;
 
+use self::hidden_sizes::{HiddenSizeSource, derive_hidden_sizes, equal_ignoring_hidden_sizes};
 use self::proposals::proposal_edit_is_stale;
 
 use std::borrow::Cow;
@@ -1089,6 +1091,13 @@ impl Workbook {
                     target.hidden_col_widths = source.hidden_col_widths.clone();
                     target.hidden_row_heights = source.hidden_row_heights.clone();
                 }
+            } else {
+                derive_hidden_sizes(
+                    &mut projected,
+                    &structure.sheet_keys,
+                    None,
+                    Some(HiddenSizeSource::Base(&model)),
+                );
             }
             validate_model(&projected)?;
             (AuthoritySlot::built(authority), projected, Some(structure))
@@ -1424,7 +1433,7 @@ impl Workbook {
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = AuthoritySlot::built(candidate);
         self.preserved.resize(frozen.sheet_keys.len());
-        self.install_model(model)?;
+        self.install_model(model, &structure)?;
         self.rebase_sheet_positions(&frozen.sheet_keys, &structure.sheet_keys);
         self.invalidate_sheet_info();
         self.graph = Some(graph);
@@ -1697,7 +1706,7 @@ impl Workbook {
             .get_mut()?
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
-        self.install_model(model)?;
+        self.install_model(model, &new_structure)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(new_structure),
@@ -1797,7 +1806,12 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                let serialize = if self.is_collaborative() {
+                    xlsx_parse::serialize_collaborative_workbook_with_package
+                } else {
+                    xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes
+                };
+                let parts = serialize(
                     &self.model,
                     package,
                     &self.preserved.origins,
@@ -2636,7 +2650,9 @@ impl Workbook {
                 ops.push(format);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || models_semantically_equal(&preview, &self.model, self.is_collaborative())
+        {
             return Ok(MutationResult::default());
         }
         let mut inverse = Vec::new();
@@ -2960,7 +2976,14 @@ impl Workbook {
         let proposals_changed = self
             .rebased_proposals(&ops)
             .is_some_and(|proposals| proposals != self.proposals.list());
-        if preview == self.model && !proposals_changed && !drawings_move {
+        if !proposals_changed
+            && !drawings_move
+            && if self.is_collaborative() {
+                equal_ignoring_hidden_sizes(&self.model, &mut preview)
+            } else {
+                preview == self.model
+            }
+        {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -3247,7 +3270,7 @@ impl Workbook {
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
-        self.install_model(restored)?;
+        self.install_model(restored, &new_structure)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
             structure: Box::new(new_structure),
@@ -3431,7 +3454,9 @@ impl Workbook {
                 ops.push(op);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || models_semantically_equal(&preview, &self.model, self.is_collaborative())
+        {
             self.proposals.remove(id);
             return Ok(ProposalAcceptance {
                 proposal_id: id.to_string(),
@@ -4369,6 +4394,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
+            self.derive_replica_hidden_sizes(&mut model, &new_structure, None);
             self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
@@ -4444,7 +4470,13 @@ impl Workbook {
         };
         let staged = self
             .authority()?
-            .stage_local_ops_v1(ops, origin, &self.model.styles)
+            .stage_replica_ops_v1(
+                ops,
+                origin,
+                &self.model.styles,
+                None,
+                (&self.model, &structure.sheet_keys),
+            )
             .map_err(authority_error)?;
         if !structure.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
@@ -5423,12 +5455,29 @@ impl Workbook {
     /// replacements (snapshot restore, remote state, replayed history) must
     /// `invalidate_sheet_info` instead — there is no op list that explains
     /// what changed.
-    fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
+    fn install_model(&mut self, mut model: WorkbookModel, next: &WorkbookStructure) -> Result<()> {
+        self.derive_replica_hidden_sizes(&mut model, next, None);
         self.bump_model_epoch();
         self.clear_geometry();
         self.invalidate_sheet_info();
         self.model = model;
         Ok(())
+    }
+
+    fn derive_replica_hidden_sizes(
+        &self,
+        model: &mut WorkbookModel,
+        next: &WorkbookStructure,
+        preview: Option<&WorkbookModel>,
+    ) {
+        if let WorkbookMode::Collaborative { structure } = &self.mode {
+            derive_hidden_sizes(
+                model,
+                &next.sheet_keys,
+                preview,
+                Some(HiddenSizeSource::Replica(&self.model, &structure.sheet_keys)),
+            );
+        }
     }
 }
 
@@ -6541,7 +6590,11 @@ fn cell_states_semantically_equal(left: &CellState, right: &CellState) -> bool {
     }
 }
 
-fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> bool {
+fn models_semantically_equal(
+    left: &WorkbookModel,
+    right: &WorkbookModel,
+    collaborative: bool,
+) -> bool {
     if left.date_system != right.date_system
         || left.shared_strings != right.shared_strings
         || left.styles != right.styles
@@ -6554,8 +6607,9 @@ fn models_semantically_equal(left: &WorkbookModel, right: &WorkbookModel) -> boo
             || left.merges != right.merges
             || left.col_widths != right.col_widths
             || left.row_heights != right.row_heights
-            || left.hidden_col_widths != right.hidden_col_widths
-            || left.hidden_row_heights != right.hidden_row_heights
+            || !collaborative
+                && (left.hidden_col_widths != right.hidden_col_widths
+                    || left.hidden_row_heights != right.hidden_row_heights)
         {
             return false;
         }
@@ -7506,12 +7560,22 @@ impl Workbook {
         }
         let mut projected = authority.materialize_oracle().map_err(authority_error)?;
         retain_array_formulas(&model, &mut projected);
-        if client_id.is_none() {
+        let structure = if client_id.is_some() {
+            let structure = authority.structure_oracle().map_err(authority_error)?;
+            derive_hidden_sizes(
+                &mut projected,
+                &structure.sheet_keys,
+                None,
+                Some(HiddenSizeSource::Base(&model)),
+            );
+            Some(structure)
+        } else {
             for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
                 target.hidden_col_widths = source.hidden_col_widths.clone();
                 target.hidden_row_heights = source.hidden_row_heights.clone();
             }
-        }
+            None
+        };
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -7521,9 +7585,9 @@ impl Workbook {
             .map(|chart| (chart.frame_id(), chart.anchor))
             .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
-        let mode = match client_id {
-            Some(_) => WorkbookMode::Collaborative {
-                structure: Box::new(authority.structure_oracle().map_err(authority_error)?),
+        let mode = match structure {
+            Some(structure) => WorkbookMode::Collaborative {
+                structure: Box::new(structure),
             },
             None => WorkbookMode::Standalone,
         };

@@ -81,12 +81,16 @@ impl Workbook {
         }
         let styles = &staged.model.styles;
         let built = self.authority()?;
-        let mut authority = if !self.is_collaborative() {
-            built.stage_standalone_ops_v1(&ops, origin, styles, baseline)
-        } else {
-            match baseline {
-                Some(baseline) => built.stage_local_ops_from_v1(&ops, origin, styles, baseline),
-                None => built.stage_local_ops_v1(&ops, origin, styles),
+        let mut authority = match &self.mode {
+            WorkbookMode::Collaborative { structure } => built.stage_replica_ops_v1(
+                &ops,
+                origin,
+                styles,
+                baseline,
+                (&self.model, &structure.sheet_keys),
+            ),
+            WorkbookMode::Standalone => {
+                built.stage_standalone_ops_v1(&ops, origin, styles, baseline)
             }
         }
         .map_err(authority_error)?;
@@ -103,6 +107,11 @@ impl Workbook {
                 let mut model = std::mem::take(&mut authority.model);
                 retain_formula_caches(&self.model, &mut model);
                 retain_array_formulas(&self.model, &mut model);
+                self.derive_replica_hidden_sizes(
+                    &mut model,
+                    &authority.structure,
+                    Some(&staged.model),
+                );
                 model
             }
             WorkbookMode::Standalone => staged.model,
