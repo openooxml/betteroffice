@@ -106,6 +106,7 @@ pub(crate) fn is_cell_shape_anchor(
         })
         && position.vertical.as_ref().is_none_or(|axis| {
             matches!(axis.relative_to.as_deref(), None | Some("paragraph" | "line"))
+                && !matches!(axis.align.as_deref(), Some("center" | "bottom"))
         })
 }
 

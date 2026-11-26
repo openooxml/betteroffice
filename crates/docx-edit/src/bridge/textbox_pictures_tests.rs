@@ -924,7 +924,7 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
 fn cell_text_box_centers_across_the_content_width() {
     let drawing = cell_anchor_box(
         "<wp:align>center</wp:align>",
-        "<wp:align>center</wp:align>",
+        "<wp:posOffset>0</wp:posOffset>",
         "<wp:wrapNone/>",
         114300,
     );
@@ -1025,6 +1025,35 @@ fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
         assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
         assert_eq!(shape["y"], table["y"]);
     }
+}
+
+#[test]
+fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin() {
+    for (frame, align) in [
+        ("paragraph", "center"),
+        ("paragraph", "bottom"),
+        ("line", "center"),
+        ("line", "bottom"),
+    ] {
+        let drawing = cell_anchor_box(
+            "<wp:posOffset>914400</wp:posOffset>",
+            &format!("<wp:align>{align}</wp:align>"),
+            "<wp:wrapNone/>",
+            114300,
+        )
+        .replace(r#"relativeFrom="paragraph""#, &format!(r#"relativeFrom="{frame}""#));
+        let (display, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+        let (table, _) = cell_anchor_table(&layout);
+        assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
+        assert_eq!(shape["y"], table["y"]);
+    }
+}
+
+#[test]
+#[ignore = "open question: where Word places a cell text box aligned center or bottom against its paragraph or line"]
+fn paragraph_aligned_cell_text_box_follows_word() {
+    todo!()
 }
 
 #[test]
