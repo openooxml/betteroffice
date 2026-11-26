@@ -513,6 +513,25 @@ fn workbook_path_qualifiers_preserve_cached_formula_results() {
 }
 
 #[test]
+fn a_quoted_workbook_path_keeps_the_saved_value_where_the_release_returned_the_iferror_fallback() {
+    let source = package(
+        concat!(
+            r#"<row r="1"><c r="A1"><v>7</v></c>"#,
+            r#"<c r="B1"><f>IFERROR('C:\Books\Data.xlsx'!A1,0)</f><v>5</v></c>"#,
+            r#"<c r="C1"><f>A1*2</f><v>-1</v></c></row>"#,
+        ),
+        "",
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    assert_eq!(stored(&workbook, "B1").1, number(5.0));
+    assert_eq!(stored(&workbook, "C1").1, number(-1.0));
+
+    workbook.recalculate_all(options());
+    assert_eq!(stored(&workbook, "B1").1, number(5.0));
+    assert_eq!(stored(&workbook, "C1").1, number(14.0));
+}
+
+#[test]
 fn defined_name_range_joins_recalculate_to_the_release_value() {
     for (sheet, qualifier) in [("Data", "Data"), ("Data Set", "'Data Set'")] {
         let formula = format!("SUM(Start_1:{qualifier}!B2)");
