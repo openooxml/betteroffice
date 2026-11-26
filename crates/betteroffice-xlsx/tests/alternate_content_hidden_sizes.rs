@@ -88,10 +88,7 @@ fn collaborative_save_preserves_wrapped_cols_and_rows_after_reset_and_cell_edit(
     );
     let xml =
         format!("{WORKSHEET_START}{WRAPPED_COLS}<sheetData>{WRAPPED_ROW}</sheetData></worksheet>");
-    let source = source_with_worksheet(
-        &xml,
-        vec![Sheet::new("Data"), Sheet::new("Edits")],
-    );
+    let source = source_with_worksheet(&xml, vec![Sheet::new("Data"), Sheet::new("Edits")]);
     let mut workbook = Workbook::open_collaborative(&source, 7).unwrap();
     let sheet = SheetId(0);
     let options = CalculationOptions::default();

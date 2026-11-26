@@ -437,10 +437,7 @@ fn retried_remote_hide_remembers_and_republishes_the_predecessor_height() {
     assert_eq!(sheet.hidden_row_heights.get(&2), Some(&22.0));
 
     apply(&mut target, vec![row_visibility(2, false)]);
-    assert_eq!(
-        target.sheet(DATA).unwrap().row_heights.get(&2),
-        Some(&22.0),
-    );
+    assert_eq!(target.sheet(DATA).unwrap().row_heights.get(&2), Some(&22.0),);
     let update = diff(&target, &delayed);
     receive(&mut delayed, &update);
     assert_eq!(

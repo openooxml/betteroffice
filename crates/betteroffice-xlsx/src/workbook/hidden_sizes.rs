@@ -94,9 +94,9 @@ pub(super) fn derive_source_hidden_sizes(
     source: Option<&WorkbookModel>,
 ) {
     for (sheet, key) in model.sheets.iter_mut().zip(keys) {
-        if let Some(prior) = source.and_then(|source| {
-            base_sheet_index(key).and_then(|index| source.sheets.get(index))
-        }) {
+        if let Some(prior) = source
+            .and_then(|source| base_sheet_index(key).and_then(|index| source.sheets.get(index)))
+        {
             let derive = |shared: &Sizes, hidden: &Sizes, visible: &Sizes| {
                 shared
                     .iter()

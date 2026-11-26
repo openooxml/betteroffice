@@ -2914,9 +2914,7 @@ impl Workbook {
 
             self.ensure_move_keeps_inline_text(&origins, op)?;
             validate_op(staged, op)?;
-            if !collaborative
-                && let Op::SetChartAnchor { sheet, to, .. } = op
-            {
+            if !collaborative && let Op::SetChartAnchor { sheet, to, .. } = op {
                 validate_chart_geometry(staged, require_sheet(staged, *sheet)?, *to)?;
             }
             validate_insert_capacity(staged, op)?;
@@ -4421,11 +4419,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
-            self.derive_replica_hidden_sizes(
-                &mut model,
-                &new_structure,
-                Some(staged.hidden_sizes),
-            );
+            self.derive_replica_hidden_sizes(&mut model, &new_structure, Some(staged.hidden_sizes));
             self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
@@ -6058,9 +6052,9 @@ fn validate_committed_chart_geometry(
 ) -> Result<()> {
     for op in ops {
         if let Op::SetChartAnchor { sheet, frame, .. } = op {
-            let previous = before.sheet(*sheet).and_then(|sheet| {
-                sheet.charts.iter().find(|chart| chart.frame_id() == *frame)
-            });
+            let previous = before
+                .sheet(*sheet)
+                .and_then(|sheet| sheet.charts.iter().find(|chart| chart.frame_id() == *frame));
             let sheet = require_sheet(staged, *sheet)?;
             let chart = sheet
                 .charts
@@ -6075,7 +6069,11 @@ fn validate_committed_chart_geometry(
     Ok(())
 }
 
-fn validate_chart_geometry(model: &WorkbookModel, sheet: &Sheet, anchor: ChartAnchor) -> Result<()> {
+fn validate_chart_geometry(
+    model: &WorkbookModel,
+    sheet: &Sheet,
+    anchor: ChartAnchor,
+) -> Result<()> {
     resolve_chart_anchor(anchor, &GridGeometry::new(sheet, &model.styles), 0, 0)
         .map_err(|error| Error::InvalidOperation(error.to_string()))?;
     Ok(())
