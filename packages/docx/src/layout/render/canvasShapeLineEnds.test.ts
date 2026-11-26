@@ -12,9 +12,9 @@ test('connector line ends follow the first and last nonzero tangents', async () 
     { type: 'move', x: 0, y: 0 },
     { type: 'cubic', cp1x: 50, cp1y: 0, cp2x: 100, cp2y: 40, x: 100, y: 80 },
   ];
-  for (const [geometryPath, height, expected] of [
-    [bent, 0, [[[0, 0], [8, 4], [8, -4]], [[100, 0], [92, -4], [92, 4]]]],
-    [curved, 80, [[[0, 0], [8, 4], [8, -4]], [[100, 80], [104, 72], [96, 72]]]],
+  for (const [shapeType, geometryPath, height, expected] of [
+    ['bentConnector2', bent, 0, [[[0, 0], [8, 4], [8, -4]], [[100, 0], [92, -4], [92, 4]]]],
+    ['curvedConnector2', curved, 80, [[[0, 0], [8, 4], [8, -4]], [[100, 80], [104, 72], [96, 72]]]],
   ] as const) {
     let path: number[][] = [];
     const filled: number[][][] = [];
@@ -31,7 +31,7 @@ test('connector line ends follow the first and last nonzero tangents', async () 
       fill() { filled.push(path); },
     } as unknown as CanvasRenderingContext2D;
     await drawPrimitive(ctx, {
-      kind: 'shape', x: 0, y: 0, w: 100, h: height, geometryPath,
+      kind: 'shape', shapeType, x: 0, y: 0, w: 100, h: height, geometryPath,
       fillPaint: { kind: 'none' },
       strokePaint: { width: 2, headEnd: { type: 'triangle' }, tailEnd: { type: 'triangle' } },
     });
