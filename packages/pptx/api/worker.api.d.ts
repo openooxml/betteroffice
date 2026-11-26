@@ -985,6 +985,11 @@ export type PresentationCommandPayloads = {
         cancelled?: boolean;
         at?: PresentationCommandSelectionReference;
     };
+    compositionUpdate: PresentationCommandTextInput & {
+        compositionId: string;
+        text: string;
+        style?: TextStyle;
+    };
     compositionCommit: PresentationCommandTextInput & {
         compositionId: string;
         text: string;
@@ -1018,6 +1023,7 @@ export declare const PRESENTATION_COMMAND_ADMISSION: Readonly<{
     readonly deleteForward: "local-write";
     readonly paragraphBreak: "local-write";
     readonly compositionStart: "local-write";
+    readonly compositionUpdate: "local-write";
     readonly compositionCommit: "local-write";
     readonly activateSlide: "view";
     readonly selectObject: "view";

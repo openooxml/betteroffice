@@ -187,6 +187,8 @@ class FakeCommandClient implements PresentationCommandClient {
   refuse?: (intent: PresentationCommandEnvelope) => PresentationCommandAck['outcomes'][number]['reason'];
   readonly versions = new Map<string, number>([['v0', 0]]);
   readonly mutations: { seq: number; from: number; to: number; length: number }[] = [];
+  /** Stage text each open composition has put in the story. */
+  readonly compositions = new Map<string, { from: number; text: string }>();
   readonly outcomes = new Map<number, PresentationCommandAck['outcomes'][number]>();
   readonly sent: PresentationCommandEnvelope[] = [];
   readonly replies = new Map<number, ReturnType<typeof deferred<PresentationCommandAck>>>();
@@ -247,16 +249,27 @@ class FakeCommandClient implements PresentationCommandClient {
       }
       else if (intent.kind === 'moveSelection') selected = pptxWorker.navigateGeometry(
         pptxWorker.indexGeometry(pptxWorker.decodeCommandDisplayList(this.state.frame)), selected, intent.payload.motion, intent.payload.extend, this.text);
-      else if (intent.kind === 'insertText' || intent.kind === 'replaceText' || intent.kind === 'compositionCommit') {
+      else if (intent.kind === 'insertText' || intent.kind === 'replaceText' || intent.kind === 'compositionUpdate' ||
+        intent.kind === 'compositionCommit') {
         const reference = intent.payload.at;
         const original = reference.source === 'confirmed' ? reference.selection : this.selections.get(reference.seq);
         const at = original && this.rebase(original, reference.source === 'confirmed' ? basis : reference.seq);
         if (!at) throw new Error('Expected mutation selection result');
-        const from = Math.min(at.anchor, at.focus);
-        const to = Math.max(at.anchor, at.focus);
+        const stage = 'compositionId' in intent.payload ? this.compositions.get(intent.payload.compositionId) : undefined;
+        if (intent.kind === 'compositionCommit') this.compositions.delete(intent.payload.compositionId);
+        if (intent.kind === 'compositionCommit' && stage?.text === intent.payload.text) {
+          this.selections.set(sequence, selected?.kind === 'object' ? null : selected);
+          const outcome: PresentationCommandAck['outcomes'][number] = { seq: sequence, status: 'noop', committed: false };
+          outcomes.push(outcome);
+          this.outcomes.set(sequence, outcome);
+          continue;
+        }
+        const from = stage ? stage.from : Math.min(at.anchor, at.focus);
+        const to = stage ? stage.from + stage.text.length : Math.max(at.anchor, at.focus);
+        if (intent.kind === 'compositionUpdate') this.compositions.set(intent.payload.compositionId, { from, text: intent.payload.text });
         if (from < 0 || to > this.text.length) throw new Error('Expected valid text offsets');
         this.text = this.text.slice(0, from) + intent.payload.text + this.text.slice(to);
-        const focus = Math.min(at.anchor, at.focus) + intent.payload.text.length;
+        const focus = from + intent.payload.text.length;
         selected = { ...at, anchor: focus, focus };
         this.mutations.push({ seq: sequence, from, to, length: intent.payload.text.length });
         version = `v${sequence}`;
@@ -1395,15 +1408,16 @@ async function checkEchoStyle(
     calls(canvas).length = 0;
     let pending: Promise<PresentationCommandAck | null>;
     if (kind === 'compositionCommit') {
+      // The stage is an engine edit: nothing is echoed, the story holds the stage text once the stage is
+      // acknowledged, and the matching commit changes nothing.
       store.updateComposition(text);
-      const preview = store.getSnapshot();
-      const recorded = [...calls(canvas)];
+      expect(store.getSnapshot().echo).toBeNull();
+      await store.fence();
+      expect((await value.savedParagraphs()).join('\n').slice(Math.min(position, focus), Math.min(position, focus) + text.length)).toBe(text);
       pending = commitComposition(store, text, 100);
       const ack = await pending;
-      expect(ack?.outcomes.some((outcome) => outcome.committed)).toBe(true);
+      expect(ack?.outcomes).toMatchObject([{ status: 'noop', committed: false }]);
       expect((await value.savedParagraphs()).join('\n').slice(Math.min(position, focus), Math.min(position, focus) + text.length)).toBe(text);
-      calls(canvas).splice(0, calls(canvas).length, ...recorded);
-      expectEchoStyle(canvas, preview, ack!.frame!, Math.min(position, focus), text);
     } else {
       const at = { source: 'confirmed' as const, selection: { ...textSelection(store.getSnapshot().selection), anchor: position, focus } };
       pending = store.dispatch({ kind, payload: { at, text, style, inputTime: 100, undoGroup: 'echo-style' } });
@@ -1653,8 +1667,10 @@ test('echo_allowlist_composition_preview_rejects_inherited_transforms', async ()
       calls(canvas).length = 0;
       store.updateComposition('a');
       expectNoEcho(canvas, store.getSnapshot());
+      await store.fence();
+      expect(await value.savedParagraphs()).toEqual(['alphaAa']);
       const ack = await commitComposition(store, 'a', 102);
-      expect(ack?.outcomes.some((outcome) => outcome.committed)).toBe(true);
+      expect(ack?.outcomes).toMatchObject([{ status: 'noop', committed: false }]);
       expect(await value.savedParagraphs()).toEqual(['alphaAa']);
     } finally { dispose(); await value.dispose(); }
   }
@@ -2096,9 +2112,10 @@ test('p5_refused_field_commit_allows_later_plain_composition', async () => {
     });
     await held;
     await act(async () => { value.release(); await value.flush(); });
-    const commit = value.sent.find((intent) => intent.kind === 'compositionCommit');
-    if (!commit) throw new Error('Expected composition commit');
-    expect(value.outcomes.get(commit.seq)).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
+    // The first stage is the edit the field refuses.
+    const stage = value.sent.find((intent) => intent.kind === 'compositionUpdate');
+    if (!stage) throw new Error('Expected composition stage');
+    expect(value.outcomes.get(stage.seq)).toMatchObject({ status: 'refused', reason: 'unsupported', committed: false });
     const plain = paints[paints.length - 1].displayList.primitives.find((primitive) =>
       primitive.kind === 'textBox' && primitive.lines.some((line) => line.runs.map((run) => run.text).join('') === 'abc'));
     if (plain?.kind !== 'textBox') throw new Error('Expected plain text box');
@@ -2114,10 +2131,13 @@ test('p5_refused_field_commit_allows_later_plain_composition', async () => {
     });
     await act(async () => { await value.flush(); });
     expect(await value.savedParagraphs()).toEqual(['A12B', 'abc語']);
-    expect(value.outcomes.get(value.sent[value.sent.length - 2].seq)).toMatchObject({ status: 'applied', committed: true });
+    // The later stage is the edit; its commit matches it and changes nothing.
+    expect(value.outcomes.get(value.sent[value.sent.length - 3].seq)).toMatchObject({ status: 'applied', committed: true });
+    expect(value.outcomes.get(value.sent[value.sent.length - 2].seq)).toMatchObject({ status: 'noop', committed: false });
     expect(value.errors.mock.calls.map(([error]) => error)).toMatchObject([
-      { cause: { operation: 'compositionCommit', outcome: { reason: 'unsupported' } } },
+      { cause: { operation: 'compositionUpdate', outcome: { reason: 'unsupported' } } },
       { cause: { operation: 'compositionEnd', outcome: { reason: 'dependency-refused' } } },
+      { cause: { operation: 'compositionCommit', outcome: { reason: 'dependency-refused' } } },
     ]);
   } finally { await value.dispose(); }
 });
@@ -2581,6 +2601,11 @@ describe('peerless caret blink', () => {
     return { ...frame, displayList: new TextEncoder().encode(JSON.stringify(list)).buffer };
   }
 
+  /** Installs the engine frame for the last stage edit: the stage text is in the story, not echoed. */
+  async function settleStage(client: FakeCommandClient): Promise<void> {
+    await act(async () => { client.ack(client.sent.length, coveringFrame(client, client.text, client.sent.length)); });
+  }
+
   function caret(view: ReturnType<typeof render>): HTMLElement {
     const element = view.queryByTestId('pptx-caret');
     expect(element?.style.visibility).toBe('visible');
@@ -2668,10 +2693,12 @@ describe('peerless caret blink', () => {
     await act(async () => { echoed.client.ack(2, coveringFrame(echoed.client, echoed.client.text, 2)); });
     await advance(530);
     await act(async () => { compose(echoed.input, 'compositionupdate', 'a'); });
+    await settleStage(echoed.client);
     expect(echoCaret.style.left).toBe('50px');
     expect(echoCaret.style.visibility).toBe('visible');
     await advance(400);
     await act(async () => { compose(echoed.input, 'compositionupdate', 'ab'); });
+    await settleStage(echoed.client);
     expect(echoCaret.style.left).toBe('60px');
     const compositionCounts = paintingCounts();
     await advance(130);
@@ -2752,10 +2779,9 @@ describe('peerless caret blink', () => {
     await act(async () => { value.client.ack(4, coveringFrame(value.client, value.client.text, 4)); });
     calls(value.canvas).length = 0;
     await act(async () => { compose(value.input, 'compositionupdate', 'a'); });
-    expect(calls(value.canvas).filter((entry) => entry.kind === 'fillText')
-      .map((entry) => entry.args[0]).join('')).toBe('aaabc');
-    expect(calls(value.canvas).some((entry) => entry.kind === 'fillRect'
-      && entry.args.join(',') === '40,57,10,1')).toBe(true);
+    expect(calls(value.canvas).some((entry) => entry.kind === 'fillText')).toBe(false);
+    await settleStage(value.client);
+    expect(value.client.text).toBe('aaabc');
     expect(kinds(caretStrokes())).toEqual([]);
   });
 
@@ -2808,6 +2834,7 @@ describe('peerless caret blink', () => {
     await advance(530);
     await act(async () => { compose(value.input, 'compositionupdate', 'a'); });
     expect(echoViews[echoViews.length - 1].composition?.text).toBe('a');
+    await settleStage(value.client);
     expectLine(50);
     const counts = paintingCounts();
     await advance(530);

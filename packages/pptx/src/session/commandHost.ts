@@ -125,7 +125,9 @@ export function registerPresentationCommandHandlers(
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
     | { kind: 'object'; object: PresentationCommandObjectSelection }
     | { kind: 'transform'; object: PresentationCommandObjectSelection; rect: ShapeRect; move: boolean }
-    | { kind: 'history'; direction: 'undo' | 'redo'; receipt?: PresentationHistoryReceipt }
+    | { kind: 'history'; direction: 'undo' | 'redo'; receipt?: PresentationHistoryReceipt;
+      /** A cancelled composition over a selection: the selection its undone stages give back. */
+      restore?: PresentationCommandSelection }
     | { kind: 'activation'; slideId: string }
     | { kind: 'mode'; readOnly: boolean }
     | { kind: 'selection'; selection: PresentationCommandSelection | null }
@@ -201,7 +203,11 @@ export function registerPresentationCommandHandlers(
   const storedMarks: TextStyle = {};
   const draftStyles = new Map<string, TextStyleSnapshot>();
   let lastEditState: PresentationCommandEditState | undefined;
-  let composition: { id: string; selection: PresentationCommandSelection; committed: boolean } | undefined;
+  let composition: {
+    id: string; selection: PresentationCommandSelection; committed: boolean; inserted: string;
+    /** Length of the selection the first stage replaced, while the stages are still the last local undo step. */
+    replaced?: number;
+  } | undefined;
   let typing: { target: string; group: string; time: number; kind: string; position: number } | undefined;
   let initialUpdate = false;
   let historyThroughSeq = 0;
@@ -1263,7 +1269,7 @@ export function registerPresentationCommandHandlers(
       return { kind: 'format', selection: { ...at }, patch: resolved };
     }
     if (at.kind === 'shape') return 'unsupported';
-    if (command.kind === 'compositionStart' || command.kind === 'compositionCommit') {
+    if (command.kind === 'compositionStart' || command.kind === 'compositionUpdate' || command.kind === 'compositionCommit') {
       if (typeof command.payload.compositionId !== 'string' || command.payload.compositionId.length === 0) {
         return 'invalid-payload';
       }
@@ -1284,6 +1290,7 @@ export function registerPresentationCommandHandlers(
     switch (command.kind) {
       case 'insertText':
       case 'replaceText':
+      case 'compositionUpdate':
       case 'compositionCommit':
         text = command.payload.text;
         style = command.payload.style;
@@ -1317,10 +1324,25 @@ export function registerPresentationCommandHandlers(
       default:
         return 'invalid-payload';
     }
+    if (command.kind === 'compositionUpdate' || command.kind === 'compositionCommit') {
+      const range = compositionRange(story.text, start, end);
+      if (!range) return 'invalid-composition';
+      [start, end] = range;
+      if (command.kind === 'compositionCommit' && start < end && text === composition!.inserted) {
+        return { kind: 'text', selection: { ...at }, start: end, end, text: '' };
+      }
+      // Cancelling stages typed over a selection undoes them, so the selected text comes back with its formatting.
+      const replaced = composition!.replaced;
+      if (command.kind === 'compositionCommit' && text === '' && start < end && replaced && presentation().canUndo()) {
+        const restore = { ...composition!.selection, anchor: start, focus: start + replaced, affinity: 'downstream' as const };
+        delete restore.goalX;
+        return { kind: 'history', direction: 'undo', restore };
+      }
+    }
     if (!validText(text) || story.text.length - (end - start) + text.length > 0xfffffffe) {
       return 'invalid-payload';
     }
-    if (command.kind === 'compositionCommit' && text === '') {
+    if (command.kind === 'compositionCommit' && text === '' && start === end) {
       return { kind: 'text', selection: { ...at }, start, end, text };
     }
     const cached = stories.get(storyKey(at))!;
@@ -1356,7 +1378,7 @@ export function registerPresentationCommandHandlers(
     }
     let inheritMarks = false;
     if (style === undefined && (command.kind === 'insertText' || command.kind === 'replaceText' ||
-      command.kind === 'compositionCommit')) {
+      command.kind === 'compositionUpdate' || command.kind === 'compositionCommit')) {
       inheritMarks = true;
       style = { ...DEFAULT_EDITOR_TEXT_STYLE,
         ...Object.fromEntries(Object.entries(formattingAt(at).formatting)
@@ -1424,9 +1446,26 @@ export function registerPresentationCommandHandlers(
     while (selections.size > 256) selections.delete(selections.keys().next().value!);
   }
 
+  /**
+   * The range a composition stage replaces. Before any stage text is in the story it is the command's own (rebased,
+   * confirmed) range; after that it is the stage text inserted at the composition's start, refused when that text is no
+   * longer there (a remote edit changed it).
+   */
+  function compositionRange(text: string, start: number, end: number): [number, number] | null {
+    const { selection: captured, inserted } = composition!;
+    if (inserted === '') return [start, end];
+    const from = Math.min(captured.anchor, captured.focus);
+    return text.slice(from, from + inserted.length) === inserted ? [from, from + inserted.length] : null;
+  }
+
   function apply(command: PresentationCommandEnvelope, admitted: Admission): boolean {
     const opened = presentation();
     if (admitted.kind === 'noop') return false;
+    // Any other local write leaves the stages behind it in the undo history, so a cancel can no longer undo them.
+    if (composition?.replaced && PRESENTATION_COMMAND_ADMISSION[command.kind] === 'local-write' &&
+      command.kind !== 'compositionUpdate' && command.kind !== 'compositionCommit' && command.kind !== 'registerFont') {
+      composition.replaced = undefined;
+    }
     if (admitted.kind === 'remote') {
       const selected = selection ? anchor(selection) : null;
       const composed = composition ? anchor(composition.selection) : null;
@@ -1458,8 +1497,17 @@ export function registerPresentationCommandHandlers(
       if (!result.applied) return false;
       admitted.receipt = result;
       typing = undefined;
-      composition = undefined;
-      selection = null;
+      const restore = admitted.restore;
+      if (restore && composition) {
+        // The composition stays open until its end, with nothing of its own left in the story.
+        composition = { ...composition, selection: { ...restore, focus: restore.anchor }, inserted: '', replaced: undefined,
+          committed: true };
+        selection = { ...restore };
+        activeSlideId = restore.slideId;
+      } else {
+        composition = undefined;
+        selection = null;
+      }
       objectSelection = null;
       clearMarks();
       return true;
@@ -1543,6 +1591,7 @@ export function registerPresentationCommandHandlers(
       return true;
     }
     if (admitted.kind === 'compositionEnd') {
+      if (composition?.inserted) opened.addUndoBoundary();
       composition = undefined;
       return false;
     }
@@ -1576,7 +1625,7 @@ export function registerPresentationCommandHandlers(
       if (marksAt(admitted.selection) !== storedMarks) clearMarks();
       selection = admitted.selection;
       activeSlideId = selection.slideId;
-      composition = { id: admitted.id, selection: { ...selection }, committed: false };
+      composition = { id: admitted.id, selection: { ...selection }, committed: false, inserted: '' };
       return false;
     }
     if (admitted.kind === 'format' || admitted.kind === 'alignment') {
@@ -1601,10 +1650,11 @@ export function registerPresentationCommandHandlers(
     const at = admitted.selection;
     objectSelection = null;
     if (marksAt(at) !== storedMarks) clearMarks();
-    if (command.kind === 'compositionCommit' && text === '') {
+    if (command.kind === 'compositionCommit' && text === '' && start === end) {
       composition!.committed = true;
       return false;
     }
+    const composing = command.kind === 'compositionUpdate' || command.kind === 'compositionCommit';
     if (start !== end || text.length > 0) {
       const joinsParagraphs = stories.get(storyKey(at))!.text.paragraphs
         .some((paragraph) => start <= paragraph.end && paragraph.end < end);
@@ -1612,7 +1662,9 @@ export function registerPresentationCommandHandlers(
         (command.kind === 'insertText' || command.kind === 'deleteBackward' || command.kind === 'deleteForward');
       const time = command.payload.inputTime!;
       const group = command.payload.undoGroup!;
-      if (!grouped || !typing || typing.target !== storyKey(at) || typing.group !== group ||
+      if (composing) {
+        if (composition!.inserted === '') { typing = undefined; opened.addUndoBoundary(); }
+      } else if (!grouped || !typing || typing.target !== storyKey(at) || typing.group !== group ||
         typing.kind !== command.kind || time < typing.time || time - typing.time >= 500 ||
         at.anchor !== typing.position || at.focus !== typing.position) opened.addUndoBoundary();
       if (end > start) {
@@ -1631,12 +1683,19 @@ export function registerPresentationCommandHandlers(
           offset += paragraph.length;
         }
       }
-      if (grouped) typing = { target: storyKey(at), group, time, kind: command.kind, position: start + text.length };
+      if (composing) typing = undefined;
+      else if (grouped) typing = { target: storyKey(at), group, time, kind: command.kind, position: start + text.length };
       else { opened.addUndoBoundary(); typing = undefined; }
     }
     selection = { ...at, anchor: start + text.length, focus: start + text.length, affinity: 'downstream' };
     delete selection.goalX;
     activeSlideId = at.slideId;
+    if (composing) {
+      if (composition!.inserted === '') composition!.replaced = end > start && text !== '' ? end - start : undefined;
+      composition!.inserted = text;
+      composition!.selection = { ...at, anchor: start, focus: start, affinity: 'downstream' };
+      delete composition!.selection.goalX;
+    }
     if (command.kind === 'compositionCommit') composition!.committed = true;
     return start !== end || text.length > 0;
   }
@@ -1652,8 +1711,12 @@ export function registerPresentationCommandHandlers(
     if (command.seq !== throughSeq + 1) return ack();
     const admitted = admit(command);
     if (typeof admitted === 'string') {
-      if (command.kind === 'compositionCommit' && composition &&
-        composition.id === command.payload?.compositionId) composition = undefined;
+      if ((command.kind === 'compositionCommit' || command.kind === 'compositionUpdate') && composition &&
+        composition.id === command.payload?.compositionId) {
+        // A refused stage or commit closes the composition; stage text already in the story stays one undo step.
+        if (composition.inserted) presentation().addUndoBoundary();
+        composition = undefined;
+      }
       const outcome: PresentationCommandOutcome = { seq: command.seq,
         status: admitted === 'dependency-refused' ? 'cancelled' : 'refused',
         reason: admitted, committed: false };
@@ -1684,7 +1747,7 @@ export function registerPresentationCommandHandlers(
       if (committed) projection.commit(version);
       if (!versions.has(version) && version !== retainedBasis?.version) versions.set(version, throughSeq);
       const outcome: PresentationCommandOutcome = { seq: command.seq,
-        status: command.kind === 'compositionCommit' && command.payload.text === '' ? 'cancelled'
+        status: command.kind === 'compositionCommit' && command.payload.text === '' && !committed ? 'cancelled'
           : committed || admitted.kind === 'invoke' && admitted.method === 'propose' ||
           admitted.kind === 'format' || admitted.kind === 'alignment' ||
           admitted.kind === 'font' || admitted.kind === 'activation' || admitted.kind === 'selection' || admitted.kind === 'object' || command.kind === 'setReadOnly' ||
