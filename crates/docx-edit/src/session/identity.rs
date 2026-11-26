@@ -191,11 +191,12 @@ impl EditSessionCore {
         &self,
         use_local_provenance: bool,
     ) -> EngineResult<String> {
+        let mut provenance_net = 0;
         let plan = self
             .engine
             .doc()
-            .paragraph_save_plan_with_local_provenance(use_local_provenance);
-        serde_json::to_string(&json!({
+            .paragraph_save_plan_with_local_provenance(use_local_provenance, &mut provenance_net);
+        let mut wire = json!({
             "assignments": plan
                 .assignments
                 .iter()
@@ -258,8 +259,11 @@ impl EditSessionCore {
                 }).collect::<Vec<_>>(),
                 "removed": part.removed,
             })).collect::<Vec<_>>(),
-        }))
-        .map_err(EngineError::message)
+        });
+        if provenance_net > 0 {
+            wire["provenanceNet"] = json!(provenance_net);
+        }
+        serde_json::to_string(&wire).map_err(EngineError::message)
     }
 
     /// Reconciles and publishes the `[owner, paraId]` pairs a save captured,

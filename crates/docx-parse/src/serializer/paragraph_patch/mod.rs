@@ -173,7 +173,7 @@ pub(crate) fn patch_paragraph_v1(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, ParagraphPatchError> {
-    patch_inner(source_paragraph, patch, context).map_err(|failure| ParagraphPatchError {
+    patch_inner(source_paragraph, patch, context, None).map_err(|failure| ParagraphPatchError {
         part: context.part.clone(),
         ordinal: Some(patch.ordinal),
         code: failure.code,
@@ -181,10 +181,143 @@ pub(crate) fn patch_paragraph_v1(
     })
 }
 
+#[doc(hidden)]
+pub struct ParagraphPatchSource {
+    xml: String,
+    scopes: NamespaceScopes,
+}
+
+impl ParagraphPatchSource {
+    pub fn new(xml: String) -> Self {
+        let scopes = NamespaceScopes::new(&xml);
+        Self { xml, scopes }
+    }
+
+    pub fn base_preserving_more_runs(
+        &self,
+        start: usize,
+        base: &ParagraphPatchV1,
+        recorded: &ParagraphPatchV1,
+    ) -> Option<String> {
+        if base.result_sha256 != recorded.result_sha256 {
+            return None;
+        }
+        let context = self.scopes.context("", start);
+        let paragraph = self.xml.get(start..)?;
+        let source = &paragraph[super::s13::element_span(paragraph, &[])?];
+        let (base_xml, base) = preview(source, base, &context)?;
+        let (_, recorded) = preview(source, recorded, &context)?;
+        if base.kept.len() <= recorded.kept.len()
+            || !recorded.kept.keys().all(|run| base.kept.contains_key(run))
+            || base.cell_runs.len() != recorded.cell_runs.len()
+        {
+            return None;
+        }
+        let extra: BTreeSet<_> = base
+            .kept
+            .iter()
+            .filter_map(|(run, &written)| (!recorded.kept.contains_key(run)).then_some(written))
+            .collect();
+        let mut previous_pair = None;
+        for (&base_run, &recorded_run) in base.cell_runs.iter().zip(&recorded.cell_runs) {
+            if previous_pair.replace((base_run, recorded_run)) == Some((base_run, recorded_run)) {
+                continue;
+            }
+            let base_raw = &base.run_properties[base_run];
+            let recorded_raw = &recorded.run_properties[recorded_run];
+            if base_raw != recorded_raw
+                && (!extra.contains(&base_run)
+                    || modeled_run_properties(base_raw)? != modeled_run_properties(recorded_raw)?)
+            {
+                return None;
+            }
+        }
+        Some(base_xml)
+    }
+}
+
+struct Preview {
+    kept: BTreeMap<usize, usize>,
+    cell_runs: Vec<usize>,
+    run_properties: Vec<String>,
+}
+
+fn modeled_run_properties(raw: &str) -> Option<Value> {
+    if raw.is_empty() {
+        Some(Value::Null)
+    } else {
+        verify::formatting(raw, false).ok()
+    }
+}
+
+fn preview(
+    source: &str,
+    patch: &ParagraphPatchV1,
+    context: &PatchContext,
+) -> Option<(String, Preview)> {
+    let mut preview = None;
+    let output = patch_inner(source, patch, context, Some(&mut preview)).ok()?;
+    Some((output, preview?))
+}
+
+impl Preview {
+    fn new(
+        source: &str,
+        before: &lower::Lowered,
+        output: &str,
+        after: &lower::Lowered,
+        patch: &ParagraphPatchV1,
+    ) -> Self {
+        let mut edits = patch.text_edits.iter().peekable();
+        let mut shift = 0;
+        let kept = before
+            .runs
+            .iter()
+            .enumerate()
+            .filter_map(|(original, run)| {
+                while let Some(edit) = edits.next_if(|edit| edit.to <= run.from) {
+                    let inserted = edit
+                        .insert
+                        .iter()
+                        .map(|insert| insert.text.encode_utf16().count() as i64)
+                        .sum::<i64>();
+                    shift += inserted - i64::from(edit.to - edit.from);
+                }
+                if run.from == run.to || edits.peek().is_some_and(|edit| edit.from < run.to) {
+                    return None;
+                }
+                let from = u32::try_from(i64::from(run.from) + shift).ok()?;
+                let to = from.checked_add(run.to - run.from)?;
+                let at = after.runs.partition_point(|candidate| candidate.to <= from);
+                let candidate = after.runs.get(at)?;
+                (candidate.from == from
+                    && candidate.to == to
+                    && source[before.xml.nodes[run.node].span.clone()]
+                        == output[after.xml.nodes[candidate.node].span.clone()])
+                    .then_some((original, at))
+            })
+            .collect();
+        Self {
+            kept,
+            cell_runs: after.cells.iter().map(|cell| cell.run).collect(),
+            run_properties: after
+                .runs
+                .iter()
+                .map(|run| {
+                    run.properties
+                        .map(|at| output[after.xml.nodes[at].span.clone()].to_owned())
+                        .unwrap_or_default()
+                })
+                .collect(),
+        }
+    }
+}
+
 fn patch_inner(
     source: &str,
     patch: &ParagraphPatchV1,
     context: &PatchContext,
+    preview: Option<&mut Option<Preview>>,
 ) -> Result<String, Failure> {
     let mut lowered = lower::lower(
         source,
@@ -251,6 +384,9 @@ fn patch_inner(
         &properties,
         PatchErrorCode::ResultMismatch,
     )?;
+    if let Some(preview) = preview {
+        *preview = Some(Preview::new(source, &lowered, &output, &verified, patch));
+    }
     let actual: Vec<_> = verified.cells.into_iter().map(|cell| cell.unit).collect();
     if !same_content(&actual, &units) {
         return Err(Failure::new(

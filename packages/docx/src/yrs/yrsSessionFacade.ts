@@ -1628,7 +1628,8 @@ export function wrapSession(
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
     paragraphSavePlan: (useLocalProvenance) => {
-      const plan = JSON.parse(session.paragraph_save_plan(useLocalProvenance)) as DocxParagraphSavePlan;
+      const { provenanceNet, ...plan } = JSON.parse(session.paragraph_save_plan(useLocalProvenance)) as
+        DocxParagraphSavePlan & { provenanceNet?: number };
       for (const part of plan.splicedParts ?? []) {
         if (!part.changed.length) continue;
         if (!part.paragraphPatches || !part.legacyParagraphs) {
@@ -1643,6 +1644,9 @@ export function wrapSession(
             'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
           );
         }
+      }
+      if (provenanceNet) {
+        console.debug(`DOCX_MINIMAL_PATCH replace counts ${JSON.stringify({ provenanceNet })}`);
       }
       return plan;
     },

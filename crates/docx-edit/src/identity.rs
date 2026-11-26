@@ -19,6 +19,7 @@
 
 mod unit_matches;
 
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,8 +28,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use docx_parse::paragraph_identity::{
     ParagraphOccurrence, allocate_paragraph_id_where, format_paragraph_id, parse_paragraph_id,
 };
-use docx_parse::paragraph_patch::{InheritanceStateV1, LegacyParagraphV1, ParagraphPatchV1};
-use docx_parse::serializer::S13TablePatch;
+use docx_parse::paragraph_patch::{LegacyParagraphV1, ParagraphPatchV1};
+use docx_parse::serializer::{ParagraphPatchSource, S13TablePatch};
 use ooxml_opc::PackageBytes;
 use yrs::branch::Branch;
 use yrs::types::text::YChange;
@@ -4314,12 +4315,13 @@ impl EditingDoc {
     /// exactly what it gave as seeded (see [`StoryState`]), so that its source
     /// bytes are what a save would write, IDs aside.
     pub fn paragraph_save_plan(&self) -> ParagraphSavePlan {
-        self.paragraph_save_plan_with_local_provenance(true)
+        self.paragraph_save_plan_with_local_provenance(true, &mut 0)
     }
 
     pub(crate) fn paragraph_save_plan_with_local_provenance(
         &self,
         use_local_provenance: bool,
+        provenance_net: &mut u32,
     ) -> ParagraphSavePlan {
         let Some(source) = self.source_index() else {
             return ParagraphSavePlan::default();
@@ -4416,6 +4418,8 @@ impl EditingDoc {
                     .eq(part_stories(&live, part).keys());
                 if part.as_written {
                     let inline_tail = ends_with_inline_tail(seeded, part);
+                    let patch_source = OnceCell::new();
+                    let mut part_provenance_net = 0;
                     let equal = equal_output
                         .get(&index)
                         .into_iter()
@@ -4474,6 +4478,11 @@ impl EditingDoc {
                             metadata: metadata.as_deref(),
                             source_paragraph: Some(&source_paragraph),
                             source: Some(&source),
+                            stale_inheritance: stale.iter().any(|cell| {
+                                story.strip_prefix(cell.as_str()).is_some_and(|rest| {
+                                    rest.is_empty() || rest.starts_with(':')
+                                })
+                            }),
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
@@ -4491,10 +4500,18 @@ impl EditingDoc {
                         };
                         let recorded_patch = equal.or(checked.as_ref()).and_then(|proof| {
                             crate::paragraph_patch_plan::diff_recorded_paragraph(
-                                seeded, live, context, proof,
+                                seeded, live, context, proof, || {
+                                    let start = part.occurrence(ordinal)?.tag.start;
+                                    let source = patch_source
+                                        .get_or_init(|| {
+                                            source.part_xml(part).map(ParagraphPatchSource::new)
+                                        })
+                                        .as_ref()?;
+                                    Some((source, start))
+                                },
                             )
                             .ok()
-                            .filter(|patch| {
+                            .filter(|(patch, _)| {
                                 !inline_tail
                                     || patch.run_edits.is_empty()
                                     || !source.rewrite_loses_source_runs(
@@ -4508,21 +4525,17 @@ impl EditingDoc {
                             spliced.format_only.push(ordinal);
                         }
                         let patch = match recorded_patch {
-                            Some(patch) => Ok(patch),
+                            Some((patch, used_base)) => {
+                                part_provenance_net += u32::from(used_base);
+                                Ok(patch)
+                            }
                             None if equal.is_some() => continue,
                             None => {
                                 crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
                             }
                         };
                         match patch {
-                            Ok(mut patch) => {
-                                if stale.iter().any(|cell| {
-                                    story.strip_prefix(cell.as_str()).is_some_and(|rest| {
-                                        rest.is_empty() || rest.starts_with(':')
-                                    })
-                                }) {
-                                    patch.inheritance = InheritanceStateV1::Unknown;
-                                }
+                            Ok(patch) => {
                                 if equal.is_some() {
                                     equal_patches.push(patch);
                                 } else {
@@ -4569,6 +4582,7 @@ impl EditingDoc {
                             spliced.changed.sort_unstable();
                             spliced.paragraph_patches.sort_unstable_by_key(|patch| patch.ordinal);
                         }
+                        *provenance_net += part_provenance_net;
                         plan.spliced_parts.push(spliced);
                     }
                 } else {

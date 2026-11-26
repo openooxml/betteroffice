@@ -43,6 +43,8 @@ pub use paragraph_ids::{
     S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart, S13TablePatch,
 };
 pub use paragraph_patch::language::patch_style_languages;
+#[doc(hidden)]
+pub use paragraph_patch::ParagraphPatchSource;
 pub use parts::{
     CommentParaInfo, serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_part, serialize_comments_with_info,

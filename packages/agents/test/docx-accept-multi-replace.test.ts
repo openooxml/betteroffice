@@ -182,13 +182,33 @@ test('preserves untouched runs between replacements when every run has the same 
     expectRuns(paragraph, [runs[0]!, ...runs.slice(2, 6)], contractorExpected.map(([text]): RunText => [text, false])));
 }, 30_000);
 
-test('patches each replaced run when recorded edits resolve ambiguous alignment', async () => {
-  const untouched = run(2, 'X', true);
-  await checkProposal([run(1, 'ABCD'), untouched, run(3, 'efgh')], [
-    { query: 'ABCD', newText: 'e-f-g-h' }, { query: 'efgh', newText: 'ABCD' },
-  ], paragraph => expectRuns(paragraph, [untouched], [
-    ['e-f-g-h', false], ['X', true], ['ABCD', false],
-  ]));
+for (const tail of ['efgh', 'efghk']) {
+  test(`recorded replacements preserve the middle run with ${tail} as the final source run`, async () => {
+    const untouched = run(2, 'X', true);
+    const expanded = [...tail].join('-');
+    const doc = await openDocx(await fixture([run(1, 'ABCD'), untouched, run(3, tail)]));
+    try {
+      const edits = [{ query: 'ABCD', newText: expanded }, { query: tail, newText: 'ABCD' }].map(
+        ({ query, newText }) => ({ match: doc.grep({ query }).matches[0]!.match, newText })
+      );
+      const proposal = doc.propose({ author: 'test', edits });
+      expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false, changes: 2 });
+      await checkExport(() => doc.export(), paragraph => expectRuns(paragraph, [untouched], [
+        [expanded, false], ['X', true], ['ABCD', false],
+      ]));
+      const { baseBytes, basePatched, localPatched } = await compareWithBaseExport(doc, [untouched]);
+      if (tail === 'efghk') expect(basePatched).toContain(1);
+      expect(localPatched).toContain(1);
+      expect(runsOf(await documentXml(baseBytes))).not.toContain(untouched);
+    } finally { doc.close(); }
+  }, 30_000);
+}
+
+test('export keeps a source run inside a replaced word when base preserves more', async () => {
+  const untouched = run(2, 'KEEP').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+  await checkProposal([run(1, 'a'), untouched, run(3, 'z')], [{ query: 'aKEEPz', newText: 'bKEEPy' }],
+    paragraph => expectRuns(paragraph, [untouched], [['b', false], ['KEEP', false], ['y', false]]),
+    { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
 }, 30_000);
 
 test('accepts a lone recorded insertion and keeps the untouched run byte-identical', async () => {

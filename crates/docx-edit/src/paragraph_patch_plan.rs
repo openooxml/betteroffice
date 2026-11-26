@@ -8,6 +8,7 @@ use docx_parse::paragraph_patch::{
     LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
     UnitV1, canonical_json_v1, result_sha256, unit_sha256,
 };
+use docx_parse::serializer::ParagraphPatchSource;
 use serde_json::{Value, json};
 use yrs::Any;
 
@@ -22,6 +23,7 @@ pub(crate) struct PatchContext<'a> {
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
     pub source_paragraph: Option<&'a dyn Fn() -> Option<String>>,
     pub source: Option<&'a crate::identity::SourceIndex>,
+    pub stale_inheritance: bool,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -1420,20 +1422,31 @@ pub(crate) fn unproven_paragraph(ordinal: u32) -> LegacyParagraphV1 {
     }
 }
 
-pub(crate) fn diff_recorded_paragraph(
+pub(crate) fn diff_recorded_paragraph<'a>(
     seeded: &[StorySegment],
     live: &[StorySegment],
     context: PatchContext<'_>,
     proof: &Proof,
-) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
-    plan_paragraph(
+    patch_source: impl FnOnce() -> Option<(&'a ParagraphPatchSource, usize)>,
+) -> Result<(ParagraphPatchV1, bool), LegacyParagraphV1> {
+    let recorded = plan_paragraph(
         seeded,
         live,
         context,
         RunRules::Full,
         &Cell::new(false),
         Some(proof),
-    )
+    )?;
+    if let Ok(base) = diff_paragraph_v1(seeded, live, context)
+        && base != recorded
+        && let Some((source, start)) = patch_source()
+        && source
+            .base_preserving_more_runs(start, &base, &recorded)
+            .is_some()
+    {
+        return Ok((base, true));
+    }
+    Ok((recorded, false))
 }
 
 struct RecordedEdit {
@@ -1974,7 +1987,7 @@ fn plan_paragraph(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
-        inheritance: if context.metadata.is_some() {
+        inheritance: if context.metadata.is_some() && !context.stale_inheritance {
             InheritanceStateV1::Current
         } else {
             InheritanceStateV1::Unknown
@@ -2125,6 +2138,7 @@ mod tests {
             metadata: None,
             source_paragraph: None,
             source: None,
+            stale_inheritance: false,
             seeded_markers: &[],
             live_markers: &[],
         }
@@ -2254,6 +2268,52 @@ mod tests {
     }
 
     #[test]
+    fn base_replaces_a_recorded_whole_word_only_if_the_extra_run_keeps_its_formatting() {
+        let seeded = paragraph("aKEEPz", json!({}));
+        let live = paragraph("bKEEPy", json!({}));
+        let proof = Proof {
+            seed_width: 6,
+            live_width: 6,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 0,
+                to: 6,
+                live_from: 0,
+                live_to: 6,
+                donor: DonorV1::At { at: 0 },
+            }],
+        };
+        let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
+        let (recorded, _) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap();
+        assert_eq!(recorded.text_edits.len(), 1);
+        assert_eq!(base.text_edits.len(), 2);
+
+        for (kept_property, last_property, uses_base) in [
+            ("<w:noProof/>", "", true),
+            ("<w:rtl/>", "", false),
+            ("<w:noProof/>", "<w:rPr><w:noProof/></w:rPr>", false),
+        ] {
+            let keep = format!("<w:r><w:rPr>{kept_property}</w:rPr><w:t>KEEP</w:t></w:r>");
+            let source = ParagraphPatchSource::new(format!(
+                "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>a</w:t></w:r>{keep}<w:r>{last_property}<w:t>z</w:t></w:r></w:p>"
+            ));
+            let (patch, used_base) =
+                diff_recorded_paragraph(&seeded, &live, context(), &proof, || Some((&source, 0)))
+                    .unwrap();
+            assert_eq!(used_base, uses_base, "{kept_property} {last_property}");
+            if uses_base {
+                assert_eq!(patch, base);
+                let xml = source
+                    .base_preserving_more_runs(0, &patch, &recorded)
+                    .unwrap();
+                assert!(xml.contains(&keep));
+            } else {
+                assert_eq!(patch, recorded);
+            }
+        }
+    }
+
+    #[test]
     fn reversed_recorded_ranges_do_not_produce_a_patch() {
         let seeded = paragraph("abc", json!({}));
         let live = paragraph("aXc", json!({}));
@@ -2268,7 +2328,7 @@ mod tests {
                 donor: DonorV1::At { at: 0 },
             }],
         };
-        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof).unwrap_err();
+        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
         assert_eq!(error, unproven_paragraph(0));
     }
 
@@ -2295,7 +2355,7 @@ mod tests {
         let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
         assert_eq!(base.run_edits.len(), 1);
         assert_eq!(base.text_edits.len(), 1);
-        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof).unwrap_err();
+        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
         assert_eq!(error, unproven_paragraph(0));
     }
 
