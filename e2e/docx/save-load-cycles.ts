@@ -14,7 +14,7 @@ const CYCLES = 10;
 export const saveLoadCycles: DocxScenario = {
   name: 'save-load-cycles',
   description:
-    'Ten rounds of type, project, repack and reopen in a fresh session, checking every earlier marker survives and file growth stays bounded while recording save/open timings.',
+    'Ten rounds of type, save and reopen in a fresh session, checking every earlier marker survives and file growth stays bounded while recording save/open timings.',
   participants: ['web'],
   async run({ recorder, open }) {
     let editor = await recorder.loadAsync(() => open());
