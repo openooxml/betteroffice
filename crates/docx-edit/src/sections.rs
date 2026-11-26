@@ -6,6 +6,7 @@ use yrs::{Any, Map, Out, ReadTxn, Text};
 use crate::{EditCtx, EditingDoc, map_string, story_ref};
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "wasm", derive(serde::Deserialize))]
 #[serde(rename_all = "camelCase")]
 pub struct SectionInfo {
     pub closing_paragraph_id: String,

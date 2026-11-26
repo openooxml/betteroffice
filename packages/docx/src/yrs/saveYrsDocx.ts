@@ -474,7 +474,7 @@ async function sectionSavePlan(
 ): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
   const source = sessionMaterializedSource(session);
   if (!source) {
-    observeInput?.(source);
+    observeInput?.(source, []);
     return undefined;
   }
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
@@ -495,13 +495,14 @@ async function sectionSavePlan(
   const structural = plannedSplices.some(part => part.inserted?.length || part.removed?.length);
   const contiguous = sourceParagraphs.every((paragraph, index) => (paragraph.sourceOrdinal ?? index) === index);
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
-  const sectionChanges = session.listSections?.().some(section => {
+  const sections = session.listSections?.() ?? [];
+  const sectionChanges = sections.some(section => {
     const before = section.closingParagraphId === 'final' ? source.package.document.finalSectionProperties ?? {}
       : byOrdinal.get(originalByKey.get(section.closingParagraphId) ?? -1)?.sectionProperties;
     return !sectionPropertiesEqual(before, section.authored);
   });
   if (!sectionChanges) {
-    observeInput?.(source);
+    observeInput?.(source, sections);
     return undefined;
   }
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
@@ -513,7 +514,7 @@ async function sectionSavePlan(
   const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
   await preloadOpcWasm();
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
-  observeInput?.(source, bytes);
+  observeInput?.(source, sections, bytes);
   const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
   const ordinary = (message: string) => {
     if (lossy()) throw new DocxSectionError('unsupported', message);
@@ -633,7 +634,7 @@ export async function writeSessionSave(
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
   const sectionPlan = options.commentDeletion ? undefined : await (
-    sectionSavePlanTestSeam.hook?.check(session, output, capture, sourceBuffer, !!options.useLocalProvenance)
+    sectionSavePlanTestSeam.hook?.check(session, output, capture, sourceBuffer)
     ?? sectionSavePlan(session, output, capture, sourceBuffer)
   );
   if (yieldSave) await yieldSave();

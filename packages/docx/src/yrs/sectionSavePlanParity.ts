@@ -4,6 +4,7 @@ import { relative } from 'node:path';
 import type { RustParagraphIds } from '../docx/rustSaveFacade';
 import { withSessionRevisionIds } from '../docx/sessionRevisionIds';
 import type { BlockContent, Document, DocumentBody } from '../types/document';
+import { engineKind } from '../wasm/engineEdit';
 import type { YrsSession } from './index';
 import { withPartMetadata, type ResidentPartMetadata } from './residentParts';
 import { captureSessionSave, type DocxSessionSave } from './saveYrsDocx';
@@ -18,26 +19,30 @@ type Result = { plan?: Plan; lossy: boolean; strict: boolean } | { error: string
 type NativeSession = EditSession & { section_save_plan_json(input: string): string };
 
 const sessions = new WeakMap<YrsSession, EditSession>();
-const stats = { checked: 0, differences: 0, undefined: 0, plan: 0, ordinary: 0, refusal: 0 };
+const stats = {
+  checked: 0, saveHook: 0, projected: 0, differences: 0, undefined: 0, plan: 0, ordinary: 0, refusal: 0,
+};
 
-afterAll(() => {
-  if (stats.differences > 0) {
-    throw new Error(`Section save plan parity found ${stats.differences} differences`);
-  }
-});
+if (engineKind !== 'native') {
+  afterAll(() => {
+    if (stats.differences > 0) {
+      throw new Error(`Section save plan parity found ${stats.differences} differences`);
+    }
+  });
+
+  sectionSavePlanTestSeam.hook = {
+    attach: (session, raw) => { sessions.set(session, raw); },
+    check: async (session, output, capture, sourceBuffer) => {
+      const { plan, refusal } = await compareSectionPlans(session, output, capture, sourceBuffer, 'saveHook');
+      if (refusal) throw refusal;
+      return plan;
+    },
+  };
+}
 
 export function sectionSavePlanParityStats(): Readonly<typeof stats> {
   return stats;
 }
-
-sectionSavePlanTestSeam.hook = {
-  attach: (session, raw) => { sessions.set(session, raw); },
-  check: async (session, output, capture, sourceBuffer, useLocalProvenance) => {
-    const { plan, refusal } = await compareSectionPlans(session, output, capture, sourceBuffer, useLocalProvenance);
-    if (refusal) throw refusal;
-    return plan;
-  },
-};
 
 function parityTestFile(): string {
   const getState = Reflect.get(expect, 'getState') as (() => { testPath?: string }) | undefined;
@@ -49,18 +54,77 @@ function parityTestFile(): string {
   return file ? relative(process.cwd(), file) : '<unknown>';
 }
 
-function sessionKeys(blocks: readonly BlockContent[], keys: Array<string | null>): void {
-  for (const block of blocks) {
+function sessionKeys(blocks: readonly BlockContent[]): Array<string | null> {
+  const keys: Array<string | null> = [];
+  const pending: BlockContent[] = [];
+  const push = (list: readonly BlockContent[]) => {
+    for (let i = list.length - 1; i >= 0; i--) pending.push(list[i]!);
+  };
+  push(blocks);
+  while (pending.length > 0) {
+    const block = pending.pop()!;
     if (block.type === 'paragraph') keys.push(projectedSessionKey(block) ?? null);
     else if (block.type === 'table') {
-      for (const row of block.rows) for (const cell of row.cells) sessionKeys(cell.content, keys);
-    } else if (block.type === 'blockSdt') sessionKeys(block.content, keys);
+      for (let r = block.rows.length - 1; r >= 0; r--) {
+        const cells = block.rows[r]!.cells;
+        for (let c = cells.length - 1; c >= 0; c--) push(cells[c]!.content);
+      }
+    } else if (block.type === 'blockSdt') push(block.content);
   }
+  return keys;
 }
 
-function s13Body(document: Readonly<Document>): DocumentBody {
+type Path = Array<string | number>;
+type BlockFragment = { parent: number; path: Path; json: string };
+
+function isBlockList(key: string, owner: unknown, path: Path, root: boolean): boolean {
+  const bodyEntry = root && path.length === 2;
+  if (key === 'content') {
+    return (root && path.length === 0) || (bodyEntry && path[0] === 'sections')
+      || owner === 'tableCell' || owner === 'blockSdt';
+  }
+  if (key === 'blockContent') return bodyEntry && path[0] === 'comments';
+  return key === 'blocks' && (
+    path.at(-1) === 'structuredCode' || path.at(-1) === 'structuredResult'
+    || (path.includes('fieldTree') && (path.at(-1) === 'code' || path.at(-1) === 'result'))
+  );
+}
+
+function splitBody(document: DocumentBody): { document: string; blocks: BlockFragment[] } {
+  type Container = Record<string | number, unknown>;
+  const fragments: BlockFragment[] = [];
+  const lists: Array<{ parent: number; path: Path; content: BlockContent[] }> = [];
+  const serialize = (value: DocumentBody | BlockContent[], parent: number): string => {
+    const copy = (value: object) => (Array.isArray(value) ? value.slice() : { ...value }) as Container;
+    const root = copy(value);
+    const pending = [{ copy: root, path: [] as Path }];
+    while (pending.length > 0) {
+      const { copy: current, path } = pending.pop()!;
+      if (current.type === 'run') continue;
+      for (const [key, entry] of Object.entries(current)) {
+        if (Array.isArray(entry) && isBlockList(key, current.type, path, parent === 0)) {
+          lists.push({ parent, path: [...path, key], content: entry as BlockContent[] });
+          current[key] = [];
+        } else if (Array.isArray(entry) || (typeof entry === 'object' && entry !== null && Object.getPrototypeOf(entry) === Object.prototype)) {
+          const child = copy(entry);
+          current[key] = child;
+          pending.push({ copy: child, path: [...path, Array.isArray(current) ? Number(key) : key] });
+        }
+      }
+    }
+    return JSON.stringify(root);
+  };
+  const root = serialize(document, 0);
+  while (lists.length > 0) {
+    const { parent, path, content } = lists.pop()!;
+    fragments.push({ parent, path, json: serialize(content, fragments.length + 1) });
+  }
+  return { document: root, blocks: fragments };
+}
+
+function s13Body(document: Readonly<Document>) {
   const request = { document: document.package.document };
-  return withSessionRevisionIds(request, () => JSON.parse(JSON.stringify(request.document)) as DocumentBody);
+  return withSessionRevisionIds(request, () => splitBody(request.document));
 }
 
 async function referenceResult(
@@ -89,26 +153,26 @@ async function compareSectionPlans(
   output: Document,
   capture: DocxSessionSave,
   sourceBuffer: ArrayBuffer,
-  useLocalProvenance: boolean
+  origin: 'saveHook' | 'projected'
 ) {
   const reportPath = process.env.SECTION_PLAN_PARITY_OUT;
   const testFile = reportPath ? parityTestFile() : undefined;
   const raw = sessions.get(session) as NativeSession | undefined;
   let native: Result | { exception: string } | undefined;
-  const result = await referenceResult(session, output, capture, sourceBuffer, (source, sourcePart) => {
+  const result = await referenceResult(session, output, capture, sourceBuffer, (source, sections, sourcePart) => {
     if (!raw && !source) return;
     try {
       if (!raw) throw new Error('Section parity requires an opened WASM session');
-      const outputSessionKeys: Array<string | null> = [];
-      sessionKeys(output.package.document.content, outputSessionKeys);
       const { metadata } = sectionSavePlanTestSeam.reference!;
       native = JSON.parse(raw.section_save_plan_json(JSON.stringify({
         source: source && s13Body(source),
         output: s13Body(output),
-        outputSessionKeys,
+        outputSessionKeys: sessionKeys(output.package.document.content),
         metadataUnchanged: source !== null && metadata(source) === metadata(output),
         sourcePart: sourcePart === undefined ? null : Array.from(sourcePart),
-        useLocalProvenance,
+        sections,
+        identities: capture.identities,
+        plan: capture.plan,
       }))) as Result;
     } catch (error) {
       native = { exception: String(error) };
@@ -117,6 +181,7 @@ async function compareSectionPlans(
   if (native === undefined) return result;
   const kind = result.refusal ? 'refusal' : !result.plan ? 'undefined' : result.plan.plan ? 'plan' : 'ordinary';
   stats.checked += 1;
+  stats[origin] += 1;
   stats[kind] += 1;
   const expectedJson = stableStringify(result.expected);
   const nativeJson = stableStringify(native);
@@ -155,12 +220,12 @@ function projectPlan(
     yrsToDocument(session, base), capture.identities
   );
   editOutput?.(output);
-  return { output, capture, sourceBuffer, useLocalProvenance };
+  return { output, capture, sourceBuffer };
 }
 
 export async function checkProjectedSectionPlan(session: YrsSession, options?: ProjectedPlanOptions): Promise<Result> {
-  const { output, capture, sourceBuffer, useLocalProvenance } = projectPlan(session, options);
-  return (await compareSectionPlans(session, output, capture, sourceBuffer, useLocalProvenance)).expected;
+  const { output, capture, sourceBuffer } = projectPlan(session, options);
+  return (await compareSectionPlans(session, output, capture, sourceBuffer, 'projected')).expected;
 }
 
 export async function referenceProjectedSectionPlan(session: YrsSession, options?: ProjectedPlanOptions): Promise<Result> {

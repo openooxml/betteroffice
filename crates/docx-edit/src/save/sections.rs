@@ -5,8 +5,6 @@ use std::collections::{HashMap, HashSet};
 use docx_parse::serializer::{SectionEdit, SectionEdits};
 use docx_parse::{BlockContent, DocumentBody, Paragraph, SectionProperties};
 use serde::Serialize;
-#[cfg(any(test, feature = "wasm"))]
-use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -33,12 +31,467 @@ pub(crate) struct SectionPlan {
 pub(crate) struct SectionPlanError(pub(crate) &'static str);
 
 #[cfg(any(test, feature = "wasm"))]
-pub(crate) fn from_json_any_depth<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
-    let mut de = serde_json::Deserializer::from_str(json);
-    de.disable_recursion_limit();
-    let value = T::deserialize(&mut de)?;
-    de.end()?;
-    Ok(value)
+pub(crate) mod transport {
+    use std::sync::Arc;
+
+    use docx_parse::inline::{InlineNode, StructuredFieldContent, StructuredFieldTree};
+    use docx_parse::paragraph::ParagraphContent;
+    use serde::Deserialize;
+
+    use super::{BlockContent, DocumentBody, Paragraph};
+
+    #[derive(Deserialize)]
+    pub(crate) struct BodyFragments {
+        document: String,
+        blocks: Vec<BlockFragment>,
+    }
+
+    #[derive(Deserialize)]
+    struct BlockFragment {
+        parent: usize,
+        path: Vec<PathSegment>,
+        json: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PathSegment {
+        Field(String),
+        Index(usize),
+    }
+
+    struct Path<'a>(&'a [PathSegment]);
+
+    impl<'a> Path<'a> {
+        fn field(&mut self) -> Option<&'a str> {
+            let (PathSegment::Field(field), rest) = self.0.split_first()? else {
+                return None;
+            };
+            self.0 = rest;
+            Some(field)
+        }
+
+        fn index(&mut self) -> Option<usize> {
+            let (PathSegment::Index(index), rest) = self.0.split_first()? else {
+                return None;
+            };
+            self.0 = rest;
+            Some(*index)
+        }
+
+        fn end(&self) -> Option<()> {
+            self.0.is_empty().then_some(())
+        }
+    }
+
+    fn paragraph_slot<'a>(
+        paragraph: &'a mut Paragraph,
+        mut path: Path<'_>,
+    ) -> Option<&'a mut Vec<BlockContent>> {
+        enum Site<'a> {
+            Inline(&'a mut InlineNode),
+            Inlines(&'a mut Vec<InlineNode>),
+            Tree(&'a mut StructuredFieldTree),
+            Field(&'a mut StructuredFieldContent),
+        }
+
+        if path.field()? != "content" {
+            return None;
+        }
+        let mut site = match paragraph.content.get_mut(path.index()?)? {
+            ParagraphContent::Inline(node) => Site::Inline(node),
+            ParagraphContent::Tracked(change) => Site::Inlines(&mut change.content),
+            _ => return None,
+        };
+        loop {
+            site = match (site, path.field()?) {
+                (Site::Inlines(nodes), "content") => Site::Inline(nodes.get_mut(path.index()?)?),
+                (Site::Inline(InlineNode::Tracked(change)), "content") => {
+                    Site::Inline(change.content.get_mut(path.index()?)?)
+                }
+                (Site::Inline(InlineNode::InlineSdt(sdt)), "content") => {
+                    Site::Inline(sdt.content.get_mut(path.index()?)?)
+                }
+                (Site::Inline(InlineNode::Hyperlink(link)), "children") => {
+                    Site::Inline(link.children.get_mut(path.index()?)?)
+                }
+                (Site::Inline(InlineNode::Hyperlink(link)), "structuredChildren") => {
+                    Site::Inline(link.structured_children.as_mut()?.get_mut(path.index()?)?)
+                }
+                (Site::Inline(InlineNode::SimpleField(field)), "structuredResult") => {
+                    Site::Field(field.structured_result.as_mut()?)
+                }
+                (Site::Inline(InlineNode::SimpleField(field)), "fieldTree") => {
+                    Site::Tree(field.field_tree.as_mut()?)
+                }
+                (Site::Inline(InlineNode::ComplexField(field)), "structuredCode") => {
+                    Site::Field(field.structured_code.as_mut()?)
+                }
+                (Site::Inline(InlineNode::ComplexField(field)), "structuredResult") => {
+                    Site::Field(field.structured_result.as_mut()?)
+                }
+                (Site::Inline(InlineNode::ComplexField(field)), "fieldTree") => {
+                    Site::Tree(field.field_tree.as_mut()?)
+                }
+                (Site::Tree(tree), "children") => {
+                    Site::Tree(tree.children.as_mut()?.get_mut(path.index()?)?)
+                }
+                (Site::Tree(tree), "code") => Site::Field(tree.code.as_mut()?),
+                (Site::Tree(tree), "result") => Site::Field(tree.result.as_mut()?),
+                (Site::Field(field), "inline") => {
+                    Site::Inline(field.inline.as_mut()?.get_mut(path.index()?)?)
+                }
+                (Site::Field(field), "blocks") => {
+                    path.end()?;
+                    return field.blocks.as_mut();
+                }
+                _ => return None,
+            };
+        }
+    }
+
+    fn block_slot<'a>(
+        blocks: &'a mut [BlockContent],
+        mut path: Path<'_>,
+    ) -> Option<&'a mut Vec<BlockContent>> {
+        let slot = match blocks.get_mut(path.index()?)? {
+            BlockContent::Table(table) => {
+                if path.field()? != "rows" {
+                    return None;
+                }
+                let row = Arc::get_mut(table)?.rows.get_mut(path.index()?)?;
+                if path.field()? != "cells" {
+                    return None;
+                }
+                &mut row.cells.get_mut(path.index()?)?.content
+            }
+            BlockContent::BlockSdt(sdt) => &mut Arc::get_mut(sdt)?.content,
+            BlockContent::Paragraph(paragraph) => {
+                return paragraph_slot(Arc::get_mut(paragraph)?, path);
+            }
+            BlockContent::RawXml(_) => return None,
+        };
+        if path.field()? != "content" {
+            return None;
+        }
+        path.end()?;
+        Some(slot)
+    }
+
+    fn document_slot<'a>(
+        document: &'a mut DocumentBody,
+        mut path: Path<'_>,
+    ) -> Option<&'a mut Vec<BlockContent>> {
+        let slot = match path.field()? {
+            "content" => &mut document.content,
+            "sections" => {
+                let section = document.sections.as_mut()?.get_mut(path.index()?)?;
+                if path.field()? != "content" {
+                    return None;
+                }
+                &mut section.content
+            }
+            "comments" => {
+                let comment = document.comments.as_mut()?.get_mut(path.index()?)?;
+                match path.field()? {
+                    "blockContent" => &mut comment.block_content,
+                    "content" => {
+                        return paragraph_slot(comment.content.get_mut(path.index()?)?, path);
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        path.end()?;
+        Some(slot)
+    }
+
+    impl BodyFragments {
+        pub(crate) fn rebuild(self) -> Result<DocumentBody, String> {
+            type Children = Vec<(Vec<PathSegment>, Vec<BlockContent>)>;
+
+            let slots = self.blocks.len() + 1;
+            let mut children: Vec<Children> = (0..slots).map(|_| Vec::new()).collect();
+            for fragment in self.blocks.into_iter().rev() {
+                let mut blocks: Vec<BlockContent> =
+                    serde_json::from_str(&fragment.json).map_err(|error| error.to_string())?;
+                for (path, content) in children.pop().expect("one slot per fragment") {
+                    *block_slot(&mut blocks, Path(&path)).ok_or("Invalid block fragment path")? =
+                        content;
+                }
+                children
+                    .get_mut(fragment.parent)
+                    .ok_or("Invalid block fragment parent")?
+                    .push((fragment.path, blocks));
+            }
+            let mut document =
+                serde_json::from_str(&self.document).map_err(|error| error.to_string())?;
+            for (path, content) in children.pop().expect("a slot for the body") {
+                *document_slot(&mut document, Path(&path)).ok_or("Invalid body fragment path")? =
+                    content;
+            }
+            Ok(document)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use serde_json::json;
+
+        use super::*;
+
+        #[test]
+        fn rebuilds_a_body_with_deeply_nested_tables() {
+            let body = json!({"content": [], "finalSectionProperties": {"marginLeft": 1440.0}});
+            let table = json!([{"type": "table", "rows": [{
+                "type": "tableRow", "cells": [{"type": "tableCell", "content": []}]
+            }]}]);
+            let leaf = json!([{"type": "paragraph", "content": [], "paraId": "00000001"}]);
+            let fragments = BodyFragments {
+                document: body.to_string(),
+                blocks: (0..=260)
+                    .map(|parent| {
+                        let value = if parent == 260 { &leaf } else { &table };
+                        BlockFragment {
+                            parent,
+                            path: if parent == 0 {
+                                vec![PathSegment::Field("content".to_owned())]
+                            } else {
+                                serde_json::from_str(r#"[0,"rows",0,"cells",0,"content"]"#).unwrap()
+                            },
+                            json: value.to_string(),
+                        }
+                    })
+                    .collect(),
+            };
+            let mut rebuilt = fragments.rebuild().unwrap();
+            let mut blocks = std::mem::take(&mut rebuilt.content);
+            assert_eq!(serde_json::to_value(&rebuilt).unwrap(), body);
+            for _ in 0..260 {
+                let BlockContent::Table(table_block) = &mut blocks[0] else {
+                    panic!("expected a table");
+                };
+                let cell = &mut Arc::get_mut(table_block).unwrap().rows[0].cells[0];
+                let nested = std::mem::take(&mut cell.content);
+                assert_eq!(serde_json::to_value(&blocks).unwrap(), table);
+                blocks = nested;
+            }
+            assert_eq!(serde_json::to_value(&blocks).unwrap(), leaf);
+        }
+    }
+
+    #[cfg(feature = "wasm")]
+    pub(crate) use snapshot::plan_json;
+
+    #[cfg(feature = "wasm")]
+    mod snapshot {
+        use docx_parse::serializer::{S13ParagraphId, S13PatchedPart, S13SpliceAnchor, S13TablePatch};
+        use serde::Deserialize;
+
+        use crate::SectionInfo;
+        use crate::identity::{
+            ParagraphIdentities, ParagraphIdentity, ParagraphOrigin, ParagraphRef,
+            ParagraphSavePlan, SourceParagraphRef, SpliceAnchor, SplicedPart,
+        };
+        use crate::save::sections::{SectionPlanInput, section_save_plan};
+
+        use super::BodyFragments;
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Input {
+            source: Option<BodyFragments>,
+            output: BodyFragments,
+            output_session_keys: Vec<Option<String>>,
+            metadata_unchanged: bool,
+            source_part: Option<Vec<u8>>,
+            sections: Vec<SectionInfo>,
+            identities: Identities,
+            plan: SavePlan,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Identities {
+            session_id: String,
+            package_sha256: Option<String>,
+            paragraphs: Vec<Identity>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Identity {
+            session: Option<SessionParagraph>,
+            source: Option<SourceParagraph>,
+            origin: Origin,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SessionParagraph {
+            story: String,
+            para_id: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SourceParagraph {
+            package_sha256: String,
+            part_uri: String,
+            paragraph_ordinal: u32,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Origin {
+            Source,
+            Authored,
+            Synthetic,
+        }
+
+        impl TryFrom<Identities> for ParagraphIdentities {
+            type Error = &'static str;
+
+            fn try_from(input: Identities) -> Result<Self, Self::Error> {
+                let paragraphs = input
+                    .paragraphs
+                    .into_iter()
+                    .map(|identity| {
+                        let source = identity.source.map(|source| SourceParagraphRef {
+                            package_sha256: source.package_sha256,
+                            part_uri: source.part_uri,
+                            paragraph_ordinal: source.paragraph_ordinal,
+                        });
+                        let paragraph = match identity.session {
+                            Some(session) => ParagraphRef::Session {
+                                story: session.story,
+                                para_id: session.para_id,
+                            },
+                            None => ParagraphRef::Source(
+                                source.clone().ok_or("Missing paragraph source identity")?,
+                            ),
+                        };
+                        Ok(ParagraphIdentity {
+                            paragraph,
+                            origin: match identity.origin {
+                                Origin::Source => ParagraphOrigin::Source,
+                                Origin::Authored => ParagraphOrigin::Authored,
+                                Origin::Synthetic => ParagraphOrigin::Synthetic,
+                            },
+                            source,
+                            ooxml_para_id: None,
+                            id_origin: None,
+                            source_story: None,
+                        })
+                    })
+                    .collect::<Result<_, Self::Error>>()?;
+                Ok(Self {
+                    session_id: input.session_id,
+                    package_sha256: input.package_sha256,
+                    paragraphs,
+                })
+            }
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SavePlan {
+            assignments: Vec<S13ParagraphId>,
+            patched_parts: Vec<S13PatchedPart>,
+            #[serde(default)]
+            spliced_parts: Vec<Splice>,
+            #[serde(default)]
+            section_spliced_parts: Vec<Splice>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Splice {
+            part: String,
+            changed: Vec<u32>,
+            #[serde(default)]
+            section_only: Vec<u32>,
+            #[serde(default)]
+            inserted: Vec<S13SpliceAnchor>,
+            #[serde(default)]
+            removed: Vec<u32>,
+            #[serde(default)]
+            table_patches: Vec<S13TablePatch>,
+        }
+
+        impl From<Splice> for SplicedPart {
+            fn from(splice: Splice) -> Self {
+                Self {
+                    part: splice.part,
+                    changed: splice.changed,
+                    section_only: splice.section_only,
+                    inserted: splice
+                        .inserted
+                        .into_iter()
+                        .map(|anchor| match anchor {
+                            S13SpliceAnchor::Before(ordinal) => SpliceAnchor::Before(ordinal),
+                            S13SpliceAnchor::After(ordinal) => SpliceAnchor::After(ordinal),
+                        })
+                        .collect(),
+                    removed: splice.removed,
+                    table_patches: splice.table_patches,
+                    ..Self::default()
+                }
+            }
+        }
+
+        impl From<SavePlan> for ParagraphSavePlan {
+            fn from(plan: SavePlan) -> Self {
+                Self {
+                    assignments: plan
+                        .assignments
+                        .into_iter()
+                        .map(|id| (id.part, id.ordinal, id.para_id))
+                        .collect(),
+                    patched_parts: plan
+                        .patched_parts
+                        .into_iter()
+                        .map(|part| (part.part, part.para_ids))
+                        .collect(),
+                    spliced_parts: plan.spliced_parts.into_iter().map(Into::into).collect(),
+                    section_spliced_parts: plan
+                        .section_spliced_parts
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    ..Self::default()
+                }
+            }
+        }
+
+        pub(crate) fn plan_json(json: &str) -> Result<String, String> {
+            let input: Input = serde_json::from_str(json).map_err(|error| error.to_string())?;
+            let Some(source) = input.source else {
+                return Ok("null".to_owned());
+            };
+            let source = source.rebuild()?;
+            let output = input.output.rebuild()?;
+            let identities = ParagraphIdentities::try_from(input.identities)?;
+            let plan = input.plan.into();
+            let result = section_save_plan(
+                SectionPlanInput {
+                    source: Some(&source),
+                    output: &output,
+                    output_session_keys: &input.output_session_keys,
+                    metadata_unchanged: input.metadata_unchanged,
+                    source_part: input.source_part.as_deref(),
+                },
+                &input.sections,
+                &identities,
+                &plan,
+            );
+            match result {
+                Ok(plan) => serde_json::to_string(&plan).map_err(|error| error.to_string()),
+                Err(error) => Ok(serde_json::json!({ "error": error.0 }).to_string()),
+            }
+        }
+    }
 }
 
 fn properties(section: &SectionProperties) -> Value {
@@ -442,70 +895,188 @@ pub(crate) fn section_save_plan(
 mod tests {
     use std::sync::Arc;
 
-    use docx_parse::{Table, TableCell, TableRow};
+    use docx_parse::section::parse_section_properties;
+    use docx_parse::serializer::{S13ParagraphIds, S13SaveRequest, write_docx_s13_parts};
+    use docx_parse::xml::{ParseBudget, ParseLimits, parse_xml};
     use serde_json::json;
 
     use super::*;
+    use crate::identity::{ParagraphIdentity, SourceParagraphRef};
 
     #[test]
-    fn deserializes_a_body_with_deeply_nested_tables() {
-        std::thread::Builder::new()
-            .stack_size(64 << 20)
-            .spawn(|| {
-                let paragraph = BlockContent::Paragraph(Arc::new(Paragraph {
-                    node_type: "paragraph".to_owned(),
-                    para_id: None,
-                    repeated_para_id: None,
-                    para_id_attribute: None,
-                    source_ordinal: None,
-                    text_id: None,
-                    extra_attributes: Vec::new(),
-                    formatting: None,
-                    property_changes: None,
-                    p_pr_ins: None,
-                    p_pr_del: None,
-                    content: Vec::new(),
-                    list_rendering: None,
-                    rendered_page_break_before: None,
-                    section_properties: None,
-                }));
-                let mut content = Vec::new();
-                for _ in 0..260 {
-                    content.push(paragraph.clone());
-                    content = vec![BlockContent::Table(Arc::new(Table {
-                        rows: vec![TableRow {
-                            node_type: "tableRow".to_owned(),
-                            extra_attributes: None,
-                            formatting: None,
-                            property_changes: None,
-                            structural_change: None,
-                            cells: vec![TableCell {
-                                node_type: "tableCell".to_owned(),
-                                formatting: None,
-                                property_changes: None,
-                                structural_change: None,
-                                content,
-                                leading_bookmarks: None,
-                            }],
-                            leading_bookmarks: None,
-                            trailing_bookmarks: None,
-                        }],
-                        ..Table::empty()
-                    }))];
-                }
-                let body = DocumentBody {
-                    content,
-                    ..DocumentBody::default()
-                };
-                let json = serde_json::to_string(&body).unwrap();
-                let error = serde_json::from_str::<DocumentBody>(&json).unwrap_err();
-                assert!(error.to_string().contains("recursion limit exceeded"), "{error}");
-                let decoded: DocumentBody = from_json_any_depth(&json).unwrap();
-                assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+    fn empty_page_border_transforms_allow_a_margin_only_patch() {
+        let original = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+    <w:body>
+        <w:p/>
+        <w:sectPr>
+            <w:pgMar w:left='1440'/>
+            <w:pgBorders>
+                <w:top w:color='ABCDEF' w:val='single'/>
+            </w:pgBorders>
+        </w:sectPr>
+    </w:body>
+</w:document>"#;
+        let part = "word/document.xml";
+        let final_properties = |bytes: &[u8]| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = parse_xml(bytes, part, &mut budget).unwrap();
+            let body = xml.root().unwrap().child("w", "body").unwrap();
+            parse_section_properties(Some(body.child("w", "sectPr").unwrap()))
+        };
+        let mut model = json!({
+            "content": [{"type": "paragraph", "content": []}],
+            "finalSectionProperties": final_properties(original.as_bytes()),
+        });
+        let source: DocumentBody = serde_json::from_value(model.clone()).unwrap();
+        let authored = &mut model["finalSectionProperties"];
+        authored["marginLeft"] = json!(1800);
+        authored["pageBorders"]["top"]["color"]["transforms"] = json!([]);
+        let sections = [SectionInfo {
+            closing_paragraph_id: "final".to_owned(),
+            first_paragraph: 1,
+            last_paragraph: 1,
+            authored: authored.clone(),
+            resolved: authored.clone(),
+        }];
+        let output: DocumentBody = serde_json::from_value(model).unwrap();
+        let plan = section_save_plan(
+            SectionPlanInput {
+                source: Some(&source),
+                output: &output,
+                output_session_keys: &[None],
+                metadata_unchanged: true,
+                source_part: Some(original.as_bytes()),
+            },
+            &sections,
+            &ParagraphIdentities {
+                session_id: "session".to_owned(),
+                package_sha256: None,
+                paragraphs: Vec::new(),
+            },
+            &ParagraphSavePlan {
+                patched_parts: vec![(part.to_owned(), Vec::new())],
+                ..ParagraphSavePlan::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let edits = plan.plan.unwrap();
+        assert!(edits.only_sections);
+        let [edit] = edits.edits.as_slice() else {
+            panic!("expected one section edit");
+        };
+        assert_eq!(edit.paragraph, None);
+        assert!(json_equal(&edit.properties, &json!({"marginLeft": 1800})));
+
+        let whole: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": output,
+            "options": {"updateModifiedDate": false},
+        }))
+        .unwrap();
+        let patch = S13SaveRequest {
+            paragraph_ids: Some(S13ParagraphIds {
+                section_edits: Some(edits),
+                ..S13ParagraphIds::default()
+            }),
+            ..whole.clone()
+        };
+        let original_parts = [(part.to_owned(), original.as_bytes().to_vec())];
+        let write_body = |request| {
+            let saved = write_docx_s13_parts(request, &original_parts, None).unwrap();
+            ooxml_opc::unzip_parts(&saved)
+                .unwrap()
+                .into_iter()
+                .find(|(path, _)| path == part)
+                .unwrap()
+                .1
+        };
+        let patched = write_body(patch);
+        let written = write_body(whole);
+        assert_eq!(final_properties(&patched), final_properties(&written));
+        assert_eq!(
+            patched.as_slice(),
+            original.replace("w:left='1440'", "w:left='1800'").as_bytes(),
+        );
+        let patched_bytes = original
+            .bytes()
+            .zip(patched)
+            .filter(|(before, after)| before != after)
+            .count();
+        assert!(patched_bytes < original.len().abs_diff(written.len()));
+    }
+
+    #[test]
+    fn shared_paragraph_edits_use_each_body_occurrence() {
+        let source: DocumentBody = serde_json::from_value(json!({"content": [
+            {"type": "paragraph", "content": []},
+            {"type": "paragraph", "content": [], "sectionProperties": {"marginLeft": 1440}},
+            {"type": "paragraph", "content": []},
+        ]}))
+        .unwrap();
+        let mut output = source.clone();
+        let BlockContent::Paragraph(paragraph) = &mut output.content[1] else {
+            panic!("expected a section paragraph");
+        };
+        let section = Arc::make_mut(paragraph).section_properties.as_mut().unwrap();
+        section.margin_left = Some(1800.0);
+        let authored = properties(section);
+        let repeated = output.content[1].clone();
+        output.content.insert(2, repeated);
+
+        let key = "boundary".to_owned();
+        let sections = [SectionInfo {
+            closing_paragraph_id: key.clone(),
+            first_paragraph: 1,
+            last_paragraph: 2,
+            authored: authored.clone(),
+            resolved: authored,
+        }];
+        let source_part = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/><w:p><w:pPr><w:sectPr><w:pgMar w:left="1440"/></w:sectPr></w:pPr></w:p><w:p/></w:body></w:document>"#;
+        let plan = section_save_plan(
+            SectionPlanInput {
+                source: Some(&source),
+                output: &output,
+                output_session_keys: &[None, Some(key.clone()), Some(key.clone()), None],
+                metadata_unchanged: false,
+                source_part: Some(source_part),
+            },
+            &sections,
+            &ParagraphIdentities {
+                session_id: "session".to_owned(),
+                package_sha256: None,
+                paragraphs: vec![ParagraphIdentity {
+                    paragraph: ParagraphRef::Session {
+                        story: "body".to_owned(),
+                        para_id: key,
+                    },
+                    origin: ParagraphOrigin::Source,
+                    ooxml_para_id: None,
+                    id_origin: None,
+                    source_story: None,
+                    source: Some(SourceParagraphRef {
+                        package_sha256: "0".repeat(64),
+                        part_uri: "/word/document.xml".to_owned(),
+                        paragraph_ordinal: 1,
+                    }),
+                }],
+            },
+            &ParagraphSavePlan::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let edits = plan.plan.unwrap();
+        assert!(!edits.only_sections);
+        let [first, second] = edits.edits.as_slice() else {
+            panic!("expected two section edits");
+        };
+        assert_eq!((first.paragraph, second.paragraph), (Some(1), Some(2)));
+        for edit in [first, second] {
+            assert_eq!(edit.body_paragraphs, Some(4));
+            assert_eq!(edit.donor, Some(1));
+            assert!(json_equal(&edit.properties, &json!({"marginLeft": 1800})));
+        }
     }
 
     #[test]

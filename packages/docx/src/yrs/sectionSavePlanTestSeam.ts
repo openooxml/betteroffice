@@ -2,9 +2,12 @@ import type { RustParagraphIds } from '../docx/rustSaveFacade';
 import type { Document } from '../types/document';
 import type { YrsSession } from './index';
 import type { DocxSessionSave } from './saveYrsDocx';
+import type { SectionInfo } from './sections';
 import type { EditSession } from './wasm/index';
 
-export type SectionPlanInputObserver = (source: Readonly<Document> | null, sourcePart?: Uint8Array) => void;
+export type SectionPlanInputObserver = (
+  source: Readonly<Document> | null, sections: readonly SectionInfo[], sourcePart?: Uint8Array
+) => void;
 
 type PlanArgs = [session: YrsSession, output: Document, capture: DocxSessionSave, sourceBuffer: ArrayBuffer];
 type Plan = (...args: [...PlanArgs, observeInput?: SectionPlanInputObserver]) =>
@@ -13,7 +16,7 @@ type Plan = (...args: [...PlanArgs, observeInput?: SectionPlanInputObserver]) =>
 export const sectionSavePlanTestSeam: {
   hook?: {
     attach: (session: YrsSession, raw: EditSession) => void;
-    check: (...args: [...PlanArgs, useLocalProvenance: boolean]) => ReturnType<Plan>;
+    check: (...args: PlanArgs) => ReturnType<Plan>;
   };
   reference?: {
     plan: Plan;

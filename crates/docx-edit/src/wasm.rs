@@ -1444,46 +1444,9 @@ impl EditSession {
     #[doc(hidden)]
     #[wasm_bindgen(skip_typescript)]
     pub fn section_save_plan_json(&self, input_json: &str) -> Result<String, JsValue> {
-        use crate::save::sections::{SectionPlanInput, from_json_any_depth, section_save_plan};
-
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Input {
-            source: Option<docx_parse::DocumentBody>,
-            output: docx_parse::DocumentBody,
-            output_session_keys: Vec<Option<String>>,
-            metadata_unchanged: bool,
-            source_part: Option<Vec<u8>>,
-            #[serde(default)]
-            use_local_provenance: bool,
-        }
-
-        let input: Input = from_json_any_depth(input_json).map_err(EngineError::message)?;
-        if input.source.is_none() || !self.core.has_story("body") {
-            return Ok("null".to_owned());
-        }
-        let doc = self.core.engine.doc();
-        let sections = doc.list_sections().map_err(EngineError::message)?;
-        let identities = doc.paragraph_identities();
-        let plan = doc.paragraph_save_plan_with_local_provenance(input.use_local_provenance, &mut 0);
-        let result = section_save_plan(
-            SectionPlanInput {
-                source: input.source.as_ref(),
-                output: &input.output,
-                output_session_keys: &input.output_session_keys,
-                metadata_unchanged: input.metadata_unchanged,
-                source_part: input.source_part.as_deref(),
-            },
-            &sections,
-            &identities,
-            &plan,
-        );
-        match result {
-            Ok(plan) => serde_json::to_string(&plan)
-                .map_err(EngineError::message)
-                .map_err(JsValue::from),
-            Err(error) => Ok(serde_json::json!({ "error": error.0 }).to_string()),
-        }
+        crate::save::sections::transport::plan_json(input_json)
+            .map_err(EngineError::message)
+            .map_err(JsValue::from)
     }
 
     pub fn section_margins_json(&self) -> String {

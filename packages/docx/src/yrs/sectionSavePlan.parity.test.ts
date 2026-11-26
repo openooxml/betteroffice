@@ -1,6 +1,7 @@
-import { afterAll, expect, test } from 'bun:test';
+import { afterAll, expect, test as bunTest } from 'bun:test';
 import JSZip from 'jszip';
 import type { SectionProperties } from '../types/document';
+import { engineKind } from '../wasm/engineEdit';
 import { FLAVOURS, syntheticDocx } from './__fixtures__/previewChain';
 import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
 import { partMetadata } from './residentParts';
@@ -12,13 +13,17 @@ import {
 import { DocxSectionError } from './sections';
 import { sectionPackage } from './sectionTestPackage';
 
-await import('./sections.test');
-await import('./sectionBreak.test');
-await import('./sectionSaveRegression.test');
+const test = bunTest.skipIf(engineKind === 'native');
 
-afterAll(() => {
-  expect(sectionSavePlanParityStats().checked).toBeGreaterThan(0);
-});
+if (engineKind !== 'native') {
+  await import('./sections.test');
+  await import('./sectionBreak.test');
+  await import('./sectionSaveRegression.test');
+
+  afterAll(() => {
+    expect(sectionSavePlanParityStats().saveHook).toBeGreaterThan(0);
+  });
+}
 
 const MAIN = 'word/document.xml';
 
@@ -167,6 +172,17 @@ test('changing only a page border color transform plans an ordinary save', async
   } finally { session.destroy(); }
 });
 
+test('the TypeScript planner falls back for a margin change with an empty page border transform list', async () => {
+  const session = await open(false, withPageBorder);
+  try {
+    const options = changeFinalProperties(session, properties => {
+      properties.marginLeft = 1800;
+      properties.pageBorders!.top!.color!.transforms = [];
+    });
+    expect(await referenceProjectedSectionPlan(session, options)).toEqual({ lossy: false, strict: false });
+  } finally { session.destroy(); }
+});
+
 function changeFirstMargin(session: YrsSession): void {
   const first = session.listSections()[0];
   const left = first.authored.marginLeft ?? 1440;
@@ -224,6 +240,26 @@ test('only section edits use source ordinals after a hidden paragraph', async ()
       strict: false,
     });
     if (result && 'plan' in result) expect(result.plan!.edits[0]).not.toHaveProperty('bodyParagraphs');
+  } finally { session.destroy(); }
+});
+
+test('the TypeScript planner places both edits at the first occurrence of a shared paragraph', async () => {
+  const session = await open(true);
+  try {
+    const boundary = session.listSections()[0].closingParagraphId;
+    session.setSectionProperties(boundary, { margins: { left: 1800 } });
+    const result = await referenceProjectedSectionPlan(session, {
+      editOutput: ({ package: { document } }) => {
+        const index = document.content.findIndex(block => block.type === 'paragraph' && block.sectionProperties);
+        document.content = [
+          ...document.content.slice(0, index), document.content[index]!, ...document.content.slice(index),
+        ];
+        document.customRootBindings = [{ name: 'xmlns:parity', value: 'urn:parity' }];
+      },
+    });
+    expect(result).toMatchObject({
+      plan: { onlySections: false, edits: [{ paragraph: 1 }, { paragraph: 1 }] },
+    });
   } finally { session.destroy(); }
 });
 
