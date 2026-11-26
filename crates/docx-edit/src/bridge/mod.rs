@@ -1486,7 +1486,14 @@ fn walk_story_chunks<T: ReadTxn>(
                         fallback: Some(if hidden {
                             String::new()
                         } else {
-                            shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            revealed_field_text(
+                                || shared_map_string(field, txn, "fieldData"),
+                                shared_any(field, txn, "resultProjection").is_some(),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            })
                         }),
                         source: field_join
                             .as_ref()
@@ -2016,6 +2023,18 @@ fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, 
         previews.extend(images.iter().filter_map(any_map));
     }
     previews
+}
+
+fn revealed_field_text(
+    source: impl FnOnce() -> Option<String>,
+    projected_children: bool,
+    env: &RenderEnv,
+) -> Option<String> {
+    if !env.show_hidden_text {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&source()?).ok()?;
+    crate::seed::nested_field_display_text(&value, projected_children)
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
@@ -3669,9 +3688,18 @@ fn lower_inline_sdt_values(
                         raw_type: (field_type != mapped_type).then_some(field_type),
                         instruction,
                         fallback: Some(
-                            payload
-                                .and_then(|payload| map_string(payload, "displayText"))
-                                .unwrap_or_default(),
+                            revealed_field_text(
+                                || payload.and_then(|payload| map_string(payload, "fieldData")),
+                                payload.is_some_and(|payload| {
+                                    payload.contains_key("resultProjection")
+                                }),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                payload
+                                    .and_then(|payload| map_string(payload, "displayText"))
+                                    .unwrap_or_default()
+                            }),
                         ),
                         source: payload.and_then(|payload| map_string(payload, "fieldData")),
                         locked: payload
@@ -6684,6 +6712,51 @@ mod tests {
     fn yrs_attrs(value: Value) -> Attrs {
         let value = crate::seed::any_from_value(value).unwrap();
         attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn a_field_without_nested_results_renders_its_stored_label_in_both_modes() {
+        let result = json!([{"type": "run", "content": [{"type": "text", "text": 42}]}]);
+        let field = json!({
+            "type": "simpleField", "instruction": "QUOTE", "fieldType": "QUOTE",
+            "content": result, "structuredResult": {"inline": result}
+        });
+        let doc = EditingDoc::new(63);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "field".to_owned(),
+                payload: vec![
+                    ("instruction".to_owned(), Any::from("QUOTE")),
+                    ("fieldType".to_owned(), Any::from("QUOTE")),
+                    ("displayText".to_owned(), Any::from("42")),
+                    ("fieldData".to_owned(), Any::from(field.to_string())),
+                ],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        for show_hidden_text in [false, true] {
+            let blocks = yrs_doc_to_layout_blocks(
+                &doc,
+                "body",
+                &RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let [Run::Field(field)] = paragraph.runs.as_slice() else {
+                panic!("expected field");
+            };
+            assert_eq!(field.fallback.as_deref(), Some("42"), "{show_hidden_text}");
+        }
     }
 
     #[test]
