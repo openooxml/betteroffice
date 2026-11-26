@@ -301,7 +301,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
                 let ctx = EvalContext::new(provider, sheet);
                 let value = evaluate(&expr, &ctx);
                 CellState {
-                    value: if ctx.read_other_workbook() || ctx.read_unreadable_definition() {
+                    value: if ctx.read_other_workbook() {
                         CellValue::Empty
                     } else {
                         value

@@ -7,7 +7,7 @@ pub(crate) use xlsx_model::sheet_qualifier::can_start_span as is_unquoted_sheet;
 use xlsx_model::sheet_qualifier::{is_path_qualifier, parse_sheet_token};
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
-use crate::reference::MAX_TABLE_SPEC_ITEMS;
+use crate::reference::{MAX_TABLE_SPEC_ITEMS, column, row};
 use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
@@ -183,6 +183,7 @@ pub fn lex_with_range_names(
         is_range_name: &is_range_name,
         is_sheet_span: None,
         evaluation_error: None,
+        release_grammar: false,
     }
     .run()
 }
@@ -201,9 +202,23 @@ pub(crate) fn lex_for_evaluation(
         is_range_name: &is_formula_parameter,
         is_sheet_span,
         evaluation_error: Some(&mut error),
+        release_grammar: false,
     }
     .run()?;
     error.map_or(Ok(tokens), Err)
+}
+
+pub(crate) fn lex_released_definition(input: &str) -> Result<Vec<Token>, ParseError> {
+    Lexer {
+        input,
+        pos: 0,
+        table_refs: None,
+        is_range_name: &is_formula_parameter,
+        is_sheet_span: None,
+        evaluation_error: None,
+        release_grammar: true,
+    }
+    .run()
 }
 
 fn is_formula_parameter(name: &str) -> bool {
@@ -424,6 +439,7 @@ pub fn rewrite_table_columns<'a>(
         is_range_name: &is_formula_parameter,
         is_sheet_span: None,
         evaluation_error: None,
+        release_grammar: false,
     };
     let tokens = lexer.run()?;
     let table_refs = lexer.table_refs.take().unwrap();
@@ -552,6 +568,7 @@ struct Lexer<'a> {
     is_range_name: &'a dyn Fn(&str) -> bool,
     is_sheet_span: Option<&'a SheetSpan<'a>>,
     evaluation_error: Option<&'a mut Option<ParseError>>,
+    release_grammar: bool,
 }
 
 struct TableRefRewrite {
@@ -580,6 +597,7 @@ impl Lexer<'_> {
                 '"' => self.lex_string()?,
                 '#' => self.lex_error_literal()?,
                 '\'' => self.lex_quoted_sheet_ref()?,
+                '[' if self.release_grammar => self.lex_released_workbook_function(start)?,
                 '[' => self.lex_bracket_ref(start)?,
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
@@ -630,7 +648,8 @@ impl Lexer<'_> {
                     ));
                 }
             };
-            if self.input[whitespace..start].contains(' ')
+            if !self.release_grammar
+                && self.input[whitespace..start].contains(' ')
                 && out
                     .last()
                     .is_some_and(|token: &Token| is_intersection(&token.kind, &kind))
@@ -677,6 +696,9 @@ impl Lexer<'_> {
     }
 
     fn consume_bang(&mut self) -> bool {
+        if self.release_grammar {
+            return self.peek() == Some('!') && self.bump().is_some();
+        }
         if !self.after_ws().starts_with('!') {
             return false;
         }
@@ -742,7 +764,18 @@ impl Lexer<'_> {
         let start = self.pos;
         let rest = &self.input[start..];
         let after_digits = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
-        if after_digits.trim_start().starts_with(':') {
+        if let Some(tail) = after_digits.trim_start().strip_prefix(':') {
+            if self.release_grammar {
+                let tail = tail.trim_start();
+                if tail
+                    .strip_prefix('$')
+                    .unwrap_or(tail)
+                    .starts_with(|ch: char| ch.is_ascii_digit())
+                {
+                    return self.lex_word_or_ref();
+                }
+                return self.lex_number();
+            }
             self.pos = self.input.len() - after_digits.len();
             let first = &self.input[start..self.pos];
             if let Some(kind) = self.try_range_token(&None, first) {
@@ -784,6 +817,23 @@ impl Lexer<'_> {
             }
         }
         Err(ParseError::new(start, "unknown error literal"))
+    }
+
+    fn lex_released_workbook_function(&mut self, start: usize) -> Result<TokKind, ParseError> {
+        if let Some((index, name)) = self.input[start + 1..].split_once("]!") {
+            let word = name
+                .find(|ch: char| !ch.is_alphanumeric() && !matches!(ch, '_' | '.'))
+                .unwrap_or(name.len());
+            if !index.is_empty()
+                && index.bytes().all(|byte| byte.is_ascii_digit())
+                && word > 0
+                && name[word..].starts_with('(')
+            {
+                self.pos = start + 1 + index.len() + 2 + word;
+                return Ok(TokKind::Ident(self.input[start..self.pos].to_owned()));
+            }
+        }
+        Err(ParseError::new(start, "unexpected character '['"))
     }
 
     fn lex_bracket_ref(&mut self, start: usize) -> Result<TokKind, ParseError> {
@@ -891,6 +941,9 @@ impl Lexer<'_> {
         let kind = self
             .try_sheet_reference(&sheet, true, start)?
             .ok_or_else(|| ParseError::new(self.pos, "expected a sheet qualifier"))?;
+        if self.release_grammar {
+            return Ok(kind);
+        }
         if is_path_qualifier(&sheet) {
             self.reject_for_evaluation(start, "workbook path qualifiers are unsupported");
         }
@@ -909,6 +962,9 @@ impl Lexer<'_> {
         start: usize,
     ) -> Result<Option<TokKind>, ParseError> {
         if self.consume_bang() {
+            if self.release_grammar {
+                return self.lex_reference(first.to_owned(), start).map(Some);
+            }
             if quoted
                 && let Some((first, last)) = workbook_scope(first)
                     .or_else(|| (!is_path_qualifier(first)).then_some(first))
@@ -926,7 +982,8 @@ impl Lexer<'_> {
             }
             return self.lex_reference(first.to_owned(), start).map(Some);
         }
-        if self.peek() != Some(':')
+        if self.release_grammar
+            || self.peek() != Some(':')
             || !(quoted || is_unquoted_sheet(first))
             || (!quoted && start + first.len() == self.pos && (self.is_range_name)(first))
         {
@@ -982,7 +1039,8 @@ impl Lexer<'_> {
         let start = self.pos;
         let word = self.read_word();
         let end = self.pos;
-        if word.len() == 1
+        if !self.release_grammar
+            && word.len() == 1
             && word.as_bytes()[0].is_ascii_alphabetic()
             && let Some(path) = self.input[end..].strip_prefix(":\\")
         {
@@ -990,7 +1048,8 @@ impl Lexer<'_> {
             self.pos = self.input.len() - after_path.len();
         }
         let path_end = self.pos;
-        if (path_end != end || word.ends_with('\\'))
+        if !self.release_grammar
+            && (path_end != end || word.ends_with('\\'))
             && let Some(kind) = self.try_external_ref(start)?
         {
             if !self.input[start..path_end].ends_with('\\') {
@@ -1060,7 +1119,7 @@ impl Lexer<'_> {
         }
         let rest = &self.input[self.pos..];
         let nested = rest.trim_start_matches([' ', '\t', '\n', '\r']);
-        if nested.starts_with("@[") {
+        if !self.release_grammar && nested.starts_with("@[") {
             self.skip_ws();
             self.bump();
             spec.bands.push(TableBand::ThisRow);
@@ -1102,7 +1161,7 @@ impl Lexer<'_> {
         start: usize,
         column: &mut impl FnMut(&str, std::ops::Range<usize>),
     ) -> Result<(), ParseError> {
-        if self.peek() == Some('@') {
+        if !self.release_grammar && self.peek() == Some('@') {
             self.bump();
             spec.bands.push(TableBand::ThisRow);
         }
@@ -1120,9 +1179,18 @@ impl Lexer<'_> {
                 Some(c) => item.push(c),
             }
         }
+        if self.release_grammar && item.starts_with('@') {
+            spec.bands.push(TableBand::ThisRow);
+            item.remove(0);
+        }
         if item.is_empty() {
             return Ok(());
         }
+        let is_band = if self.release_grammar {
+            item.starts_with('#')
+        } else {
+            is_band
+        };
         if is_band {
             let band = TableBand::parse(&item)
                 .ok_or_else(|| ParseError::new(start, "unknown table band selector"))?;
@@ -1149,7 +1217,7 @@ impl Lexer<'_> {
             return Err(ParseError::new(start, "expected reference or defined name"));
         }
         let sheet = Some(sheet);
-        if self.peek() == Some('[') {
+        if !self.release_grammar && self.peek() == Some('[') {
             return self.lex_table_ref(sheet, word, start);
         }
         if self.evaluation_error.is_some()
@@ -1168,7 +1236,7 @@ impl Lexer<'_> {
         if let Some(range) = self.try_range_token(sheet, word) {
             return Some(range);
         }
-        if !self.ends_address() {
+        if !self.release_grammar && !self.ends_address() {
             return None;
         }
         let cell = CellRef::parse_a1(&word.to_ascii_uppercase()).ok()?;
@@ -1183,6 +1251,9 @@ impl Lexer<'_> {
     }
 
     fn try_range_token(&mut self, sheet: &Option<String>, word: &str) -> Option<TokKind> {
+        if self.release_grammar {
+            return self.try_released_range_token(sheet, word);
+        }
         if !self.after_ws().starts_with(':') {
             return None;
         }
@@ -1222,6 +1293,45 @@ impl Lexer<'_> {
             }
         }
         self.pos = save;
+        None
+    }
+
+    fn try_released_range_token(&mut self, sheet: &Option<String>, word: &str) -> Option<TokKind> {
+        if !self.input[self.pos..].trim_start().starts_with(':') {
+            return None;
+        }
+        let save = self.pos;
+        if column(word).is_ok() || row(word).is_ok() {
+            self.skip_ws();
+            self.bump();
+            self.skip_ws();
+            let end = self.read_word();
+            let source = format!("{word}:{end}");
+            if let Ok(range) = ColumnRange::parse_a1(&source) {
+                return Some(TokKind::ColumnRange {
+                    sheet: sheet.clone(),
+                    range,
+                });
+            }
+            if let Ok(range) = RowRange::parse_a1(&source) {
+                return Some(TokKind::RowRange {
+                    sheet: sheet.clone(),
+                    range,
+                });
+            }
+            self.pos = save;
+        }
+        if self.peek() == Some(':') {
+            self.bump();
+            let end = self.read_word();
+            if let Ok(range) = CellRange::parse_a1(&format!("{word}:{end}").to_ascii_uppercase()) {
+                return Some(TokKind::Range {
+                    sheet: sheet.clone(),
+                    range,
+                });
+            }
+            self.pos = save;
+        }
         None
     }
 }
@@ -1478,6 +1588,7 @@ mod tests {
                     is_range_name: &is_formula_parameter,
                     is_sheet_span: None,
                     evaluation_error: Some(&mut evaluation_error),
+                    release_grammar: false,
                 }
                 .run()
                 .unwrap(),

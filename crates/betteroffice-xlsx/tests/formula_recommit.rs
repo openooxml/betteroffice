@@ -3,6 +3,7 @@ use betteroffice_xlsx::{
     ProposalEditInput, ProposalRequest, SheetId, Workbook,
 };
 use serde_json::{Value, json};
+use xlsx_model::ErrorValue;
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -592,12 +593,22 @@ fn unreadable_defined_names_keep_callers_cached_and_refuse_authoring() {
         r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Target_1</f><v>41</v></c>"#,
         r#"<c r="C1"><f>IFERROR(Target_1,0)</f><v>42</v></c><c r="D1"><f>A1*2</f><v>-1</v></c></row>"#,
     );
-    for formula in [
-        r"'C:\Books\Data.xlsx'!A1",
-        "Sheet1 !A1",
-        "Sheet1! #REF!",
-        "SUM(A1:B2[Col])",
-        "A1:LOG10(1)",
+    let name_error = CellValue::Error {
+        value: ErrorValue::Name,
+    };
+    for (formula, direct, caught) in [
+        ("[1]Data!A1", number(41.0), number(42.0)),
+        (
+            r"'C:\Books\Data.xlsx'!A1",
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            number(0.0),
+        ),
+        ("Sheet1 !A1", name_error.clone(), number(0.0)),
+        ("Sheet1! #REF!", name_error.clone(), number(0.0)),
+        ("SUM(A1:B2[Col])", number(41.0), number(0.0)),
+        ("A1:LOG10(1)", name_error, number(0.0)),
     ] {
         let workbook_tail = format!(
             r#"<definedNames><definedName name="Target_1">{formula}</definedName></definedNames><calcPr fullCalcOnLoad="1"/>"#,
@@ -605,8 +616,8 @@ fn unreadable_defined_names_keep_callers_cached_and_refuse_authoring() {
         let source = package(sheet_data, &workbook_tail);
         let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
         workbook.recalculate_all(options());
-        assert_eq!(stored(&workbook, "B1").1, number(41.0), "{formula}");
-        assert_eq!(stored(&workbook, "C1").1, number(42.0), "{formula}");
+        assert_eq!(stored(&workbook, "B1").1, direct, "{formula}");
+        assert_eq!(stored(&workbook, "C1").1, caught, "{formula}");
         assert_eq!(stored(&workbook, "D1").1, number(14.0));
         let result = workbook.apply_ops(
             vec![Op::SetDefinedName {
@@ -626,6 +637,102 @@ fn unreadable_defined_names_keep_callers_cached_and_refuse_authoring() {
             ),
             "{formula}: {result:?}"
         );
+    }
+}
+
+#[test]
+fn rejected_definitions_recalculate_callers_as_in_the_release() {
+    let sheet_data = concat!(
+        r#"<row r="1"><c r="A1"><f>Target_1</f><v>41</v></c>"#,
+        r#"<c r="B1"><f>IFERROR(Target_1,0)</f><v>42</v></c>"#,
+        r#"<c r="C1" t="b"><f>ISERROR(Target_1)</f><v>0</v></c>"#,
+        r#"<c r="D1"><f>Target_1</f></c></row>"#,
+    );
+    for (definition, keeps_direct_cache) in [
+        ("SUM(1,", false),
+        ("Jan:Mar!A1", false),
+        ("A1:C3 B2:D4", false),
+        ("[@Amount]", true),
+        ("Sheet1!Table1[Amount]", true),
+    ] {
+        let tail = format!(
+            r#"<definedNames><definedName name="Target_1">{definition}</definedName></definedNames>"#,
+        );
+        let mut workbook = Workbook::open(&package(sheet_data, &tail)).unwrap();
+        workbook.recalculate_all(options());
+        let error = CellValue::Error {
+            value: ErrorValue::Name,
+        };
+        let cached_direct = if keeps_direct_cache {
+            number(41.0)
+        } else {
+            error.clone()
+        };
+        assert_eq!(stored(&workbook, "A1").1, cached_direct, "{definition}");
+        assert_eq!(stored(&workbook, "B1").1, number(0.0), "{definition}");
+        let is_error = if keeps_direct_cache {
+            CellValue::Bool { value: false }
+        } else {
+            CellValue::Bool { value: true }
+        };
+        assert_eq!(stored(&workbook, "C1").1, is_error, "{definition}");
+        assert_eq!(stored(&workbook, "D1").1, error, "{definition}");
+        workbook
+            .edit_cell(SheetId(0), cell("E1"), "=IFERROR(Target_1,0)", options())
+            .unwrap();
+        assert_eq!(stored(&workbook, "E1").1, number(0.0), "{definition}");
+    }
+}
+
+#[test]
+fn a_definition_read_by_the_release_keeps_its_incremental_dependencies() {
+    let source = package(
+        r#"<row r="1"><c r="A1"><v>7</v></c><c r="B1"><f>Target_1</f><v>999</v></c></row>"#,
+        r#"<definedNames><definedName name="Target_1">A1+IFERROR('C:\Books\Data.xlsx'!A1,0)</definedName></definedNames>"#,
+    );
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook.recalculate_all(options());
+    assert_eq!(stored(&workbook, "B1").1, number(7.0));
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "8", options())
+        .unwrap();
+    assert_eq!(stored(&workbook, "B1").1, number(8.0));
+}
+
+#[test]
+fn array_error_handlers_discard_unused_definition_errors_as_in_the_release() {
+    let sheet_data = concat!(
+        r#"<row r="1"><c r="A1"><f>SUM(IFERROR({1,2},Target_1))</f><v>999</v></c>"#,
+        r#"<c r="B1"><f>SUM(IFNA({1,2},Target_1))</f><v>999</v></c>"#,
+        r#"<c r="C1"><f>SUM(IFERROR({1,#N/A},Target_1))</f><v>999</v></c>"#,
+        r#"<c r="D1"><f>SUM(IFNA({1,#N/A},Target_1))</f><v>999</v></c></row>"#,
+    );
+    for (definition, used) in [
+        (
+            "SUM(1,",
+            CellValue::Error {
+                value: ErrorValue::Name,
+            },
+        ),
+        (
+            r"'C:\Books\Data.xlsx'!A1",
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+        ),
+        ("[@Amount]", number(999.0)),
+    ] {
+        let tail = format!(
+            r#"<definedNames><definedName name="Target_1">{definition}</definedName></definedNames>"#,
+        );
+        let mut workbook = Workbook::open(&package(sheet_data, &tail)).unwrap();
+        workbook.recalculate_all(options());
+        for address in ["A1", "B1"] {
+            assert_eq!(stored(&workbook, address).1, number(3.0), "{definition}");
+        }
+        for address in ["C1", "D1"] {
+            assert_eq!(stored(&workbook, address).1, used, "{definition}");
+        }
     }
 }
 

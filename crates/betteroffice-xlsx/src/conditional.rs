@@ -738,7 +738,7 @@ impl Cache {
         if ctx.exhausted() {
             return Err(Unknown::Refused);
         }
-        if ctx.has_unhandled_unsupported_function() || ctx.read_unreadable_definition() {
+        if ctx.has_unhandled_unsupported_function() {
             return Err(Unknown::EngineGap);
         }
         matched
@@ -855,8 +855,7 @@ impl Cache {
                 values.push(evaluate(call, context));
                 *spent += MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 aggregate.refused |= context.exhausted();
-                aggregate.gap |= context.has_unhandled_unsupported_function()
-                    || context.read_unreadable_definition();
+                aggregate.gap |= context.has_unhandled_unsupported_function();
                 built = true;
             }
             let mut tables = Vec::with_capacity(formula.counts.len());
@@ -881,8 +880,7 @@ impl Cache {
                 let read = MAX_EVALUATION_CELL_VISITS.saturating_sub(context.remaining_cells());
                 self.whole_range += read;
                 *spent += read;
-                aggregate.gap |= context.has_unhandled_unsupported_function()
-                    || context.read_unreadable_definition();
+                aggregate.gap |= context.has_unhandled_unsupported_function();
                 built = true;
             }
             let base = formula.base.as_ref().map(|base| {
@@ -1681,6 +1679,39 @@ mod tests {
             format: Arc::new(DifferentialFormat::default()),
             fill_unknown: false,
             stop: false,
+        }
+    }
+
+    #[test]
+    fn conditional_rules_handle_rejected_definitions_as_in_the_release() {
+        let sheet = SheetId(0);
+        let mut model = Workbook::default();
+        model.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        model.defined_names.push(xlsx_model::DefinedName {
+            name: "Garbled".into(),
+            formula: "SUM(1,".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let mut context = EvalContext::new(&model, sheet);
+        let mut spent = 0;
+        for source in ["IFERROR(Garbled,1)", "A1 B1"] {
+            let rule = expression_rule("C1", source);
+            let matched = Cache::default().matches(
+                &model,
+                sheet,
+                0,
+                &rule,
+                &CellValue::Empty,
+                rule.anchor,
+                &mut context,
+                &mut spent,
+            );
+            if source == "IFERROR(Garbled,1)" {
+                assert!(matches!(matched, Ok(true)));
+            } else {
+                assert!(matches!(matched, Err(Unknown::Unparsable)));
+            }
         }
     }
 

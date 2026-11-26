@@ -5,6 +5,7 @@ use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, ErrorValue, SheetI
 
 use crate::lexer::{
     ParseError, SheetSpan, TokKind, Token, lex, lex_for_evaluation, lex_for_rewrite,
+    lex_released_definition,
 };
 use crate::{ColumnRange, RowRange, TableSpec};
 
@@ -142,24 +143,39 @@ pub(crate) fn parse_with_sheet_span(
     src: &str,
     is_sheet_span: Option<&SheetSpan<'_>>,
 ) -> Result<Expr, ParseError> {
-    parse_source(src, &lex_for_evaluation(src, is_sheet_span)?, false)
+    parse_source(
+        src,
+        &lex_for_evaluation(src, is_sheet_span)?,
+        ParseMode::Current,
+    )
 }
 
 #[doc(hidden)]
 pub fn parse_formula_for_rewrite(src: &str) -> Result<Expr, ParseError> {
-    parse_source(src, &lex_for_rewrite(src)?, false)
+    parse_source(src, &lex_for_rewrite(src)?, ParseMode::Current)
 }
 
 #[doc(hidden)]
 pub fn is_formula_source(src: &str) -> bool {
-    lex(src).is_ok_and(|tokens| parse_source(src, &tokens, true).is_ok())
+    lex(src).is_ok_and(|tokens| parse_source(src, &tokens, ParseMode::FormulaSource).is_ok())
 }
 
-fn parse_source(
-    src: &str,
-    tokens: &[Token],
-    accept_indexed_external: bool,
-) -> Result<Expr, ParseError> {
+pub(crate) fn parse_released_definition(src: &str) -> Result<Expr, ParseError> {
+    parse_source(
+        src,
+        &lex_released_definition(src)?,
+        ParseMode::ReleasedDefinition,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    Current,
+    FormulaSource,
+    ReleasedDefinition,
+}
+
+fn parse_source(src: &str, tokens: &[Token], mode: ParseMode) -> Result<Expr, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
@@ -167,7 +183,7 @@ fn parse_source(
         tokens,
         pos: 0,
         source: src,
-        accept_indexed_external,
+        mode,
     };
     let expr = p.expr_bp(0, 0)?;
     if let Some(tok) = p.peek() {
@@ -191,7 +207,7 @@ struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     source: &'a str,
-    accept_indexed_external: bool,
+    mode: ParseMode,
 }
 
 impl<'a> Parser<'a> {
@@ -288,7 +304,8 @@ impl<'a> Parser<'a> {
             let pos = self.here();
             self.advance();
             let rhs = self.postfix(depth + 1)?;
-            if !reference_operand(&lhs.expr) || !reference_operand(&rhs.expr) {
+            if !reference_operand(&lhs.expr, self.mode) || !reference_operand(&rhs.expr, self.mode)
+            {
                 return Err(ParseError::new(pos, "':' joins two references"));
             }
             let ast_depth = lhs.depth.max(rhs.depth) + 1;
@@ -400,7 +417,8 @@ impl<'a> Parser<'a> {
         if self.source[pos..].starts_with('\'') {
             return Ok(kind);
         }
-        if !self.accept_indexed_external || !crate::deps::names_other_workbook(&self.source[pos..])
+        if self.mode != ParseMode::FormulaSource
+            || !crate::deps::names_other_workbook(&self.source[pos..])
         {
             return Err(err());
         }
@@ -558,16 +576,18 @@ impl<'a> Parser<'a> {
 /// what `:` accepts as an end: something that already designates cells, a
 /// call that may resolve to one, or the `#REF!` excel leaves behind when a
 /// deletion takes an end away.
-fn reference_operand(expr: &Expr) -> bool {
+fn reference_operand(expr: &Expr, mode: ParseMode) -> bool {
     if let Expr::Name { name, .. } = expr {
         return !address_shaped(name);
+    }
+    if matches!(expr, Expr::RowRange { sheet: Some(_), .. }) {
+        return mode != ParseMode::ReleasedDefinition;
     }
     matches!(
         expr,
         Expr::Ref { .. }
             | Expr::Range { .. }
             | Expr::ColumnRange { .. }
-            | Expr::RowRange { sheet: Some(_), .. }
             | Expr::TableRef { .. }
             | Expr::FuncCall { .. }
             | Expr::RangeJoin { .. }

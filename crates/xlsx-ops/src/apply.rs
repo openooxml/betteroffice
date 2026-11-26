@@ -1188,7 +1188,21 @@ pub fn validate_defined_name_formula_in(
     source: &str,
 ) -> Result<(), OpError> {
     validate_name_formula(source, |source| {
-        xlsx_calc::parser::parse_formula_for_cell(source, workbook, scope.unwrap_or(SheetId(0)))
+        if let Some(sheet) = scope {
+            return xlsx_calc::parser::parse_formula_for_cell(source, workbook, sheet);
+        }
+        xlsx_calc::parse_formula(source).or_else(|error| {
+            (0..workbook.sheets.len())
+                .find_map(|index| {
+                    xlsx_calc::parser::parse_formula_for_cell(
+                        source,
+                        workbook,
+                        SheetId(index as u32),
+                    )
+                    .ok()
+                })
+                .ok_or(error)
+        })
     })
 }
 

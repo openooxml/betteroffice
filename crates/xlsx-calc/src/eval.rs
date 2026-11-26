@@ -18,7 +18,7 @@ use crate::fmath;
 use crate::functions::criteria_index::CriteriaCache;
 use crate::graph::DepGraph;
 use crate::lexer::SheetSpan;
-use crate::parser::{BinaryOp, Expr, UnaryOp, parse_with_sheet_span};
+use crate::parser::{BinaryOp, Expr, UnaryOp, parse_released_definition, parse_with_sheet_span};
 use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
@@ -197,7 +197,6 @@ pub struct EvalContext<'a> {
     /// called, in call order; no handler answers for them.
     uncomputable: Rc<RefCell<Vec<String>>>,
     other_workbook: Rc<Cell<bool>>,
-    unreadable_definition: Rc<Cell<bool>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<DefinedNameValues>>,
     array_depth: Rc<Cell<u32>>,
@@ -277,7 +276,6 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
-            unreadable_definition: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -326,7 +324,6 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
-            unreadable_definition: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -368,7 +365,6 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             uncomputable: Rc::new(RefCell::new(Vec::new())),
             other_workbook: Rc::new(Cell::new(false)),
-            unreadable_definition: Rc::new(Cell::new(false)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(DefinedNameValues::default())),
             array_depth: Rc::new(Cell::new(0)),
@@ -401,7 +397,6 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::clone(&self.unsupported_functions),
             uncomputable: Rc::clone(&self.uncomputable),
             other_workbook: Rc::clone(&self.other_workbook),
-            unreadable_definition: Rc::clone(&self.unreadable_definition),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             array_depth: Rc::clone(&self.array_depth),
@@ -424,7 +419,6 @@ impl<'a> EvalContext<'a> {
         let exhausted = self.exhausted.get();
         let errors = self.unhandled_budget_errors.get();
         let unsupported = self.unsupported_functions.get();
-        let unreadable = self.unreadable_definition.get();
         let uncomputable = self.uncomputable_checkpoint();
         let random = self.random_state.get();
         let names = self.defined_name_values.borrow().insertions.len();
@@ -443,7 +437,6 @@ impl<'a> EvalContext<'a> {
             self.exhausted.set(exhausted);
             self.unhandled_budget_errors.set(errors);
             self.unsupported_functions.set(unsupported);
-            self.unreadable_definition.set(unreadable);
             self.discard_uncomputable_since(uncomputable);
             self.random_state.set(random);
             self.defined_name_values.borrow_mut().restore(names);
@@ -555,7 +548,6 @@ impl<'a> EvalContext<'a> {
         self.unsupported_functions.set(0);
         self.uncomputable.borrow_mut().clear();
         self.other_workbook.set(false);
-        self.unreadable_definition.set(false);
         self.defined_name_stack.borrow_mut().clear();
         *self.defined_name_values.borrow_mut() = DefinedNameValues::default();
         self.array_depth.set(0);
@@ -655,11 +647,6 @@ impl<'a> EvalContext<'a> {
         self.other_workbook.get()
     }
 
-    #[doc(hidden)]
-    pub fn read_unreadable_definition(&self) -> bool {
-        self.unreadable_definition.get()
-    }
-
     pub(crate) fn record_other_workbook(&self) {
         self.other_workbook.set(true);
         self.record_unsupported_function();
@@ -748,8 +735,10 @@ impl<'a> EvalContext<'a> {
     }
 
     fn parsed_definition(&self, owner: SheetId, formula: &str) -> Option<Arc<Expr>> {
-        if self.parse_cache.is_some() {
-            return self.parse_formula(owner, formula);
+        if let Some(cache) = self.parse_cache {
+            return parse_definition_cached(cache, formula, &|first, last| {
+                self.is_sheet_span(owner, first, last)
+            });
         }
         {
             let definitions = self.parsed_definitions.borrow();
@@ -766,7 +755,8 @@ impl<'a> EvalContext<'a> {
         DEFINED_NAME_PARSES.with(|count| count.set(count.get() + 1));
         let (expression, contextual) = parse_with_span_tracking(formula, &|first, last| {
             self.is_sheet_span(owner, first, last)
-        })?;
+        });
+        let expression = expression.or_else(|| released_definition(formula))?;
         self.parsed_definitions
             .borrow_mut()
             .entry(contextual.then_some(owner))
@@ -816,7 +806,8 @@ pub(crate) fn parse_cached(
     if let Some(expr) = cache.lock().expect("parse cache poisoned").get(src) {
         return Some(Arc::clone(expr));
     }
-    let (expr, contextual) = parse_with_span_tracking(src, is_span)?;
+    let (expr, contextual) = parse_with_span_tracking(src, is_span);
+    let expr = expr?;
     if !contextual {
         cache
             .lock()
@@ -826,7 +817,19 @@ pub(crate) fn parse_cached(
     Some(expr)
 }
 
-fn parse_with_span_tracking(src: &str, is_span: &SheetSpan<'_>) -> Option<(Arc<Expr>, bool)> {
+pub(crate) fn parse_definition_cached(
+    cache: &ParseCache,
+    source: &str,
+    is_span: &SheetSpan<'_>,
+) -> Option<Arc<Expr>> {
+    parse_cached(cache, source, is_span).or_else(|| released_definition(source))
+}
+
+fn released_definition(source: &str) -> Option<Arc<Expr>> {
+    parse_released_definition(source).ok().map(Arc::new)
+}
+
+fn parse_with_span_tracking(src: &str, is_span: &SheetSpan<'_>) -> (Option<Arc<Expr>>, bool) {
     let contextual = Cell::new(false);
     let expr = parse_with_sheet_span(
         src,
@@ -835,8 +838,9 @@ fn parse_with_span_tracking(src: &str, is_span: &SheetSpan<'_>) -> Option<(Arc<E
             is_span(first, last)
         }),
     )
-    .ok()?;
-    Some((Arc::new(expr), contextual.get()))
+    .ok()
+    .map(Arc::new);
+    (expr, contextual.get())
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
@@ -1075,7 +1079,6 @@ fn bind_defined_name(
         .unwrap_or(&defined.formula);
     let sheet = defined.local_sheet.unwrap_or(key.0);
     let expression = ctx.parsed_definition(sheet, formula).ok_or_else(|| {
-        ctx.unreadable_definition.set(true);
         if mentions_workbook_index(formula) {
             ctx.record_other_workbook();
         } else if formula.contains('[') {
@@ -1127,7 +1130,7 @@ pub(crate) fn resolve_ref(
 /// context sheet). returns `None` only when a named sheet does not exist.
 pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Option<SheetId> {
     match sheet {
-        Some(name) if is_path_qualifier(name) => None,
+        Some(name) if is_path_qualifier(name) => missing_sheet(name, ctx),
         Some(name) => ctx
             .provider
             .sheet_id(name)
@@ -2388,7 +2391,7 @@ mod tests {
                 format!(r#"INDIRECT("'{scope}'!R1C1",FALSE)"#),
                 ErrorValue::Ref,
             ),
-            ("PathTarget".into(), ErrorValue::Name),
+            ("PathTarget".into(), ErrorValue::Ref),
         ] {
             assert_eq!(
                 evaluate(&parse_formula(&source).unwrap(), &context),

@@ -243,6 +243,79 @@ fn a_scoped_name_takes_precedence_over_a_sheet_span_only_on_its_sheet() {
 }
 
 #[test]
+fn workbook_names_can_be_authored_and_synced_from_a_nonfirst_sheet_context() {
+    let report = SheetId(2);
+    let other = SheetId(3);
+    let mut model = WorkbookModel {
+        sheets: ["Start_1", "Data", "Report", "Other"]
+            .into_iter()
+            .map(Sheet::new)
+            .collect(),
+        ..WorkbookModel::default()
+    };
+    model.defined_names.push(DefinedName {
+        name: "Start_1".into(),
+        formula: "Data!$A$1".into(),
+        local_sheet: Some(report),
+        hidden: false,
+    });
+    for (at, value) in [(CellRef::new(0, 0), 10.0), (CellRef::new(1, 1), 20.0)] {
+        model.sheets[1].set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let options = CalculationOptions::default();
+    let mut author = Workbook::from_model_collaborative(model.clone(), 501).unwrap();
+    let mut peer = Workbook::from_model_collaborative(model, 502).unwrap();
+    author
+        .apply_ops(
+            vec![Op::SetDefinedName {
+                name: "Summary".into(),
+                refers_to: "SUM(Start_1:Data!B2)".into(),
+                scope: None,
+                hidden: None,
+            }],
+            options,
+        )
+        .unwrap();
+    for sheet in [report, other] {
+        author
+            .edit_cell(sheet, FORMULA_CELL, "=IFERROR(Summary,-1)", options)
+            .unwrap();
+    }
+    let update = author.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap();
+    peer.apply_update_v1(&update, options).unwrap();
+    for workbook in [&mut author, &mut peer] {
+        workbook.recalculate_all(options);
+        for (sheet, value) in [(report, 30.0), (other, -1.0)] {
+            assert_eq!(
+                workbook
+                    .model()
+                    .sheet(sheet)
+                    .unwrap()
+                    .cell(FORMULA_CELL)
+                    .unwrap()
+                    .value,
+                CellValue::Number { value },
+            );
+        }
+        assert_eq!(
+            xlsx_ops::cell_state_for_input(
+                "=Report!Summary+IFERROR(Other!Summary,-1)",
+                workbook.model(),
+                report,
+            )
+            .value,
+            CellValue::Number { value: 29.0 },
+        );
+    }
+}
+
+#[test]
 fn sheet_qualifier_edits_follow_a_span_with_a_missing_quoted_endpoint() {
     let model = model_with_cached_formula(&["Jan", "Report"], "SUM(Jan:'Missing Sheet'!A1)");
     let mut workbook = Workbook::from_model(model).unwrap();

@@ -19,7 +19,7 @@ use xlsx_model::{
 
 use crate::TableSpec;
 use crate::deps::{offset_target, positional_argument, range_join_span, references};
-use crate::eval::{ParseCache, parse_cached};
+use crate::eval::{ParseCache, parse_cached, parse_definition_cached};
 use crate::functions::Func;
 use crate::parser::Expr;
 use crate::reference::table_rect;
@@ -411,10 +411,7 @@ impl DepGraph {
                         let defined = &self.defined_names[index];
                         let owner = defined.local_sheet.unwrap_or(sheet);
                         if expanded.insert((sheet, index))
-                            && let Some(parsed) =
-                                parse_cached(asts, definition_source(defined), &|first, last| {
-                                    self.is_sheet_span(owner, first, last)
-                                })
+                            && let Some(parsed) = self.parse_definition(asts, owner, defined)
                         {
                             bodies.push((owner, parsed));
                         }
@@ -905,6 +902,17 @@ impl DepGraph {
         })
     }
 
+    fn parse_definition(
+        &self,
+        asts: &ParseCache,
+        owner: SheetId,
+        defined: &DefinedName,
+    ) -> Option<Arc<Expr>> {
+        parse_definition_cached(asts, definition_source(defined), &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })
+    }
+
     /// the node's parsed ast; `None` when the cell carries no (parseable)
     /// formula.
     pub(crate) fn ast(&self, sheet: SheetId, cell: CellRef) -> Option<Arc<Expr>> {
@@ -1034,7 +1042,7 @@ impl DepGraph {
                 continue;
             }
             let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
-            let Some(expression) = self.parse_formula(definition_sheet, definition_source(defined))
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
             else {
                 continue;
             };
@@ -1112,7 +1120,7 @@ impl DepGraph {
                 continue;
             }
             let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
-            let Some(expression) = self.parse_formula(definition_sheet, definition_source(defined))
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
             else {
                 continue;
             };
@@ -1137,7 +1145,7 @@ impl DepGraph {
                 continue;
             }
             let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
-            let Some(expression) = self.parse_formula(definition_sheet, definition_source(defined))
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
             else {
                 continue;
             };
