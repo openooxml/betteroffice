@@ -26,11 +26,15 @@ impl ProjectionHooks for Hooks {
         _segments: &[StorySegment],
     ) -> Result<(), ProjectionError> {
         if context.source.has_comment_ranges || context.markers.has_comments(story.id) {
-            story.result.defer(self.family(), "commentRanges", story.id, None);
+            story
+                .result
+                .defer(self.family(), "commentRanges", story.id, None);
         }
         story.state.markers.raw_mark_offsets = context.markers.raw_offsets(context.txn, story.id);
         if context.source.has_revision_ranges {
-            story.result.defer(self.family(), "revisions", story.id, None);
+            story
+                .result
+                .defer(self.family(), "revisions", story.id, None);
         }
         Ok(())
     }
@@ -42,8 +46,17 @@ impl ProjectionHooks for Hooks {
         segment: &StorySegment,
         _content: &mut Lowered,
     ) -> Result<(), ProjectionError> {
-        for kind in MARKS.iter().copied().filter(|kind| super::story::has_mark(segment, kind)) {
-            story.result.defer(self.family(), kind, story.id, Some(story.state.paragraph_index));
+        for kind in MARKS
+            .iter()
+            .copied()
+            .filter(|kind| super::story::has_mark(segment, kind))
+        {
+            story.result.defer(
+                self.family(),
+                kind,
+                story.id,
+                Some(story.state.paragraph_index),
+            );
         }
         Ok(())
     }
@@ -58,16 +71,30 @@ impl ProjectionHooks for Hooks {
     ) -> Result<(), ProjectionError> {
         let index = Some(story.state.paragraph_index);
         for kind in ["pPrIns", "pPrDel", "pPrChange", "bookmarks"] {
-            if props.and_then(|props| props.values.get(kind)).is_some_and(|value| !matches!(value, Any::Null | Any::Undefined)) {
+            if props
+                .and_then(|props| props.values.get(kind))
+                .is_some_and(|value| !matches!(value, Any::Null | Any::Undefined))
+            {
                 story.result.defer(self.family(), kind, story.id, index);
             }
         }
-        if story.state.markers.raw_mark_offsets
-            [story.state.markers.raw_mark_offsets.partition_point(|offset| *offset < story.state.paragraph_start)..]
-            .first().is_some_and(|offset| *offset <= story.state.offset)
-            || source.is_some_and(|source| source.content.iter().any(|inline| inline.node_type() == "rawXml"))
+        if story.state.markers.raw_mark_offsets[story
+            .state
+            .markers
+            .raw_mark_offsets
+            .partition_point(|offset| *offset < story.state.paragraph_start)..]
+            .first()
+            .is_some_and(|offset| *offset <= story.state.offset)
+            || source.is_some_and(|source| {
+                source
+                    .content
+                    .iter()
+                    .any(|inline| inline.node_type() == "rawXml")
+            })
         {
-            story.result.defer(self.family(), "rawInline", story.id, index);
+            story
+                .result
+                .defer(self.family(), "rawInline", story.id, index);
         }
         Ok(())
     }

@@ -15,7 +15,11 @@ pub(super) struct StoryData {
 }
 
 pub(super) fn project_root(story_id: &str, blocks: &[BlockContent]) -> StoryProjection {
-    let kind = if story_id.starts_with("hf:") { "headerFooterStory" } else { "noteStory" };
+    let kind = if story_id.starts_with("hf:") {
+        "headerFooterStory"
+    } else {
+        "noteStory"
+    };
     let mut result = StoryProjection {
         story_id: story_id.to_owned(),
         blocks: blocks.to_vec(),
@@ -38,9 +42,12 @@ impl ProjectionHooks for Hooks {
         _source: Option<&Paragraph>,
         paragraph: &mut Paragraph,
     ) -> Result<(), ProjectionError> {
-        if paragraph.section_properties.is_some() || properties.is_some_and(|properties| {
-            properties.values.contains_key("sectPr") || properties.values.contains_key("sectionBreakType")
-        }) {
+        if paragraph.section_properties.is_some()
+            || properties.is_some_and(|properties| {
+                properties.values.contains_key("sectPr")
+                    || properties.values.contains_key("sectionBreakType")
+            })
+        {
             story.state.aux.section_ranges_deferred = true;
         }
         Ok(())
@@ -54,7 +61,9 @@ impl ProjectionHooks for Hooks {
         if story.id == "body"
             && (story.state.aux.section_ranges_deferred || context.package_body_has_sections)
         {
-            story.result.defer(self.family(), "sectionRanges", story.id, None);
+            story
+                .result
+                .defer(self.family(), "sectionRanges", story.id, None);
         }
         Ok(())
     }

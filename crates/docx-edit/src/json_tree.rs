@@ -61,7 +61,10 @@ impl OrderedValue {
             Self::String(value) => Value::String(value.clone()),
             Self::Array(values) => Value::Array(values.iter().map(Self::value).collect()),
             Self::Object(entries) => Value::Object(
-                entries.iter().map(|(key, value)| (key.clone(), value.value())).collect(),
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.value()))
+                    .collect(),
             ),
         }
     }
@@ -118,7 +121,13 @@ fn scalar(input: &mut &str) -> Result<OrderedValue, String> {
             }
         }
     } else {
-        bytes.find(|(_, byte)| matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}' | b'|'))
+        bytes
+            .find(|(_, byte)| {
+                matches!(
+                    byte,
+                    b' ' | b'\t' | b'\r' | b'\n' | b',' | b']' | b'}' | b'|'
+                )
+            })
             .map_or(input.len(), |(index, _)| index)
     };
     let (token, rest) = input.split_at(end);

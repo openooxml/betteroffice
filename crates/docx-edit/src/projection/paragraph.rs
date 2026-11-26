@@ -2,21 +2,48 @@ use docx_parse::formatting::ParagraphFormatting;
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use serde_json::{Map, Value};
 
-use super::{Attrs, ProjectionContext, ProjectionError, StoryState, attr_string, decode, json_value, runs};
+use super::{
+    Attrs, ProjectionContext, ProjectionError, StoryState, attr_string, decode, json_value, runs,
+};
 use crate::ParagraphProperties;
 
 const TRUTHY_PROPERTIES: &[&str] = &[
-    "alignment", "bidi", "borders", "cnfStyle", "contextualSpacing", "indentFirstLine",
-    "indentLeft", "indentRight", "lineSpacing", "pageBreakBefore", "shading", "styleId", "tabs",
+    "alignment",
+    "bidi",
+    "borders",
+    "cnfStyle",
+    "contextualSpacing",
+    "indentFirstLine",
+    "indentLeft",
+    "indentRight",
+    "lineSpacing",
+    "pageBreakBefore",
+    "shading",
+    "styleId",
+    "tabs",
 ];
 const PRESENT_PROPERTIES: &[&str] = &[
-    "adjustRightInd", "afterAutospacing", "autoSpaceDE", "autoSpaceDN", "beforeAutospacing",
-    "outlineLevel", "spaceAfter", "spaceAfterLines", "spaceBefore", "spaceBeforeLines",
+    "adjustRightInd",
+    "afterAutospacing",
+    "autoSpaceDE",
+    "autoSpaceDN",
+    "beforeAutospacing",
+    "outlineLevel",
+    "spaceAfter",
+    "spaceAfterLines",
+    "spaceBefore",
+    "spaceBeforeLines",
     "widowControl",
 ];
 const AUTHORED_OVERRIDES: &[&str] = &[
-    "adjustRightInd", "alignment", "autoSpaceDE", "autoSpaceDN", "bidi", "pageBreakBefore",
-    "styleId", "widowControl",
+    "adjustRightInd",
+    "alignment",
+    "autoSpaceDE",
+    "autoSpaceDN",
+    "bidi",
+    "pageBreakBefore",
+    "styleId",
+    "widowControl",
 ];
 
 pub(super) fn new(
@@ -25,7 +52,8 @@ pub(super) fn new(
     formatting: Option<ParagraphFormatting>,
     content: Vec<ParagraphContent>,
 ) -> Paragraph {
-    let repeated_para_id = source.filter(|source| source.para_id == saved_id)
+    let repeated_para_id = source
+        .filter(|source| source.para_id == saved_id)
         .and_then(|source| source.repeated_para_id);
     Paragraph {
         node_type: "paragraph".to_owned(),
@@ -60,32 +88,43 @@ pub(super) fn formatting(
         attrs.remove("styleId");
     }
     let numbering = attrs.get("numPr").filter(|value| !value.is_null());
-    let mut inherited = context.inheritance.paragraph_formatting(
-        attr_string(&properties.values, "pStyle"),
-        story.table_paragraph_formatting.clone(),
-    ).and_then(|value| value.as_object().cloned());
+    let mut inherited = context
+        .inheritance
+        .paragraph_formatting(
+            attr_string(&properties.values, "pStyle"),
+            story.table_paragraph_formatting.clone(),
+        )
+        .and_then(|value| value.as_object().cloned());
     if let Some(resolved) = &mut inherited {
         if numbering.is_none() && resolved.contains_key("numPr") {
             inherited = None;
-        } else if numbering.is_some() || crate::structured::source::story_root(story_id) != story_id {
-            resolved.retain(|key, _| ["autoSpaceDE", "autoSpaceDN", "adjustRightInd"].contains(&key.as_str()));
+        } else if numbering.is_some() || crate::structured::source::story_root(story_id) != story_id
+        {
+            resolved.retain(|key, _| {
+                ["autoSpaceDE", "autoSpaceDN", "adjustRightInd"].contains(&key.as_str())
+            });
         } else {
             resolved.remove("indentLeft");
             resolved.remove("indentRight");
         }
     }
-    let original = non_null(&attrs, "_originalFormatting").map(|value| {
-        value.as_object().ok_or_else(|| ProjectionError::InvalidInput(
-            "original paragraph formatting must be an object".to_owned()
-        ))
-    }).transpose()?;
-    let style_numbering = attrs.get("numPrFromStyle")
+    let original = non_null(&attrs, "_originalFormatting")
+        .map(|value| {
+            value.as_object().ok_or_else(|| {
+                ProjectionError::InvalidInput(
+                    "original paragraph formatting must be an object".to_owned(),
+                )
+            })
+        })
+        .transpose()?;
+    let style_numbering = attrs
+        .get("numPrFromStyle")
         .or_else(|| original.and_then(|original| original.get("numPrFromStyle")));
-    let style_sourced = numbering.is_some_and(|numbering| {
-        style_numbering.is_some_and(|style| same(numbering, style))
-    });
+    let style_sourced = numbering
+        .is_some_and(|numbering| style_numbering.is_some_and(|style| same(numbering, style)));
     if let Some(original) = original {
-        let inherits = |key| original.get(key).is_none() && inherits_value(&attrs, inherited.as_ref(), key);
+        let inherits =
+            |key| original.get(key).is_none() && inherits_value(&attrs, inherited.as_ref(), key);
         let mut result = original.clone();
         for key in AUTHORED_OVERRIDES {
             if inherits(key) {
@@ -100,7 +139,11 @@ pub(super) fn formatting(
         }
         if style_sourced || !same_option(numbering, original.get("numPr")) {
             result.remove("numPrFromStyle");
-            set(&mut result, "numPr", if style_sourced { None } else { numbering });
+            set(
+                &mut result,
+                "numPr",
+                if style_sourced { None } else { numbering },
+            );
         }
         if let Some(cnf) = non_null(&attrs, "cnfStyle") {
             set(&mut result, "cnfStyle", Some(cnf));
@@ -109,11 +152,18 @@ pub(super) fn formatting(
         return decode(Some(&Value::Object(result)));
     }
 
-    let mut result: Map<_, _> = TRUTHY_PROPERTIES.iter().filter_map(|key| {
-        attrs.get(*key).filter(|value| good(value)).map(|value| ((*key).to_owned(), value.clone()))
-    }).chain(PRESENT_PROPERTIES.iter().filter_map(|key| {
-        non_null(&attrs, key).map(|value| ((*key).to_owned(), value.clone()))
-    })).collect();
+    let mut result: Map<_, _> = TRUTHY_PROPERTIES
+        .iter()
+        .filter_map(|key| {
+            attrs
+                .get(*key)
+                .filter(|value| good(value))
+                .map(|value| ((*key).to_owned(), value.clone()))
+        })
+        .chain(PRESENT_PROPERTIES.iter().filter_map(|key| {
+            non_null(&attrs, key).map(|value| ((*key).to_owned(), value.clone()))
+        }))
+        .collect();
     if result.is_empty() && numbering.is_none() {
         return Ok(None);
     }
@@ -126,15 +176,28 @@ pub(super) fn formatting(
     if let Some(inherited) = inherited {
         if inherited.contains_key("lineSpacing")
             && same_option(result.get("lineSpacing"), inherited.get("lineSpacing"))
-            && result.get("lineSpacingRule").and_then(Value::as_str).unwrap_or("auto")
-                == inherited.get("lineSpacingRule").and_then(Value::as_str).unwrap_or("auto")
+            && result
+                .get("lineSpacingRule")
+                .and_then(Value::as_str)
+                .unwrap_or("auto")
+                == inherited
+                    .get("lineSpacingRule")
+                    .and_then(Value::as_str)
+                    .unwrap_or("auto")
         {
             result.remove("lineSpacing");
             result.remove("lineSpacingRule");
         }
         result.retain(|key, value| {
-            matches!(key.as_str(), "styleId" | "numPr" | "lineSpacing" | "lineSpacingRule" | "indentFirstLine" | "hangingIndent")
-                || !same_option(Some(value), inherited.get(key))
+            matches!(
+                key.as_str(),
+                "styleId"
+                    | "numPr"
+                    | "lineSpacing"
+                    | "lineSpacingRule"
+                    | "indentFirstLine"
+                    | "hangingIndent"
+            ) || !same_option(Some(value), inherited.get(key))
         });
         if result.is_empty() {
             return Ok(None);
@@ -148,18 +211,44 @@ fn paragraph_mark(
     attrs: &Attrs,
     source: Option<&Paragraph>,
 ) -> Result<(), ProjectionError> {
-    let mark = source.map(|source| source.formatting.as_ref().and_then(|format| format.run_properties.as_ref()));
-    if !result.contains_key("runProperties") && mark.flatten().is_none() && !attrs.contains_key("language") {
+    let mark = source.map(|source| {
+        source
+            .formatting
+            .as_ref()
+            .and_then(|format| format.run_properties.as_ref())
+    });
+    if !result.contains_key("runProperties")
+        && mark.flatten().is_none()
+        && !attrs.contains_key("language")
+    {
         return Ok(());
     }
     let mut run = match result.remove("runProperties") {
         None | Some(Value::Null) => Map::new(),
         Some(Value::Object(run)) => run,
-        Some(_) => return Err(ProjectionError::InvalidInput("paragraph mark formatting must be an object".to_owned())),
+        Some(_) => {
+            return Err(ProjectionError::InvalidInput(
+                "paragraph mark formatting must be an object".to_owned(),
+            ));
+        }
     };
     if let Some(mark) = mark {
-        set(&mut run, "fontFamily", mark.and_then(|mark| mark.font_family.as_ref()).map(json_value).transpose()?.as_ref());
-        set(&mut run, "language", mark.and_then(|mark| mark.language.as_ref()).map(json_value).transpose()?.as_ref());
+        set(
+            &mut run,
+            "fontFamily",
+            mark.and_then(|mark| mark.font_family.as_ref())
+                .map(json_value)
+                .transpose()?
+                .as_ref(),
+        );
+        set(
+            &mut run,
+            "language",
+            mark.and_then(|mark| mark.language.as_ref())
+                .map(json_value)
+                .transpose()?
+                .as_ref(),
+        );
     }
     if let Some(language) = attrs.get("language") {
         let patch = json_value(language)?;
@@ -170,8 +259,13 @@ fn paragraph_mark(
     Ok(())
 }
 
-fn inherits_value(attrs: &Map<String, Value>, inherited: Option<&Map<String, Value>>, key: &str) -> bool {
-    inherited.and_then(|inherited| non_null(inherited, key))
+fn inherits_value(
+    attrs: &Map<String, Value>,
+    inherited: Option<&Map<String, Value>>,
+    key: &str,
+) -> bool {
+    inherited
+        .and_then(|inherited| non_null(inherited, key))
         .is_some_and(|inherited| non_null(attrs, key).is_some_and(|value| same(value, inherited)))
 }
 
@@ -215,7 +309,9 @@ pub(super) fn same(left: &Value, right: &Value) -> bool {
             }
             (Value::Object(left), Value::Object(right)) if left.len() == right.len() => {
                 for (key, value) in left {
-                    let Some(other) = right.get(key) else { return false };
+                    let Some(other) = right.get(key) else {
+                        return false;
+                    };
                     pending.push((value, other));
                 }
             }

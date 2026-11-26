@@ -757,12 +757,17 @@ impl StoryRevisions {
                             self.stamp_projection_root(story);
                             if let Some(root) = projection::projection_root(story) {
                                 let live = txn.get_map(STORIES).is_some_and(|stories| {
-                                    stories.contains_key(txn, story) && !story_is_removed(txn, story)
+                                    stories.contains_key(txn, story)
+                                        && !story_is_removed(txn, story)
                                 });
                                 if live {
-                                    self.live_projection_roots.entry(root.to_owned()).or_default()
+                                    self.live_projection_roots
+                                        .entry(root.to_owned())
+                                        .or_default()
                                         .insert(Arc::clone(story));
-                                } else if let Some(members) = self.live_projection_roots.get_mut(root) {
+                                } else if let Some(members) =
+                                    self.live_projection_roots.get_mut(root)
+                                {
                                     members.remove(story);
                                 }
                             }

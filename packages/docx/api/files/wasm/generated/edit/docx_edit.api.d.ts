@@ -948,6 +948,14 @@ export class EditSession {
      * stories: 0 once the states are known, 1 when more slices are needed, 2 when declined.
      */
     prime_save_seed_states_slice(paragraphs: number, inflated: number, max_bytes: number): number;
+    /**
+     * @internal
+     */
+    project_document_json(input_json: string): string;
+    /**
+     * @internal
+     */
+    project_story_json(story_id: string, input_json: string): string;
     proposal_revision_ranges_json(ids_json: string): string;
     /**
      * Versioned paragraph texts:
@@ -2045,6 +2053,8 @@ export interface InitOutput {
     readonly editsession_prime_last_slice_cost: (a: number) => number;
     readonly editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
     readonly editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
+    readonly editsession_project_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_project_story_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];

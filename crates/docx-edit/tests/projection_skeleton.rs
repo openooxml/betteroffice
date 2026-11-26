@@ -41,7 +41,11 @@ fn package_with_parts(
             r#"<w:numbering xmlns:w="{WORD}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
         )),
     ].into_iter().map(|(path, xml)| (path.to_owned(), xml.into_bytes())).collect::<Vec<_>>();
-    parts.extend(extra.iter().map(|(path, xml)| ((*path).to_owned(), xml.as_bytes().to_vec())));
+    parts.extend(
+        extra
+            .iter()
+            .map(|(path, xml)| ((*path).to_owned(), xml.as_bytes().to_vec())),
+    );
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -50,21 +54,29 @@ fn body(projection: &ProjectionOutput) -> &[BlockContent] {
 }
 
 fn paragraph(block: &BlockContent) -> &Paragraph {
-    let BlockContent::Paragraph(paragraph) = block else { panic!("expected paragraph") };
+    let BlockContent::Paragraph(paragraph) = block else {
+        panic!("expected paragraph")
+    };
     paragraph
 }
 
 fn run(content: &ParagraphContent) -> &Run {
-    let ParagraphContent::Inline(InlineNode::Run(run)) = content else { panic!("expected run") };
+    let ParagraphContent::Inline(InlineNode::Run(run)) = content else {
+        panic!("expected run")
+    };
     run
 }
 
 fn text(paragraph: &Paragraph) -> String {
-    paragraph.content.iter().flat_map(|content| &run(content).content)
+    paragraph
+        .content
+        .iter()
+        .flat_map(|content| &run(content).content)
         .filter_map(|content| match content {
             RunContent::Text { text, .. } => Some(text.as_str()),
             _ => None,
-        }).collect()
+        })
+        .collect()
 }
 
 #[test]
@@ -75,7 +87,9 @@ fn projects_plain_paragraphs_in_session_order() {
         r#"<w:p w14:paraId="00000013"><w:r><w:t>Last</w:t></w:r></w:p>"#,
     ));
     let output = doc.project_document(&ProjectionInput::default()).unwrap();
-    let [first, empty, last] = body(&output) else { panic!("expected three paragraphs") };
+    let [first, empty, last] = body(&output) else {
+        panic!("expected three paragraphs")
+    };
     let first = paragraph(first);
     assert_eq!(first.para_id.as_deref(), Some("00000011"));
     assert_eq!(first.text_id.as_deref(), Some("00000021"));
@@ -84,7 +98,10 @@ fn projects_plain_paragraphs_in_session_order() {
     assert_eq!(text(first), "A😀B");
     assert!(paragraph(empty).content.is_empty());
     assert_eq!(text(paragraph(last)), "Last");
-    assert_eq!(output.paragraph_session_keys, ["00000011", "00000012", "00000013"]);
+    assert_eq!(
+        output.paragraph_session_keys,
+        ["00000011", "00000012", "00000013"]
+    );
     assert!(output.created_list_sites.is_empty());
     assert!(output.session_revision_placeholders.is_empty());
 }
@@ -145,12 +162,15 @@ fn reprojects_after_an_edit_and_carries_the_last_assembled_body() {
         Position::new("body", 3),
         "!",
         FormatPolicy::Inherit,
-    ).unwrap();
+    )
+    .unwrap();
     let story = doc.project_story("body", &defaults).unwrap();
-    let unchanged = doc.project_document(&ProjectionInput {
-        root_stories: Some(BTreeSet::new()),
-        ..ProjectionInput::default()
-    }).unwrap();
+    let unchanged = doc
+        .project_document(&ProjectionInput {
+            root_stories: Some(BTreeSet::new()),
+            ..ProjectionInput::default()
+        })
+        .unwrap();
     assert_eq!(text(paragraph(&body(&unchanged)[0])), "A😀Z");
     let after = doc.project_document(&defaults).unwrap();
     assert_eq!(text(paragraph(&body(&after)[0])), "A😀!Z");
@@ -163,12 +183,20 @@ fn reprojects_after_an_edit_and_carries_the_last_assembled_body() {
 fn defers_tab_in_its_paragraph_and_carries_the_source_tab() {
     let doc = seeded(r#"<w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t></w:r></w:p>"#);
     let output = doc.project_document(&ProjectionInput::default()).unwrap();
-    let tab = output.deferred.iter().find(|deferred| deferred.kind == "tab").unwrap();
+    let tab = output
+        .deferred
+        .iter()
+        .find(|deferred| deferred.kind == "tab")
+        .unwrap();
     assert_eq!(tab.family, ProjectionFamily::Fields);
     assert_eq!(tab.story_id, "body");
     assert_eq!(tab.paragraph, Some(0));
     let content = &paragraph(&body(&output)[0]).content;
-    assert!(content.iter().any(|content| run(content).content.contains(&RunContent::Tab)));
+    assert!(
+        content
+            .iter()
+            .any(|content| run(content).content.contains(&RunContent::Tab))
+    );
     assert_eq!(text(paragraph(&body(&output)[0])), "AB");
 }
 
@@ -188,8 +216,10 @@ fn carries_a_deferred_table_without_projecting_its_paragraph_keys() {
     assert_eq!(text(paragraph(last)), "Last");
     assert_eq!(output.paragraph_session_keys, ["00000011", "00000012"]);
     assert!(output.deferred.iter().any(|deferral| {
-        deferral.family == ProjectionFamily::Tables && deferral.kind == "table"
-            && deferral.story_id == "body" && deferral.paragraph == Some(1)
+        deferral.family == ProjectionFamily::Tables
+            && deferral.kind == "table"
+            && deferral.story_id == "body"
+            && deferral.paragraph == Some(1)
     }));
 }
 
@@ -237,7 +267,10 @@ fn projects_the_deepest_tables_the_parser_accepts() {
     let too_deep = package_with_parts(&nested_tables(levels + 1), "", "", &[]);
     assert!(matches!(
         docx_parse::parse_docx_s9_wire(&too_deep, Default::default()),
-        Err(docx_parse::ParseError::ResourceLimit { kind: "nestingDepth", .. })
+        Err(docx_parse::ParseError::ResourceLimit {
+            kind: "nestingDepth",
+            ..
+        })
     ));
     let doc = seeded(&nested_tables(levels));
     let document = doc.project_document_json("{}").unwrap();
@@ -252,23 +285,32 @@ fn projects_the_deepest_tables_the_parser_accepts() {
     let typed = doc.project_document(&ProjectionInput::default()).unwrap();
     let mut blocks = body(&typed);
     for level in 0..levels {
-        let table = blocks.iter().find_map(|block| match block {
-            BlockContent::Table(table) => Some(table),
-            _ => None,
-        }).unwrap_or_else(|| panic!("missing table level {}", level + 1));
+        let table = blocks
+            .iter()
+            .find_map(|block| match block {
+                BlockContent::Table(table) => Some(table),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing table level {}", level + 1));
         blocks = &table.rows[0].cells[0].content;
     }
-    let [inner] = blocks else { panic!("expected the innermost paragraph") };
+    let [inner] = blocks else {
+        panic!("expected the innermost paragraph")
+    };
     assert_eq!(text(paragraph(inner)), DEEP_MARKER);
 
     let overrides = serde_json::json!({
         "host": { "comments": [{
             "id": 1, "author": "Ada", "content": [], "blockContent": body(&typed),
         }] },
-    }).to_string();
+    })
+    .to_string();
     assert!(json_nesting(&overrides) > 128);
     assert_eq!(
-        doc.project_document_json(&overrides).unwrap().matches(DEEP_MARKER).count(),
+        doc.project_document_json(&overrides)
+            .unwrap()
+            .matches(DEEP_MARKER)
+            .count(),
         2,
     );
 }
@@ -281,23 +323,35 @@ fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
         let mut story = "body".to_owned();
         let mut owners = Vec::new();
         for _ in 0..levels {
-            let receipt = doc.insert_table(&ctx, Position::new(&story, 0), 1, 1).unwrap();
+            let receipt = doc
+                .insert_table(&ctx, Position::new(&story, 0), 1, 1)
+                .unwrap();
             owners.push(story);
             story = receipt.created_story_ids.into_iter().next().unwrap();
         }
-        doc.insert_text(&ctx, Position::new(&story, 0), DEEP_MARKER, FormatPolicy::Inherit).unwrap();
+        doc.insert_text(
+            &ctx,
+            Position::new(&story, 0),
+            DEEP_MARKER,
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
         for json in [
             doc.project_document_json("{}").unwrap(),
             doc.project_story_json("body", "{}").unwrap(),
         ] {
             let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
-            let tables: Vec<_> = wire["deferred"].as_array().unwrap().iter()
+            let tables: Vec<_> = wire["deferred"]
+                .as_array()
+                .unwrap()
+                .iter()
                 .filter(|entry| entry["family"] == "tables")
                 .map(|entry| {
                     assert_eq!(entry["kind"], "table");
                     assert_eq!(entry["paragraph"], 0);
                     entry["storyId"].as_str().unwrap()
-                }).collect();
+                })
+                .collect();
             assert!(tables.iter().copied().eq(owners.iter().map(String::as_str)));
         }
     }
@@ -306,7 +360,9 @@ fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
 #[test]
 fn rejects_malformed_and_over_budget_projection_input() {
     let doc = seeded("<w:p/>");
-    let error = doc.project_story_json("body", r#"{"host":{"styles":false}}"#).unwrap_err();
+    let error = doc
+        .project_story_json("body", r#"{"host":{"styles":false}}"#)
+        .unwrap_err();
     assert!(matches!(error, ProjectionError::InvalidInput(_)));
     let input = format!("{}0{}", "[".repeat(1025), "]".repeat(1025));
     let error = doc.project_document_json(&input).unwrap_err();
@@ -317,22 +373,39 @@ fn seeded_with_auxiliary_stories() -> EditingDoc {
     let parts = [
         ("header", "header1", "header1", "hdr", "", "Header"),
         ("footer", "footer1", "footer1", "ftr", "", "Footer"),
-        ("footnotes", "footnotes", "footnotes", "footnotes", "footnote", "Footnote"),
-        ("endnotes", "endnotes", "endnotes", "endnotes", "endnote", "Endnote"),
+        (
+            "footnotes",
+            "footnotes",
+            "footnotes",
+            "footnotes",
+            "footnote",
+            "Footnote",
+        ),
+        (
+            "endnotes", "endnotes", "endnotes", "endnotes", "endnote", "Endnote",
+        ),
     ];
     let mut overrides = String::new();
     let mut relationships = String::new();
     let mut extra = Vec::new();
-    let paths: Vec<_> = parts.iter().map(|(_, file, _, _, _, _)| format!("word/{file}.xml")).collect();
+    let paths: Vec<_> = parts
+        .iter()
+        .map(|(_, file, _, _, _, _)| format!("word/{file}.xml"))
+        .collect();
     for ((kind, file, rel, tag, child, text), path) in parts.into_iter().zip(&paths) {
         use std::fmt::Write;
         write!(overrides, r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{kind}+xml"/>"#).unwrap();
         write!(relationships, r#"<Relationship Id="{rel}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{file}.xml"/>"#).unwrap();
         let paragraph = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
-        let content = if child.is_empty() { paragraph } else {
+        let content = if child.is_empty() {
+            paragraph
+        } else {
             format!(r#"<w:{child} w:id="1">{paragraph}</w:{child}>"#)
         };
-        extra.push((path.as_str(), format!(r#"<w:{tag} xmlns:w="{WORD}">{content}</w:{tag}>"#)));
+        extra.push((
+            path.as_str(),
+            format!(r#"<w:{tag} xmlns:w="{WORD}">{content}</w:{tag}>"#),
+        ));
     }
     seeded_with_parts(
         concat!(
@@ -389,7 +462,9 @@ fn projects_each_root_as_the_matching_part_of_the_document() {
 #[test]
 fn projecting_a_header_does_not_visit_the_body() {
     let doc = seeded_with_auxiliary_stories();
-    let header = doc.project_story("hf:header1", &ProjectionInput::default()).unwrap();
+    let header = doc
+        .project_story("hf:header1", &ProjectionInput::default())
+        .unwrap();
     assert_eq!(text(paragraph(&header.blocks[0])), "Header");
     assert!(doc.projection_has_visited_source_story("hf:header1"));
     assert!(!doc.projection_has_visited_source_story("body"));

@@ -1,4 +1,6 @@
-use super::{Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks, StoryPosition};
+use super::{
+    Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks, StoryPosition,
+};
 use crate::StorySegment;
 
 pub(super) struct Hooks;
@@ -18,8 +20,17 @@ impl ProjectionHooks for Hooks {
         segment: &StorySegment,
         _lowered: &mut Lowered,
     ) -> Result<(), ProjectionError> {
-        for mark in MARKS.iter().copied().filter(|mark| super::story::has_mark(segment, mark)) {
-            story.result.defer(self.family(), mark, story.id, Some(story.state.paragraph_index));
+        for mark in MARKS
+            .iter()
+            .copied()
+            .filter(|mark| super::story::has_mark(segment, mark))
+        {
+            story.result.defer(
+                self.family(),
+                mark,
+                story.id,
+                Some(story.state.paragraph_index),
+            );
         }
         Ok(())
     }
