@@ -5821,7 +5821,8 @@ mod tests {
         .unwrap();
         let widths = [400.0];
         let mut flow = FloatFlow::new(&blocks, &widths, &config, None).unwrap();
-        flow.measure_until(&mut blocks, &widths, &config, 1).unwrap();
+        flow.measure_until(&mut blocks, &widths, &config, 1)
+            .unwrap();
         assert_eq!(flow.measured(), 1);
         assert!(flow.steps().is_none());
     }
@@ -5893,7 +5894,8 @@ mod tests {
         assert_eq!(blocks[0], original);
         assert!(segment.matches(&FloatFlowReplay::default()));
         assert!(!segment.started);
-        flow.measure_until(&mut blocks, &[width], &config, 1).unwrap();
+        flow.measure_until(&mut blocks, &[width], &config, 1)
+            .unwrap();
         assert_eq!(flow.measured(), 1);
         assert!(flow.steps().is_none());
     }

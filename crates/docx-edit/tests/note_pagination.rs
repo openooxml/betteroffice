@@ -245,11 +245,7 @@ fn a_same_height_body_edit_beside_floats_remeasures_only_the_edited_block() {
 
     engine
         .doc()
-        .replace_range(
-            &EditCtx::local("", ""),
-            StoryRange::new("body", 3, 4),
-            "x",
-        )
+        .replace_range(&EditCtx::local("", ""), StoryRange::new("body", 3, 4), "x")
         .unwrap();
     let before = engine.stats();
     let edited = engine.layout_document_with_regions_json(&request).unwrap();

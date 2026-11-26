@@ -1543,9 +1543,10 @@ fn flow_wrapping_remeasures<'a>(
     options: &docx_layout::types::LayoutOptions,
     regions: &DocumentRegions,
 ) -> bool {
-    blocks.clone().any(|block| {
-        matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
-    }) || unequal_column_blocks(blocks.clone(), options, regions).contains(&true)
+    blocks
+        .clone()
+        .any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))
+        || unequal_column_blocks(blocks.clone(), options, regions).contains(&true)
         || continuous_pictures(blocks, options)
 }
 
@@ -8351,8 +8352,7 @@ impl EngineSession {
                                     blocks.iter(),
                                     &input.options,
                                     &regions,
-                                )
-                            {
+                                ) {
                                 flow.record_steps()
                             } else {
                                 flow
@@ -8768,17 +8768,14 @@ impl EngineSession {
         let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
         // Unequal columns re-measure blocks at the width of the column they
         // land in, which only the full pass resolves.
-        let unequal_columns = pagination
-            .input
-            .as_ref()
-            .is_some_and(|input| {
-                unequal_column_blocks(
-                    input.measured.iter().map(|measured| &measured.block),
-                    &input.options,
-                    &regions,
-                )
-                .contains(&true)
-            });
+        let unequal_columns = pagination.input.as_ref().is_some_and(|input| {
+            unequal_column_blocks(
+                input.measured.iter().map(|measured| &measured.block),
+                &input.options,
+                &regions,
+            )
+            .contains(&true)
+        });
         drop(pagination);
         let regional = match (
             resident_body && single_section && !unequal_columns && !provisional,
@@ -9359,17 +9356,14 @@ impl EngineSession {
         let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
         // Unequal columns re-measure blocks at the width of the column they
         // land in, which only the full pass resolves.
-        let unequal_columns = pagination
-            .input
-            .as_ref()
-            .is_some_and(|input| {
-                unequal_column_blocks(
-                    input.measured.iter().map(|measured| &measured.block),
-                    &input.options,
-                    &regions,
-                )
-                .contains(&true)
-            });
+        let unequal_columns = pagination.input.as_ref().is_some_and(|input| {
+            unequal_column_blocks(
+                input.measured.iter().map(|measured| &measured.block),
+                &input.options,
+                &regions,
+            )
+            .contains(&true)
+        });
         drop(pagination);
         let regional = match (
             resident_body && single_section && !unequal_columns && !provisional,
@@ -21961,7 +21955,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         body += &preview_fixture::paragraph(3, &preview_fixture::run("Editable paragraph"));
         body += &preview_fixture::paragraph(
             4,
-            &format!("<w:pPr>{section}</w:pPr>{}", preview_fixture::run("Section end")),
+            &format!(
+                "<w:pPr>{section}</w:pPr>{}",
+                preview_fixture::run("Section end")
+            ),
         );
         body += &preview_fixture::paragraph(5, &preview_fixture::run("Next section"));
         body += section;
