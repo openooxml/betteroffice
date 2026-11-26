@@ -110,8 +110,13 @@ pub fn sheet_qualifiers_with_sheets(
         }
         if bytes.get(first.end) == Some(&b':')
             && (quoted || external || (can_start_span(&first.name) && has_sheet(&first.name)))
-            && (quoted || bytes.get(first.end + 1) != Some(&b'\''))
             && let Some(second) = parse_sheet_token(source, first.end + 1)
+            && (quoted
+                || bytes[second.start] != b'\''
+                || (!external
+                    && !second.name.is_empty()
+                    && !second.name.contains(':')
+                    && has_sheet(&second.name)))
             && let Some(target) = qualified_target(source, second.end)
             && is_span_target(source, target)
         {
@@ -140,7 +145,8 @@ pub fn sheet_qualifiers_with_sheets(
     out
 }
 
-fn can_start_span(name: &str) -> bool {
+#[doc(hidden)]
+pub fn can_start_span(name: &str) -> bool {
     name.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
         && !name.contains(['$', '\\'])
         && CellRef::parse_a1(&name.to_ascii_uppercase()).is_err()
@@ -380,9 +386,6 @@ pub fn rename_sheets_with_sheets(
         let last = lookup(&qualifier.last);
         if first.is_none() && last.is_none() {
             continue;
-        }
-        if qualifier.has_ambiguous_target(source) {
-            return (source.to_owned(), Vec::new());
         }
         used.extend(first.into_iter().chain(last));
         let first = first.map_or(qualifier.first.as_str(), |at| renamed[at].1.as_str());
@@ -635,11 +638,6 @@ pub fn remove_sheet_references_noting_spans(
             continue;
         };
         let whole = || qualifier.span.start..reference_end(source, start);
-        if qualifier.has_ambiguous_target(source)
-            && narrowed_span(&qualifier, removed_name, order_before).is_some()
-        {
-            return None;
-        }
         if !qualifier.is_span() {
             if sheet_names_equal(&qualifier.first, removed_name) {
                 replacements.push((whole(), "#REF!".to_owned()));

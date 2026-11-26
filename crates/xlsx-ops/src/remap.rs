@@ -5,7 +5,9 @@ use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use xlsx_calc::lexer::{MAX_FORMULA_BYTES, ensure_unambiguous_spaced_calls};
+use xlsx_calc::lexer::{
+    MAX_FORMULA_BYTES, ensure_unambiguous_spaced_calls, ensure_unambiguous_spaced_references,
+};
 use xlsx_calc::parser::{Expr, parse_formula_with_sheet_spans};
 use xlsx_calc::{ColumnRange, RowRange, TokKind, lex_for_rewrite, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
@@ -2461,7 +2463,7 @@ fn has_ambiguous_spaced_call(source: &str) -> bool {
     source.contains('(')
         && source.contains(char::is_whitespace)
         && lex_for_rewrite(source)
-            .is_ok_and(|tokens| ensure_unambiguous_spaced_calls(source, &tokens).is_err())
+            .is_ok_and(|tokens| ensure_unambiguous_spaced_references(source, &tokens).is_err())
 }
 
 pub(crate) fn ensure_sheet_edit_references_rewritable(
@@ -3165,6 +3167,68 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_table_preserves_an_intersection_with_a_range_union() {
+        let mut workbook = wb(&["Data", "Report"]);
+        workbook.tables.push(xlsx_model::Table {
+            name: "Amt".into(),
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A2").unwrap(),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Old".into()],
+            style: Vec::new(),
+        });
+        workbook.defined_names = vec![defined("Input", "SUM(A:N (A1:B2,C1:D2))+Amt[Old]")];
+        crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
+        assert!(workbook.tables.is_empty());
+        assert_eq!(
+            workbook.defined_names[0].formula,
+            "SUM(A:N (A1:B2,C1:D2))+#REF!"
+        );
+    }
+
+    #[test]
+    fn sheets_can_be_renamed_and_removed_beside_range_unions_and_numeric_calls() {
+        for (source, renamed, removed) in [
+            (
+                "SUM(Data!A:N (Data!1:2,Data!3:4))",
+                "SUM('New Data'!A:N ('New Data'!1:2,'New Data'!3:4))",
+                "SUM(#REF!:N (#REF!,#REF!))",
+            ),
+            (
+                "SUM(LOG10 (1), Data!A1)",
+                "SUM(LOG10 (1), 'New Data'!A1)",
+                "SUM(LOG10 (1), #REF!)",
+            ),
+        ] {
+            let mut workbook = wb(&["Data", "Report"]);
+            set_formula(&mut workbook, SheetId(1), "B1", source);
+            let mut edited = workbook.clone();
+            crate::apply(
+                &mut edited,
+                &Op::RenameSheet {
+                    sheet: SheetId(0),
+                    name: "New Data".into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(formula(&edited, SheetId(1), "B1").as_deref(), Some(renamed));
+
+            crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
+            assert_eq!(formula(&workbook, SheetId(0), "B1").as_deref(), Some(removed));
+        }
+    }
+
+    #[test]
+    fn an_unrelated_row_edit_leaves_a_defined_name_with_a_spaced_numeric_call_unchanged() {
+        let source = "SUM(LOG10 (1), Data!A1)";
+        let mut workbook = wb(&["Data", "Other"]);
+        workbook.defined_names = vec![defined("Input", source)];
+        crate::apply(&mut workbook, &insert_rows(1, 0, 1)).unwrap();
+        assert_eq!(workbook.defined_names[0].formula, source);
+    }
+
+    #[test]
     fn ambiguous_spaced_calls_refuse_dropped_table_rewrites() {
         let dropped = ["Amt".to_owned()];
         for reference in ["LOG10 (1)", "Amt:IF (C1,B1,B2)", "Amt:LET (x,B1,x)"] {
@@ -3212,6 +3276,134 @@ mod tests {
         ));
         assert!(!names_unrewritable_table(source, dropped, &sheets));
         assert_eq!(remove_table_references(source, dropped, &sheets), None);
+    }
+
+    #[test]
+    fn mixed_quoted_span_removes_its_sheet_even_when_it_owns_a_same_named_table() {
+        let source = "SUM(Amounts:'Data two'!A1:B2)";
+        let report = SheetId(2);
+        let mut workbook = wb(&["Amounts", "Data two", "Report"]);
+        workbook.tables.push(xlsx_model::Table {
+            name: "Amounts".into(),
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A2").unwrap(),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Amt".into()],
+            style: Vec::new(),
+        });
+        set_formula(&mut workbook, report, "B1", source);
+        workbook.defined_names = vec![defined("Span", source)];
+
+        let mut renamed = workbook.clone();
+        crate::apply(
+            &mut renamed,
+            &Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Totals".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            formula(&renamed, report, "B1").as_deref(),
+            Some("SUM('Totals:Data two'!A1:B2)")
+        );
+
+        let mut shifted = workbook.clone();
+        crate::apply(&mut shifted, &insert_rows(1, 0, 1)).unwrap();
+        assert_eq!(
+            formula(&shifted, report, "B1").as_deref(),
+            Some("SUM('Amounts:Data two'!A2:B3)")
+        );
+        assert_eq!(
+            shifted.defined_names[0].formula,
+            "SUM(Amounts:'Data two'!A2:B3)"
+        );
+
+        crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
+        assert!(workbook.tables.is_empty());
+        assert_eq!(
+            formula(&workbook, SheetId(1), "B1").as_deref(),
+            Some("SUM('Data two'!A1:B2)")
+        );
+        assert_eq!(workbook.defined_names[0].formula, "SUM('Data two'!A1:B2)");
+    }
+
+    #[test]
+    fn mixed_quoted_span_endpoints_follow_sheet_renames_and_removals() {
+        let source = "SUM(Jan:'End Sheet'!A1)";
+        let report = SheetId(3);
+        let mut workbook = wb(&["Jan", "Feb", "End Sheet", "Report"]);
+        set_formula(&mut workbook, report, "B1", source);
+        workbook.defined_names = vec![defined("Span", source)];
+        for (op, owner, expected) in [
+            (
+                Op::RenameSheet {
+                    sheet: SheetId(0),
+                    name: "Start".into(),
+                },
+                report,
+                "SUM('Start:End Sheet'!A1)",
+            ),
+            (
+                Op::RemoveSheet { index: 0 },
+                SheetId(2),
+                "SUM('Feb:End Sheet'!A1)",
+            ),
+            (
+                Op::RemoveSheet { index: 2 },
+                SheetId(2),
+                "SUM(Jan:Feb!A1)",
+            ),
+        ] {
+            let mut edited = workbook.clone();
+            crate::apply(&mut edited, &op).unwrap();
+            assert_eq!(formula(&edited, owner, "B1").as_deref(), Some(expected));
+            assert_eq!(edited.defined_names[0].formula, expected);
+        }
+    }
+
+    #[test]
+    fn mixed_quoted_spans_shift_cells_names_and_charts_on_endpoint_and_interior_edits() {
+        let source = "SUM(Jan:'End Sheet'!A1)";
+        let report = SheetId(3);
+        let mut workbook = wb(&["Jan", "Feb", "End Sheet", "Report"]);
+        set_formula(&mut workbook, report, "B1", source);
+        workbook.defined_names = vec![defined("Span", source)];
+        charted(&mut workbook, report, &[source]);
+        for target in [0, 1, 2] {
+            let mut shifted = workbook.clone();
+            crate::apply(&mut shifted, &insert_rows(target, 0, 1)).unwrap();
+            assert_eq!(
+                formula(&shifted, report, "B1").as_deref(),
+                Some("SUM('Jan:End Sheet'!A2)"),
+                "sheet {target}"
+            );
+            assert_eq!(shifted.defined_names[0].formula, "SUM(Jan:'End Sheet'!A2)");
+            assert_eq!(chart_formulas(&shifted, report), ["SUM(Jan:'End Sheet'!A2)"]);
+        }
+        assert!(formula_has_sheet_span(source, &workbook));
+        workbook.sheets[3].conditional_formats.push(ConditionalFormatting {
+            sqref: "B1".into(),
+            rules: vec![ConditionalFormatRule {
+                id: "span".into(),
+                rule_type: "expression".into(),
+                operator: None,
+                formulas: vec![source.into()],
+                priority: 1,
+                dxf_id: None,
+                format: Default::default(),
+                raw_xml: None,
+            }],
+        });
+        assert_sheet_edit_refuses(
+            &workbook,
+            &insert_rows(1, 0, 1),
+            &OpError::InvalidConditionalFormat(
+                "structural edit would affect conditional format span on sheet 'Report' (sqref 'B1'); reference rewriting is unsupported".into(),
+            ),
+            source,
+        );
     }
 
     #[test]
@@ -3749,6 +3941,39 @@ mod tests {
             remap_proposal_formula(source, SheetId(3), &names, &op).as_deref(),
             Some("SUM('Jan:Mar'!$A$2:$A$6)+'[1]Jan:Mar'!B1")
         );
+    }
+
+    #[test]
+    fn unquoted_whole_row_sheet_spans_still_remap() {
+        let names = ["Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report"]
+            .map(str::to_owned);
+        for (source, target, expected) in [
+            ("SUM(Sheet1:Sheet3!1:2)", 1, "SUM('Sheet1:Sheet3'!2:3)"),
+            ("SUM(Sheet1:Sheet2!$1:$5)", 0, "SUM('Sheet1:Sheet2'!$2:$6)"),
+            ("Sheet1:Sheet3!1:1", 2, "'Sheet1:Sheet3'!2:2"),
+            ("SUM(Q1_Sales:Q2_Sales!1:10)", 3, "SUM('Q1_Sales:Q2_Sales'!2:11)"),
+        ] {
+            let op = insert_rows(target, 0, 1);
+            assert_eq!(
+                remap_proposal_formula(source, SheetId(5), &names, &op).as_deref(),
+                Some(expected),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn let_range_joins_remap_unquoted_reference_shaped_sheet_names() {
+        for sheet in ["R2C3", "A1", "TRUE"] {
+            let names = [sheet, "Report"].map(str::to_owned);
+            let source = format!("_xlfn.LET(_xlpm.c, {sheet}!A1, SUM(_xlpm.c:{sheet}!A2))");
+            let expected = format!("_xlfn.LET(_xlpm.c,'{sheet}'!A2,SUM(_xlpm.c : '{sheet}'!A3))");
+            assert_eq!(
+                remap_proposal_formula(&source, SheetId(1), &names, &insert_rows(0, 0, 1)),
+                Some(expected),
+                "{source}"
+            );
+        }
     }
 
     #[test]

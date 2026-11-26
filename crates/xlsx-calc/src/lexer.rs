@@ -3,7 +3,8 @@
 
 use std::fmt;
 
-use xlsx_model::sheet_qualifier::{is_r1c1_reference, parse_sheet_token};
+pub(crate) use xlsx_model::sheet_qualifier::can_start_span as is_unquoted_sheet;
+use xlsx_model::sheet_qualifier::parse_sheet_token;
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
 use crate::reference::MAX_TABLE_SPEC_ITEMS;
@@ -166,10 +167,18 @@ pub enum TokKind {
 
 /// tokenize a formula source string.
 pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
+    lex_with_sheet_spans(input, &|_| false)
+}
+
+pub(crate) fn lex_with_sheet_spans(
+    input: &str,
+    has_sheet: &dyn Fn(&str) -> bool,
+) -> Result<Vec<Token>, ParseError> {
     Lexer {
         input,
         pos: 0,
         table_refs: None,
+        has_sheet,
     }
     .run()
 }
@@ -181,6 +190,19 @@ pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
 
 #[doc(hidden)]
 pub fn ensure_unambiguous_spaced_calls(input: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    check_spaced_calls(input, tokens, false)
+}
+
+#[doc(hidden)]
+pub fn ensure_unambiguous_spaced_references(input: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    check_spaced_calls(input, tokens, true)
+}
+
+fn check_spaced_calls(
+    input: &str,
+    tokens: &[Token],
+    allow_numeric_call: bool,
+) -> Result<(), ParseError> {
     for (index, paren) in tokens.iter().enumerate() {
         if paren.kind != TokKind::LParen || index == 0 {
             continue;
@@ -209,35 +231,62 @@ pub fn ensure_unambiguous_spaced_calls(input: &str, tokens: &[Token]) -> Result<
             .next()
             .unwrap_or_default()
             .trim_start();
-        if crate::functions::resolve(endpoint).is_none()
-            && !crate::array::is_array_builtin(endpoint)
+        let builtin = crate::functions::resolve(endpoint);
+        if builtin.is_none() && !crate::array::is_array_builtin(endpoint) {
+            continue;
+        }
+        let group = &tokens[index + 1..];
+        if matches!(kind, TokKind::ColumnRange { .. })
+            && looks_like_range_group(group, builtin == Some(crate::functions::Func::N))
         {
             continue;
         }
-        let single_address = matches!(
-            tokens.get(index + 1..index + 3),
-            Some([
-                Token {
-                    kind: TokKind::Ref { .. }
-                        | TokKind::Range { .. }
-                        | TokKind::ColumnRange { .. }
-                        | TokKind::RowRange { .. },
-                    ..
-                },
-                Token {
-                    kind: TokKind::RParen,
-                    ..
-                }
-            ])
-        );
-        if !matches!(kind, TokKind::ColumnRange { .. }) || !single_address {
-            return Err(ParseError::new(
-                reference.start,
-                "ambiguous spaced function call",
-            ));
+        if allow_numeric_call
+            && matches!(reference.kind, TokKind::Ref { sheet: None, .. })
+            && matches!(
+                group,
+                [Token { kind: TokKind::Num(_), .. }, Token { kind: TokKind::RParen, .. }, ..]
+            )
+        {
+            continue;
         }
+        return Err(ParseError::new(
+            reference.start,
+            "ambiguous spaced function call",
+        ));
     }
     Ok(())
+}
+
+fn looks_like_range_group(tokens: &[Token], allow_union: bool) -> bool {
+    if let [first, close, ..] = tokens
+        && close.kind == TokKind::RParen
+    {
+        return matches!(
+            first.kind,
+            TokKind::Ref { .. }
+                | TokKind::Range { .. }
+                | TokKind::ColumnRange { .. }
+                | TokKind::RowRange { .. }
+        );
+    }
+    if !allow_union {
+        return false;
+    }
+    for pair in tokens.chunks_exact(2) {
+        if !matches!(
+            pair[0].kind,
+            TokKind::Range { .. } | TokKind::ColumnRange { .. } | TokKind::RowRange { .. }
+        ) {
+            return false;
+        }
+        match pair[1].kind {
+            TokKind::Comma => {}
+            TokKind::RParen => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 #[doc(hidden)]
@@ -330,6 +379,7 @@ pub fn rewrite_table_columns<'a>(
         input,
         pos: 0,
         table_refs: Some(Vec::new()),
+        has_sheet: &|_| false,
     };
     let tokens = lexer.run()?;
     let table_refs = lexer.table_refs.take().unwrap();
@@ -439,14 +489,6 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '.' | '$' | '\\')
 }
 
-pub(crate) fn is_unquoted_sheet(word: &str) -> bool {
-    has_unquoted_sheet_chars(word)
-        && !word.eq_ignore_ascii_case("TRUE")
-        && !word.eq_ignore_ascii_case("FALSE")
-        && CellRef::parse_a1(&word.to_ascii_uppercase()).is_err()
-        && !is_r1c1_reference(word)
-}
-
 fn has_unquoted_sheet_chars(word: &str) -> bool {
     word.starts_with(|ch: char| ch.is_alphabetic() || ch == '_') && !word.contains(['$', '\\'])
 }
@@ -477,6 +519,7 @@ struct Lexer<'a> {
     input: &'a str,
     pos: usize,
     table_refs: Option<Vec<TableRefRewrite>>,
+    has_sheet: &'a dyn Fn(&str) -> bool,
 }
 
 struct TableRefRewrite {
@@ -843,7 +886,7 @@ impl Lexer<'_> {
         let save = self.pos;
         self.bump();
         let quoted_last = self.peek() == Some('\'');
-        if quoted_last && !quoted {
+        if quoted_last && !quoted && (start + first.len() != save || !(self.has_sheet)(first)) {
             self.pos = save;
             return Ok(None);
         }
@@ -851,6 +894,12 @@ impl Lexer<'_> {
             && self.consume_bang()
         {
             let first = workbook_scope(first).unwrap_or(first);
+            if quoted_last && !quoted
+                && (last.is_empty() || last.contains(':') || !(self.has_sheet)(&last))
+            {
+                self.pos = save;
+                return Ok(None);
+            }
             if quoted
                 && (first.is_empty()
                     || last.is_empty()
@@ -1363,6 +1412,7 @@ mod tests {
                     input: source,
                     pos: 0,
                     table_refs: Some(Vec::new()),
+                    has_sheet: &|_| false,
                 }
                 .run()
                 .unwrap(),

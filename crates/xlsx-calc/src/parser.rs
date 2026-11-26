@@ -1,10 +1,10 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::sheet_qualifier::{parse_sheet_token, qualified_target};
+use xlsx_model::sheet_qualifier::{can_start_span, parse_sheet_token, qualified_target};
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
-use crate::lexer::{ParseError, TokKind, Token, is_unquoted_sheet, lex};
+use crate::lexer::{ParseError, TokKind, Token, lex_with_sheet_spans};
 use crate::{ColumnRange, RowRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -139,7 +139,7 @@ fn parse_source(
     has_sheet: &dyn Fn(&str) -> bool,
     accept_indexed_external: bool,
 ) -> Result<Expr, ParseError> {
-    let tokens = lex(src)?;
+    let tokens = lex_with_sheet_spans(src, has_sheet)?;
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
@@ -198,9 +198,13 @@ fn parse_source(
 
 fn is_name_range_join(token: &Token, source: &str, has_sheet: &dyn Fn(&str) -> bool) -> bool {
     // A bare name can also be the left operand of a join to a qualified address.
-    matches!(&token.kind, TokKind::ThreeDRef { first, last, .. }
+    matches!(&token.kind, TokKind::ThreeDRef { first, last, target }
         if !source[token.start..].starts_with('\'') && !address_shaped(first)
-            && is_unquoted_sheet(last) && !has_sheet(first))
+            && !matches!(target.as_ref(), TokKind::RowRange { .. })
+            && !has_sheet(first)
+            && (can_start_span(last) || first.split_once('.').is_some_and(|(prefix, _)| {
+                prefix.eq_ignore_ascii_case("_xlpm")
+            })))
 }
 
 fn qualify_reference(kind: TokKind, sheet: String) -> TokKind {
@@ -1022,6 +1026,17 @@ mod tests {
             assert!(matches!(&parsed, Expr::Ref { sheet: Some(name), .. } if name == sheet));
             assert_eq!(parsed.to_formula(), quoted);
             assert_eq!(parse_formula(&quoted).unwrap(), parsed);
+        }
+    }
+
+    #[test]
+    fn excel_parameter_range_joins_accept_unquoted_reference_shaped_sheet_names() {
+        for (source, quoted) in [
+            ("_xlpm.c:R2C3!A2", "_xlpm.c:'R2C3'!A2"),
+            ("_xlpm.c:A1!B2", "_xlpm.c:'A1'!B2"),
+            ("_xlpm.c:TRUE!A2", "_xlpm.c:'TRUE'!A2"),
+        ] {
+            assert_eq!(parse_formula(source).unwrap(), parse_formula(quoted).unwrap());
         }
     }
 

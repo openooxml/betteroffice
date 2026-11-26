@@ -2435,6 +2435,47 @@ mod tests {
     }
 
     #[test]
+    fn unquoted_whole_row_sheet_spans_keep_cached_values() {
+        let mut workbook = Workbook::default();
+        workbook.sheets = ["Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report"]
+            .into_iter()
+            .map(Sheet::new)
+            .collect();
+        let report = SheetId(5);
+        for (source, cache) in [
+            ("SUM(Sheet1:Sheet3!1:2)", 42.0),
+            ("SUM(Sheet1:Sheet2!$1:$5)", 43.0),
+            ("Sheet1:Sheet3!1:1", 44.0),
+            ("SUM(Q1_Sales:Q2_Sales!1:10)", 45.0),
+        ] {
+            put_cached_formula(&mut workbook, report, "A1", source, num(cache));
+            rebuild_and_recalc_all(&mut workbook, None);
+            assert_eq!(value(&workbook, report, "A1"), num(cache), "{source}");
+        }
+    }
+
+    #[test]
+    fn let_range_joins_recalculate_across_unquoted_reference_shaped_sheet_names() {
+        for sheet in ["R2C3", "A1", "TRUE"] {
+            let (mut workbook, report) = one_sheet();
+            let input = SheetId(1);
+            workbook.sheets.push(Sheet::new(sheet));
+            put_num(&mut workbook, input, "A1", 2.0);
+            put_num(&mut workbook, input, "A2", 3.0);
+            let source = format!("_xlfn.LET(_xlpm.c, {sheet}!A1, SUM(_xlpm.c:{sheet}!A2))");
+            put_formula(&mut workbook, report, "A1", &source);
+            let (mut graph, _) = rebuild_and_recalc_all(&mut workbook, None);
+            assert_eq!(value(&workbook, report, "A1"), num(5.0), "{source}");
+            put_num(&mut workbook, input, "A2", 7.0);
+            recalc_after(&mut workbook, &mut graph, &[(input, a1("A2"))], None);
+            assert_eq!(value(&workbook, report, "A1"), num(9.0), "{source}");
+            put_num(&mut workbook, input, "A1", 11.0);
+            recalc_after(&mut workbook, &mut graph, &[(input, a1("A1"))], None);
+            assert_eq!(value(&workbook, report, "A1"), num(18.0), "{source}");
+        }
+    }
+
+    #[test]
     fn an_unknown_function_without_a_cached_value_reports_name() {
         let (mut wb, s) = one_sheet();
         put_formula(&mut wb, s, "A1", "REPRO_UNKNOWN_FUNCTION(1)");

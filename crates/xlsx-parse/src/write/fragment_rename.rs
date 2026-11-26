@@ -364,6 +364,77 @@ mod tests {
     }
 
     #[test]
+    fn preserved_selector_intersections_follow_sheet_renames_and_removals() {
+        let source = "SUM(Data!$B$2:$B$4 [@Status])";
+        let with_second_ref = "SUM(Data!$B$2:$B$4 [@Status])+Data!C1";
+        let xml = format!(
+            "<dataValidations><dataValidation><formula1>{source}</formula1><formula2>{with_second_ref}</formula2></dataValidation></dataValidations>"
+        );
+        let source_order = ["Data", "Report"].map(str::to_owned).to_vec();
+        let rename = SheetEdits {
+            source_order: source_order.clone(),
+            ..renamed(&[("Data", "New Data")])
+        };
+        let remove = SheetEdits {
+            source_order,
+            removed: vec!["Data".into()],
+            ..SheetEdits::default()
+        };
+        for (edits, expected) in [
+            (&rename, xml.replace("Data!", "&apos;New Data&apos;!")),
+            (
+                &remove,
+                xml.replace(with_second_ref, "SUM(#REF! [@Status])+#REF!")
+                    .replace(source, "SUM(#REF! [@Status])"),
+            ),
+        ] {
+            assert_eq!(
+                rename_fragment(xml.as_bytes(), false, edits).unwrap(),
+                Some(expected.into_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_span_intersections_and_chains_follow_sheet_edits() {
+        let order = ["Jan", "Feb", "Mar", "Report"].map(str::to_owned).to_vec();
+        let rename = SheetEdits {
+            source_order: order.clone(),
+            ..renamed(&[("Mar", "End")])
+        };
+        let remove_endpoint = SheetEdits {
+            source_order: order.clone(),
+            removed: vec!["Mar".into()],
+            ..SheetEdits::default()
+        };
+        for target in ["A1 (A1:B2)", "A:B (1:2)", "A:B:C"] {
+            let source = format!("SUM(Jan:Mar!{target})");
+            assert_eq!(
+                rename.apply(&source),
+                Some((format!("SUM(Jan:End!{target})"), vec![0]))
+            );
+            assert_eq!(
+                remove_endpoint.apply(&source),
+                Some((format!("SUM(Jan:Feb!{target})"), vec![]))
+            );
+        }
+        let remove_interior = SheetEdits {
+            source_order: order,
+            removed: vec!["Feb".into()],
+            ..SheetEdits::default()
+        };
+        let source = "SUM(Jan:Mar!A1:B2 (1:2))+Feb!A1";
+        assert_eq!(
+            rename.apply(source),
+            Some(("SUM(Jan:End!A1:B2 (1:2))+Feb!A1".into(), vec![0]))
+        );
+        assert_eq!(
+            remove_interior.apply(source),
+            Some(("SUM(Jan:Mar!A1:B2 (1:2))+#REF!".into(), vec![]))
+        );
+    }
+
+    #[test]
     fn a_span_a_deletion_would_narrow_after_sheets_moved_is_refused() {
         let edits = SheetEdits {
             source_order: ["Jan", "Feb", "Mar"].map(str::to_owned).to_vec(),
