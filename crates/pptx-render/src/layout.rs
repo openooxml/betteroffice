@@ -11575,6 +11575,7 @@ mod tests {
         };
         connector.base.id = 9_003;
         connector.geometry = "bentConnector3".to_owned();
+        connector.adjust_values.insert("adj1".to_owned(), 1e40);
         connector.outline = Some(red_outline(76_200.0));
         package.masters[0].shapes.push(ShapeNode::Shape(connector));
 
@@ -11609,8 +11610,9 @@ mod tests {
                         object_id: 9_003,
                         fill: None,
                         stroke: Some(_),
+                        path,
                         ..
-                    }
+                    } if path.get(1) == Some(&GeometryPathCommand::Line { x: 1e6, y: 0.0 })
                 ))
         );
     }

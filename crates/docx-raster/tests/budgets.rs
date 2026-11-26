@@ -415,6 +415,37 @@ fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
     );
 }
 
+#[test]
+fn a_long_custom_dash_is_charged_for_each_clipped_fragment() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut path = vec![json!({"type": "move", "x": 8, "y": 8})];
+    path.extend((1..=260).map(|step| {
+        let x = if step % 2 == 0 { 8 } else { 104 };
+        json!({"type": "line", "x": x, "y": 8})
+    }));
+    let scene = |geometry_path: &[Value]| {
+        list(
+            32.0,
+            16.0,
+            vec![json!({
+                "kind": "shape", "x": 0, "y": 0, "w": 32, "h": 16,
+                "geometryPath": geometry_path,
+                "strokePaint": {"color": "#000000", "width": 4, "customDash": vec![128; 65_536]}
+            })],
+        )
+    };
+    render_png(&scene(&path[..3]), 0, &resources).unwrap();
+
+    let scene = scene(&path);
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(allocated < 4 * MIB, "refusal allocated {allocated} bytes");
+}
+
 /// An image border dashes the frame's rectangle, whose perimeter is four more
 /// numbers off the display list.
 #[test]

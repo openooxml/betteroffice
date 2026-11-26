@@ -1709,6 +1709,37 @@ pub(crate) fn parse_color(value: &str) -> Result<Color, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_clipped_dashes_preserve_stroke_opacity() {
+        let mut builder = PathBuilder::new();
+        builder.move_to(8.0, 8.0);
+        builder.line_to(104.0, 8.0);
+        builder.line_to(8.0, 8.0);
+        let path = builder.finish().unwrap();
+        let mut target = Pixmap::new(32, 16).unwrap();
+        target.fill(Color::WHITE);
+        let (paint, stroke) = stroke_paint(
+            &SlideStroke {
+                join: None,
+                color: "#ff000080".to_owned(),
+                width: 4.0,
+                dashed: true,
+                head_end: None,
+                tail_end: None,
+                paint: None,
+            },
+            [0.0, 0.0, 32.0, 16.0],
+        )
+        .unwrap()
+        .unwrap();
+        stroke_visible_path(&mut target, &path, &paint, &stroke, Transform::identity(), None)
+            .unwrap();
+        let single = target.pixel(10, 8).unwrap();
+        assert!((126..=128).contains(&single.green()));
+        assert_eq!(target.pixel(14, 8), Some(single));
+        assert_eq!(target.pixel(18, 8), Some(single));
+    }
+
     use super::*;
 
     #[test]

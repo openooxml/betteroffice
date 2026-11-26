@@ -4063,6 +4063,35 @@ mod tests {
                         {"type": "line", "x": 96000032, "y": 24},
                         {"type": "line", "x": 96000032, "y": 120},
                         {"type": "line", "x": 128, "y": 120}
+    #[test]
+    fn overlapping_clipped_dashes_preserve_stroke_opacity() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0, "width": 32, "height": 16,
+                "primitives": [{
+                    "kind": "shape", "x": 0, "y": 0, "w": 32, "h": 16,
+                    "geometryPath": [
+                        {"type": "move", "x": 8, "y": 8},
+                        {"type": "line", "x": 104, "y": 8},
+                        {"type": "line", "x": 8, "y": 8}
+                    ],
+                    "strokePaint": {"color": "#ff000080", "width": 4, "customDash": [2, 1]}
+                }]
+            }]
+        }))
+        .unwrap();
+        let png = render_png(
+            &scene,
+            0,
+            &RenderResources::new(&FontStore::new(), &FontChains::new(), &ImageMap::new()),
+        )
+        .unwrap();
+        let single = picture_pixel(&png, 10, 8);
+        assert!((126..=128).contains(&single[1]));
+        assert_eq!(picture_pixel(&png, 14, 8), single);
+        assert_eq!(picture_pixel(&png, 18, 8), single);
+    }
+
                     ],
                     "strokePaint": {"color": "#ff0000", "width": 4, "customDash": [2, 1]}
                 }]

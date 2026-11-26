@@ -1827,18 +1827,8 @@ mod tests {
             Some(&0.5)
         );
         assert!(preset_geometry_default_adjustments("rect").is_empty());
-        for (preset, count) in [
-            ("bentConnector2", 0),
-            ("bentConnector3", 1),
-            ("bentConnector4", 2),
-            ("bentConnector5", 3),
-        ] {
-            assert_eq!(
-                preset_geometry_default_adjustments(preset),
-                (1..=count)
-                    .map(|i| (format!("adj{i}"), 0.5))
-                    .collect::<HashMap<_, _>>()
-            );
+        for preset in ["bentConnector2", "bentConnector3", "bentConnector4", "bentConnector5"] {
+            assert!(preset_geometry_default_adjustments(preset).is_empty());
         }
     }
 
