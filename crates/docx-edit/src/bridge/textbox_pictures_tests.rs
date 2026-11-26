@@ -849,12 +849,7 @@ fn table_boundary_wrap_square_shape_paints_on_its_anchor_page() {
     }
 }
 
-fn cell_anchor_box(
-    horizontal: &str,
-    vertical: &str,
-    wrap: &str,
-    height: u32,
-) -> String {
+fn cell_anchor_box(horizontal: &str, vertical: &str, wrap: &str, height: u32) -> String {
     format!(
         r#"<w:drawing><wp:anchor layoutInCell="1" behindDoc="0" relativeHeight="1"><wp:positionH relativeFrom="column">{horizontal}</wp:positionH><wp:positionV relativeFrom="paragraph">{vertical}</wp:positionV><wp:extent cx="609600" cy="{height}"/>{wrap}<wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Box label</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
     )
@@ -900,8 +895,10 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
         "<wp:wrapNone/>",
         114300,
     );
-    let (display, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
-    let (control, control_layout) = display_with_layout(&cell_anchor_package("", "Anchor text"), true);
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let (control, control_layout) =
+        display_with_layout(&cell_anchor_package("", "Anchor text"), true);
     let primitives = display["pages"][0]["primitives"].as_array().unwrap();
     let control = control["pages"][0]["primitives"].as_array().unwrap();
     let shape = painted_cell_anchor(primitives);
@@ -928,10 +925,14 @@ fn cell_text_box_centers_across_the_content_width() {
         "<wp:wrapNone/>",
         114300,
     );
-    let (display, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
     let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
     let (table, _) = cell_anchor_table(&layout);
-    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + (360.0 - 64.0) / 2.0);
+    assert_eq!(
+        shape["x"],
+        table["x"].as_f64().unwrap() + 160.0 + (360.0 - 64.0) / 2.0
+    );
 }
 
 #[test]
@@ -942,7 +943,8 @@ fn cell_square_wrap_uses_the_painted_text_box_rectangle() {
         r#"<wp:wrapSquare wrapText="right"/>"#,
         342900,
     );
-    let story = "Anchor text and more words for the lines beside and below the floating text box. ".repeat(10);
+    let story = "Anchor text and more words for the lines beside and below the floating text box. "
+        .repeat(10);
     let (engine, layout, font) =
         layout_with_engine(&cell_anchor_package(&drawing, &story), true, |_| {});
     let (display, unreadable) = engine
@@ -970,19 +972,31 @@ fn cell_square_wrap_uses_the_painted_text_box_rectangle() {
         assert_eq!(line["leftOffset"], right - cell_x);
     }
     assert_eq!(lines[2]["leftOffset"].as_f64().unwrap_or(0.0), 0.0);
-    let glyphs: Vec<_> = primitives
+    let runs: Vec<_> = primitives
         .iter()
         .filter(|item| {
             item["kind"] == "glyphRun"
                 && item["cell"]["col"] == 1
                 && item["lineIndex"].as_u64().is_some_and(|line| line < 2)
-                && item["text"] != "Box label"
+                && !item["blockKey"]
+                    .as_str()
+                    .is_some_and(|key| key.starts_with("shape:"))
                 && baseline_y(item) < line_top + 36.0
         })
-        .flat_map(|item| item["glyphs"].as_array().unwrap())
         .collect();
-    assert!(!glyphs.is_empty());
-    assert!(glyphs.iter().all(|glyph| glyph["x"].as_f64().unwrap() >= right - 0.01));
+    assert!(!runs.is_empty());
+    let overlapping: Vec<_> = runs
+        .iter()
+        .filter(|item| {
+            item["glyphs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|glyph| glyph["x"].as_f64().unwrap() < right - 0.01)
+        })
+        .map(|item| (&item["blockKey"], &item["text"], &item["x"]))
+        .collect();
+    assert!(overlapping.is_empty(), "{overlapping:?}");
 
     let tall = drawing.replace("342900", "762000");
     let (display, layout) = display_with_layout(&cell_anchor_package(&tall, "Anchor text"), true);
@@ -992,7 +1006,12 @@ fn cell_square_wrap_uses_the_painted_text_box_rectangle() {
     let row_height = measure["rows"][0]["height"].as_f64().unwrap();
     let shape_bottom = shape["y"].as_f64().unwrap() + shape["h"].as_f64().unwrap();
     assert_eq!(row_height, shape_bottom - table["y"].as_f64().unwrap());
-    assert!(row_height > cell_anchor_table(&control).1["rows"][0]["height"].as_f64().unwrap());
+    assert!(
+        row_height
+            > cell_anchor_table(&control).1["rows"][0]["height"]
+                .as_f64()
+                .unwrap()
+    );
 }
 
 #[test]
@@ -1019,11 +1038,12 @@ fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
     );
     for frame in [r#"relativeFrom="column""#, r#"relativeFrom="paragraph""#] {
         let drawing = drawing.replace(frame, r#"relativeFrom="page""#);
-        let (display, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
         let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
         let (table, _) = cell_anchor_table(&layout);
-        assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
-        assert_eq!(shape["y"], table["y"]);
+        assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
     }
 }
 
@@ -1041,12 +1061,16 @@ fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin(
             "<wp:wrapNone/>",
             114300,
         )
-        .replace(r#"relativeFrom="paragraph""#, &format!(r#"relativeFrom="{frame}""#));
-        let (display, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        .replace(
+            r#"relativeFrom="paragraph""#,
+            &format!(r#"relativeFrom="{frame}""#),
+        );
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
         let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
         let (table, _) = cell_anchor_table(&layout);
-        assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
-        assert_eq!(shape["y"], table["y"]);
+        assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
     }
 }
 
@@ -1080,15 +1104,21 @@ fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
         assert_eq!(anchor_pages.len(), 1);
         let mut painted = pages.iter().enumerate().flat_map(|(page, value)| {
             let primitives = value["primitives"].as_array().unwrap();
-            primitives.iter().enumerate().filter_map(move |(index, primitive)| {
-                (primitive["kind"] == "shape").then_some((page, index, primitives, primitive))
-            })
+            primitives
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, primitive)| {
+                    (primitive["kind"] == "shape").then_some((page, index, primitives, primitive))
+                })
         });
         let (page, index, primitives, shape) = painted.next().unwrap();
         assert_eq!(anchor_pages, vec![page]);
         assert!(painted.next().is_none());
         assert!(shape["clipGroup"].is_null());
-        assert_eq!(index < text_run_index(primitives, "Anchor paragraph"), behind);
+        assert_eq!(
+            index < text_run_index(primitives, "Anchor paragraph"),
+            behind
+        );
         if anchor_lines == 1 {
             assert_eq!(index < text_run_index(primitives, "Cell tail 00;"), behind);
         }
@@ -1105,7 +1135,8 @@ fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
                 && primitive["cell"] == shape["cell"]
                 && cell_blocks.iter().any(|block| {
                     block["kind"] == "paragraph"
-                        && (block["id"] == primitive["blockId"] || block["id"] == primitive["blockKey"])
+                        && (block["id"] == primitive["blockId"]
+                            || block["id"] == primitive["blockKey"])
                 })
         }) {
             assert_eq!(index < text_index, behind, "{}", run["text"]);
@@ -1115,9 +1146,11 @@ fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
         } else {
             "Anchor continuation 79;"
         };
-        assert!(pages[page + 1..].iter().any(|later| {
-            text(later["primitives"].as_array().unwrap()).contains(last)
-        }));
+        assert!(
+            pages[page + 1..]
+                .iter()
+                .any(|later| { text(later["primitives"].as_array().unwrap()).contains(last) })
+        );
     }
 }
 

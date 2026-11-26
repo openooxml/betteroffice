@@ -3737,7 +3737,9 @@ fn measure_cell_blocks(
     for (index, block) in blocks.iter().enumerate() {
         if let LayoutBlock::Shape(shape) = block {
             let wrap = shape.wrap_type.as_deref();
-            if shape_wraps_text(wrap) && is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated) {
+            if shape_wraps_text(wrap)
+                && is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated)
+            {
                 let anchor = cell_shape_anchor(index, blocks.len(), |i| {
                     matches!(blocks[i], LayoutBlock::Paragraph(_))
                 });
@@ -3830,7 +3832,9 @@ fn measure_cell_blocks(
             zones.push(zone);
         } else if has_wrapping_shapes && let BlockExtent::Paragraph(paragraph) = &extent {
             y += before
-                + paragraph.lines.iter()
+                + paragraph
+                    .lines
+                    .iter()
                     .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
                     .sum::<f64>();
         } else {
@@ -4566,7 +4570,8 @@ fn measure_table_with_compat_shift(
                     previous_after = 0.0;
                     continue;
                 }
-                if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape, rotated)) {
+                if matches!(block, LayoutBlock::Shape(shape) if !stacks_cell_shape(shape, rotated))
+                {
                     continue;
                 }
                 let visual = if has_table_floats {
@@ -6803,12 +6808,18 @@ mod tests {
                     ]}]}]
             }))
             .unwrap();
-            let BlockExtent::Table(table) = measure_block(&mut block, 220.0, &config).unwrap() else {
+            let BlockExtent::Table(table) = measure_block(&mut block, 220.0, &config).unwrap()
+            else {
                 panic!()
             };
             let row = &table.rows[0];
-            let BlockExtent::Paragraph(paragraph) = &row.cells[0].blocks[1] else { panic!() };
-            (row.height, paragraph.lines[0].float_skip_before.unwrap_or(0.0))
+            let BlockExtent::Paragraph(paragraph) = &row.cells[0].blocks[1] else {
+                panic!()
+            };
+            (
+                row.height,
+                paragraph.lines[0].float_skip_before.unwrap_or(0.0),
+            )
         };
         for behind in [false, true] {
             let (height, skip) = measure("lrTb", behind, 0, 0, 80, 60);

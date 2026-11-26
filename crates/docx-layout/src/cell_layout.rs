@@ -218,7 +218,10 @@ pub(crate) fn layout_cell_content_with_rotation(
         {
             if shape_wraps_text(shape.wrap_type.as_deref()) {
                 let anchor = cell_shape_anchor(i, n, |index| {
-                    matches!(blocks.and_then(|b| b.get(index)), Some(LayoutBlock::Paragraph(_)))
+                    matches!(
+                        blocks.and_then(|b| b.get(index)),
+                        Some(LayoutBlock::Paragraph(_))
+                    )
                 });
                 let (_, top, _, height) = cell_shape_rect(
                     shape.position.as_ref(),
@@ -245,7 +248,9 @@ pub(crate) fn layout_cell_content_with_rotation(
             BlockExtent::Paragraph(paragraph) => line_tops[anchor]
                 .first()
                 .zip(paragraph.lines.first())
-                .map_or(fallback, |(top, line)| top - line.float_skip_before.unwrap_or(0.0)),
+                .map_or(fallback, |(top, line)| {
+                    top - line.float_skip_before.unwrap_or(0.0)
+                }),
             _ => fallback,
         };
         float_bottom = float_bottom.max(top + bottom);

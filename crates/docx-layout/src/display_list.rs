@@ -2674,7 +2674,11 @@ pub(crate) struct ShapeBlockIn {
 
 impl ShapeBlockIn {
     fn has_cell_anchor(&self, rotated: bool) -> bool {
-        crate::anchor::is_cell_shape_anchor(self.position.as_ref(), self.wrap_type.as_deref(), rotated)
+        crate::anchor::is_cell_shape_anchor(
+            self.position.as_ref(),
+            self.wrap_type.as_deref(),
+            rotated,
+        )
     }
 }
 
@@ -3548,7 +3552,9 @@ pub(crate) struct TableFragmentIn {
 
 impl TableFragmentIn {
     fn cell_window(&self, g: &GridCell) -> Option<&crate::types::CellClip> {
-        self.cell_clips.as_ref()?.iter()
+        self.cell_clips
+            .as_ref()?
+            .iter()
             .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
     }
 }
@@ -12565,10 +12571,16 @@ pub(crate) fn emit_table_fragment(
         );
         let mut floating_shapes = floating_shapes.into_iter().peekable();
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
-            if floating_shapes.peek().is_some_and(|range| range.end == index) {
+            if floating_shapes
+                .peek()
+                .is_some_and(|range| range.end == index)
+            {
                 floating_shapes.next();
             }
-            if floating_shapes.peek().is_some_and(|range| range.contains(&index)) {
+            if floating_shapes
+                .peek()
+                .is_some_and(|range| range.contains(&index))
+            {
                 continue;
             }
             if windowed_lines
@@ -12750,7 +12762,12 @@ impl CellContentFrame {
         self.shows_anchor_at(measure, anchor, true)
     }
 
-    fn shows_anchor_at(&self, measure: &TableCellExtentIn, anchor: usize, check_window: bool) -> bool {
+    fn shows_anchor_at(
+        &self,
+        measure: &TableCellExtentIn,
+        anchor: usize,
+        check_window: bool,
+    ) -> bool {
         if !check_window {
             return true;
         }
@@ -12916,8 +12933,11 @@ fn cell_content_frame<'m>(
             if crate::cell_layout::shape_wraps_text(wrap) {
                 float_bottom = float_bottom.max(y + height);
             }
-            let behind = shape.behind_doc.or_else(|| position.and_then(|p| p.behind_doc))
-                == Some(true) || wrap == Some("behind");
+            let behind = shape
+                .behind_doc
+                .or_else(|| position.and_then(|p| p.behind_doc))
+                == Some(true)
+                || wrap == Some("behind");
             CellShape {
                 anchor,
                 index,
@@ -13005,8 +13025,13 @@ fn emit_cell_content(
 
     let mut paint_shapes = |prims: &mut Vec<Primitive>, behind| {
         let start = prims.len();
-        for placement in visible_shapes.clone().filter(|shape| shape.behind == behind) {
-            let BlockIn::Shape(shape) = &cell.blocks[placement.index] else { unreachable!() };
+        for placement in visible_shapes
+            .clone()
+            .filter(|shape| shape.behind == behind)
+        {
+            let BlockIn::Shape(shape) = &cell.blocks[placement.index] else {
+                unreachable!()
+            };
             let mut frag = placement.fragment.clone();
             frag.y += content_top;
             emit_shape_fragment(prims, &frag, shape, ctx);
@@ -13323,7 +13348,11 @@ fn cell_shape_fragment(sb: &ShapeBlockIn, sm: &BoxExtentIn, selectable: bool) ->
         x: 0.0,
         y: 0.0,
         width: if sm.width > 0.0 { sm.width } else { sb.width },
-        height: if sm.height > 0.0 { sm.height } else { sb.height },
+        height: if sm.height > 0.0 {
+            sm.height
+        } else {
+            sb.height
+        },
         doc_start: if selectable { sb.doc_start } else { None },
         doc_end: if selectable { sb.doc_end } else { None },
         pm_start: if selectable { sb.pm_start } else { None },
@@ -13900,7 +13929,13 @@ fn visit_table_fragment(
                 {
                     let (cut_top, cut_bottom) = frame.content_cuts(frag, g);
                     let windowed_lines = frag.cell_window(g).is_some();
-                    frame.shows_anchor(cell, cell_measure, index, cut_top || cut_bottom || windowed_lines)
+                    frame
+                        .shows_anchor(
+                            cell,
+                            cell_measure,
+                            index,
+                            cut_top || cut_bottom || windowed_lines,
+                        )
                         .then_some(ShownPart::Whole)
                 }
                 (_, extent) => {
