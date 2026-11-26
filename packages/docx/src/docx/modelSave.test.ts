@@ -1,16 +1,16 @@
 import { beforeAll, expect, setSystemTime, test } from 'bun:test';
-import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { preloadOpcWasm, unzipContainer } from './wasm';
-import { writeDocxS13WithWarningsWire } from './parseWasm';
 import { parseDocx } from './parser';
 import { repackDocx, repackDocxWithWarnings } from './rezip';
 import { rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
-import { serializeDocumentSaveModel } from './modelSave';
+import { modelPartsRewrittenWarning } from './modelSave';
+import { writeDocumentWithRust } from './rustSaveFacade';
 import { EDIT_PARAGRAPH_ID, oneSavePackage } from '../yrs/__fixtures__/oneSavePackage';
 import { createYrsSession } from '../yrs/index';
 import { yrsToDocument } from '../yrs/yrsToDocument';
+import type { Document } from '../types/document';
 
 const ROOT = resolve(import.meta.dir, '../../../..');
 const CORE = 'docProps/core.xml';
@@ -37,9 +37,10 @@ const fixturePaths = [
 
 async function expectUnchanged(source: Uint8Array) {
   const document = await parse(source);
+  const plain = await writeDocumentWithRust(await parse(source), document.originalBuffer!, WITHOUT_STAMP);
   const result = await repackDocxWithWarnings(document, WITHOUT_STAMP);
   expect(new Uint8Array(result.buffer)).toEqual(Uint8Array.from(source));
-  expect(result.warnings).toEqual(document.warnings ?? []);
+  expect(result.warnings).toEqual(plain.warnings);
 }
 
 for (const path of fixturePaths.sort()) {
@@ -92,62 +93,135 @@ test('saving an unchanged model still applies the writer’s relationship ID upd
   expect(link.rId).toBe('first');
 });
 
-test('the default stamp changes only the core properties of an unchanged model', async () => {
+test('the default stamp returns the plain writer output for an unchanged model', async () => {
   const { bytes } = oneSavePackage();
-  const document = await parse(bytes);
+  const parts = new Map(Object.entries(unzipContainer(bytes)));
+  const opaque = toBytes('opaque member');
+  parts.set('__proto__', opaque);
+  const source = rezipPartsToArrayBuffer(parts);
+  const document = await parseDocx(source, { preloadFonts: false });
   setSystemTime(new Date(NOW));
   try {
-    const saved = await repackDocxWithWarnings(document, { modifiedBy: 'Fixture author' });
-    expect(saved.warnings).toEqual(document.warnings ?? []);
-    const before = unzipContainer(bytes);
+    const plain = await writeDocumentWithRust(await parse(new Uint8Array(source)), source);
+    const saved = await repackDocxWithWarnings(document);
+    expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
     const after = unzipContainer(new Uint8Array(saved.buffer));
-    const expectedCore = new TextDecoder().decode(before[CORE])
-      .replace('2024-01-02T03:04:05Z</dcterms:modified>', `${NOW}</dcterms:modified>`)
-      .replace('</cp:coreProperties>',
-        '<cp:lastModifiedBy>Fixture author</cp:lastModifiedBy></cp:coreProperties>');
-    expect(after).toEqual({ ...before, [CORE]: new TextEncoder().encode(expectedCore) });
-    expect(after[CORE]).not.toEqual(before[CORE]);
+    expect(new TextDecoder().decode(after[CORE])).toContain(`${NOW}</dcterms:modified>`);
+    expect(Object.getPrototypeOf(after)).toEqual(opaque);
+    expect(saved.warnings.slice(0, -1)).toEqual(plain.warnings);
+    expect(saved.warnings.at(-1)).toContain(`"${CORE}"`);
   } finally {
     setSystemTime();
   }
 });
 
-test('a changed model uses the plan-less writer and reports the rewritten parts', async () => {
+test('modifiedBy uses the plain writer with timestamp stamping disabled', async () => {
   const { bytes } = oneSavePackage();
-  const document = await parse(bytes);
+  const parts = new Map(Object.entries(unzipContainer(bytes)));
+  const core = new TextDecoder().decode(parts.get(CORE)).replace(
+    '</cp:coreProperties>', '<cp:lastModifiedBy >Before</cp:lastModifiedBy></cp:coreProperties>'
+  );
+  parts.set(CORE, toBytes(core));
+  const source = rezipPartsToArrayBuffer(parts);
+  const writerOptions = { ...WITHOUT_STAMP, modifiedBy: 'Alice' };
+  const plain = await writeDocumentWithRust(await parse(new Uint8Array(source)), source, writerOptions);
+  let reads = 0;
+  const saved = await repackDocxWithWarnings(await parse(new Uint8Array(source)), {
+    ...WITHOUT_STAMP,
+    get modifiedBy() {
+      if (++reads > 2) throw new Error('Unexpected modifiedBy read');
+      return 'Alice';
+    },
+  });
+  expect(reads).toBe(2);
+  expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
+  const writtenCore = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.buffer))[CORE]);
+  expect(writtenCore).toContain('<cp:lastModifiedBy>Alice</cp:lastModifiedBy>');
+  expect(writtenCore).toContain('2024-01-02T03:04:05Z</dcterms:modified>');
+});
+
+test('an unchanged model keeps writer warnings when returning the source bytes', async () => {
+  const { bytes } = oneSavePackage();
+  const parts = new Map(Object.entries(unzipContainer(bytes)));
+  const path = 'word/document.xml';
+  const xml = new TextDecoder().decode(parts.get(path)).replace(
+    '</w:r>',
+    '<w:object xmlns:o="urn:schemas-microsoft-com:office:office" ' +
+      'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<o:OLEObject r:id="rIdOle"/></w:object></w:r>'
+  );
+  parts.set(path, toBytes(xml));
+  const source = rezipPartsToArrayBuffer(parts);
+  const plain = await writeDocumentWithRust(await parse(new Uint8Array(source)), source, WITHOUT_STAMP);
+  const saved = await repackDocxWithWarnings(await parse(new Uint8Array(source)), WITHOUT_STAMP);
+  expect(plain.warnings.join('\n')).toContain('opaque drawing references relationship "rIdOle"');
+  expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(source));
+  expect(saved.warnings).toEqual(plain.warnings);
+});
+
+function editableRun(document: Document) {
   const paragraph = document.package.document.content.find(
     (block) => block.type === 'paragraph' && block.paraId === EDIT_PARAGRAPH_ID
   );
-  if (paragraph?.type !== 'paragraph' || paragraph.content[0]?.type !== 'run' ||
-      paragraph.content[0].content[0]?.type !== 'text') {
+  const run = paragraph?.type === 'paragraph' ? paragraph.content[0] : undefined;
+  if (run?.type !== 'run' || run.content[0]?.type !== 'text') {
     throw new Error('Missing the editable paragraph');
   }
-  paragraph.content[0].content[0].text = 'Edited model';
+  return { run, textNode: run.content[0] };
+}
+
+test('model matching uses the value the writer serializes from a text proxy', async () => {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  const { run, textNode } = editableRun(document);
+  run.content[0] = new Proxy(textNode, {
+    get(target, key, receiver) {
+      if (key === 'text') return 'Edited by proxy';
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+  const xml = unzipContainer(new Uint8Array(saved.buffer))['word/document.xml'];
+  expect(new TextDecoder().decode(xml)).toContain('Edited by proxy');
+  expect(saved.warnings.some((warning) => warning.startsWith(CODE))).toBe(true);
+});
+
+test('a changed model uses the plan-less writer and reports the rewritten parts', async () => {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  const plainDocument = await parse(bytes);
+  editableRun(document).textNode.text = 'Edited model';
+  editableRun(plainDocument).textNode.text = 'Edited model';
 
   setSystemTime(new Date(NOW));
   try {
-    const expected = writeDocxS13WithWarningsWire(JSON.stringify({
-      determinism: { seed: createHash('sha256').update(bytes).digest('hex'), now: NOW },
-      ...JSON.parse(serializeDocumentSaveModel(document)),
-      options: WITHOUT_STAMP,
-    }), bytes);
-    const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
-    expect(new Uint8Array(saved.buffer)).toEqual(Uint8Array.from(expected.bytes));
+    const plain = await writeDocumentWithRust(plainDocument, plainDocument.originalBuffer!);
+    const saved = await repackDocxWithWarnings(document);
+    expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
     const before = unzipContainer(bytes);
-    const after = unzipContainer(expected.bytes);
-    const rewritten = Object.entries(after)
-      .filter(([path, content]) => !before[path] || !Buffer.from(content).equals(Buffer.from(before[path])))
-      .map(([path]) => path)
+    const after = unzipContainer(new Uint8Array(plain.buffer));
+    const rewritten = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+      .filter((path) => !before[path] || !after[path] || !Buffer.from(before[path]).equals(Buffer.from(after[path])))
       .sort();
     expect(rewritten).toContain('word/document.xml');
+    expect(rewritten).toContain(CORE);
     expect(saved.warnings).toEqual([
-      ...(document.warnings ?? []),
-      ...expected.warnings,
+      ...plain.warnings,
       `${CODE} ${JSON.stringify(rewritten)} Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`,
     ]);
   } finally {
     setSystemTime();
   }
+});
+
+test('the rewritten parts warning includes additions and removals', () => {
+  const bytes = toBytes('member');
+  const original = new Map([['removed.xml', bytes], ['unchanged.xml', bytes]]);
+  const written = new Map([['added.xml', bytes], ['unchanged.xml', bytes.slice()]]);
+  expect(modelPartsRewrittenWarning(original, written)).toBe(
+    `${CODE} ["added.xml","removed.xml"] Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`
+  );
+  expect(modelPartsRewrittenWarning(original, original)).toBeUndefined();
 });
 
 test('a changed Yrs projection is saved as a caller model', async () => {

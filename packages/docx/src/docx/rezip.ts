@@ -11,7 +11,12 @@
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
 import type { RawDocxContent } from './unzip';
-import { modelMatchesSource, modelPartsRewrittenWarning } from './modelSave';
+import {
+  modelMatchesSource,
+  modelPartsRewrittenWarning,
+  readModelSaveParts,
+  samePartBytes,
+} from './modelSave';
 import { preloadParseWasm } from './parseWasm';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
@@ -74,55 +79,33 @@ async function repackModel(
   options: RepackOptions,
   includeWarnings: boolean
 ): Promise<RepackResult> {
-  const source = doc.originalBuffer;
-  if (!source) return repackDocxModelWrite(doc, options);
-  await Promise.all([preloadParseWasm(), preloadOpcWasm()]);
-  const matches = modelMatchesSource(doc, source);
-  const result = await repackDocxModelWrite(doc, options);
-  if (matches) {
-    const buffer = saveUnchangedModel(source, options);
-    if (buffer) return { buffer, warnings: [...(doc.warnings ?? [])] };
-  }
-  if (includeWarnings) result.warnings.push(modelPartsRewrittenWarning(source, result.buffer));
-  return result;
-}
-
-async function repackDocxModelWrite(
-  doc: Document,
-  options: RepackOptions = {}
-): Promise<RepackResult> {
   if (!doc.originalBuffer) {
     throw new Error(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
-  return { buffer: result.buffer, warnings: result.warnings };
-}
+  const source = doc.originalBuffer;
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(new Uint8Array(source)).buffer);
+  const determinism = {
+    seed: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+    now: new Date().toISOString(),
+  };
+  const matches = modelMatchesSource(doc, source, determinism);
+  const { buffer, warnings } = await writeDocumentWithRust(doc, source, options, undefined, determinism);
+  if (!matches && !includeWarnings) return { buffer, warnings };
 
-function saveUnchangedModel(
-  source: ArrayBuffer,
-  options: RepackOptions
-): ArrayBuffer | undefined {
-  const updateModifiedDate = options.updateModifiedDate ?? true;
-  const modifiedBy = options.modifiedBy;
-  if (typeof updateModifiedDate !== 'boolean' ||
-      (modifiedBy !== undefined && typeof modifiedBy !== 'string')) return undefined;
-  if (!updateModifiedDate && !modifiedBy) return source.slice(0);
-  try {
-    const parts = loadParts(source);
-    const core = partText(parts.get('docProps/core.xml'));
-    if (core === undefined) return source.slice(0);
-    const updated = updateCoreProperties(core, {
-      updateModifiedDate,
-      modifiedBy: modifiedBy?.replaceAll('$', () => '$$'),
-    });
-    if (updated === core) return source.slice(0);
-    parts.set('docProps/core.xml', toBytes(updated));
-    return rezipPartsToArrayBuffer(parts);
-  } catch {
-    return undefined;
+  const original = readModelSaveParts(source);
+  const written = readModelSaveParts(buffer);
+  const core = 'docProps/core.xml';
+  if (matches && samePartBytes(original.get(core), written.get(core))) {
+    return { buffer: source.slice(0), warnings };
   }
+  if (includeWarnings) {
+    const warning = modelPartsRewrittenWarning(original, written);
+    if (warning) warnings.push(warning);
+  }
+  return { buffer, warnings };
 }
 
 export async function repackDocxFromRaw(
@@ -321,7 +304,7 @@ export function isDocxBuffer(buffer: ArrayBuffer): boolean {
 
 export async function createDocx(doc: Document): Promise<ArrayBuffer> {
   const originalBuffer = await createEmptyDocx();
-  return (await repackDocxModelWrite({ ...doc, originalBuffer })).buffer;
+  return (await writeDocumentWithRust({ ...doc, originalBuffer }, originalBuffer)).buffer;
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

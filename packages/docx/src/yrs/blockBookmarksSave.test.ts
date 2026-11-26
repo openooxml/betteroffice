@@ -162,7 +162,9 @@ for (const container of ['footnote', 'endnote'] as const) {
           session.insertText({ story: 'body', paraId: '00000010', offset: 0 }, 'Edited ');
         }
         const outputs = [
-          new Uint8Array((await writeDocumentWithRust(base, base.originalBuffer!)).buffer),
+          new Uint8Array(edited
+            ? await repackDocx(base)
+            : (await writeDocumentWithRust(base, base.originalBuffer!)).buffer),
           new Uint8Array((await saveYrsDocx(session)).bytes),
         ];
         for (const saved of outputs) {

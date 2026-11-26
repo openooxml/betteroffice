@@ -13,7 +13,7 @@ No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency
 
 ## Usage
 
-Parse a DOCX and save it. An unchanged model saves as the original package with only the modified date updated (byte for byte with `updateModifiedDate: false`); to keep unchanged content while editing, use `createYrsSession`, `seedFromDocx` and `saveYrsDocx`.
+Parse a DOCX and save it. An unchanged model saves byte for byte with `updateModifiedDate: false` and no change to `modifiedBy`. To keep unchanged content while editing, use `createYrsSession`, `seedFromDocx` and `saveYrsDocx`.
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';
