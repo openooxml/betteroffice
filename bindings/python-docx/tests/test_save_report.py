@@ -83,11 +83,14 @@ def test_a_whole_write_without_a_save_plan_says_so(report_bytes: bytes) -> None:
     assert ">X<" in _main_part(report.bytes)
 
 
+CUSTOM_XML = (
+    '<w:customXml w:uri="urn:pr1" w:element="tagged">'
+    "<w:r><w:t>Tagged</w:t></w:r></w:customXml>"
+)
 STRUCTURE_DROPPED_BODY = (
     '<w:p w14:paraId="0000000A" w14:textId="77777777"><w:r><w:t xml:space="preserve">Near </w:t></w:r>'
     f"{SMART_TAG}</w:p>"
-    '<w:p w14:paraId="0000000B" w14:textId="77777777"><w:customXml w:uri="urn:pr1" w:element="tagged">'
-    "<w:r><w:t>Tagged</w:t></w:r></w:customXml></w:p>"
+    f'<w:p w14:paraId="0000000B" w14:textId="77777777">{CUSTOM_XML}</w:p>'
     '<w:p w14:paraId="0000000C" w14:textId="77777777"><w:bookmarkStart w:id="1" w:name="pr1mark"/>'
     '<w:r><w:t>Marked</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>'
     '<w:p w14:paraId="0000000D" w14:textId="77777777"><w:pPr><mc:AlternateContent>'
@@ -129,6 +132,7 @@ def test_a_whole_write_in_the_save_plan_reports_the_structure_it_drops(
 ) -> None:
     document = Document.open(structure_dropped_bytes)
     document.replace_text("0000000D", "aaa")
+    document.replace_text("0000000D", "aa")
     report = _report(document)
     assert report.kept_unchanged is None
     assert report.structure_dropped is not None
@@ -142,6 +146,22 @@ def test_a_whole_write_in_the_save_plan_reports_the_structure_it_drops(
         (0, "0000000A", "Near Ancient", ["w:smartTag"]),
         (1, "0000000B", "Tagged", ["w:customXml"]),
     ]
+    assert Document.open(report.bytes).paragraph("0000000D").text == "aa"
+
+
+def test_a_recorded_deletion_keeps_the_smart_tag_and_custom_xml(
+    structure_dropped_bytes: bytes,
+) -> None:
+    document = Document.open(structure_dropped_bytes)
+    document.replace_text("0000000D", "aaa")
+    report = _report(document)
+    assert report.kept_unchanged is None
+    assert report.structure_dropped is None
+    assert report.whole_model_write is False
+    assert Document.open(report.bytes).paragraph("0000000D").text == "aaa"
+    saved = _main_part(report.bytes)
+    assert SMART_TAG in saved
+    assert CUSTOM_XML in saved
 
 
 @pytest.mark.parametrize("edit", [None, "0000000D", "0000000E"])
