@@ -334,15 +334,52 @@ test('restyling after inserting text into a directly formatted heading keeps a p
       .replace('<w:pStyle w:val="ListParagraph"/>', '<w:pStyle w:val="Heading1"/>'));
 }, 30_000);
 
-test('set_paragraph_style still refuses a style that defines list numbering', async () => {
+test('set_paragraph_style to a style that defines list numbering puts the paragraph on its list', async () => {
   const source = await restyleFixture();
   const doc = await open(source.bytes);
   const target = item(doc, 'Plain paragraph');
-  const error = await refusal(doc.edit({
+  expect(target.list).toBeUndefined();
+  await doc.edit({
     version: doc.list().version,
+    edits: [{ op: 'set_paragraph_style', paragraph: target.ref, style: 'Numbered Heading' }],
+  });
+  expect(doc.read(target.ref).style).toBe('NumberedHeading');
+  expect(item(doc, 'Plain paragraph').list).toEqual({ level: 0 });
+  const pilcrow = doc.session.paragraphs('body').find(entry => entry.text === 'Plain paragraph')!.properties;
+  expect(pilcrow.numPr).toMatchObject({ numId: 43, ilvl: 0 });
+  expect(pilcrow.listNumFmt).toBe('decimal');
+
+  const bytes = await doc.export();
+  const saved = await JSZip.loadAsync(bytes);
+  const paragraph = byText(await saved.file('word/document.xml')!.async('string'), 'Plain paragraph');
+  expect(paragraph).toContain('<w:pStyle w:val="NumberedHeading"/>');
+  expect(paragraph).not.toContain('<w:numPr>');
+  expect(paragraph).not.toContain('<w:ind');
+  expect(await saved.file('word/styles.xml')!.async('string')).toBe(source.styles);
+  expect(await saved.file('word/numbering.xml')!.async('string')).toBe(NUMBERING);
+
+  const reopened = await open(bytes);
+  expect(reopened.read(item(reopened, 'Plain paragraph').ref).style).toBe('NumberedHeading');
+  expect(item(reopened, 'Plain paragraph').list).toEqual({ level: 0 });
+}, 30_000);
+
+test('set_paragraph_style refuses a style whose numbering the document does not define', async () => {
+  const source = await restyleFixture();
+  const zip = await JSZip.loadAsync(source.bytes);
+  zip.file('word/styles.xml', source.styles.replace(
+    '<w:style w:type="paragraph" w:styleId="NumberedHeading"><w:name w:val="Numbered Heading"/>' +
+      '<w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="43"/>',
+    '<w:style w:type="paragraph" w:styleId="NumberedHeading"><w:name w:val="Numbered Heading"/>' +
+      '<w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="99"/>'));
+  const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
+  const target = item(doc, 'Plain paragraph');
+  const version = doc.list().version;
+  const error = await refusal(doc.edit({
+    version,
     edits: [{ op: 'set_paragraph_style', paragraph: target.ref, style: 'Numbered Heading' }],
   }));
   expect(error.code).toBe('UNSUPPORTED');
-  expect(error.message).toContain('defines list numbering; set_paragraph_style cannot apply a numbered style yet');
+  expect(error.message).toContain('names list numbering that the document\'s numbering part does not define');
+  expect(doc.list().version).toBe(version);
   expect(doc.read(target.ref).style).not.toBe('NumberedHeading');
 }, 30_000);

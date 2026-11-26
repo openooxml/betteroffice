@@ -11,11 +11,6 @@ async function open(bytes: Uint8Array) {
 }
 afterEach(() => { opened.splice(0).forEach(doc => doc.close()); });
 
-async function editCode(doc: DocxAgentDocument, edit: Parameters<DocxAgentDocument['edit']>[0]['edits'][number]) {
-  try { await doc.edit({ version: doc.list().version, edits: [edit] }); return 'ok'; }
-  catch (error) { return (error as { code: string }).code; }
-}
-
 const canonical = (xml: string) => xml.replace(/<([a-zA-Z0-9:]+)((?:\s+[a-zA-Z0-9:]+="[^"]*")+)\s*(\/?)>/g, (_all, tag: string, attrs: string, self: string) => {
   const sorted = [...attrs.matchAll(/([a-zA-Z0-9:]+)="([^"]*)"/g)].sort((a, b) => a[1].localeCompare(b[1])).map(match => ` ${match[1]}="${match[2]}"`).join('');
   return `<${tag}${sorted}${self}>`;
@@ -264,17 +259,12 @@ async function numberedStyleFixture(anchorText = 'Style one', noDefault = false)
   });
 }
 
-test('insert before a style numbered paragraph is refused like after unless a non-numbered style is given', async () => {
+test('insert before and after a style numbered paragraph both join its list unless a non-numbered style is given', async () => {
   const doc = await open(await numberedStyleFixture());
-  const baseline = await xmlOf(doc);
-  const version = doc.list().version;
   const anchor = item(doc, 'Style one').ref;
-  const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: anchor, paragraphs: [{ text: 'After style list', style: 'ListNumber' }] });
-  const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: anchor, paragraphs: [{ text: 'Before style list' }] });
-  expect(afterCode).toBe('UNSUPPORTED');
-  expect(beforeCode).toBe(afterCode);
-  expect(doc.list().version).toBe(version);
-  expect(await xmlOf(doc)).toBe(baseline);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: anchor, paragraphs: [{ text: 'After style list', style: 'ListNumber' }] }] });
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', before: item(doc, 'Style one').ref, paragraphs: [{ text: 'Before style list' }] }] });
+  await expectStyleNumbered(doc, ['Before style list', 'After style list'], 'ListNumber');
 
   const styled = await open(await numberedStyleFixture());
   await styled.edit({ version: styled.list().version, edits: [{
@@ -284,13 +274,11 @@ test('insert before a style numbered paragraph is refused like after unless a no
   expect(pPrOf(blockOf(await xmlOf(styled), 'Not a list'))).not.toContain('<w:numPr>');
 });
 
-test('explicit numbered style is refused like after and a missing default style does not break before', async () => {
+test('an explicit numbered style numbers paragraphs inserted before and after, and a missing default style does not break before', async () => {
   const doc = await open(await numberedStyleFixture());
-  const plain = item(doc, 'Plain').ref;
-  const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
-  const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: plain, paragraphs: [{ text: 'X', style: 'ListNumber' }] });
-  expect(afterCode).toBe('UNSUPPORTED');
-  expect(beforeCode).toBe(afterCode);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item(doc, 'Plain').ref, paragraphs: [{ text: 'X after', style: 'ListNumber' }] }] });
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', before: item(doc, 'Plain').ref, paragraphs: [{ text: 'X before', style: 'ListNumber' }] }] });
+  await expectStyleNumbered(doc, ['X before', 'X after'], 'ListNumber');
 
   const noDefault = await open(await numberedStyleFixture('Style one', true));
   await noDefault.edit({ version: noDefault.list().version, edits: [{
@@ -309,23 +297,30 @@ test('insert after keeps its existing plain behaviour', async () => {
   expect(pPrOf(blockOf(await xmlOf(doc), 'Added after'))).not.toContain('BodyText');
 });
 
-test('insert before an unstyled anchor with a numbered default style is refused like after', async () => {
+test('insert before and after an unstyled anchor with a numbered default style both join the default style list', async () => {
   const zip = await JSZip.loadAsync(await numberedStyleFixture());
   const w = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   zip.file('word/styles.xml', `<w:styles xmlns:w="${w}"><w:style w:type="paragraph" w:default="1" w:styleId="DefaultList"><w:name w:val="Default List"/><w:pPr><w:numPr><w:numId w:val="3"/></w:numPr></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Plain"><w:name w:val="Plain"/></w:style></w:styles>`);
   zip.file('word/document.xml', (await zip.file('word/document.xml')!.async('string')).replace(/<w:body>[\s\S]*?(?=<w:sectPr>)/, `<w:body>${para('', 'Default anchor')}${para('', 'Tail')}`));
   const doc = await open(await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' }));
   expect(item(doc, 'Default anchor').list).toEqual({ level: 0 });
-  const baseline = await xmlOf(doc);
-  const version = doc.list().version;
-  const anchor = item(doc, 'Default anchor').ref;
-  const afterCode = await editCode(doc, { op: 'insert_paragraphs', after: anchor, paragraphs: [{ text: 'After default list' }] });
-  const beforeCode = await editCode(doc, { op: 'insert_paragraphs', before: anchor, paragraphs: [{ text: 'Before default list' }] });
-  expect(afterCode).toBe('UNSUPPORTED');
-  expect(beforeCode).toBe(afterCode);
-  expect(doc.list().version).toBe(version);
-  expect(await xmlOf(doc)).toBe(baseline);
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', after: item(doc, 'Default anchor').ref, paragraphs: [{ text: 'After default list' }] }] });
+  await doc.edit({ version: doc.list().version, edits: [{ op: 'insert_paragraphs', before: item(doc, 'Default anchor').ref, paragraphs: [{ text: 'Before default list' }] }] });
+  await expectStyleNumbered(doc, ['Before default list', 'After default list']);
 });
+
+async function expectStyleNumbered(doc: DocxAgentDocument, texts: string[], style?: string) {
+  const bytes = await doc.export();
+  const xml = (await (await JSZip.loadAsync(bytes)).file('word/document.xml')!.async('string'));
+  const reopened = await open(bytes);
+  for (const text of texts) {
+    expect(item(doc, text).list).toEqual({ level: 0 });
+    const pPr = pPrOf(blockOf(xml, text));
+    expect(pPr).not.toContain('<w:numPr>');
+    if (style) expect(pPr).toContain(`<w:pStyle w:val="${style}"/>`);
+    expect(item(reopened, text).list).toEqual({ level: 0 });
+  }
+}
 
 test('insert before a list style anchor keeps inherited alignment out of direct properties', async () => {
   for (const inControl of [false, true]) {

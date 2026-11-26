@@ -1765,7 +1765,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(
             refusal.message,
             format!(
-                "style {style:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
+                "style {style:?} names list numbering that the document's numbering part does not define"
             )
         );
         let refusal = refuse(
@@ -1782,7 +1782,7 @@ fn paragraph_styles_apply_their_full_effect_in_rust() {
         assert_eq!(
             refusal.message,
             format!(
-                "style {style:?} defines list numbering, which v1 batches do not apply; retaining numbering definitions for batches is a follow-up"
+                "style {style:?} names list numbering that the document's numbering part does not define"
             )
         );
     }
@@ -1855,6 +1855,138 @@ fn paragraph_styles_without_a_numbering_id_apply_like_plain_styles() {
         code(&doc, vec![set_style("00000001", "ListNumber")]),
         EditFailureCode::Unsupported
     );
+}
+
+fn numbered_style_package(body: &str, extra_styles: &str) -> Vec<u8> {
+    let mut parts = ooxml_opc::unzip_parts(&docx(body)).unwrap();
+    for (name, from, to) in [
+        (
+            "[Content_Types].xml",
+            "</Types>",
+            r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>"#,
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            "</Relationships>",
+            r#"<Relationship Id="rIdNumbering" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>"#,
+        ),
+        (
+            "word/styles.xml",
+            "</w:styles>",
+            &format!("{extra_styles}</w:styles>"),
+        ),
+    ] {
+        let part = parts.iter_mut().find(|(part, _)| part == name).unwrap();
+        part.1 = String::from_utf8(part.1.clone())
+            .unwrap()
+            .replace(from, to)
+            .into_bytes();
+    }
+    parts.push((
+        "word/numbering.xml".to_owned(),
+        format!(
+            r#"<w:numbering {NS}><w:abstractNum w:abstractNumId="3"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="1440" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="3"/></w:num><w:abstractNum w:abstractNumId="4"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1)"/><w:pPr><w:ind w:left="2880" w:hanging="720"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="2"><w:abstractNumId w:val="4"/></w:num></w:numbering>"#
+        )
+        .into_bytes(),
+    ));
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn numbered_styles_put_inserted_and_restyled_paragraphs_on_their_list() {
+    let doc = open_package(&numbered_style_package(&p("00000001", &r("plain")), ""));
+    let undo = UndoSession::new();
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![insert_paragraphs(
+            "00000001",
+            TargetEdge::End,
+            vec![new_paragraph("step", Some("ListChild"))],
+        )],
+    );
+    apply(&doc, &undo, vec![set_style("00000001", "ListNumber")]);
+    let inserted = applied.receipts[0].new_paragraphs[0].para_id.clone();
+    for (id, style) in [(inserted.as_str(), "ListChild"), ("00000001", "ListNumber")] {
+        let listed = properties(&doc, id);
+        assert_eq!(listed.get("pStyle"), Some(&Any::from(style)), "{id}");
+        let Some(Any::Map(num_pr)) = listed.get("numPr") else {
+            panic!("{id} is numbered by its style: {listed:?}");
+        };
+        assert_eq!(number(num_pr.get("numId")), Some(1.0), "{id}");
+        assert_eq!(listed.get("numPrFromStyle"), listed.get("numPr"), "{id}");
+        assert_eq!(
+            listed.get("listNumFmt"),
+            Some(&Any::from("decimal")),
+            "{id}"
+        );
+        assert_eq!(listed.get("listMarker"), Some(&Any::from("%1.")), "{id}");
+    }
+    if let Some(Any::Map(original)) = properties(&doc, "00000001").get("_originalFormatting") {
+        assert!(!original.contains_key("numPr"));
+    }
+}
+
+#[test]
+fn numbered_styles_give_inserted_paragraphs_the_indents_seeding_gives() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="CharsList"><w:name w:val="Chars List"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr><w:ind w:leftChars="200"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="FirstList"><w:name w:val="First List"/><w:basedOn w:val="ListNumber"/><w:pPr><w:ind w:firstLine="200"/></w:pPr></w:style>"#;
+    for style in ["ListNumber", "CharsList", "FirstList"] {
+        let body = format!(
+            "{}{}",
+            p("00000001", &r("plain")),
+            styled("00000002", style, &r("seeded"))
+        );
+        let doc = open_package(&numbered_style_package(&body, styles));
+        let applied = apply(
+            &doc,
+            &UndoSession::new(),
+            vec![insert_paragraphs(
+                "00000001",
+                TargetEdge::End,
+                vec![new_paragraph("inserted", Some(style))],
+            )],
+        );
+        let inserted = properties(&doc, &applied.receipts[0].new_paragraphs[0].para_id);
+        let seeded = properties(&doc, "00000002");
+        for key in [
+            "numPr",
+            "listMarker",
+            "listNumFmt",
+            "indentLeft",
+            "indentFirstLine",
+            "hangingIndent",
+            "listLevelIndents",
+        ] {
+            let present = |values: &std::collections::BTreeMap<String, Any>| {
+                values
+                    .get(key)
+                    .filter(|value| !matches!(value, Any::Null | Any::Undefined))
+                    .cloned()
+            };
+            assert_eq!(present(&inserted), present(&seeded), "{style} {key}");
+        }
+    }
+}
+
+#[test]
+fn restyling_a_directly_numbered_paragraph_to_another_lists_style_keeps_its_own_list_indents() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="OtherList"><w:name w:val="Other List"/><w:pPr><w:numPr><w:numId w:val="2"/></w:numPr></w:pPr></w:style>"#;
+    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>direct</w:t></w:r></w:p>"#;
+    let doc = open_package(&numbered_style_package(body, styles));
+    let before = properties(&doc, "00000001");
+    apply(
+        &doc,
+        &UndoSession::new(),
+        vec![set_style("00000001", "OtherList")],
+    );
+    let after = properties(&doc, "00000001");
+    assert_eq!(after.get("pStyle"), Some(&Any::from("OtherList")));
+    let Some(Any::Map(num_pr)) = after.get("numPr") else {
+        panic!("the paragraph keeps its direct numbering: {after:?}");
+    };
+    assert_eq!(number(num_pr.get("numId")), Some(1.0));
+    assert_ne!(number(after.get("indentLeft")), Some(2880.0));
+    assert_eq!(after.get("listMarker"), before.get("listMarker"));
 }
 
 fn open_numbered_restyle(body: &str) -> EditingDoc {

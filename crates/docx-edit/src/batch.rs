@@ -1633,15 +1633,13 @@ fn plan_insert_paragraphs<T: ReadTxn>(
         let mut styled = source
             .styled_paragraph(style)
             .map_err(|message| invalid(message, &requested))?;
-        if settle_style_numbering(&mut styled.properties) {
+        if !settle_style_numbering(&mut styled.properties, source) {
             let named = style.map_or_else(
                 || "the default paragraph style".to_owned(),
                 |id| format!("style {id:?}"),
             );
             return Err(unsupported(
-                format!(
-                    "{named} defines list numbering, which v1 batches do not apply; {NUMBERING_FOLLOW_UP}"
-                ),
+                format!("{named} names list numbering {UNDEFINED_NUMBERING}"),
                 &requested,
             ));
         }
@@ -1678,7 +1676,7 @@ fn plan_insert_paragraphs<T: ReadTxn>(
     })
 }
 
-const NUMBERING_FOLLOW_UP: &str = "retaining numbering definitions for batches is a follow-up";
+const UNDEFINED_NUMBERING: &str = "that the document's numbering part does not define";
 
 const DISPLACED_OPAQUE: &str =
     "saving would move an opaque XML block past the blocks that follow it";
@@ -1946,13 +1944,37 @@ fn defines_numbering(properties: &[(String, yrs::Any)]) -> bool {
     })
 }
 
-/// Discard style numbering with no nonzero `numId`; retain actual numbered styles.
-fn settle_style_numbering(properties: &mut Vec<(String, yrs::Any)>) -> bool {
-    if defines_numbering(properties) {
-        return true;
-    }
+/// Puts a paragraph a style numbers on that style's list, as seeding does, and discards style
+/// numbering with no nonzero `numId`. Refuses, returning `false`, numbering the document does not
+/// define.
+fn settle_style_numbering(
+    properties: &mut Vec<(String, yrs::Any)>,
+    source: &SourceMetadata,
+) -> bool {
+    let num_pr = properties.iter().find_map(|(key, value)| match value {
+        yrs::Any::Map(num_pr) if key == "numPr" && defines_numbering(properties) => {
+            Some((**num_pr).clone())
+        }
+        _ => None,
+    });
     properties.retain(|(key, _)| !matches!(key.as_str(), "numPr" | "numPrFromStyle"));
-    false
+    let Some(num_pr) = num_pr else {
+        return true;
+    };
+    let style = properties.iter().find_map(|(key, value)| match value {
+        yrs::Any::String(id) if key == "pStyle" => Some(id.to_string()),
+        _ => None,
+    });
+    let style = style.as_deref().or(source.default_paragraph_style());
+    let Some(list) = crate::list_definitions::style_list_attrs(&num_pr, style, source) else {
+        return false;
+    };
+    properties.retain(|(key, _)| !list.contains_key(key));
+    properties.extend(
+        list.into_iter()
+            .filter(|(_, value)| !matches!(value, yrs::Any::Null)),
+    );
+    true
 }
 
 fn plan_style<T: ReadTxn>(
@@ -1989,11 +2011,12 @@ fn plan_style<T: ReadTxn>(
     let mut next = source
         .styled_paragraph(Some(style_id))
         .map_err(|message| invalid(message, &requested))?;
-    if settle_style_numbering(&mut next.properties) {
+    if crate::ops::paragraph::keeps_direct_numbering(&paragraph.mark.properties) {
+        next.properties
+            .retain(|(key, _)| !matches!(key.as_str(), "numPr" | "numPrFromStyle"));
+    } else if !settle_style_numbering(&mut next.properties, source) {
         return Err(unsupported(
-            format!(
-                "style {style_id:?} defines list numbering; set_paragraph_style cannot apply a numbered style yet"
-            ),
+            format!("style {style_id:?} names list numbering {UNDEFINED_NUMBERING}"),
             &requested,
         ));
     }
@@ -2623,11 +2646,11 @@ fn plan_block_fill<T: ReadTxn>(
                 .source
                 .styled_paragraph(first.mark.style_id().as_deref())
                 .map_err(|message| invalid(message, &fill.resolved))?;
-            if settle_style_numbering(&mut styled.properties) {
+            if !settle_style_numbering(&mut styled.properties, fill.source) {
                 return Err(failure(
                     EditFailureCode::Unsupported,
                     format!(
-                        "the control's paragraph style defines list numbering, which v1 batches do not apply to new paragraphs; {NUMBERING_FOLLOW_UP}"
+                        "the control's paragraph style names list numbering {UNDEFINED_NUMBERING}"
                     ),
                     Some(fill.resolved.clone()),
                 ));

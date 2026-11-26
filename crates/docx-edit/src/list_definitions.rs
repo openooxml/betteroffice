@@ -395,6 +395,40 @@ fn source_attrs(
     Some(attrs)
 }
 
+/// The attributes that put a paragraph of style `style_id` on the list that style numbers it with,
+/// `num_pr`, as seeding stores a paragraph numbered by its style: the level's indents apply on the
+/// sides the style chain leaves unset. `None` when `source` renders no such level.
+pub(crate) fn style_list_attrs(
+    num_pr: &HashMap<String, Any>,
+    style_id: Option<&str>,
+    source: &SourceMetadata,
+) -> Option<BTreeMap<String, Any>> {
+    let mut attrs = rendered_level(num_pr, source)?;
+    attrs.insert("numPr".to_owned(), Any::from(num_pr.clone()));
+    attrs.insert("numPrFromStyle".to_owned(), Any::from(num_pr.clone()));
+    let level = source
+        .numbering()
+        .get_level(
+            map_number(num_pr, "numId")?,
+            map_number(num_pr, "ilvl").unwrap_or(0.0),
+        )
+        .and_then(|level| level.p_pr);
+    let (style_left, style_first) = source.style_chain_indents(style_id);
+    if let Some(level) = level {
+        if let Some(left) = level.indent_left.filter(|_| !style_left) {
+            attrs.insert("indentLeft".to_owned(), Any::Number(left));
+        }
+        if let Some(first) = level.indent_first_line.filter(|_| !style_first) {
+            attrs.insert("indentFirstLine".to_owned(), Any::Number(first));
+            attrs.insert(
+                "hangingIndent".to_owned(),
+                level.hanging_indent.map_or(Any::Null, Any::Bool),
+            );
+        }
+    }
+    Some(attrs)
+}
+
 /// The list attributes seeding stores for a paragraph on the source list and level `num_pr`
 /// names, as `source` renders them; `None` when it renders no such level.
 fn rendered_level(

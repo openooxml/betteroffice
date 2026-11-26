@@ -844,6 +844,27 @@ impl SourceMetadata {
             .and_then(|value| any_from_value(value).ok())
     }
 
+    /// Whether the `basedOn` chain of paragraph style `style_id` sets the left and the first-line
+    /// indent, which parsing gives precedence over the indents of the list the style numbers.
+    pub(crate) fn style_chain_indents(&self, style_id: Option<&str>) -> (bool, bool) {
+        let mut current = style_id.map(str::to_owned);
+        let mut seen = Vec::new();
+        let mut result = (false, false);
+        while let Some(id) = current.filter(|id| !seen.contains(id)) {
+            let Some(style) = self.styles.style(&id) else {
+                break;
+            };
+            let properties = field(Some(style), "pPr");
+            let set = |key: &str| field(properties, key).is_some_and(|value| !value.is_null());
+            result.0 |= set("indentLeft") || set("indentLeftChars");
+            result.1 |=
+                set("indentFirstLine") || set("hangingIndent") || set("indentFirstLineChars");
+            current = string(field(Some(style), "basedOn")).map(str::to_owned);
+            seen.push(id);
+        }
+        result
+    }
+
     /// The outline level `style_id` defines, its `basedOn` chain included.
     pub(crate) fn style_outline_level(&self, style_id: &str) -> Option<f64> {
         number(field(

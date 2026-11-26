@@ -1502,6 +1502,26 @@ fn rebase_paragraph_runs(
     }
 }
 
+/// Whether the paragraph with `properties` is numbered by its own numbering rather than its style's,
+/// which a restyle keeps.
+pub(crate) fn keeps_direct_numbering(properties: &BTreeMap<String, Any>) -> bool {
+    let direct = present(properties.get("numPr")).is_some_and(|_| {
+        match properties.get("_originalFormatting") {
+            Some(Any::Map(original)) => {
+                present(original.get("numPr")).is_some()
+                    && present(original.get("numPrFromStyle")) != present(original.get("numPr"))
+            }
+            _ => present(properties.get("numPrFromStyle"))
+                .is_none_or(|style| Some(style) != present(properties.get("numPr"))),
+        }
+    });
+    direct
+        || matches!(
+            crate::resolve_list_identity(properties),
+            Some(crate::ListIdentity::Created { .. })
+        )
+}
+
 /// Plans applying `style` to one paragraph: every style-resolved pilcrow key takes the style's
 /// value or clears, the source direct formatting drops those keys, the controlled run marks take
 /// the style's values, and other run marks that matched the previous style follow the new one.
@@ -1524,21 +1544,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
         .iter()
         .map(|(key, value)| (key.as_str(), value))
         .collect();
-    let direct_numbering = present(properties.get("numPr")).is_some_and(|_| {
-        match properties.get("_originalFormatting") {
-            Some(Any::Map(original)) => {
-                present(original.get("numPr")).is_some()
-                    && present(original.get("numPrFromStyle")) != present(original.get("numPr"))
-            }
-            _ => present(properties.get("numPrFromStyle"))
-                .is_none_or(|style| Some(style) != present(properties.get("numPr"))),
-        }
-    });
-    let direct_numbering = direct_numbering
-        || matches!(
-            crate::resolve_list_identity(properties),
-            Some(crate::ListIdentity::Created { .. })
-        );
+    let direct_numbering = keeps_direct_numbering(properties);
     let clears_numbering =
         present(properties.get("numPr")).is_some() && !target.contains_key("numPr");
     let mut changes = Vec::new();
@@ -1575,30 +1581,30 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
             changes.push((key.to_owned(), wanted.cloned()));
         }
     }
-    if !direct_numbering {
-        if clears_numbering {
-            for key in [
-                "numPr",
-                "numPrFromStyle",
-                crate::LIST_DEF,
-                crate::list_definitions::LIST_LEVEL_INDENTS,
-                "listNumFmt",
-                "listIsBullet",
-                "listMarker",
-                "listMarkerHidden",
-                "listMarkerBold",
-                "listMarkerItalic",
-                "listMarkerColor",
-                "listLevelNumFmts",
-                "listAbstractNumId",
-                "listStartOverride",
-                "listMarkerFontFamily",
-                "listMarkerFontSize",
-                "listMarkerSuffix",
-            ] {
-                if present(properties.get(key)).is_some() {
-                    changes.push((key.to_owned(), None));
-                }
+    let styles_numbering = target.contains_key("numPr");
+    if !direct_numbering && (clears_numbering || styles_numbering) {
+        for key in [
+            "numPr",
+            "numPrFromStyle",
+            crate::LIST_DEF,
+            crate::list_definitions::LIST_LEVEL_INDENTS,
+            "listNumFmt",
+            "listIsBullet",
+            "listMarker",
+            "listMarkerHidden",
+            "listMarkerBold",
+            "listMarkerItalic",
+            "listMarkerColor",
+            "listLevelNumFmts",
+            "listAbstractNumId",
+            "listStartOverride",
+            "listMarkerFontFamily",
+            "listMarkerFontSize",
+            "listMarkerSuffix",
+        ] {
+            let wanted = present(target.get(key).copied());
+            if wanted != present(properties.get(key)) {
+                changes.push((key.to_owned(), wanted.cloned()));
             }
         }
     }
@@ -1614,7 +1620,7 @@ pub(crate) fn plan_paragraph_style<T: ReadTxn>(
         for key in crate::seed::style_resolved_keys() {
             direct.remove(formatting_key(key));
         }
-        if clears_numbering {
+        if clears_numbering || styles_numbering {
             direct.remove("numPr");
             direct.remove("numPrFromStyle");
         }
