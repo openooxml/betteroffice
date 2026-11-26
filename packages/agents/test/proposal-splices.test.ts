@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { MAX_SPLICE_CELLS, MAX_SPLICES_PER_CHANGE, spliceChange } from '../src/proposal-splices';
+import { MAX_SPLICE_CELLS, spliceChange } from '../src/proposal-splices';
 
 const change = (oldText: string, newText: string, start = 0) => ({
   ref: 'p1', revision: 1, story: 'body', paragraph: 1, start, oldText, newText,
@@ -21,6 +21,11 @@ test('splices maximize the UTF-16 length of retained tokens', () => {
     .toEqual([change('X', 'Z'), change('red ', '', 2), change('', ' red', 10), change('Y', 'W', 11)]);
   expect(spliceChange(change('X|KEEP 👩‍💻|Y', 'Z|👩‍💻 KEEP|W')))
     .toEqual([change('X', 'Z'), change('KEEP ', '', 2), change('', ' KEEP', 12), change('Y', 'W', 13)]);
+});
+
+test('splices weight a whitespace token once regardless of its length', () => {
+  expect(spliceChange(change('X|KEEP     red|Y', 'Z|tan     KEEP|W')))
+    .toEqual([change('X', 'Z'), change('', 'tan     ', 2), change('     red', '', 6), change('Y', 'W', 15)]);
 });
 
 test('splices keep shared space between swapped words', () => {
@@ -48,6 +53,13 @@ test('splices keep punctuation inside numbers, dates, IDs and URL components', (
   }
   expect(spliceChange(change('x https://alpha.example/path a', 'y https://beta.example/path b')))
     .toEqual([change('x', 'y'), change('alpha.example/path', 'beta.example/path', 10), change('a', 'b', 29)]);
+});
+
+test('splices retain words between parentheses and other non-joining punctuation', () => {
+  for (const [left, right] of [['(', ')'], ['[', ']'], ['!', '?'], [';', '+']]) {
+    expect(spliceChange(change(`x${left}KEEP${right}y`, `a${left}KEEP${right}b`)))
+      .toEqual([change('x', 'a'), change('y', 'b', 7)]);
+  }
 });
 
 test('splices keep CJK runs, marks, numbers and underscores inside word tokens', () => {
@@ -90,16 +102,13 @@ test('splices cap the trimmed token alignment table', () => {
 
 test('splices combine adjacent deletions and insertions and preserve pure edits', () => {
   expect(spliceChange(change('aXYZb', 'a123b'))).toEqual([change('XYZ', '123', 1)]);
-  expect(spliceChange(change('a|X|b', 'Y|a||b|Z')))
-    .toEqual([change('', 'Y|'), change('X', '', 2), change('', '|Z', 5)]);
+  expect(spliceChange(change('a|X|b', 'Y!a||b?Z')))
+    .toEqual([change('', 'Y!'), change('X', '', 2), change('', '?Z', 5)]);
   expect(spliceChange(change('a', 'a'))).toEqual([]);
 });
 
-test('splices keep the trimmed replacement whole above the per-change cap', () => {
-  const words = (word: string, count: number) => Array(count).fill(word).join(' ');
-  const at = change(words('a', MAX_SPLICES_PER_CHANGE), words('b', MAX_SPLICES_PER_CHANGE));
-  expect(spliceChange(at)).toHaveLength(MAX_SPLICES_PER_CHANGE);
-  const over = change(words('a', MAX_SPLICES_PER_CHANGE + 1), words('b', MAX_SPLICES_PER_CHANGE + 1));
-  expect(spliceChange(change(`p ${over.oldText} z`, `p ${over.newText} z`)))
-    .toEqual([change(over.oldText, over.newText, 2)]);
+test('splices split 33 replacements and retain every KEEP word', () => {
+  const words = (word: string) => Array(33).fill(word).join(' KEEP ');
+  expect(spliceChange(change(`p ${words('a')} z`, `p ${words('b')} z`)))
+    .toEqual(Array.from({ length: 33 }, (_, i) => change('a', 'b', 2 + i * 7)));
 });

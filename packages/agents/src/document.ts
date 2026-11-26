@@ -6,7 +6,7 @@ import { createDocxBatchSchema, type DocxAgentBatch, type DocxAgentEdit, type Do
 import { compareDocxStructure, docxModelCounts, type DocxModelCounts } from './docx-structure';
 import { editLimit } from './edit-limits';
 import { cleanupGuard } from './cleanup';
-import { boundary, graphemeRange, spliceChange, trimChange } from './proposal-splices';
+import { boundary, graphemeRange, MAX_PROPOSAL_STEPS, spliceChange, trimChange } from './proposal-splices';
 import {
   DocumentToolError,
   AcceptDateUnsupportedError,
@@ -88,6 +88,7 @@ type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' |
 interface HeldProposal {
   value: Proposal;
   splices: ProposalChange[];
+  spliceGroups: { splices: ProposalChange[]; oldText: string }[];
   targets: Map<string, { story: string; paraId: string; fingerprint: string }>;
   engine: DocxProposalRecord[];
   registered: Set<string>;
@@ -97,7 +98,6 @@ interface HeldProposal {
 }
 
 const MAX_TEXT = 16_000;
-const MAX_PROPOSAL_STEPS = 128;
 
 function integer(value: number, min: number, max: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -127,13 +127,16 @@ function literal(query: string, caseSensitive: boolean): RegExp {
   return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), caseSensitive ? 'gu' : 'giu');
 }
 
-function touchesChange(left: ProposalChange, right: ProposalChange): boolean {
+function spliceSpan(splices: ProposalChange[]) {
+  const { ref, start } = splices[0]!;
+  const last = splices[splices.length - 1]!;
+  return { ref, start, end: last.start + last.oldText.length };
+}
+
+function touchesChange(left: ReturnType<typeof spliceSpan>, right: ReturnType<typeof spliceSpan>): boolean {
   if (left.ref !== right.ref) return false;
-  const leftEnd = left.start + left.oldText.length;
-  const rightEnd = right.start + right.oldText.length;
-  return !left.oldText || !right.oldText
-    ? left.start <= rightEnd && right.start <= leftEnd
-    : left.start < rightEnd && right.start < leftEnd;
+  if (left.start === left.end && right.start === right.end) return left.start === right.start;
+  return left.start < right.end && right.start < left.end;
 }
 
 export class DocxAgentDocument {
@@ -151,7 +154,6 @@ export class DocxAgentDocument {
   private readonly identities = new Map<string, Paragraph>();
   private readonly runRevisions = new Map<string, { fingerprint: string; revision: number }>();
   private readonly proposals = new Map<string, HeldProposal>();
-  private readonly stagingProposals = new Set<Promise<DocxProposalResult>>();
   private readonly matches = new Map<string, Omit<ExactTextEdit, 'newText'>>();
   private readonly cursors = new Map<string, { epoch: number; signature: string; paragraph: number; offset: number }>();
   private readonly unsubscribe: () => void;
@@ -162,7 +164,6 @@ export class DocxAgentDocument {
   private nextCursor = 1;
   private nextMatch = 1;
   private closed = false;
-  private closeWithdrawal?: Promise<void>;
   private paragraphStyles?: ParagraphStyle[];
   private commentPartCheck?: { source: ArrayBuffer; allowLegacy: boolean; check: Promise<CommentSource> };
   private commentPackageBaseline?: { version: number; deletion: boolean; bytes: Promise<Uint8Array> };
@@ -460,9 +461,23 @@ export class DocxAgentDocument {
       targets.set(p.ref, { story: p.story, paraId: p.paraId, fingerprint: p.fingerprint });
     }
     const value: Proposal = { id: `proposal${this.nextProposal++}`, author: input.author, note: input.note ?? '', status: 'pending', changes, staleRefs: [] };
-    const split = changes.flatMap(spliceChange);
-    const splices = split.length > MAX_PROPOSAL_STEPS ? changes.map(change => trimChange(change)) : split;
-    return { value, splices, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
+    const split = changes.map(spliceChange);
+    let spliceCount = split.reduce((count, splices) => count + splices.length, 0);
+    if (spliceCount > MAX_PROPOSAL_STEPS) {
+      const order = split.map((splices, index) => ({ index, count: splices.length }))
+        .sort((a, b) => b.count - a.count || a.index - b.index);
+      for (const { index, count } of order) {
+        if (spliceCount <= MAX_PROPOSAL_STEPS || count === 1) break;
+        split[index] = [trimChange(changes[index]!)];
+        spliceCount -= count - 1;
+      }
+    }
+    const spliceGroups = split.map((splices, index) => {
+      const change = changes[index]!;
+      const { start, end } = spliceSpan(splices);
+      return { splices, oldText: change.oldText.slice(start - change.start, end - change.start) };
+    });
+    return { value, splices: split.flat(), spliceGroups, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
   }
 
   propose(input: { author: string; note?: string; edits: TextEdit[] }): Proposal {
@@ -486,19 +501,14 @@ export class DocxAgentDocument {
   async proposeAsync(input: { author: string; note?: string; edits: TextEdit[] }): Promise<Proposal> {
     if (!this.proposalPeer) return this.propose(input);
     const plan = this.prepareProposal(input);
-    let staging: Promise<DocxProposalResult> | undefined;
     try {
-      staging = this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
-      this.stagingProposals.add(staging);
-      const result = await staging;
-      if (this.closed) throw new DocumentToolError('CLOSED', 'This document is closed. Open it again.');
+      const result = await this.proposalPeer.proposeChanges({ expectVersion: plan.version, expectPreviewVersion: plan.previewVersion, proposals: plan.proposals });
       this.synchronizeProposals(this.session.getProposals());
       const snapshot = this.proposalResult(result, plan.held.splices);
       const value = this.recordProposal(plan, snapshot);
       if (!plan.held.editorDecisions.size) this.checkDecisionReferences(plan.references, plan.held);
       return value;
     } catch (error) {
-      if (this.closed) throw error;
       if (!plan.held.editorDecisions.size && plan.held.registered.size) {
         const current = this.proposalSnapshot ?? this.session.getProposals();
         const ids = [...plan.held.registered];
@@ -514,8 +524,6 @@ export class DocxAgentDocument {
         this.proposals.delete(plan.held.value.id);
       }
       throw error;
-    } finally {
-      if (staging) this.stagingProposals.delete(staging);
     }
   }
 
@@ -565,7 +573,7 @@ export class DocxAgentDocument {
       throw new DocumentToolError('INVALID_ARGUMENT', 'Tracked acceptance requires an ISO date.');
     }
     const baseVersion = this.session.version();
-    const draft = await this.fork();
+    const draft = await this.forkForAdoption(true);
     const release = cleanupGuard(() => draft.destroy());
     try {
       this.checkPending(held);
@@ -818,10 +826,8 @@ export class DocxAgentDocument {
   }
 
   close() {
-    if (this.closed) return this.closeWithdrawal;
+    if (this.closed) return;
     this.closed = true;
-    const ids = [...this.proposals.values()].flatMap(held => held.value.status === 'pending'
-      ? held.engine.map(record => record.id) : [...held.registered]);
     this.unsubscribe();
     this.unsubscribeProposals();
     this.proposals.clear();
@@ -832,26 +838,7 @@ export class DocxAgentDocument {
     this.identities.clear();
     this.runRevisions.clear();
     this.paragraphs = [];
-    if (this.ownsSession) {
-      this.session.destroy();
-    } else if (ids.length) {
-      const withdraw = () => {
-        const snapshot = this.session.getProposals();
-        const previewVersion = Math.max(snapshot.previewVersion, this.proposalSnapshot?.previewVersion ?? 0);
-        const request = { expectVersion: this.session.version(), expectPreviewVersion: previewVersion, ids };
-        const peer = this.proposalPeer;
-        if (peer) return peer.withdrawProposals(request).then(result =>
-          !result.ok && result.failure.code === 'tracked-revision-conflict'
-            ? peer.withdrawProposals({ ...request, keepRevisions: true }) : result
-        ).then(result => { this.proposalResult(result, []); });
-        const result = this.session.withdrawProposals(request);
-        this.proposalResult(!result.ok && result.failure.code === 'tracked-revision-conflict'
-          ? this.session.withdrawProposals({ ...request, keepRevisions: true }) : result, []);
-      };
-      this.closeWithdrawal = this.stagingProposals.size ? Promise.allSettled(this.stagingProposals).then(withdraw) : withdraw();
-      void this.closeWithdrawal?.catch(() => {});
-      return this.closeWithdrawal;
-    }
+    if (this.ownsSession) this.session.destroy();
   }
 
   private index() {
@@ -999,6 +986,14 @@ export class DocxAgentDocument {
     } catch (error) { throw cleanupGuard(() => draft.destroy()).failed(error); }
   }
 
+  private async forkForAdoption(carryProvenance: boolean) {
+    const draft = await this.fork();
+    try {
+      if (carryProvenance) draft.beginUndoCapture();
+      return draft;
+    } catch (error) { throw cleanupGuard(() => draft.destroy()).failed(error); }
+  }
+
   private adoptDraft(draft: YrsSession, vector: Uint8Array, carryProvenance: boolean) {
     const update = draft.encodeStateAsUpdate(vector);
     this.session.addUndoBoundary();
@@ -1050,6 +1045,7 @@ export class DocxAgentDocument {
       }
       return offset + delta;
     };
+    const acceptedSpans = accepted?.spliceGroups.map(group => spliceSpan(group.splices)) ?? [];
     for (const p of this.paragraphs) {
       const previous = before.paragraphs.find(entry => entry.ref === p.ref);
       if (!previous || touched.has(p.ref)) continue;
@@ -1067,14 +1063,15 @@ export class DocxAgentDocument {
         if (target?.fingerprint !== previous.fingerprint) continue;
         if (accepted && held !== accepted && held.value.status === 'pending') {
           if (!this.proposalPeer && changes.some(change => change.ref === p.ref)) continue;
-          if (held.value.changes.some(change => change.ref === p.ref && accepted.value.changes.some(edit => touchesChange(change, edit)))) {
+          if (held.spliceGroups.some(({ splices }) => splices[0]!.ref === p.ref &&
+            acceptedSpans.some(edit => touchesChange(spliceSpan(splices), edit)))) {
             target.fingerprint = '\u0000stale';
             continue;
           }
         }
         target.fingerprint = p.fingerprint;
         if (held.value.status === 'pending') {
-          for (const change of held.value.changes) if (change.ref === p.ref) change.start = shift(p.ref, change.start);
+          for (const change of held.value.changes) if (change.ref === p.ref) change.start = shift(p.ref, change.start, true);
           for (const splice of held.splices) if (splice.ref === p.ref) splice.start = shift(p.ref, splice.start, true);
         }
       }
@@ -1199,18 +1196,6 @@ export class DocxAgentDocument {
     this.synchronizeProposals(this.session.getProposals());
     if (result?.ok) for (const change of operation.request?.changes ?? []) {
       if (change.state === 'proposed') this.ownStateVersions.delete(change.id);
-    }
-    for (const versions of this.ownStateVersions.values()) {
-      for (const version of versions) {
-        if (versions.size <= 256) break;
-        versions.delete(version);
-      }
-    }
-    for (const entries of [this.ownStateVersions, this.ownWithdrawals]) {
-      for (const id of entries.keys()) {
-        if (entries.size <= 256) break;
-        entries.delete(id);
-      }
     }
   }
 
@@ -1427,9 +1412,10 @@ export class DocxAgentDocument {
     const ids = new Set(held.engine.map(record => record.id));
     const snapshot = this.attached ? this.proposalSnapshot ?? this.session.getProposals() : undefined;
     const previews = snapshot && { ...snapshot, proposals: snapshot.proposals.filter(record => !ids.has(record.id)) };
-    const changes = [...held.splices].sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
-    for (const change of changes) {
-      const { story, paraId } = held.targets.get(change.ref)!;
+    const groups = held.spliceGroups.map(group => ({ ...group, ...spliceSpan(group.splices) }))
+      .sort((a, b) => a.ref.localeCompare(b.ref) || b.start - a.start);
+    for (const { ref, start, end, oldText, splices } of groups) {
+      const { story, paraId } = held.targets.get(ref)!;
       const mapped = previews?.proposals.some(record => record.paragraph.story === story && record.paragraph.paraId === paraId) ? previews : undefined;
       let segments: YrsStorySegment[] = [];
       let found = false;
@@ -1439,14 +1425,17 @@ export class DocxAgentDocument {
         segments = [];
       }
       const text = (mapped ? this.projectSegments(segments, mapped) : segments).map(segment => segment.kind === 'text' ? segment.text : '\ufffc').join('');
-      const endOffset = change.start + change.oldText.length;
-      if (!found || change.start < 0 || endOffset > text.length || !boundary(text, change.start) || !boundary(text, endOffset)
-        || text.slice(change.start, endOffset) !== change.oldText) {
+      if (!found || start < 0 || end > text.length || !boundary(text, start) || !boundary(text, end)
+        || text.slice(start, end) !== oldText) {
         throw new DocumentToolError('STALE_TARGET', 'Target text changed. Read fresh targets and create a new proposal.');
       }
-      const start = mapped ? this.previewOffset(draft, story, paraId, change.start, mapped, true) : change.start;
-      const end = !change.oldText ? start : mapped ? this.previewOffset(draft, story, paraId, endOffset, mapped) : endOffset;
-      draft.replaceRange({ story, start: { paraId, offset: start }, end: { paraId, offset: end } }, change.newText, author);
+      for (let i = splices.length - 1; i >= 0; i--) {
+        const change = splices[i]!;
+        const endOffset = change.start + change.oldText.length;
+        const from = mapped ? this.previewOffset(draft, story, paraId, change.start, mapped, true) : change.start;
+        const to = !change.oldText ? from : mapped ? this.previewOffset(draft, story, paraId, endOffset, mapped) : endOffset;
+        draft.replaceRange({ story, start: { paraId, offset: from }, end: { paraId, offset: to } }, change.newText, author);
+      }
     }
   }
 
@@ -1474,12 +1463,11 @@ export class DocxAgentDocument {
       const steps: EditStep[] = [];
       for (const [index, edit] of edits.entries()) { failed = index; steps.push(await this.plan(edit)); }
       failed = undefined;
-      const draft = await this.fork();
+      const carryProvenance = edits.some(edit => edit.op === 'set_runs');
+      const draft = await this.forkForAdoption(carryProvenance);
       const release = cleanupGuard(() => draft.destroy());
       try {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
-        const carryProvenance = edits.some(edit => edit.op === 'set_runs');
-        if (carryProvenance) draft.beginUndoCapture();
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
         let resolved: Map<string, boolean> | undefined;

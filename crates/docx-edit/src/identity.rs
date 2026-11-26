@@ -4381,19 +4381,14 @@ impl EditingDoc {
         let live_units = units_by_key(&live);
         let equal_output: HashMap<_, _> = provenance
             .equal_output_candidates()
-            .filter_map(|(key, history)| {
+            .filter_map(|key| {
                 source.view_of(key)?;
                 let (story, was) = seeded_units.get(key)?;
                 let (live_story, now) = live_units.get(key)?;
                 if story != live_story || !was.same_projection(now) {
                     return None;
                 }
-                let proof = if history {
-                    None
-                } else {
-                    Some(provenance.prove(self, &txn, story, key)?)
-                };
-                Some((key, proof))
+                Some((key, provenance.prove(self, &txn, story, key)?))
             })
             .collect();
         let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
@@ -4439,8 +4434,7 @@ impl EditingDoc {
                         } else {
                             None
                         };
-                        let proof = equal.and_then(Option::as_ref).or(checked.as_ref());
-                        let unproven = provenance.unproven(key) || (recorded && proof.is_none());
+                        let proof = equal.or(checked.as_ref());
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
@@ -4455,8 +4449,7 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
-                        if same_stories && !unproven && proof.is_none() && formatting_alone(was, now)
-                        {
+                        if same_stories && proof.is_none() && formatting_alone(was, now) {
                             spliced.format_only.push(ordinal);
                         }
                         let Some(seeded) = was.segments.as_deref() else {
@@ -4471,26 +4464,9 @@ impl EditingDoc {
                             spliced.legacy_paragraphs.push(legacy());
                             continue;
                         };
-                        let patch = if unproven {
-                            let reason =
-                                crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
-                                    .err()
-                                    .filter(|legacy| {
-                                        legacy.detail.starts_with("marker:")
-                                            || legacy.detail.starts_with("key:pageBreak")
-                                            || legacy.detail.starts_with("key:columnBreak")
-                                    });
-                            Err(reason.unwrap_or_else(legacy))
-                        } else if let Some(proof) = proof {
-                            crate::paragraph_patch_plan::diff_paragraph_with_proof(
-                                seeded,
-                                live,
-                                context,
-                                Some(proof),
-                            )
-                        } else {
-                            crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
-                        };
+                        let patch = crate::paragraph_patch_plan::diff_paragraph_with_proof(
+                            seeded, live, context, proof,
+                        );
                         match patch {
                             Ok(mut patch) => {
                                 if stale.iter().any(|cell| {
@@ -4547,8 +4523,7 @@ impl EditingDoc {
                             .get(ordinal)
                             .and_then(|keys| keys.first())
                             .is_some_and(|key| {
-                                !provenance.unproven(key)
-                                    && !equal_output.contains_key(key.as_str())
+                                !equal_output.contains_key(key.as_str())
                                     && seeded_units
                                         .get(key.as_str())
                                         .zip(live_units.get(key.as_str()))
@@ -4987,7 +4962,7 @@ fn spliced_part(
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
-    equal_output: &HashMap<&str, Option<crate::provenance::Proof>>,
+    equal_output: &HashMap<&str, crate::provenance::Proof>,
 ) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {

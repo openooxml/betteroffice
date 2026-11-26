@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import JSZip from 'jszip';
-import { openDocx } from '../src';
+import { captureSessionSave, writeSessionSave, yrsToDocument } from '@betteroffice/docx/yrs';
+import { attachDocx, openDocx, type DocxAgentDocument } from '../src';
 import { createOfficeMcpServer } from '../src/mcp';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -25,7 +26,7 @@ function run(id: number, text: string, italic = false): string {
 const before = `<w:p w:rsidR="98765432">${run(0xa1, 'Keep &#x61;ll bytes.')}</w:p>`;
 const after = `<w:p w:rsidR="12345678">${run(0xa2, 'Keep this paragraph &#x74;oo.')}</w:p>`;
 
-async function fixture(runs: readonly string[]): Promise<Uint8Array> {
+async function fixture(runs: readonly string[], ending = after): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
@@ -33,7 +34,7 @@ async function fixture(runs: readonly string[]): Promise<Uint8Array> {
     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     `<Relationship Id="doc" Type="${R}/officeDocument" Target="${DOCUMENT}"/></Relationships>`);
-  zip.file(DOCUMENT, `<w:document xmlns:w="${W}"><w:body>${before}<w:p>${runs.join('')}</w:p>${after}<w:sectPr/></w:body></w:document>`);
+  zip.file(DOCUMENT, `<w:document xmlns:w="${W}"><w:body>${before}<w:p>${runs.join('')}</w:p>${ending}<w:sectPr/></w:body></w:document>`);
   return zip.generateAsync({ type: 'uint8array' });
 }
 
@@ -52,6 +53,29 @@ function expectRuns(paragraph: string, untouched: readonly string[], expected: R
   expect(runs.map(xml => runText(xml)), paragraph).toEqual(expected);
   for (const xml of untouched) expect(runs).toContain(xml);
   expect(paragraph).not.toMatch(/<w:(ins|del)\b/);
+}
+
+async function documentXml(bytes: Uint8Array) {
+  return (await JSZip.loadAsync(bytes)).file(DOCUMENT)!.async('string');
+}
+
+async function compareWithBaseExport(doc: DocxAgentDocument, untouched: readonly string[]) {
+  const draft = await doc['fork']();
+  try {
+    const base = draft.materializeDocx()!;
+    const capture = captureSessionSave(draft, draft.paragraphIdentities(), false);
+    const basePart = capture.plan.splicedParts?.find(part => part.part === DOCUMENT);
+    const localPart = draft.paragraphSavePlan().splicedParts?.find(part => part.part === DOCUMENT);
+    const basePatched = basePart?.paragraphPatches?.map(patch => patch.ordinal) ?? [];
+    const localPatched = localPart?.paragraphPatches?.map(patch => patch.ordinal) ?? [];
+    expect(localPatched).toEqual(expect.arrayContaining(basePatched));
+    const { bytes: baseBytes } = await writeSessionSave(draft, yrsToDocument(draft, base), capture,
+      base.originalBuffer!, { updateModifiedDate: false });
+    const bytes = await doc['exportBytes'](undefined, false);
+    const xml = await documentXml(bytes);
+    for (const sourceRun of untouched) expect(runsOf(xml)).toContain(sourceRun);
+    return { xml, bytes, baseBytes, localPatched, basePatched };
+  } finally { draft.destroy(); }
 }
 
 async function checkExport(
@@ -173,6 +197,67 @@ test('accepts a lone recorded insertion and keeps the untouched run byte-identic
     paragraph => expectRuns(paragraph, [untouched], [['fii', false], [' ti', false]]));
 }, 30_000);
 
+test('accepting 33 replacements retains every KEEP run byte-identically', async () => {
+  const kept = Array.from({ length: 32 }, (_, i) => run(2 * i + 2, ' K&#x45;EP ', true));
+  const runs = kept.flatMap((xml, i) => [run(2 * i + 1, 'a'), xml]);
+  runs.push(run(65, 'a'));
+  const query = Array(33).fill('a').join(' KEEP ');
+  const newText = Array(33).fill('b').join(' KEEP ');
+  await checkProposal(runs, [{ query, newText }], paragraph => {
+    for (const sourceRun of kept) expect(runsOf(paragraph)).toContain(sourceRun);
+    expect(runsOf(paragraph).filter(xml => runText(xml)[0] === 'b')).toHaveLength(33);
+  });
+}, 30_000);
+
+for (const kind of ['headless', 'attached', 'set_runs', 'crossing runs'] as const) {
+  test(`${kind} DOCX export keeps every paragraph patched by base alignment`, async () => {
+    const left = run(1, 'Before ');
+    const right = run(4, ' after.', true);
+    const owner = await openDocx(await fixture([left, run(2, 'alpha'), run(3, ' beta', true), right]));
+    const doc = kind === 'attached' ? attachDocx(owner.session) : owner;
+    try {
+      if (kind === 'set_runs') {
+        const page = doc.readRuns();
+        const p = page.paragraphs[1]!;
+        await doc.edit({ version: page.version, edits: [{ op: 'set_runs', paragraph: p.ref, revision: p.revision,
+          runs: [{ run: p.runs[1]!.id, text: 'FIRST' }] }] });
+      } else {
+        const query = kind === 'crossing runs' ? 'alpha beta' : 'alpha';
+        const [hit] = doc.grep({ query }).matches;
+        const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit!.match, newText: 'FIRST' }] });
+        if (kind === 'attached') expect(owner.session.listRevisions().length).toBeGreaterThan(0);
+        expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted' });
+      }
+      const untouched = [left, right, ...(kind === 'crossing runs' ? [] : [run(3, ' beta', true)])];
+      const { xml, bytes, baseBytes, localPatched, basePatched } = await compareWithBaseExport(doc, untouched);
+      expect(localPatched).toContain(1);
+      expect(xml).toContain('FIRST');
+      if (kind === 'attached') {
+        expect(basePatched).toContain(1);
+        expect(bytes).toEqual(baseBytes);
+      }
+    } finally { doc.close(); if (doc !== owner) owner.close(); }
+  }, 30_000);
+}
+
+test('successive untracked DOCX acceptances preserve untouched runs in both paragraphs', async () => {
+  const firstKept = [run(1, 'a', true), run(4, ' ret&#x61;ined first')];
+  const secondKept = [run(5, 'b', true), run(8, ' ret&#x61;ined second')];
+  const first = [firstKept[0]!, run(2, 'a'), run(3, 'X', true), firstKept[1]!];
+  const second = [secondKept[0]!, run(6, 'b'), run(7, 'X', true), secondKept[1]!];
+  const doc = await openDocx(await fixture(first, `<w:p>${second.join('')}</w:p>`));
+  try {
+    for (const [query, newText] of [['aaX', 'aY'], ['bbX', 'bZ']] as const) {
+      const [hit] = doc.grep({ query }).matches;
+      const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit!.match, newText }] });
+      expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted', tracked: false });
+    }
+    const { xml, localPatched } = await compareWithBaseExport(doc, [...firstKept, ...secondKept]);
+    expect(localPatched).toEqual([1, 2]);
+    expect(runsOf(xml).map(run => runText(run)[0])).toEqual(expect.arrayContaining(['Y', 'Z']));
+  } finally { doc.close(); }
+}, 30_000);
+
 test('accepts replacements in neighbouring runs one character apart', async () => {
   const left = run(1, 'Before ');
   const gap = run(3, '-', true);
@@ -193,23 +278,39 @@ test('edits partially replaced runs in place at both paragraph ends', async () =
   ]));
 }, 30_000);
 
-test.todo('tracked acceptance wraps only the replaced spans and keeps untouched runs byte-identical', async () => {
-  await checkProposal(contractorRuns, contractorEdits, paragraph => {
-    const plainRuns: string[] = [];
-    const revisionTag = /<w:(ins|del)\b[^>]*>([\s\S]*?)<\/w:\1>/;
-    const items = [...paragraph.matchAll(new RegExp(`${revisionTag.source}|${RUN.source}`, 'g'))];
-    expect(items.map(([xml, revision, content]) => {
-      if (revision) return [revision, runsOf(content!).map(xml => runText(xml, revision === 'del' ? 'delText' : 't'))];
-      plainRuns.push(xml);
-      return runText(xml);
-    }), paragraph).toEqual([
-      ['The contractor is ', false], ['del', [[contractor.query, true]]], ['ins', [[contractor.newText, true]]],
-      [', ', true], ['located', false], [' ', false], ['in ', false],
-      ['del', [[city.query, true]]], ['ins', [[city.newText, true]]], ['.', true],
-    ]);
-    expect(paragraph.match(/<w:(ins|del)\b/g)).toHaveLength(4);
-    for (const xml of contractorUntouched) expect(plainRuns).toContain(xml);
-  }, { tracked: true, date: '2026-01-01T00:00:00Z' });
+test('tracked acceptance rewrites the edited paragraph and keeps its neighbours', async () => {
+  const doc = await openDocx(await fixture(contractorRuns));
+  try {
+    const edits = contractorEdits.map(({ query, newText }) => ({ match: doc.grep({ query }).matches[0]!.match, newText }));
+    const proposal = doc.propose({ author: 'Agent', edits });
+    await doc.accept(proposal.id, { tracked: true, date: '2026-01-01T00:00:00Z' });
+    const part = doc.session.paragraphSavePlan().splicedParts?.find(part => part.part === DOCUMENT);
+    expect(part?.changed).toEqual([1]);
+    expect(part?.paragraphPatches ?? []).toEqual([]);
+    expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
+    const xml = await documentXml(await doc.export());
+    const paragraphs = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+    expect([paragraphs[0], paragraphs[2]]).toEqual([before, after]);
+    expect(paragraphs[1]?.match(/<w:(ins|del)\b/g)).toHaveLength(4);
+  } finally { doc.close(); }
+}, 30_000);
+
+test('an insertion after a leading inline drawing rewrites only that paragraph', async () => {
+  const drawing = '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect style="width:20pt;height:10pt"/></w:pict></w:r>';
+  const doc = await openDocx(await fixture([drawing, run(1, 'tail')]));
+  try {
+    const [hit] = doc.grep({ query: 'tail' }).matches;
+    const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit!.match, newText: 'First tail' }] });
+    await doc.accept(proposal.id);
+    const part = doc.session.paragraphSavePlan().splicedParts?.find(part => part.part === DOCUMENT);
+    expect(part?.changed).toEqual([1]);
+    expect(part?.paragraphPatches ?? []).toEqual([]);
+    expect(part?.legacyParagraphs).toMatchObject([{ ordinal: 1, detail: 'ambiguous: no adjacent text donor' }]);
+    const xml = await documentXml(await doc.export());
+    const paragraphs = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
+    expect([paragraphs[0], paragraphs[2]]).toEqual([before, after]);
+    expect(paragraphs[1]).toContain('First tail');
+  } finally { doc.close(); }
 }, 30_000);
 
 test('preserves untouched runs across three replacements in one paragraph', async () => {

@@ -1,7 +1,7 @@
 import type { ProposalChange } from './types';
 
 export const MAX_SPLICE_CELLS = 1_000_000;
-export const MAX_SPLICES_PER_CHANGE = 32;
+export const MAX_PROPOSAL_STEPS = 128;
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
@@ -28,9 +28,9 @@ function tokenOffsets(text: string, cuts: Set<number>, from: number, to: number)
   const edges = [...cuts];
   const kinds = edges.slice(0, -1).map((start, i) => {
     const cluster = text.slice(start, edges[i + 1]);
-    if (/^[\p{L}\p{N}\p{M}_]/u.test(cluster)) return 'word';
+    if (/^[\p{L}\p{N}\p{M}]/u.test(cluster)) return 'word';
     if (/^\s/u.test(cluster)) return 'space';
-    if (/^\p{P}/u.test(cluster)) return 'punctuation';
+    if (/^[.,/:'’_@-]$/u.test(cluster)) return 'joiner';
   });
   const offsets = [from];
   let previous: 'word' | 'space' | undefined;
@@ -38,7 +38,7 @@ function tokenOffsets(text: string, cuts: Set<number>, from: number, to: number)
     if (start < from) continue;
     if (start >= to) break;
     const cluster = kinds[i];
-    const kind = cluster === 'punctuation'
+    const kind = cluster === 'joiner'
       ? (kinds[i - 1] === 'word' && kinds[i + 1] === 'word' ? 'word' : undefined)
       : cluster;
     if (start !== from && (!kind || kind !== previous)) offsets.push(start);
@@ -80,12 +80,13 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
 
   const oldTokens = oldOffsets.slice(0, -1).map((at, i) => oldText.slice(at, oldOffsets[i + 1]));
   const newTokens = newOffsets.slice(0, -1).map((at, j) => newText.slice(at, newOffsets[j + 1]));
+  const weights = oldTokens.map(token => /^\s/u.test(token) ? 1 : token.length);
   const lcs = new Uint32Array(cells);
   for (let i = oldCount - 1; i >= 0; i--) {
     const row = i * columns, next = row + columns;
     for (let j = newCount - 1; j >= 0; j--) {
       lcs[row + j] = oldTokens[i] === newTokens[j]
-        ? oldTokens[i]!.length + lcs[next + j + 1]!
+        ? weights[i]! + lcs[next + j + 1]!
         : Math.max(lcs[next + j]!, lcs[row + j + 1]!);
     }
   }
@@ -98,15 +99,12 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
     if (!remaining) break;
     for (let j = newFrom; j < newCount && lcs[row + j] === remaining; j++) {
       if (oldTokens[i] !== newTokens[j]) continue;
-      if (i !== oldFrom || j !== newFrom) {
-        if (splices.length === MAX_SPLICES_PER_CHANGE) return [trimmed];
-        splices.push(splice(oldFrom, i, newFrom, j));
-      }
+      if (i !== oldFrom || j !== newFrom) splices.push(splice(oldFrom, i, newFrom, j));
       oldFrom = i + 1;
       newFrom = j + 1;
       break;
     }
   }
   if (oldFrom !== oldCount || newFrom !== newCount) splices.push(splice(oldFrom, oldCount, newFrom, newCount));
-  return splices.length > MAX_SPLICES_PER_CHANGE ? [trimmed] : splices;
+  return splices;
 }

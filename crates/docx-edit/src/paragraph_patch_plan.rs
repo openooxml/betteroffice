@@ -1404,11 +1404,13 @@ pub(crate) fn diff_paragraph_v1(
     diff_paragraph_with_proof(seeded, live, context, None)
 }
 
+const UNPROVEN_DETAIL: &str = "ambiguous: unproven edit provenance";
+
 pub(crate) fn unproven_paragraph(ordinal: u32) -> LegacyParagraphV1 {
     LegacyParagraphV1 {
         ordinal,
         code: PatchErrorCode::AmbiguousAlignment,
-        detail: "ambiguous: unproven edit provenance".to_owned(),
+        detail: UNPROVEN_DETAIL.to_owned(),
     }
 }
 
@@ -1419,14 +1421,22 @@ pub(crate) fn diff_paragraph_with_proof(
     proof: Option<&Proof>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let widened = Cell::new(false);
-    plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof).map_err(|legacy| {
+    let result = plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof).map_err(|legacy| {
         if !widened.get() {
             return legacy;
         }
         plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
             .err()
             .unwrap_or(legacy)
-    })
+    });
+    if proof.is_some()
+        && result
+            .as_ref()
+            .is_err_and(|legacy| legacy.detail == UNPROVEN_DETAIL)
+    {
+        return diff_paragraph_v1(seeded, live, context);
+    }
+    result
 }
 
 struct RecordedEdit {
@@ -2247,8 +2257,9 @@ mod tests {
     }
 
     #[test]
-    fn reversed_recorded_ranges_fail_closed() {
-        let paragraph = paragraph("abc", json!({}));
+    fn reversed_recorded_ranges_use_base_alignment() {
+        let seeded = paragraph("abc", json!({}));
+        let live = paragraph("aXc", json!({}));
         let proof = Proof {
             seed_width: 3,
             live_width: 3,
@@ -2260,9 +2271,8 @@ mod tests {
                 donor: DonorV1::At { at: 0 },
             }],
         };
-        let error = diff_paragraph_with_proof(&paragraph, &paragraph, context(), Some(&proof))
-            .unwrap_err();
-        assert_eq!(error.detail, "ambiguous: unproven edit provenance");
+        let patch = diff_paragraph_with_proof(&seeded, &live, context(), Some(&proof)).unwrap();
+        assert_eq!(patch, diff_paragraph_v1(&seeded, &live, context()).unwrap());
     }
 
     #[test]

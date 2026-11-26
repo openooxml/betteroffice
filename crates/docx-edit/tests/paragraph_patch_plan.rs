@@ -3137,7 +3137,16 @@ fn body_plan(plan: &docx_edit::ParagraphSavePlan) -> &docx_edit::SplicedPart {
 }
 
 fn assert_unproven(doc: &EditingDoc) {
-    assert_ambiguous(doc, "ambiguous: unproven edit provenance");
+    let key = &doc.paragraphs("body").unwrap()[0].para_id;
+    let state = doc.encode_state_as_update_v1();
+    let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
+    let value: serde_json::Value = serde_json::from_slice(&sidecar[1..sidecar.len() - 32]).unwrap();
+    let entry = value["entries"][key.as_str()].as_str();
+    assert!(
+        value["overflowed"] == json!(true)
+            || matches!(entry, Some("unproven" | "historyReplacement")),
+        "{value}"
+    );
 }
 
 fn open_for_transfer(content: &str, generation: &str) -> EditingDoc {
@@ -3275,7 +3284,7 @@ fn swapping_equal_text_keeps_each_source_donor() {
 }
 
 #[test]
-fn undoing_a_replacement_saves_the_whole_paragraph() {
+fn undoing_a_replacement_keeps_the_source_paragraph() {
     let content = text("abc");
     let doc = open(&content);
     let mut history = doc.undo_manager();
@@ -3287,7 +3296,7 @@ fn undoing_a_replacement_saves_the_whole_paragraph() {
 }
 
 #[test]
-fn redoing_a_deletion_saves_the_whole_paragraph() {
+fn redoing_a_deletion_saves_the_updated_text() {
     let content = text("abc");
     let doc = open(&content);
     let mut history = doc.undo_manager();
@@ -3310,6 +3319,7 @@ fn undo_of_equal_output_is_checked_before_the_digest_gate() {
     assert_splices(&doc, &[(1, 2, 1, "b")]);
     assert!(history.undo());
     assert_unproven(&doc);
+    assert!(body_plan(&doc.paragraph_save_plan()).changed.is_empty());
 }
 
 #[test]
@@ -3542,18 +3552,17 @@ fn a_pending_update_does_not_invalidate_records_in_another_paragraph() {
 }
 
 #[test]
-fn split_uses_the_whole_paragraph_path_for_the_source_occurrence() {
+fn split_marks_the_source_occurrence_unproven() {
     let content = text("abcd");
     let doc = open(&content);
     replace(&doc, 0, 1, "X");
     doc.split_paragraph(&ctx(), Position::new("body", 2), None)
         .unwrap();
+    assert_unproven(&doc);
     let plan = doc.paragraph_save_plan();
     let part = body_plan(&plan);
     assert_eq!(part.changed, [0]);
     assert_eq!(part.inserted.len(), 1);
-    assert!(part.paragraph_patches.is_empty());
-    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
     let (saved, _) = save_planned_bytes(&plan, Some(part), &package(&content), |source| {
         let mut document = save_document(source, |document| {
             document["content"][0]["content"][0]["content"][0]["text"] = json!("Xb");
@@ -3583,7 +3592,7 @@ fn split_uses_the_whole_paragraph_path_for_the_source_occurrence() {
 }
 
 #[test]
-fn replacing_inside_a_previous_insertion_uses_the_whole_paragraph_path() {
+fn replacing_inside_a_previous_insertion_invalidates_its_record() {
     let doc = open(&text("abc"));
     replace(&doc, 1, 2, "XYZ");
     replace(&doc, 2, 3, "Q");
@@ -3813,15 +3822,15 @@ fn invalid_sidecar_leaves_another_occurrences_records_intact() {
     receiver
         .apply_local_update_with_provenance(&update, &sidecar)
         .unwrap();
+    assert_unproven(&receiver);
     let plan = receiver.paragraph_save_plan();
     let part = body_plan(&plan);
     assert_eq!(part.changed, [0, 1]);
-    assert_eq!(part.legacy_paragraphs.len(), 1);
-    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
-    assert_eq!(part.paragraph_patches.len(), 1);
-    assert_eq!(part.paragraph_patches[0].ordinal, 1);
+    assert!(part.legacy_paragraphs.is_empty());
+    assert_eq!(part.paragraph_patches.len(), 2);
+    assert_eq!(part.paragraph_patches[1].ordinal, 1);
     assert_eq!(
-        splice_summary(&part.paragraph_patches[0]),
+        splice_summary(&part.paragraph_patches[1]),
         owned_splices(&[(1, 2, 1, "")]),
     );
 }
@@ -3841,6 +3850,56 @@ fn insertion_abutting_a_deletion_keeps_the_occurrence_unproven() {
         .unwrap();
         assert_unproven(&doc);
     }
+}
+
+#[test]
+fn replacement_conflicts_with_an_abutting_insertion_donated_by_removed_text() {
+    let doc = open(ADJACENT_SOURCE);
+    doc.insert_text(
+        &ctx(),
+        Position::new("body", 3),
+        "X",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    assert_splices(&doc, &[(3, 3, 2, "X")]);
+    replace(&doc, 0, 3, "ABC");
+    assert_unproven(&doc);
+    assert_eq!(doc.paragraphs("body").unwrap()[0].text, "ABCXdefghi");
+}
+
+#[test]
+fn a_sender_without_source_metadata_cannot_certify_a_transfer() {
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "shell");
+    let sender = EditingDoc::new(72);
+    sender
+        .apply_update_v1(&receiver.encode_state_as_update_v1())
+        .unwrap();
+    let base = receiver.encode_state_vector_v1();
+    replace(&sender, 0, 1, "X");
+    let update = sender.encode_diff_v1(&base).unwrap();
+    let sidecar = sender.encode_edit_provenance_for_transfer(&update, Some(&base));
+    assert!(sidecar.is_empty());
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    assert_unproven(&receiver);
+}
+
+#[test]
+fn an_unpaired_prefix_deletion_marks_an_occurrence_before_its_first_record() {
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "prefix");
+    let sender = open_for_transfer(ADJACENT_SOURCE, "prefix");
+    let base = receiver.encode_state_vector_v1();
+    sender
+        .delete_range(&ctx(), StoryRange::new("body", 0, 1))
+        .unwrap();
+    receiver
+        .apply_update_v1(&sender.encode_diff_v1(&base).unwrap())
+        .unwrap();
+    assert_unproven(&receiver);
+    replace(&receiver, 1, 2, "X");
+    assert_unproven(&receiver);
 }
 
 #[test]
@@ -3873,17 +3932,26 @@ fn bootstrap_body_plan(
     state: &[u8],
     metadata: &[u8],
     sidecar: &[u8],
+    use_local_provenance: bool,
 ) -> serde_json::Value {
     let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
     let peer = EditSessionCore::new(72, host);
     peer.bootstrap_peer_with_provenance(state, metadata, Some(source.to_vec()), sidecar)
         .unwrap();
-    session_body_plan(&peer)
+    session_body_plan_with_provenance(&peer, use_local_provenance)
 }
 
 fn session_body_plan(session: &EditSessionCore) -> serde_json::Value {
-    let plan: serde_json::Value =
-        serde_json::from_str(&session.paragraph_save_plan().unwrap()).unwrap();
+    session_body_plan_with_provenance(session, true)
+}
+
+fn session_body_plan_with_provenance(session: &EditSessionCore, enabled: bool) -> serde_json::Value {
+    let plan: serde_json::Value = serde_json::from_str(
+        &session
+            .paragraph_save_plan_with_local_provenance(enabled)
+            .unwrap(),
+    )
+    .unwrap();
     plan["splicedParts"]
         .as_array()
         .unwrap()
@@ -3966,16 +4034,27 @@ fn run_rewrite_batches_transfer_records_with_matching_deletion_retention() {
         }
         let state = owner.encode_state();
         let sidecar = owner.encode_edit_provenance_for_transfer(&state, None);
-        let part = session_body_plan(&bootstrap(75, &state, &sidecar));
-        assert_patches(&part, if retain_deleted { 2 } else { 1 });
+        let saved = bootstrap(75, &state, &sidecar);
+        let part = session_body_plan(&saved);
         if retain_deleted {
+            assert_patches(&part, 2);
             assert_eq!(part["legacyParagraphs"], json!([]));
         } else {
-            assert_eq!(part["legacyParagraphs"][0]["ordinal"], json!(1));
-            assert_eq!(
-                part["legacyParagraphs"][0]["detail"],
-                json!("ambiguous: unproven edit provenance")
-            );
+            let base = session_body_plan_with_provenance(&saved, false);
+            let patches: Vec<ParagraphPatchV1> =
+                serde_json::from_value(part["paragraphPatches"].clone()).unwrap();
+            assert_eq!(splice_summary(&patches[0]), expected);
+            for field in ["paragraphPatches", "legacyParagraphs"] {
+                let second = |plan: &serde_json::Value| {
+                    plan[field]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|entry| entry["ordinal"] == json!(1))
+                        .cloned()
+                };
+                assert_eq!(second(&part), second(&base));
+            }
         }
     }
 }
@@ -3990,7 +4069,7 @@ fn matching_bootstrap_sidecar_carries_adjacent_splice_records() {
     let state = sender.encode_state_as_update_v1();
     let sidecar = sender.encode_edit_provenance_for_transfer(&state, None);
     let metadata = sender.encode_peer_metadata().unwrap();
-    let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar);
+    let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar, true);
     let patches: Vec<ParagraphPatchV1> =
         serde_json::from_value(part["paragraphPatches"].clone()).unwrap();
     assert_eq!(part["changed"], json!([0]));
@@ -4028,8 +4107,7 @@ fn editor_save_plans_agree_after_unpaired_text_updates() {
 
     let local = author.paragraph_save_plan().unwrap();
     let editor = author.paragraph_save_plan_with_local_provenance(false).unwrap();
-    assert!(local.contains("ambiguous: unproven edit provenance"), "{local}");
-    assert_ne!(local, editor);
+    assert_eq!(local, editor);
     assert_eq!(editor, peer.paragraph_save_plan().unwrap());
     assert_eq!(editor, peer.paragraph_save_plan_with_local_provenance(false).unwrap());
 }
@@ -4054,13 +4132,11 @@ fn bootstrap_sidecar_rejects_state_from_another_moment_or_document() {
     let foreign = other.encode_state_as_update_v1();
     for (doc, state) in [(&sender, earlier), (&other, foreign)] {
         let metadata = doc.encode_peer_metadata().unwrap();
-        let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar);
+        let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar, true);
         assert_eq!(part["changed"], json!([0]));
-        assert_eq!(part["paragraphPatches"], json!([]));
-        assert_eq!(part["legacyParagraphs"], json!([{
-            "ordinal": 0,
-            "code": "AMBIGUOUS_ALIGNMENT",
-            "detail": "ambiguous: unproven edit provenance",
-        }]));
+        assert_eq!(
+            part,
+            bootstrap_body_plan(&source, &state, &metadata, &sidecar, false)
+        );
     }
 }

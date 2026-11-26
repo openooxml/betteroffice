@@ -284,6 +284,22 @@ describe('grep, read, propose, export', () => {
     } finally { split.mockRestore(); }
   });
 
+  test('applying stored insertions checks the intervening text before making any edit', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'START Executive summary END' }] });
+    const held = doc['proposals'].get(proposal.id)!;
+    expect(held.splices).toMatchObject([{ oldText: '' }, { oldText: '' }]);
+    const draft = await doc['fork']();
+    try {
+      const { paraId } = draft.paragraphs('body')[0];
+      draft.replaceRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 9 } }, 'Alternate');
+      const before = draft.encodeState();
+      await expect(Promise.resolve().then(() => doc['apply'](draft, held))).rejects.toMatchObject({ code: 'STALE_TARGET' });
+      expect(draft.encodeState()).toEqual(before);
+    } finally { draft.destroy(); }
+  });
+
   test('direct accept inherits formatting at each splice and preserves untouched runs', async () => {
     const bold = (text: string) => `<w:r><w:rPr><w:b/></w:rPr><w:t>${text}</w:t></w:r>`;
     const red = (text: string) => `<w:r><w:rPr><w:color w:val="C00000"/></w:rPr><w:t>${text}</w:t></w:r>`;

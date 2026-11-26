@@ -115,8 +115,14 @@ impl Splice {
         };
         from == other_from
             || (from < other_to && other_from < to)
-            || (from == to && from == other_to && other.inserted.is_empty())
-            || (other_from == other_to && other_from == to && self.inserted.is_empty())
+            || (from == to
+                && from == other_to
+                && (other.inserted.is_empty()
+                    || matches!(self.donor, DonorV1::At { at } if (other_from..other_to).contains(&at))))
+            || (other_from == other_to
+                && other_from == to
+                && (self.inserted.is_empty()
+                    || matches!(other.donor, DonorV1::At { at } if (from..to).contains(&at))))
     }
 }
 
@@ -248,12 +254,10 @@ impl Provenance {
         matches!(self.entries.get(key), Some(Entry::Recorded(_)))
     }
 
-    pub(crate) fn equal_output_candidates(&self) -> impl Iterator<Item = (&str, bool)> {
-        self.entries.iter().filter_map(|(key, entry)| match entry {
-            Entry::Recorded(_) => Some((key.as_str(), false)),
-            Entry::HistoryReplacement => Some((key.as_str(), true)),
-            Entry::Unproven => None,
-        })
+    pub(crate) fn equal_output_candidates(&self) -> impl Iterator<Item = &str> {
+        self.entries
+            .iter()
+            .filter_map(|(key, entry)| entry.records().map(|_| key.as_str()))
     }
 
     pub(crate) fn unproven(&self, key: &str) -> bool {
@@ -1290,6 +1294,9 @@ impl EditingDoc {
     /// Encodes provenance bound to a diff or full bootstrap state.
     #[doc(hidden)]
     pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
+        if self.source_metadata().is_none() {
+            return Vec::new();
+        }
         let Ok(txn) = self.doc.try_transact() else {
             return Vec::new();
         };
