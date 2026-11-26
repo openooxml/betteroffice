@@ -261,8 +261,9 @@ describe('grep, read, propose, export', () => {
     const bracket = '<w:r><w:rPr><w:strike/></w:rPr><w:t>]</w:t></w:r>';
     const zip = await JSZip.loadAsync(await fixture());
     const source = await zip.file('word/document.xml')!.async('string');
-    zip.file('word/document.xml', source.replace('<w:r><w:t>Executive summary</w:t></w:r>',
-      bold('Left') + punctuation + red('old') + separator + bracket));
+    zip.file('word/document.xml', source
+      .replace('<w:t>Project Aurora revenue is </w:t>', '<w:t xml:space="preserve">Project Aurora revenue is </w:t>')
+      .replace('<w:r><w:t>Executive summary</w:t></w:r>', bold('Left') + punctuation + red('old') + separator + bracket));
     const doc = await open(await zip.generateAsync({ type: 'uint8array' }));
     const [hit] = doc.grep({ query: 'Left!old|]' }).matches;
     const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: '(Left?!NEW|' }] });
