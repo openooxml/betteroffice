@@ -159,7 +159,7 @@ beside a tracked run retains its existing behavior.
 | `office_verify` | Save and reopen in memory; for DOCX also compare the saved package with the original (parts, element counts, fields, drawings, relationships). |
 | `office_export` | Write accepted edits or a pending proposal to a new file. |
 | `office_close` | Release an open document and its proposals. |
-| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows, cell merges, comments (add, reply, resolve or reopen) and page setup with `insert_section_break` and `set_section`; `runFormat: 'anchor'` copies the first plain run on insertion. `set_runs {paragraph, revision, runs:[{run,text}]}` replaces listed runs while keeping formatting; empty text deletes. |
+| `docx_edit` | DOCX: atomic direct edits of paragraph styles, bold/italic/underline, paragraphs, table rows, cell merges, comments (add, reply, resolve or reopen) and page setup with `insert_section_break` and `set_section`; inserted paragraphs take `text` or formatted `runs:[{text,bold,italic,underline}]`, and `runFormat: 'anchor'` copies the first plain run on insertion. `set_runs {paragraph, revision, runs:[{run,text}]}` replaces listed runs while keeping formatting; empty text deletes. |
 | `xlsx_outline`, `xlsx_read_range` | XLSX: sheets, used ranges, tables and defined names; range reads with a version. |
 | `xlsx_write_range`, `xlsx_format`, `xlsx_sort` | XLSX: versioned value and formula writes, formatting and sorting. |
 | `xlsx_list_defined_names`, `xlsx_edit_defined_names` | XLSX: list complete names with pagination; set or delete workbook and sheet scoped names atomically, including hidden flags. |
