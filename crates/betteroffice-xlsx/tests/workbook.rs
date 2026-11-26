@@ -14490,6 +14490,70 @@ fn a_batch_holding_a_visibility_range_is_refused_whole() {
     }
 }
 
+fn synthetic_print_xlsx(normal_family: &str, normal_size_pt: f64, sheet_xml: &str) -> Vec<u8> {
+    let styles = format!(
+        r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="{normal_size_pt}"/><name val="{normal_family}"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#
+    );
+    let parts = vec![
+        (
+            "xl/workbook.xml".to_owned(),
+            br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_vec(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("xl/styles.xml".to_owned(), styles.into_bytes()),
+        ("xl/worksheets/sheet1.xml".to_owned(), sheet_xml.as_bytes().to_vec()),
+    ];
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn print_display_list_does_not_scale_stored_ht_up_when_calibri_default_is_below_natural() {
+    let rows: String = (1..=55)
+        .map(|r| {
+            let ht = if r <= 50 { 13 } else { 15 };
+            let cell = format!(r#"<c r="A{r}"><v>{r}</v></c>"#);
+            format!(r#"<row r="{r}" ht="{ht}" customHeight="1">{cell}</row>"#)
+        })
+        .collect();
+    let sheet_xml = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr defaultRowHeight="12.75"/><cols><col min="1" max="4" width="10" customWidth="1"/></cols><sheetData>{rows}</sheetData></worksheet>"#
+    );
+    let bytes = synthetic_print_xlsx("Calibri", 11.0, &sheet_xml);
+    let workbook = Workbook::open(&bytes).unwrap();
+    let metrics = betteroffice_xlsx::PrintMetrics {
+        dpi: 72.0,
+        max_digit_width: 6.0,
+        default_row_height_pt: 12.75,
+        default_column_width: None,
+        font_size_pt: 11.0,
+        font_family: "Calibri".into(),
+        font_ascent: 10.0,
+        font_descent: 3.0,
+    };
+    let list = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:D55").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    let expected_height = xlsx_render::geometry::row_pt_to_px(50.0 * 13.0 + 5.0 * 15.0);
+    let actual_height = list.height;
+    assert!(
+        (actual_height - expected_height).abs() < 0.01,
+        "expected {expected_height}px (725pt), got {actual_height}px"
+    );
+    let actual_width = list.width;
+    assert!(
+        (actual_width - 320.0).abs() < 0.01,
+        "expected 320px, got {actual_width}px"
+    );
+}
+
 #[cfg(feature = "raster")]
 fn image_size(png: &[u8]) -> (u32, u32) {
     let header = &png[16..24];

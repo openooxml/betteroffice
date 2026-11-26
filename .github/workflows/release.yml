@@ -304,8 +304,8 @@ jobs:
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
-    timeout-minutes: 90
+    # Covers native-dist (75 minutes on the Intel Mac, then 15 for the musl smoke test) and publishing (15 minutes) with dispatch overhead.
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: write
