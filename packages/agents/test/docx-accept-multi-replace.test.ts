@@ -345,7 +345,9 @@ test('an insertion after a leading inline drawing rewrites only that paragraph',
     const part = doc.session.paragraphSavePlan(true).splicedParts?.find(part => part.part === DOCUMENT);
     expect(part?.changed).toEqual([1]);
     expect(part?.paragraphPatches ?? []).toEqual([]);
-    expect(part?.legacyParagraphs).toMatchObject([{ ordinal: 1, detail: 'ambiguous: no adjacent text donor' }]);
+    const base = doc.session.paragraphSavePlan(false).splicedParts?.find(part => part.part === DOCUMENT);
+    expect(part?.legacyParagraphs).toEqual(base?.legacyParagraphs);
+    expect(part?.legacyParagraphs?.map(paragraph => paragraph.ordinal)).toEqual([1]);
     const xml = await documentXml(await doc.export());
     const paragraphs = xml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? [];
     expect([paragraphs[0], paragraphs[2]]).toEqual([before, after]);
