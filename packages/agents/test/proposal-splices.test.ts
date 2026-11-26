@@ -20,9 +20,9 @@ test('splices keep shared space between swapped words', () => {
   expect(spliceChange(change('a  b', 'A   B'))).toEqual([change('a  b', 'A   B')]);
 });
 
-test('splices remove brackets and retain the unchanged word and space', () => {
+test('splices remove brackets, retain the unchanged word and space, and merge a replacement with an abutting deletion', () => {
   expect(spliceChange(change('[MRID xxxxxxxx]', 'MRID 12345678')))
-    .toEqual([change('[', ''), change('xxxxxxxx', '12345678', 6), change(']', '', 14)]);
+    .toEqual([change('[', ''), change('xxxxxxxx]', '12345678', 6)]);
 });
 
 test('splices keep CJK runs, marks, numbers and underscores inside word tokens', () => {
