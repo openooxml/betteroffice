@@ -857,7 +857,7 @@ fn save_font_edit(session: &EditSessionCore, bytes: &[u8], ordinal: usize) -> Ve
     docx_parse::serializer::write_docx_s13(request, bytes).unwrap()
 }
 
-fn document_xml(bytes: &[u8]) -> String {
+fn saved_document_xml(bytes: &[u8]) -> String {
     let (_, xml) = ooxml_opc::unzip_parts(bytes)
         .unwrap()
         .into_iter()
@@ -867,7 +867,7 @@ fn document_xml(bytes: &[u8]) -> String {
 }
 
 fn saved_run_fonts(bytes: &[u8], ordinal: usize) -> Vec<(String, docx_parse::xml::XmlElement)> {
-    let xml = document_xml(bytes);
+    let xml = saved_document_xml(bytes);
     let limits = docx_parse::ParseLimits::default();
     let xml = docx_parse::parse_xml(
         xml.as_bytes(),
@@ -1206,8 +1206,8 @@ fn east_asian_font_pick_survives_reopen_and_keeps_untouched_paragraph_bytes() {
     );
     let bytes = package_body_with_styles(&body, None);
     let saved = save_font_pick(&bytes, 1, 0, 5, FONT_PICK);
-    let original_xml = document_xml(&bytes);
-    let saved_xml = document_xml(&saved);
+    let original_xml = saved_document_xml(&bytes);
+    let saved_xml = saved_document_xml(&saved);
     for ordinal in [0, 2] {
         let before = element_span(&original_xml, &[0, ordinal]).unwrap();
         let after = element_span(&saved_xml, &[0, ordinal]).unwrap();
@@ -1241,13 +1241,13 @@ fn font_family_delta_ignores_extra_members() {
     let bytes = package(&font_run("中文", "Calibri", ""));
     let saved = save_font_pick(&bytes, 0, 0, 2, r#"{"fontFamily":{"ascii":"Arial"}}"#);
     assert_font_slots(&saved_run_fonts(&saved, 0), &[("中文", "Arial", "Arial")]);
-    let expected = document_xml(&saved);
+    let expected = saved_document_xml(&saved);
     for delta in [
         r#"{"fontFamily":{"ascii":"Arial","eastAsia":null}}"#,
         r#"{"fontFamily":{"ascii":"Arial","eastAsia":"Microsoft YaHei"}}"#,
     ] {
         assert_eq!(
-            document_xml(&save_font_pick(&bytes, 0, 0, 2, delta)),
+            saved_document_xml(&save_font_pick(&bytes, 0, 0, 2, delta)),
             expected
         );
     }
