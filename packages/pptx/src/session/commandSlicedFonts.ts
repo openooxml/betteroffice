@@ -1,7 +1,7 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import { slicedFacesSupported as browserSupportsSlicedFaces } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { readFontTraits } from '../../../../shared/fontTraits';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
 
 /** What the session needs from a progressive face. */
@@ -38,7 +38,10 @@ export function slicedFacesSupported(userAgent?: string): boolean {
   return browserSupportsSlicedFaces(userAgent);
 }
 
-type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
+type WholeFaceLoader = (() => Promise<ArrayBuffer>) & {
+  slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> };
+  reportCdnFailure?: FontCdnReporter;
+};
 
 interface Entry {
   family: string;
@@ -100,7 +103,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       throw error;
     });
   const replacementBytes = (entry: Entry) => wholeBytes(entry).catch((error: unknown) => {
-    if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+    if (isImplicitFontCdnError(error)) (entry.whole.reportCdnFailure ?? reportImplicitCdnFailure)(error);
     throw error;
   });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
