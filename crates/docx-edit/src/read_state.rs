@@ -66,6 +66,13 @@ impl<'a> ValueAgg<'a> {
     }
 }
 
+fn inherits_font_slot(character: char) -> bool {
+    // Matches the combining ranges in ooxml_text's font-slot classifier.
+    matches!(character as u32,
+        0x0300..=0x036f | 0x1ab0..=0x1aff | 0x1dc0..=0x1dff | 0x20d0..=0x20ff | 0xfe20..=0xfe2f
+    )
+}
+
 fn fold_selection_font<'a>(
     family: &mut ValueAgg<'a>,
     chunk: &'a crate::ops::Chunk,
@@ -102,17 +109,57 @@ fn fold_selection_font<'a>(
         chunk.attrs.get("complexScript"),
         chunk.attrs.get("fontFamily"),
     );
-    let mut used = [false; 2];
+    if complex_script || (!hint && text.is_ascii()) {
+        family.fold(latin);
+        return;
+    }
+
     let mut offset = chunk.start;
-    for (character, slot) in ooxml_text::font_slot_characters(text, complex_script, hint) {
+    let Some((mut start, first)) = text.char_indices().find(|&(_, character)| {
         let end = offset + character.len_utf16() as u32;
-        if offset >= to {
-            break;
-        }
         if end > from {
-            used[usize::from(slot == 2)] = true;
+            return true;
         }
         offset = end;
+        false
+    }) else {
+        return;
+    };
+    let mut used = [false; 2];
+    if offset < to && inherits_font_slot(first) {
+        let base = text[..start]
+            .char_indices()
+            .rev()
+            .find(|&(_, character)| !inherits_font_slot(character))
+            .map_or("", |(byte, character)| {
+                &text[byte..byte + character.len_utf8()]
+            });
+        let east_asian_base = ooxml_text::font_slot_characters(base, false, hint)
+            .next()
+            .is_some_and(|(_, slot)| slot == 2);
+        used[usize::from(east_asian_base)] = true;
+
+        let mut characters = text[start..].chars();
+        while offset < to {
+            let Some(character) = characters.next().filter(|&ch| inherits_font_slot(ch)) else {
+                break;
+            };
+            start += character.len_utf8();
+            offset += character.len_utf16() as u32;
+        }
+    }
+
+    let mut slots = ooxml_text::font_slot_characters(&text[start..], false, hint);
+    while offset < to {
+        let Some((character, slot)) = slots.next() else {
+            break;
+        };
+        offset += character.len_utf16() as u32;
+        used[usize::from(slot == 2)] = true;
+        if used[0] && used[1] {
+            *family = ValueAgg::Mixed;
+            return;
+        }
     }
     if used[0] {
         family.fold(latin);
@@ -672,6 +719,26 @@ mod tests {
             .unwrap()
     }
 
+    fn seed_font_run(text: &str, extra_fonts: &[(&str, &str)]) -> EditingDoc {
+        let doc = seed(text);
+        let fonts = [("ascii", "Calibri"), ("eastAsia", "SimSun")]
+            .into_iter()
+            .chain(extra_fonts.iter().copied())
+            .map(|(slot, value)| (slot.to_owned(), Any::from(value)))
+            .collect();
+        let delta = InlineFormatDelta {
+            other: BTreeMap::from([("fontFamily".into(), Some(Any::Map(Arc::new(fonts))))]),
+            ..Default::default()
+        };
+        doc.format_range(
+            &local(),
+            StoryRange::new("body", 0, text.encode_utf16().count() as u32),
+            &delta,
+        )
+        .unwrap();
+        doc
+    }
+
     #[test]
     fn bold_is_mixed_over_a_spanning_range_and_on_over_the_bold_range() {
         let doc = seed("hello world");
@@ -727,6 +794,57 @@ mod tests {
         let plain = context(&doc, 6, 11);
         assert_eq!(plain.font_family, None);
         assert_eq!(plain.font_size, None);
+    }
+
+    #[test]
+    fn selection_font_family_uses_selected_text_and_caret() {
+        let doc = seed_font_run("abc中文", &[]);
+        for (from, to, expected) in [
+            (0, 3, Some("Calibri")),
+            (3, 5, Some("SimSun")),
+            (0, 5, None),
+            (1, 1, Some("Calibri")),
+            (4, 4, Some("SimSun")),
+        ] {
+            assert_eq!(context(&doc, from, to).font_family.as_deref(), expected);
+        }
+
+        let ascii = seed_font_run("abc", &[]);
+        assert_eq!(context(&ascii, 1, 2).font_family.as_deref(), Some("Calibri"));
+    }
+
+    #[test]
+    fn selection_font_family_respects_east_asian_theme() {
+        let doc = seed_font_run("abc中文", &[("eastAsiaTheme", "minorEastAsia")]);
+
+        assert_eq!(context(&doc, 0, 3).font_family.as_deref(), Some("Calibri"));
+        assert_eq!(context(&doc, 3, 5).font_family, None);
+    }
+
+    #[test]
+    fn selection_font_family_uses_live_east_asian_hint() {
+        let plain = seed_font_run("é", &[]);
+        let hinted = seed_font_run("é", &[("hint", "eastAsia")]);
+
+        assert_eq!(context(&plain, 0, 1).font_family.as_deref(), Some("Calibri"));
+        assert_eq!(context(&hinted, 0, 1).font_family.as_deref(), Some("SimSun"));
+    }
+
+    #[test]
+    fn selection_font_family_keeps_combining_context_at_utf16_boundaries() {
+        let hint = [("hint", "eastAsia")];
+        let doc = seed_font_run("A𠮷x中\u{301}\u{1ab0}B", &hint);
+
+        assert_eq!(context(&doc, 3, 3).font_family.as_deref(), Some("SimSun"));
+        assert_eq!(context(&doc, 6, 7).font_family.as_deref(), Some("SimSun"));
+        assert_eq!(context(&doc, 6, 8).font_family, None);
+        assert_eq!(context(&doc, 7, 8).font_family.as_deref(), Some("Calibri"));
+
+        let no_base = seed_font_run("\u{301}\u{1ab0}中", &hint);
+        assert_eq!(
+            context(&no_base, 1, 2).font_family.as_deref(),
+            Some("Calibri")
+        );
     }
 
     #[test]

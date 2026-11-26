@@ -1115,7 +1115,7 @@ fn font_pick_keeps_alternating_scripts_in_one_saved_run() {
 
 #[test]
 fn font_pick_selects_supplementary_han_by_utf16_offsets() {
-    let text = "A𠮷B";
+    let text = "A𠮷中B";
     let (_, slot) = ooxml_text::font_slot_characters(text, false, false)
         .nth(1)
         .unwrap();
@@ -1130,7 +1130,7 @@ fn font_pick_selects_supplementary_han_by_utf16_offsets() {
     let runs = saved_run_fonts(&saved, 0);
     assert_eq!(runs.len(), 3);
     assert_font_slots(&runs[..1], &[("A", "Calibri", "SimSun")]);
-    assert_font_slots(&runs[2..], &[("B", "Calibri", "SimSun")]);
+    assert_font_slots(&runs[2..], &[("中B", "Calibri", "SimSun")]);
     assert_eq!(runs[1].0, "𠮷");
     let fonts = &runs[1].1;
     assert_eq!(fonts.attribute(Some("w"), "ascii"), Some("Georgia"));
@@ -1138,6 +1138,16 @@ fn font_pick_selects_supplementary_han_by_utf16_offsets() {
     assert_eq!(
         fonts.attribute(Some("w"), "eastAsia"),
         Some(if slot == 2 { "Georgia" } else { "SimSun" }),
+    );
+
+    let saved = save_font_pick(&bytes, 0, 3, 4, FONT_PICK);
+    assert_font_slots(
+        &saved_run_fonts(&saved, 0),
+        &[
+            ("A𠮷", "Calibri", "SimSun"),
+            ("中", "Microsoft YaHei", "Microsoft YaHei"),
+            ("B", "Calibri", "SimSun"),
+        ],
     );
 }
 
