@@ -1444,7 +1444,7 @@ impl EditSession {
     #[doc(hidden)]
     #[wasm_bindgen(skip_typescript)]
     pub fn section_save_plan_json(&self, input_json: &str) -> Result<String, JsValue> {
-        use crate::save::sections::{SectionPlanInput, section_save_plan};
+        use crate::save::sections::{SectionPlanInput, from_json_any_depth, section_save_plan};
 
         #[derive(serde::Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -1458,7 +1458,7 @@ impl EditSession {
             use_local_provenance: bool,
         }
 
-        let input: Input = serde_json::from_str(input_json).map_err(EngineError::message)?;
+        let input: Input = from_json_any_depth(input_json).map_err(EngineError::message)?;
         if input.source.is_none() || !self.core.has_story("body") {
             return Ok("null".to_owned());
         }

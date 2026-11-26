@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use docx_parse::serializer::{SectionEdit, SectionEdits};
 use docx_parse::{BlockContent, DocumentBody, Paragraph, SectionProperties};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -29,6 +30,14 @@ pub(crate) struct SectionPlan {
 
 #[derive(Debug)]
 pub(crate) struct SectionPlanError(pub(crate) &'static str);
+
+pub(crate) fn from_json_any_depth<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
+    let mut de = serde_json::Deserializer::from_str(json);
+    de.disable_recursion_limit();
+    let value = T::deserialize(&mut de)?;
+    de.end()?;
+    Ok(value)
+}
 
 fn properties(section: &SectionProperties) -> Value {
     serde_json::to_value(section).expect("section properties serialize to JSON")
@@ -429,9 +438,73 @@ pub(crate) fn section_save_plan(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use docx_parse::{Table, TableCell, TableRow};
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn deserializes_a_body_with_deeply_nested_tables() {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(|| {
+                let paragraph = BlockContent::Paragraph(Arc::new(Paragraph {
+                    node_type: "paragraph".to_owned(),
+                    para_id: None,
+                    repeated_para_id: None,
+                    para_id_attribute: None,
+                    source_ordinal: None,
+                    text_id: None,
+                    extra_attributes: Vec::new(),
+                    formatting: None,
+                    property_changes: None,
+                    p_pr_ins: None,
+                    p_pr_del: None,
+                    content: Vec::new(),
+                    list_rendering: None,
+                    rendered_page_break_before: None,
+                    section_properties: None,
+                }));
+                let mut content = Vec::new();
+                for _ in 0..260 {
+                    content.push(paragraph.clone());
+                    content = vec![BlockContent::Table(Arc::new(Table {
+                        rows: vec![TableRow {
+                            node_type: "tableRow".to_owned(),
+                            extra_attributes: None,
+                            formatting: None,
+                            property_changes: None,
+                            structural_change: None,
+                            cells: vec![TableCell {
+                                node_type: "tableCell".to_owned(),
+                                formatting: None,
+                                property_changes: None,
+                                structural_change: None,
+                                content,
+                                leading_bookmarks: None,
+                            }],
+                            leading_bookmarks: None,
+                            trailing_bookmarks: None,
+                        }],
+                        ..Table::empty()
+                    }))];
+                }
+                let body = DocumentBody {
+                    content,
+                    ..DocumentBody::default()
+                };
+                let json = serde_json::to_string(&body).unwrap();
+                let error = serde_json::from_str::<DocumentBody>(&json).unwrap_err();
+                assert!(error.to_string().contains("recursion limit exceeded"), "{error}");
+                let decoded: DocumentBody = from_json_any_depth(&json).unwrap();
+                assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn scans_section_tags_with_the_same_lexical_rules_inside_and_outside_xml() {

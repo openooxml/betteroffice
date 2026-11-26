@@ -1,4 +1,4 @@
-import { expect } from 'bun:test';
+import { afterAll, expect } from 'bun:test';
 import { appendFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import type { RustParagraphIds } from '../docx/rustSaveFacade';
@@ -19,6 +19,12 @@ type NativeSession = EditSession & { section_save_plan_json(input: string): stri
 
 const sessions = new WeakMap<YrsSession, EditSession>();
 const stats = { checked: 0, differences: 0, undefined: 0, plan: 0, ordinary: 0, refusal: 0 };
+
+afterAll(() => {
+  if (stats.differences > 0) {
+    throw new Error(`Section save plan parity found ${stats.differences} differences`);
+  }
+});
 
 export function sectionSavePlanParityStats(): Readonly<typeof stats> {
   return stats;
@@ -115,13 +121,13 @@ async function compareSectionPlans(
   const expectedJson = stableStringify(result.expected);
   const nativeJson = stableStringify(native);
   const differs = nativeJson !== expectedJson;
+  if (differs) stats.differences += 1;
   if (reportPath) {
     const checked = `checked ${testFile} ${kind}\n`;
     const diff = differs ? `DIFF ${testFile}\t${expectedJson}\t${nativeJson}\n` : '';
     appendFileSync(reportPath, checked + diff);
   }
   if (differs) {
-    stats.differences += 1;
     throw new Error(`Section save plan differs\nTypeScript: ${expectedJson}\nRust: ${nativeJson}`);
   }
   return result;

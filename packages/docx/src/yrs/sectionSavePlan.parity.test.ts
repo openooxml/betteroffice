@@ -96,6 +96,28 @@ test('plans no change when there is no stored or saved section start metadata', 
   } finally { session.destroy(); }
 });
 
+test('plans no section change with tables nested 260 deep', async () => {
+  const session = await open();
+  const builder = await createYrsSession();
+  try {
+    builder.openDocx(new Uint8Array(session.materializeDocx()!.originalBuffer!), false);
+    builder.applyUpdate(session.encodeState());
+    let story = 'body';
+    for (let depth = 0; depth < 260; depth += 1) {
+      const paraId = builder.paragraphs(story)[0]!.paraId;
+      const receipt = builder.insertTable({ story, paraId, offset: 0 }, 1, 1);
+      story = receipt.createdStoryIds[0]!;
+    }
+    session.applyUpdate(builder.encodeState());
+    const { checked } = sectionSavePlanParityStats();
+    expect(await checkProjectedSectionPlan(session)).toBeNull();
+    expect(sectionSavePlanParityStats().checked).toBe(checked + 1);
+  } finally {
+    builder.destroy();
+    session.destroy();
+  }
+}, 60_000);
+
 const withPageBorder = (xml: string) => xml.replace(
   '</w:sectPr>',
   '<w:pgBorders><w:top w:val="single" w:color="ABCDEF"/></w:pgBorders></w:sectPr>'
