@@ -2060,9 +2060,7 @@ pub(crate) fn remove_table_references(
                 token.end
             }
             TokKind::ThreeDRef { first, .. }
-                if !text[token.start..].starts_with('\'')
-                    && drops(first)
-                    && !has_sheet(first) =>
+                if !text[token.start..].starts_with('\'') && drops(first) && !has_sheet(first) =>
             {
                 token.start + first.len()
             }

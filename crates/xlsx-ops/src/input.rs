@@ -2,7 +2,7 @@
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
 use xlsx_calc::{EvalContext, evaluate, parse_formula, reads_other_workbook};
-use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, FormatCode, SheetId};
+use xlsx_model::{CellProvider, CellValue, DateSystem, FormatCode, SheetId};
 
 use crate::op::CellState;
 
