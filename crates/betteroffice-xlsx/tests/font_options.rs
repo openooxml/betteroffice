@@ -29,7 +29,9 @@ fn opens_with_backstop_options() {
 #[cfg(all(feature = "fonts-latin", feature = "raster"))]
 #[test]
 fn arabic_in_arial_png_uses_naskh() {
-    use betteroffice_xlsx::{Cell, CellRef, CellValue, PngFontFace, PngTarget, RenderOptions, SheetId};
+    use betteroffice_xlsx::{
+        Cell, CellRef, CellValue, PngFontFace, PngTarget, RenderOptions, SheetId,
+    };
     use xlsx_model::{CellFormat, Font};
 
     let mut model = WorkbookModel::default();
@@ -47,7 +49,9 @@ fn arabic_in_arial_png_uses_naskh() {
     sheet.set_cell(
         CellRef::new(0, 0),
         Cell {
-            value: CellValue::Text { value: "مرحبا".into() },
+            value: CellValue::Text {
+                value: "مرحبا".into(),
+            },
             style,
             ..Default::default()
         },

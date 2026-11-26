@@ -631,19 +631,18 @@ fn arabic_runs_chain_noto_naskh_arabic_in_word_and_powerpoint() {
     .unwrap();
     let arabic = |family: &str, bold: bool, office| {
         manager
-            .resolve(
-                family,
-                bold,
-                false,
-                &["arabic".to_string()],
-                office,
-            )
+            .resolve(family, bold, false, &["arabic".to_string()], office)
             .into_iter()
             .filter(|face| face.family.contains("Arabic"))
             .map(|face| (face.family, face.bold))
             .collect::<Vec<_>>()
     };
-    for family in ["Arial", "Times New Roman", "Simplified Arabic", "Traditional Arabic"] {
+    for family in [
+        "Arial",
+        "Times New Roman",
+        "Simplified Arabic",
+        "Traditional Arabic",
+    ] {
         for bold in [false, true] {
             for office in [LastResortOffice::Word, LastResortOffice::PowerPoint] {
                 assert_eq!(

@@ -108,7 +108,9 @@ fn arabic_in_arial_layout_uses_naskh_glyphs() {
     let document = Document::open(&common::sample_docx()).unwrap();
     let draw = |family: &str| {
         let result = document
-            .layout(input(json!({"text": "مرحبا", "fontFamily": family, "fontSize": FONT_SIZE_PT})))
+            .layout(input(
+                json!({"text": "مرحبا", "fontFamily": family, "fontSize": FONT_SIZE_PT}),
+            ))
             .unwrap();
         glyphs(&result)
             .into_iter()

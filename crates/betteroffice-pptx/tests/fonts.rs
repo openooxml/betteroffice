@@ -91,7 +91,10 @@ fn arabic_in_arial_uses_naskh_in_native_layout() {
         .flat_map(|line| &line.runs)
         .collect();
     assert!(!runs.is_empty());
-    assert!(runs.iter().all(|run| run.font_family == "Noto Naskh Arabic"));
+    assert!(
+        runs.iter()
+            .all(|run| run.font_family == "Noto Naskh Arabic")
+    );
 }
 
 #[cfg(feature = "fonts-latin")]
