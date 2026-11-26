@@ -14,6 +14,11 @@ type FontRequest =
   | { kind: 'last-resort'; family: string; bold: boolean; italic: boolean }
   | { kind: 'coverage'; script: string; requestedFamily?: string; bold: boolean; italic: boolean };
 
+type PendingSliceOpen = {
+  pending: Promise<ProgressiveFontFace | undefined>;
+  callers?: (() => boolean)[];
+};
+
 /** @internal */
 const DEFAULT_FONT_MAX_ATTEMPTS = 3;
 /** @internal */
@@ -51,7 +56,7 @@ function createFontSession() {
     reportImplicitCdnFailure(error);
   };
   const ignoreCdnFailure: FontCdnReporter = () => {};
-  const slices = new Map<string, Promise<ProgressiveFontFace>>();
+  const slices = new Map<string, PendingSliceOpen>();
   const coverage = new WeakMap<BundledFontLoader, Promise<ArrayBuffer>>();
   return {
     report,
@@ -72,18 +77,27 @@ function createFontSession() {
       }
       return pending;
     },
-    openSlices(location: SliceLocation): Promise<ProgressiveFontFace> {
+    openSlices(location: SliceLocation, current = () => true): Promise<ProgressiveFontFace | undefined> {
       const key = location.ref.index;
-      let pending = slices.get(key);
-      if (!pending) {
-        const scopedLocation = { ...location, reportCdnFailure: ignoreCdnFailure };
-        pending = importProgressiveFonts().then(({ openSlicedFace }) => openSlicedFace(scopedLocation));
-        slices.set(key, pending);
-        void pending.then(() => { slices.delete(key); }, async (error: unknown) => {
-          if (isImplicitFontCdnError(error)) report(error);
-          if (!(await settledFontMiss(error))) slices.delete(key);
-        });
+      const existing = slices.get(key);
+      if (existing) {
+        existing.callers?.push(current);
+        return existing.pending;
       }
+      const callers = [current];
+      const scopedLocation = { ...location, reportCdnFailure: ignoreCdnFailure };
+      const pending = importProgressiveFonts().then(({ openSlicedFace }) => {
+        opening.callers = undefined;
+        if (callers.some((isCurrent) => isCurrent())) return openSlicedFace(scopedLocation);
+        slices.delete(key);
+      });
+      const opening: PendingSliceOpen = { pending, callers };
+      slices.set(key, opening);
+      void pending.then((opened) => { if (opened) slices.delete(key); }, async (error: unknown) => {
+        opening.callers = undefined;
+        if (isImplicitFontCdnError(error)) report(error);
+        if (!(await settledFontMiss(error))) slices.delete(key);
+      });
       return pending;
     },
   };
@@ -140,7 +154,7 @@ export function prefetchCoverageFaces(
       if (!current()) return;
       const load = source.resolveScriptFallback(script as BundledFontScript, false, false);
       if (load?.slices && sliced && slicedFacesSupported()) {
-        void fontSession(source).openSlices(load.slices).catch(() => {});
+        void fontSession(source).openSlices(load.slices, current).catch(() => {});
       } else if (load) void fontSession(source).loadCoverage(load).catch(() => {});
     }
   }).catch(() => {});
@@ -294,7 +308,7 @@ export function createCommandDefaultFonts(
         if (load?.slices && sliced?.supported()) {
           try {
             const opened = await session.openSlices(load.slices);
-            if (disposed || suppliedFamily(face)) return undefined;
+            if (!opened || disposed || suppliedFamily(face)) return undefined;
             const skeleton = face.kind === 'coverage' ? await scriptFontFace(face.script, bold, italic, opened.bytes(), face.requestedFamily)
               : { family: face.family, bold: face.bold, italic: face.italic, bytes: opened.bytes() };
             if (skeleton && !families.has(skeleton.family.trim().toLowerCase())) {
