@@ -89,7 +89,7 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
   const appendSplice = (next: ProposalChange) => {
     if (!next.oldText && !next.newText) return;
     const previous = splices.at(-1);
-    if (previous) {
+    if (previous && (!previous.oldText || !previous.newText || !next.oldText || !next.newText)) {
       const gap = oldText.slice(previous.start - change.start + previous.oldText.length, next.start - change.start);
       if (/^\s+$/u.test(gap)) {
         previous.oldText += gap + next.oldText;
