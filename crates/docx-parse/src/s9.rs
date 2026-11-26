@@ -16,7 +16,9 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings, build_save_media_map};
+use crate::media::{
+    MediaFile, MediaScan, MediaTable, build_media_map_with_warnings, build_save_media_map,
+};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -223,9 +225,11 @@ pub(crate) fn parse_save_source(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<(String, S9PackageWire), ParseError> {
-    let document_path = crate::relationships::office_document_path(parts, &mut ParseBudget::new(limits))?;
-    let (envelope, _) = parse_s9_package_impl(parts, data, options, limits, None, None, true, None, true)?
-        .expect("a whole body is never refused");
+    let document_path =
+        crate::relationships::office_document_path(parts, &mut ParseBudget::new(limits))?;
+    let (envelope, _) =
+        parse_s9_package_impl(parts, data, options, limits, None, None, true, None, true)?
+            .expect("a whole body is never refused");
     Ok((document_path, envelope.document.package))
 }
 
@@ -858,7 +862,9 @@ fn parse_s9_package_impl(
     };
     let embedded_font_parts = parts
         .iter()
-        .filter(|(path, _)| !save_comparison && path.to_ascii_lowercase().starts_with("word/fonts/"))
+        .filter(|(path, _)| {
+            !save_comparison && path.to_ascii_lowercase().starts_with("word/fonts/")
+        })
         .map(|(path, bytes)| BinaryPartWire {
             path: path.clone(),
             base64: base64::engine::general_purpose::STANDARD.encode(bytes),

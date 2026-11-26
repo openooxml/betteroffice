@@ -396,7 +396,12 @@ pub(super) fn write_parts(
         .into_iter()
         .map(|(part, ids)| (package.plan_key(part).to_owned(), ids))
         .collect();
-    apply_paragraph_id_assignments(&mut request, &assignments_for_model, &relationships, &package)?;
+    apply_paragraph_id_assignments(
+        &mut request,
+        &assignments_for_model,
+        &relationships,
+        &package,
+    )?;
     let assignments: HashMap<_, _> = assignments_for_model
         .into_iter()
         .map(|(part, ids)| (package.resolve_path(&part).to_owned(), ids))
@@ -404,7 +409,12 @@ pub(super) fn write_parts(
     let patched: HashMap<String, &[(u32, String)]> = paragraph_ids
         .patched_parts
         .iter()
-        .map(|part| (package.plan_key(&part.part).to_owned(), part.para_ids.as_slice()))
+        .map(|part| {
+            (
+                package.plan_key(&part.part).to_owned(),
+                part.para_ids.as_slice(),
+            )
+        })
         .collect();
     let mut patched_parts: HashMap<String, Vec<u8>> = patched
         .iter()
@@ -632,7 +642,8 @@ pub(super) fn write_parts(
             ) && relationship.target_mode != Some(TargetMode::External)
         })
         .filter_map(|relationship| {
-            let target = resolve_relative_path(&package.document_path, &relationship.target).ok()?;
+            let target =
+                resolve_relative_path(&package.document_path, &relationship.target).ok()?;
             Some(package.plan_key(&target).to_owned())
         })
         .collect();
@@ -816,7 +827,8 @@ fn localize_table_row_namespaces(xml: &str) -> Option<String> {
             if let Some(prefix) = key.strip_prefix("xmlns:") {
                 let uri = attribute.decode_and_unescape_value(reader.decoder()).ok()?;
                 local.push((prefix.to_owned(), uri.into_owned(), table));
-            } else if row && let Some((prefix, _)) = key.split_once(':')
+            } else if row
+                && let Some((prefix, _)) = key.split_once(':')
                 && !matches!(prefix, "w" | "xml")
             {
                 used.insert(prefix.to_owned());
@@ -833,7 +845,8 @@ fn localize_table_row_namespaces(xml: &str) -> Option<String> {
                         .find(|(name, _, _)| name == &prefix)
                 {
                     binding_text.push_str(&format!(
-                        " xmlns:{prefix}=\"{}\"", super::xml_writer::escape_xml(uri)
+                        " xmlns:{prefix}=\"{}\"",
+                        super::xml_writer::escape_xml(uri)
                     ));
                 }
             }
@@ -979,7 +992,11 @@ fn save_warnings(
     }
     let [footnote_separators, footnotes, endnote_separators, endnotes] = notes;
     for (separators, notes, rels_path) in [
-        (footnote_separators, footnotes, "word/_rels/footnotes.xml.rels"),
+        (
+            footnote_separators,
+            footnotes,
+            "word/_rels/footnotes.xml.rels",
+        ),
         (endnote_separators, endnotes, "word/_rels/endnotes.xml.rels"),
     ] {
         let rels_xml = package.text(rels_path).unwrap_or_default();
@@ -1323,7 +1340,11 @@ impl<'a> Package<'a> {
             .iter()
             .enumerate()
             .map(|(index, (path, _))| {
-                let key = if product_save { path.to_ascii_lowercase() } else { path.clone() };
+                let key = if product_save {
+                    path.to_ascii_lowercase()
+                } else {
+                    path.clone()
+                };
                 (key, index)
             })
             .collect();
@@ -1355,7 +1376,8 @@ impl<'a> Package<'a> {
         } else {
             path
         };
-        self.positions.get(&path.to_ascii_lowercase())
+        self.positions
+            .get(&path.to_ascii_lowercase())
             .map_or(path, |&index| {
                 if index < self.original.len() {
                     &self.original[index].0
@@ -1366,19 +1388,30 @@ impl<'a> Package<'a> {
     }
 
     fn plan_key<'b>(&'b self, path: &'b str) -> &'b str {
-        if self.product_save { self.resolve_path(path) } else { path }
+        if self.product_save {
+            self.resolve_path(path)
+        } else {
+            path
+        }
     }
 
     fn path_key(&self, path: &str) -> String {
-        if self.product_save { path.to_ascii_lowercase() } else { path.to_owned() }
+        if self.product_save {
+            path.to_ascii_lowercase()
+        } else {
+            path.to_owned()
+        }
     }
 
     fn contains(&self, path: &str) -> bool {
-        self.positions.contains_key(&self.path_key(self.resolve_path(path)))
+        self.positions
+            .contains_key(&self.path_key(self.resolve_path(path)))
     }
 
     fn bytes(&self, path: &str) -> Option<&[u8]> {
-        let index = *self.positions.get(&self.path_key(self.resolve_path(path)))?;
+        let index = *self
+            .positions
+            .get(&self.path_key(self.resolve_path(path)))?;
         Some(if index < self.original.len() {
             self.overrides
                 .get(&index)
@@ -1395,7 +1428,9 @@ impl<'a> Package<'a> {
 
     /// The part as the source package holds it, ignoring this save's edits.
     fn original_bytes(&self, path: &str) -> Option<&'a [u8]> {
-        let index = *self.positions.get(&self.path_key(self.resolve_path(path)))?;
+        let index = *self
+            .positions
+            .get(&self.path_key(self.resolve_path(path)))?;
         self.original.get(index).map(|(_, bytes)| bytes.as_slice())
     }
 
@@ -1551,9 +1586,10 @@ fn apply_paragraph_id_assignments(
         apply_assignments(&mut request.document, ids)?;
         request.document.comments = comments;
     }
-    if let (Some(ids), Some(comments)) =
-        (parts.get(package.plan_key(COMMENTS_PART)), request.document.comments.as_mut())
-    {
+    if let (Some(ids), Some(comments)) = (
+        parts.get(package.plan_key(COMMENTS_PART)),
+        request.document.comments.as_mut(),
+    ) {
         apply_assignments(comments, ids)?;
     }
     for entries in [&mut request.header_entries, &mut request.footer_entries] {
@@ -1564,7 +1600,10 @@ fn apply_paragraph_id_assignments(
                 .and_then(|relationship| {
                     resolve_relative_path(&package.document_path, &relationship.target).ok()
                 });
-            if let Some(ids) = path.as_deref().and_then(|path| parts.get(package.plan_key(path))) {
+            if let Some(ids) = path
+                .as_deref()
+                .and_then(|path| parts.get(package.plan_key(path)))
+            {
                 apply_assignments(story, ids)?;
             }
         }
@@ -2512,7 +2551,12 @@ fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut
 
     if let Some(content_types) = package.text("[Content_Types].xml")
         && !(if package.product_save {
-            has_xml_attribute(&content_types, "Override", "PartName", "/word/numbering.xml")
+            has_xml_attribute(
+                &content_types,
+                "Override",
+                "PartName",
+                "/word/numbering.xml",
+            )
         } else {
             content_types.contains("PartName=\"/word/numbering.xml\"")
         })
@@ -3773,24 +3817,26 @@ fn xml_tags<'a>(xml: &'a str, name: &'a str) -> impl Iterator<Item = &'a str> {
 
     let xml = xml.strip_prefix('\u{feff}').unwrap_or(xml);
     let mut reader = quick_xml::Reader::from_str(xml);
-    std::iter::from_fn(move || loop {
-        let start = reader.buffer_position() as usize;
-        match reader.read_event() {
-            Ok(Event::Start(tag) | Event::Empty(tag))
-                if tag.name().as_ref() == name.as_bytes()
-                    || tag.local_name().as_ref() == name.as_bytes() =>
-            {
-                return xml.get(start..reader.buffer_position() as usize);
+    std::iter::from_fn(move || {
+        loop {
+            let start = reader.buffer_position() as usize;
+            match reader.read_event() {
+                Ok(Event::Start(tag) | Event::Empty(tag))
+                    if tag.name().as_ref() == name.as_bytes()
+                        || tag.local_name().as_ref() == name.as_bytes() =>
+                {
+                    return xml.get(start..reader.buffer_position() as usize);
+                }
+                Ok(Event::Eof) | Err(_) => return None,
+                _ => {}
             }
-            Ok(Event::Eof) | Err(_) => return None,
-            _ => {}
         }
     })
 }
 
 fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    use std::borrow::Cow;
     use quick_xml::events::Event;
+    use std::borrow::Cow;
 
     let mut reader = quick_xml::Reader::from_str(tag);
     let (Event::Start(element) | Event::Empty(element)) = reader.read_event().ok()? else {
@@ -3869,11 +3915,8 @@ fn process_new_hyperlinks(
                 continue;
             }
             let rels_path = relationship_part_path(path);
-            bound |= process_hyperlink_part(
-                package,
-                &rels_path,
-                std::iter::once(&mut story.content),
-            );
+            bound |=
+                process_hyperlink_part(package, &rels_path, std::iter::once(&mut story.content));
         }
     }
     Ok(bound)

@@ -173,7 +173,11 @@ fn document_path(
 ) -> Result<String, ParseError> {
     let find_part = |expected: &str| {
         parts.iter().find(|(path, _)| {
-            if ignore_case { path.eq_ignore_ascii_case(expected) } else { path == expected }
+            if ignore_case {
+                path.eq_ignore_ascii_case(expected)
+            } else {
+                path == expected
+            }
         })
     };
     let default_path = || {
@@ -191,7 +195,8 @@ fn document_path(
     }) else {
         return Ok(default_path());
     };
-    let RelationshipTarget::Internal(target) = resolve_relationship_target(if ignore_case { "_rels/.rels" } else { path }, relationship)?
+    let RelationshipTarget::Internal(target) =
+        resolve_relationship_target(if ignore_case { "_rels/.rels" } else { path }, relationship)?
     else {
         return Err(ParseError::Relationship {
             part: path.to_owned(),
@@ -200,9 +205,11 @@ fn document_path(
     };
     find_part(&target)
         .map(|(path, _)| path.clone())
-        .ok_or_else(|| ParseError::Container(format!(
-            "not a Word document: main document part is missing: {target}"
-        )))
+        .ok_or_else(|| {
+            ParseError::Container(format!(
+                "not a Word document: main document part is missing: {target}"
+            ))
+        })
 }
 
 pub(crate) fn office_document_path_exact(

@@ -377,7 +377,8 @@ impl SerializerContext {
         if !self.kept_unchanged.is_empty() {
             wire.push(format!(
                 "DOCX_KEPT_UNCHANGED structure {}",
-                serde_json::to_string(&self.kept_unchanged).expect("string keys and integer counts")
+                serde_json::to_string(&self.kept_unchanged)
+                    .expect("string keys and integer counts")
             ));
         }
         if !self.structure_dropped.is_empty() {

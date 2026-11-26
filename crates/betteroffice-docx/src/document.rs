@@ -18,8 +18,8 @@ use docx_edit::structured::{
     export_package_structured,
 };
 use docx_edit::{
-    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, Receipt, SegmentContent,
-    StoryRange, StorySegment, seed_from_docx_with_generation,
+    EditCtx, EditingDoc, ParagraphIdentities, ParagraphRef, Receipt, SegmentContent, StoryRange,
+    StorySegment, seed_from_docx_with_generation,
 };
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
@@ -618,8 +618,7 @@ impl Document {
             && let Ok(path) = docx_parse::relationships::office_document_path(
                 &self.original_parts,
                 &mut docx_parse::xml::ParseBudget::new(&self.parse_limits),
-            )
-        {
+            ) {
             save_core_only(&request, &path, &self.original_parts, &self.source)?
         } else {
             #[cfg(test)]
@@ -1471,8 +1470,8 @@ fn has_floating_zones(
 mod session_save_tests {
     use super::{
         Document, EditCtx, InlineNode, Locator, Paragraph, ParagraphContent, SessionEdit,
-        WHOLE_MODEL_WARNING,
-        find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
+        WHOLE_MODEL_WARNING, find_paragraph_mut, get_paragraph_text, replace_plain_run,
+        replace_section_paragraphs,
     };
 
     use std::cell::{Cell, RefCell};
@@ -1766,7 +1765,9 @@ mod session_save_tests {
         parts.push(("word/numbering.xml".to_owned(), numbering.into_bytes()));
         let source = ooxml_opc::rezip_parts(&parts).unwrap();
         let mut document = Document::open(&source).unwrap();
-        document.replace_paragraph_text("0000000B", "Budget edit").unwrap();
+        document
+            .replace_paragraph_text("0000000B", "Budget edit")
+            .unwrap();
         document.model_mut();
         document.parse_limits.max_xml_bytes = 128;
         let (report, warnings) = document.save_report_with_warnings().unwrap();

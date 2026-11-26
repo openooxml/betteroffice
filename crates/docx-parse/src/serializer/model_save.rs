@@ -283,18 +283,14 @@ fn write_model(
     ) {
         return write_fallback(request, bytes, parts, coverage, &error.to_string());
     }
-    let aliases = match header_footer_paths(
-        &request,
-        &source,
-        &body_path,
-        &part_paths,
-        parts,
-        limits,
-    ) {
-        Ok(aliases) => aliases,
-        Err(error @ ParseError::Canonical(_)) => return Err(error),
-        Err(error) => return write_fallback(request, bytes, parts, coverage, &error.to_string()),
-    };
+    let aliases =
+        match header_footer_paths(&request, &source, &body_path, &part_paths, parts, limits) {
+            Ok(aliases) => aliases,
+            Err(error @ ParseError::Canonical(_)) => return Err(error),
+            Err(error) => {
+                return write_fallback(request, bytes, parts, coverage, &error.to_string());
+            }
+        };
     if aliases.edits.values().any(|edit| {
         edit.path.eq_ignore_ascii_case(&body_path)
             || [COMMENTS, FOOTNOTES, ENDNOTES, NUMBERING]
@@ -516,7 +512,9 @@ fn validate_relationships(
             && (relationship.relationship_type != source.relationship_type
                 || !same_relationship_target(body_path, relationship, source))
         {
-            return Err(save_error(format!("cannot replace document relationship {id}")));
+            return Err(save_error(format!(
+                "cannot replace document relationship {id}"
+            )));
         }
     }
     Ok(())
@@ -564,7 +562,10 @@ fn source_story_paths<'a>(
         .iter()
         .filter_map(move |(_, relationship)| {
             let kind = relationship.relationship_type.as_str();
-            if !matches!(kind, relationship_types::HEADER | relationship_types::FOOTER) {
+            if !matches!(
+                kind,
+                relationship_types::HEADER | relationship_types::FOOTER
+            ) {
                 return None;
             }
             let target = story_path(body_path, relationship, kind).ok()??;
@@ -749,8 +750,20 @@ fn merge_alias(
             let keys: BTreeSet<_> = left
                 .keys()
                 .chain(right.keys())
-                .chain(source_left.as_object().into_iter().flatten().map(|(key, _)| key))
-                .chain(source_right.as_object().into_iter().flatten().map(|(key, _)| key))
+                .chain(
+                    source_left
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(key, _)| key),
+                )
+                .chain(
+                    source_right
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(key, _)| key),
+                )
                 .collect();
             let mut fields = serde_json::Map::new();
             for key in keys {
@@ -804,10 +817,19 @@ fn merge_alias(
     let right_tree = tree(right)?;
     let source_left = source_left.map(tree).unwrap_or(Some(Value::Null))?;
     let source_right = source_right.map(tree).unwrap_or(Some(Value::Null))?;
-    let mut result = merge(&left_tree, &right_tree, &source_left, &source_right, relationships)?;
+    let mut result = merge(
+        &left_tree,
+        &right_tree,
+        &source_left,
+        &source_right,
+        relationships,
+    )?;
     let object = result.as_object_mut()?;
     object.insert("type".into(), Value::String(left.story_type.clone()));
-    object.insert("hdrFtrType".into(), Value::String(left.hdr_ftr_type.clone()));
+    object.insert(
+        "hdrFtrType".into(),
+        Value::String(left.hdr_ftr_type.clone()),
+    );
     if let Some(Value::Object(bindings)) = object.remove("customRootBindings") {
         object.insert(
             "customRootBindings".into(),
@@ -958,7 +980,12 @@ fn parse_verbatim_note(
     };
     if element.name != format!("w:{expected}")
         || note.story_type != expected
-        || element.attribute(Some("w"), "id")?.trim().parse::<i64>().ok()? as f64 != note.id
+        || element
+            .attribute(Some("w"), "id")?
+            .trim()
+            .parse::<i64>()
+            .ok()? as f64
+            != note.id
         || element.attribute(Some("w"), "type").unwrap_or("normal") != note.note_type
     {
         return None;
@@ -989,25 +1016,28 @@ fn same_verbatim_note_content(
     use crate::block::{BlockContent, is_bookmark_block};
 
     left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| match (left, right) {
-            (BlockContent::RawXml(a), BlockContent::RawXml(b))
-                if is_bookmark_block(left) && is_bookmark_block(right) =>
-            {
-                let a = crate::xml::parse_xml_strict(a.xml.as_bytes(), path, budget);
-                let b = crate::xml::parse_xml_strict(b.xml.as_bytes(), path, budget);
-                let (Ok(a), Ok(b)) = (a, b) else {
-                    return false;
-                };
-                let (Some(a), Some(b)) = (a.root(), b.root()) else {
-                    return false;
-                };
-                a.name == b.name
-                    && ["id", "name", "colFirst", "colLast"]
-                        .iter()
-                        .all(|name| a.attribute(Some("w"), name) == b.attribute(Some("w"), name))
-            }
-            _ => same_model(left, right),
-        })
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| match (left, right) {
+                (BlockContent::RawXml(a), BlockContent::RawXml(b))
+                    if is_bookmark_block(left) && is_bookmark_block(right) =>
+                {
+                    let a = crate::xml::parse_xml_strict(a.xml.as_bytes(), path, budget);
+                    let b = crate::xml::parse_xml_strict(b.xml.as_bytes(), path, budget);
+                    let (Ok(a), Ok(b)) = (a, b) else {
+                        return false;
+                    };
+                    let (Some(a), Some(b)) = (a.root(), b.root()) else {
+                        return false;
+                    };
+                    a.name == b.name
+                        && ["id", "name", "colFirst", "colLast"].iter().all(|name| {
+                            a.attribute(Some("w"), name) == b.attribute(Some("w"), name)
+                        })
+                }
+                _ => same_model(left, right),
+            })
 }
 
 fn same_notes(notes: &[Note], source: &[Note]) -> bool {

@@ -1,5 +1,7 @@
 use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
-use docx_parse::serializer::{S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart};
+use docx_parse::serializer::{
+    S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SpliceAnchor, S13SplicedPart,
+};
 
 use crate::{ParagraphSavePlan, SpliceAnchor};
 

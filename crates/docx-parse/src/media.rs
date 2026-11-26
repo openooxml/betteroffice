@@ -583,9 +583,13 @@ pub(crate) fn comparison_image_bytes<'a>(
 
 fn find_relationship_media<'a>(media: &'a MediaMap, target: &str) -> Option<&'a MediaFile> {
     let relative = target.trim_start_matches('/');
-    [normalize_media_path(target), relative.to_owned(), format!("word/{relative}")]
-        .into_iter()
-        .find_map(|candidate| find_case_insensitive(media, &candidate))
+    [
+        normalize_media_path(target),
+        relative.to_owned(),
+        format!("word/{relative}"),
+    ]
+    .into_iter()
+    .find_map(|candidate| find_case_insensitive(media, &candidate))
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.

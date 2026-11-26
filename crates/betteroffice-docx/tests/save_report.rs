@@ -142,7 +142,10 @@ fn one_edited_paragraph_with_options_reports_the_bytes_save_with_options_writes(
 fn assert_smart_tag_dropped(report: &SaveReport) {
     assert!(report.kept_unchanged.is_none());
     assert!(!report.whole_model_write);
-    let dropped = report.structure_dropped.as_ref().expect("smart tag loss is reported");
+    let dropped = report
+        .structure_dropped
+        .as_ref()
+        .expect("smart tag loss is reported");
     assert_eq!(dropped.len(), 1);
     assert_eq!(dropped[0].part, MAIN);
     assert_eq!(dropped[0].dropped, ["w:smartTag"]);
@@ -159,7 +162,10 @@ fn a_model_fallback_writes_the_edit_with_a_save_plan() {
     assert_smart_tag_dropped(&report);
     assert!(saved_main_part(&report.bytes).contains(">X<"));
     let reopened = Document::open(&report.bytes).unwrap();
-    assert_eq!(get_paragraph_text(reopened.paragraph("0000000E").unwrap()), "X");
+    assert_eq!(
+        get_paragraph_text(reopened.paragraph("0000000E").unwrap()),
+        "X"
+    );
 }
 
 #[test]
@@ -175,8 +181,16 @@ fn a_model_edit_that_drops_a_smart_tag_does_not_report_nothing_dropped() {
     assert!(!saved.contains("<w:smartTag"), "{saved}");
     assert_smart_tag_dropped(&report);
     let (_, warnings) = document.save_report_with_warnings().unwrap();
-    assert!(warnings.iter().any(|warning| warning.starts_with("DOCX_PART_REWRITTEN word/document.xml ")));
-    assert!(!warnings.iter().any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED ")));
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_PART_REWRITTEN word/document.xml "))
+    );
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+    );
 }
 
 #[test]
