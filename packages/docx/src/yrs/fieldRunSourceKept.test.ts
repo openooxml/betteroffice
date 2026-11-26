@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx, repackDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { ComplexField, Document, Paragraph, SimpleField } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
@@ -85,7 +86,11 @@ async function projectedSession(parsed: Document): Promise<Opened> {
   documentToYrs(opened, parsed);
   return {
     session: opened,
-    save: async () => documentXml(new Uint8Array(await repackDocx(yrsToDocument(opened, parsed)))),
+    save: async () => {
+      const projected = yrsToDocument(opened, parsed);
+      const { buffer } = await writeDocumentWithRust(projected, projected.originalBuffer!);
+      return documentXml(new Uint8Array(buffer));
+    },
   };
 }
 

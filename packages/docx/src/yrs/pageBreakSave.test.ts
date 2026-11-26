@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
-import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
@@ -56,13 +56,14 @@ async function save(
 ): Promise<[string, string]> {
   const bytes = fixture(body);
   const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
-  const control = savedBody(await repackDocx(parsed));
+  const control = savedBody((await writeDocumentWithRust(parsed, parsed.originalBuffer!)).buffer);
 
   const session = await createYrsSession({ clientId: (clientId += 1) });
   try {
     session.seedFromDocx(bytes);
     edit?.(session);
-    return [savedBody(await repackDocx(yrsToDocument(session, parsed))), control];
+    const projected = yrsToDocument(session, parsed);
+    return [savedBody((await writeDocumentWithRust(projected, projected.originalBuffer!)).buffer), control];
   } finally {
     session.destroy();
   }
