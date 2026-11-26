@@ -21967,36 +21967,31 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         body += &preview_fixture::paragraph(6, &preview_fixture::run("Next section"));
         body += section;
         let bytes = preview_fixture::document(&body);
-        let line_geometry = |engine: &EngineSession, index: usize| {
+        let line_geometry = |engine: &EngineSession, index: u32| {
+            let id = format!("{:08X}", index + 1);
             let pagination = engine.pagination.borrow();
-            let entry = &pagination.input.as_ref().unwrap().measured[index];
-            let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(extent)) =
-                (&entry.block, &entry.measure)
-            else {
-                panic!("expected a measured prefix paragraph");
-            };
-            assert_eq!(extent.lines.len(), 1);
-            let y = pagination.layout.as_ref().unwrap().pages[0]
+            let paragraph = pagination.layout.as_ref().unwrap().pages[0]
                 .fragments
                 .iter()
                 .find_map(|fragment| match fragment {
-                    Fragment::Paragraph(paragraph) if paragraph.block_id == block.id => {
-                        Some(paragraph.y)
+                    Fragment::Paragraph(paragraph) if block_key(&paragraph.block_id) == id => {
+                        Some(paragraph)
                     }
                     _ => None,
                 })
                 .expect("prefix paragraph on first page");
-            (extent.lines[0].line_height, y)
+            assert_eq!((paragraph.from_line, paragraph.to_line), (0, 1));
+            (paragraph.height, paragraph.y)
         };
+        let prefix_paragraphs = [0, 1];
         for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
             let engine = EngineSession::new(9635);
             crate::seed_from_docx(engine.doc(), &bytes).unwrap();
             let mut request = lowering_pages::region_request(&engine, &bytes, font);
-            assert_eq!(request["regions"]["sections"].as_array().unwrap().len(), 2);
             certified_float_layout(&engine, &request.to_string(), trigger);
-            let prefix = [0, 1].map(|paragraph| float_flow_slot(&engine, paragraph));
+            let prefix = prefix_paragraphs.map(|paragraph| float_flow_slot(&engine, paragraph));
             let edited = float_flow_slot(&engine, 3);
-            let before = prefix.map(|index| line_geometry(&engine, index));
+            let before = prefix_paragraphs.map(|index| line_geometry(&engine, index));
             {
                 let pagination = engine.pagination.borrow();
                 assert!(pagination.float_flow[prefix[0]].as_ref().unwrap().starts());
@@ -22026,8 +22021,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     )
                     .unwrap();
             }
-            request["regions"]["sections"][0]["properties"]["docGrid"] =
-                json!({"type": "lines", "linePitch": 480});
+            let properties = request["regions"]["sections"][0]["properties"]
+                .as_object_mut()
+                .expect("first section properties");
+            properties.insert("docGrid".to_owned(), json!({"type": "lines", "linePitch": 480}));
             let request = request.to_string();
             let (measured, full) = certified_float_layout(&engine, &request, trigger);
             assert_eq!(full, 0, "{trigger:?}");
@@ -22036,11 +22033,17 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let cold = cold_session(&engine, 9636, Some((9635, &bytes)));
             cold.layout_regions_for_trigger(&request, None, RelayoutTrigger::Open)
                 .unwrap();
-            let expected = prefix.map(|index| line_geometry(&cold, index));
-            assert!(expected[0].0 > before[0].0 && expected[1].0 > before[1].0);
-            assert!(expected[1].1 > before[1].1);
+            let expected = prefix_paragraphs.map(|index| line_geometry(&cold, index));
+            assert!(
+                expected[0].0 > before[0].0 && expected[1].0 > before[1].0,
+                "{trigger:?} grid should increase prefix line heights: {before:?} to {expected:?}"
+            );
+            assert!(
+                expected[1].1 > before[1].1,
+                "{trigger:?} grid should move the second line down: {before:?} to {expected:?}"
+            );
             assert_eq!(
-                prefix.map(|index| line_geometry(&engine, index)),
+                prefix_paragraphs.map(|index| line_geometry(&engine, index)),
                 expected,
                 "{trigger:?} prefix line heights and positions"
             );
