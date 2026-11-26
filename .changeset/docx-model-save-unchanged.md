@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-`repackDocx` and Rust `Document::save` return the original bytes when the model and written core properties are unchanged. `repackDocxWithWarnings` reports rewritten package members when their names are available.
+`repackDocx` and Rust `Document::save` return the original package for an unchanged model when the save leaves its core properties, content types and relationships as they were. `repackDocxWithWarnings` names the parts rewritten after a model edit.
