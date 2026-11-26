@@ -489,7 +489,8 @@ fn lower_items(
                         };
                         let mut source = fallback.take(source_kind, payload);
                         if kind == "noteRef"
-                            && let Some(ParagraphContent::Inline(InlineNode::Run(run))) = &mut source
+                            && let Some(ParagraphContent::Inline(InlineNode::Run(run))) =
+                                &mut source
                         {
                             run.formatting = None;
                         }

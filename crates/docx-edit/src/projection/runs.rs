@@ -629,7 +629,8 @@ fn source_runs(paragraph: &Paragraph) -> Vec<SourceRun<'_>> {
             }
             InlineNode::SimpleField(_) | InlineNode::Math(_) => 1,
             InlineNode::RawXml(raw)
-                if raw.xml.trim_start().starts_with("<w:") && !raw.xml.trim_end().ends_with("/>") =>
+                if raw.xml.trim_start().starts_with("<w:")
+                    && !raw.xml.trim_end().ends_with("/>") =>
             {
                 1
             }
