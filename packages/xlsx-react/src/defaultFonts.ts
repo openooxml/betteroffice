@@ -2,6 +2,7 @@ import { fontCdnCacheKey, getFontCdnConfiguration } from '../../../shared/office
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
 import { importFonts } from '../../../shared/office-session/fontModules';
 import { nonCjkScriptUnicodeRange } from '../../../shared/office-session/textScripts';
+import type { SessionFailure } from '../../../shared/office-session/types';
 import {
   cellFontKey, cellScriptFamilies, cellScriptFontKey, cellScriptFontRequests,
   type CellScriptCache, type ScriptFontDisplayList,
@@ -109,12 +110,17 @@ function scriptFileCoolingDown(key: string): boolean {
   return typeof retryAfter === 'number' && Date.now() < retryAfter;
 }
 
-function loadScriptFile(key: string, load: () => Promise<ArrayBuffer>): Promise<ArrayBuffer> {
+function loadScriptFile(key: string, load: () => Promise<ArrayBuffer>, isDisposed: () => boolean): Promise<ArrayBuffer> {
   const current = scriptFiles.get(key);
   if (current && typeof current !== 'number') return current;
   const task = Promise.resolve().then(load);
   scriptFiles.set(key, task);
-  void task.then(() => { scriptFiles.delete(key); }, () => { scriptFiles.set(key, Date.now() + SCRIPT_FACE_RETRY_MS); });
+  void task.then(() => { scriptFiles.delete(key); }, (error: unknown) => {
+    const cancelled = error instanceof Error && (error.name === 'AbortError'
+      || (error.name === 'SessionFailure' && (error as SessionFailure).code === 'disposed'));
+    if (isDisposed() || cancelled) scriptFiles.delete(key);
+    else scriptFiles.set(key, Date.now() + SCRIPT_FACE_RETRY_MS);
+  });
   return task;
 }
 
@@ -232,7 +238,8 @@ export function createDefaultFontPainter(
         if (!load) return false;
         owners = new Set([owner]);
         pendingFaces.set(key, owners);
-        registration = registerFace(face, family, scriptFile ? () => loadScriptFile(scriptFile, load) : load, fontSet, owners, unicodeRange);
+        const loadBytes = scriptFile ? () => loadScriptFile(scriptFile, load, () => disposed) : load;
+        registration = registerFace(face, family, loadBytes, fontSet, owners, unicodeRange);
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;

@@ -1,7 +1,7 @@
 import type { BundledFontScript } from '@betteroffice/fonts';
 import type { DisplayList, TextCmd } from '../../packages/xlsx/src/display-list/types';
 import { nonCjkScriptUnicodeRange, textScripts } from './textScripts';
-import { runPieces } from './xlsxTextRuns';
+import { runPieces, textWithNumberFormatParts } from './xlsxTextRuns';
 
 export interface CellScriptFontRequest {
   fontFamily: string;
@@ -32,7 +32,7 @@ function scriptsForText(text: string): readonly BundledFontScript[] {
 }
 
 function cellScripts(cmd: TextCmd, frameScripts?: CellScriptCache): readonly BundledFontScript[] {
-  const text = (cmd.text ?? '') + (cmd.numberFormat?.parts.map(({ character }) => character).join('') ?? '');
+  const text = textWithNumberFormatParts(cmd);
   const known = frameScripts?.get(text);
   if (known) return known;
   const scripts = scriptsForText(text);

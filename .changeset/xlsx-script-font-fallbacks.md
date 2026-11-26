@@ -3,4 +3,4 @@
 "@betteroffice/xlsx-react": patch
 ---
 
-The spreadsheet editor paints Arabic, Hebrew, Thai, Devanagari and other scripts with bundled fallback fonts when the device lacks the requested glyphs.
+The spreadsheet editor uses bundled fallbacks for missing glyphs in scripts such as Arabic, Hebrew, Thai and Devanagari, with immediate retries after an editor closes mid-load. PNG exports also load script fallbacks for characters introduced by number formats.

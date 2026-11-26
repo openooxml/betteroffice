@@ -17,6 +17,10 @@ export interface TextPiece {
 
 const RIGHT_TO_LEFT = /[֐-ࣿיִ-﷿ﹰ-ﻼ‏‫‮⁧\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/u;
 
+export function textWithNumberFormatParts({ text, numberFormat }: TextCmd): string {
+  return (text ?? '') + (numberFormat?.parts.map(({ character }) => character).join('') ?? '');
+}
+
 /** Whether `text` holds a right-to-left letter or a control that opens right-to-left text. */
 export function hasRightToLeft(text: string): boolean {
   return RIGHT_TO_LEFT.test(text);
