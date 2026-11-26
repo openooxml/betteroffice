@@ -373,6 +373,33 @@ impl PageBudget {
         self.charge_scratch(segments.saturating_mul(PATH_SEGMENT_BYTES))
     }
 
+    fn charge_clipped_dash(
+        &mut self,
+        length: f32,
+        dash: &[f32],
+        mut phase: f32,
+    ) -> Result<(), String> {
+        if !length.is_finite() {
+            return self.charge_path(u64::MAX);
+        }
+        let mut remaining = f64::from(length);
+        for (index, &interval) in dash.iter().enumerate().cycle() {
+            if remaining <= 0.0 {
+                break;
+            }
+            if phase > interval || (phase == interval && interval > 0.0) {
+                phase -= interval;
+                continue;
+            }
+            if index.is_multiple_of(2) {
+                self.charge_path(1)?;
+            }
+            remaining -= f64::from(interval - phase);
+            phase = 0.0;
+        }
+        Ok(())
+    }
+
     pub(crate) fn charge_glyphs(&mut self, glyphs: u64) -> Result<(), String> {
         self.glyphs = self.glyphs.saturating_add(glyphs);
         if self.glyphs > MAX_PAGE_GLYPHS {
@@ -939,21 +966,24 @@ fn paint_shape<'k>(
         parts.push(Box::new(
             |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, budget| {
                 if let Some(dash) = &stroked.dash {
-                    let period = f64::from(dash.iter().sum::<f32>());
+                    let period = dash.iter().sum::<f32>();
                     if let Some(fragments) = clip_dashed_polyline(
                         &path,
                         &stroked.stroke,
                         transform,
                         (target.width(), target.height()),
-                        period,
+                        f64::from(period),
                     ) {
                         budget.charge_scratch(
                             (std::mem::size_of_val(dash.as_slice()) as u64)
                                 .saturating_mul(fragments.len() as u64),
                         )?;
-                        for (fragment, _) in &fragments {
-                            budget
-                                .charge_path(dash_segments(stroke_path_length(fragment), dash))?;
+                        for (fragment, phase) in &fragments {
+                            budget.charge_clipped_dash(
+                                stroke_path_length(fragment),
+                                dash,
+                                *phase % period,
+                            )?;
                         }
                         if let Some(outline) =
                             clipped_dash_outline(fragments, dash, &stroked.stroke, transform)

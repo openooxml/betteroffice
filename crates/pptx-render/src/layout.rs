@@ -7060,6 +7060,7 @@ impl HitRegion {
 struct BentConnectorHit {
     points: Vec<(f64, f64)>,
     tolerance: f64,
+    miter_radius: f64,
 }
 
 impl BentConnectorHit {
@@ -7100,20 +7101,43 @@ impl BentConnectorHit {
                 _ => unreachable!("bent connector paths contain only straight segments"),
             })
             .collect();
+        let radius = f64::from(stroke.width) / 2.0;
         Some(Self {
             points,
-            tolerance: (f64::from(stroke.width) / 2.0).max(3.0),
+            tolerance: radius.max(3.0),
+            miter_radius: if matches!(stroke.join.as_deref(), Some("round" | "bevel")) {
+                0.0
+            } else {
+                radius
+            },
         })
     }
 
     fn contains(&self, x: f32, y: f32) -> bool {
         let (x, y) = (f64::from(x), f64::from(y));
-        self.points.windows(2).any(|pair| {
+        if self.points.windows(2).any(|pair| {
             let (ax, ay) = pair[0];
             let (bx, by) = pair[1];
             let dx = (ax.min(bx) - x).max(x - ax.max(bx)).max(0.0);
             let dy = (ay.min(by) - y).max(y - ay.max(by)).max(0.0);
             dx * dx + dy * dy <= self.tolerance * self.tolerance
+        }) {
+            return true;
+        }
+        if self.miter_radius == 0.0 {
+            return false;
+        }
+        let legs = self.points.windows(2).filter(|pair| pair[0] != pair[1]);
+        legs.clone().zip(legs.skip(1)).any(|(incoming, outgoing)| {
+            let (ax, ay) = incoming[0];
+            let (bx, by) = incoming[1];
+            let (cx, cy) = outgoing[1];
+            let (dx, dy) = (x - bx, y - by);
+            if dx.abs() > self.miter_radius || dy.abs() > self.miter_radius {
+                return false;
+            }
+            (ay == by && cx == bx && (ax - bx) * dx < 0.0 && (cy - by) * dy < 0.0)
+                || (ax == bx && cy == by && (cx - bx) * dx < 0.0 && (ay - by) * dy < 0.0)
         })
     }
 }
