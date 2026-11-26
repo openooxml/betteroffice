@@ -750,24 +750,6 @@ fn table_boundary_anchored_shape_without_text_paints_once() {
     assert_table_boundary_drawing(&document(&anchored_shape(), false), &["shape"]);
 }
 
-fn exact_vmerge_table(cell: &str) -> String {
-    let rows: String = (0..6)
-        .map(|row| {
-            let (merge, content) = if row == 0 {
-                (r#"<w:vMerge w:val="restart"/>"#, cell)
-            } else {
-                ("<w:vMerge/>", "<w:p/>")
-            };
-            format!(
-                r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>{merge}</w:tcPr>{content}</w:tc><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Merge row {row:02};</w:t></w:r></w:p></w:tc></w:tr>"#
-            )
-        })
-        .collect();
-    format!(
-        r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="10800" w:lineRule="exact"/></w:pPr><w:r><w:t>Before table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>{rows}</w:tbl>"#
-    )
-}
-
 #[test]
 fn table_boundary_vertically_merged_picture_paints_once_on_anchor_page() {
     for leading_lines in [0, 12] {
@@ -781,8 +763,21 @@ fn table_boundary_vertically_merged_picture_paints_once_on_anchor_page() {
                 paragraph.replace("</w:p>", "<w:r><w:t>Merged anchor</w:t></w:r></w:p>");
             let leading = r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged lead;</w:t></w:r></w:p>"#.repeat(leading_lines);
             let tail = r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged tail;</w:t></w:r></w:p>"#.repeat(12);
-            let table = exact_vmerge_table(&format!("{leading}{paragraph}{tail}"));
-            format!("{prefix}<w:body>{table}<w:sectPr>{section}")
+            let rows: String = (0..6)
+                .map(|row| {
+                    let (merge, content) = if row == 0 {
+                        (r#"<w:vMerge w:val="restart"/>"#, format!("{leading}{paragraph}{tail}"))
+                    } else {
+                        ("<w:vMerge/>", "<w:p/>".to_owned())
+                    };
+                    format!(
+                        r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/>{merge}</w:tcPr>{content}</w:tc><w:tc><w:tcPr><w:tcW w:w="4680" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Merge row {row:02};</w:t></w:r></w:p></w:tc></w:tr>"#
+                    )
+                })
+                .collect();
+            format!(
+                r#"{prefix}<w:body><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="10800" w:lineRule="exact"/></w:pPr><w:r><w:t>Before table</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid>{rows}</w:tbl><w:sectPr>{section}"#
+            )
         });
         let (display, layout) = display_with_layout(&bytes, true);
         let pages = display["pages"].as_array().unwrap();
@@ -904,6 +899,9 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
     let (table, measure) = cell_anchor_table(&layout);
     assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
     assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 4.0 + 16.0);
+    assert!(shape["clipGroup"].is_null());
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index > text_run_index(primitives, "Cell tail"));
     assert_eq!(
         measure["rows"][0]["height"],
         cell_anchor_table(&control_layout).1["rows"][0]["height"]
@@ -1105,136 +1103,79 @@ fn paragraph_aligned_cell_text_box_follows_word() {
     todo!()
 }
 
+fn assert_cell_text_box_at_stack_origin(layout: &Value) {
+    let display = docx_layout::build_display_list_value(&layout.to_string()).unwrap();
+    let display = serde_json::to_value(display).unwrap();
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, _) = cell_anchor_table(layout);
+    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    assert!(!shape["clipGroup"].is_null());
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index < text_run_index(primitives, "Anchor text"));
+}
+
 #[test]
-fn split_row_text_box_paints_with_its_first_anchor_line_in_cell_order() {
+fn cut_or_windowed_cell_text_box_keeps_the_cell_stack_origin() {
     let drawing = cell_anchor_box(
-        "<wp:posOffset>0</wp:posOffset>",
-        "<wp:posOffset>762000</wp:posOffset>",
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
         "<wp:wrapNone/>",
         114300,
     );
-    for (behind, before, anchor_lines) in [
-        (false, 10800, 1),
-        (true, 10800, 1),
-        (false, 12000, 80),
-        (true, 12000, 80),
+    let (_, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let cut_height = 30.0;
+    for fragment_clip in [
+        json!({"clipBottom": cut_height}),
+        json!({"cellClips": [{"row": 0, "cell": 1, "top": 0.0, "bottom": cut_height}]}),
     ] {
-        let behind_doc = u8::from(behind);
-        let drawing = drawing.replace("behindDoc=\"0\"", &format!("behindDoc=\"{behind_doc}\""));
-        let bytes = table_boundary_document(&document(&drawing, false), before, anchor_lines);
-        let (display, layout) = display_with_layout(&bytes, true);
-        let pages = display["pages"].as_array().unwrap();
-        assert!(pages.len() > 1);
-        let anchor_pages = shown_anchor_pages(&display, &layout, "Anchor paragraph");
-        assert_eq!(anchor_pages.len(), 1);
-        let mut painted = pages.iter().enumerate().flat_map(|(page, value)| {
-            let primitives = value["primitives"].as_array().unwrap();
-            primitives
-                .iter()
-                .enumerate()
-                .filter_map(move |(index, primitive)| {
-                    (primitive["kind"] == "shape").then_some((page, index, primitives, primitive))
-                })
-        });
-        let (page, index, primitives, shape) = painted.next().unwrap();
-        assert_eq!(anchor_pages, vec![page]);
-        assert!(painted.next().is_none());
-        assert!(shape["clipGroup"].is_null());
-        assert_eq!(
-            index < text_run_index(primitives, "Anchor paragraph"),
-            behind
-        );
-        if anchor_lines == 1 {
-            assert_eq!(index < text_run_index(primitives, "Cell tail 00;"), behind);
-        }
-        let cell_blocks = layout["measured"]
-            .as_array()
+        let mut layout = layout.clone();
+        let fragment = layout["layout"]["pages"][0]["fragments"]
+            .as_array_mut()
             .unwrap()
-            .iter()
-            .find(|item| item["block"]["kind"] == "table")
-            .unwrap()["block"]["rows"][0]["cells"][0]["blocks"]
-            .as_array()
+            .iter_mut()
+            .find(|item| item["kind"] == "table")
             .unwrap();
-        for (text_index, run) in primitives.iter().enumerate().filter(|(_, primitive)| {
-            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
-                && primitive["cell"] == shape["cell"]
-                && cell_blocks.iter().any(|block| {
-                    block["kind"] == "paragraph"
-                        && (block["id"] == primitive["blockId"]
-                            || block["id"] == primitive["blockKey"])
-                })
-        }) {
-            assert_eq!(index < text_index, behind, "{}", run["text"]);
-        }
-        let last = if anchor_lines == 1 {
-            "Cell tail 19;"
-        } else {
-            "Anchor continuation 79;"
-        };
-        assert!(
-            pages[page + 1..]
-                .iter()
-                .any(|later| { text(later["primitives"].as_array().unwrap()).contains(last) })
-        );
+        fragment["height"] = json!(cut_height);
+        fragment
+            .as_object_mut()
+            .unwrap()
+            .extend(fragment_clip.as_object().unwrap().clone());
+        assert_cell_text_box_at_stack_origin(&layout);
     }
 }
 
 #[test]
-fn vertically_merged_text_box_belongs_to_the_fragment_with_its_line_top() {
-    use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
-    use docx_layout::types::LayoutBlock;
-
+fn cell_text_box_with_missing_anchor_positions_keeps_the_cell_stack_origin() {
     let drawing = cell_anchor_box(
-        "<wp:posOffset>0</wp:posOffset>",
-        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
         "<wp:wrapNone/>",
-        38100,
+        114300,
     );
-    for (leading_height, owner) in [(1320, 0), (1440, 1)] {
-        let cell = format!(
-            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="{leading_height}" w:lineRule="exact"/></w:pPr><w:r><w:t>Merged lead</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r>{drawing}</w:r><w:r><w:t>Merged anchor</w:t></w:r></w:p>"#
-        );
-        let bytes = document_paragraphs(&exact_vmerge_table(&cell), false);
-        let (display, layout) = display_with_layout(&bytes, true);
-        let pages = display["pages"].as_array().unwrap();
-        assert_eq!(pages.len(), 2);
-        assert!(text(pages[0]["primitives"].as_array().unwrap()).contains("Merge row 00;"));
-        assert!(text(pages[1]["primitives"].as_array().unwrap()).contains("Merge row 01;"));
-        let painted: Vec<_> = pages
-            .iter()
-            .enumerate()
-            .flat_map(|(page, value)| {
-                value["primitives"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter_map(move |primitive| (primitive["kind"] == "shape").then_some(page))
-            })
-            .collect();
-        assert_eq!(painted, vec![owner], "leading_height={leading_height}");
-
-        let mut input = serde_json::from_value(layout).unwrap();
-        let paginated = docx_layout::compute_layout_input(&mut input).unwrap();
-        let placements = place_layout(&PlacementInput {
-            layout: &paginated,
-            measured: &input.measured,
-            headers_footers: None,
-            bands_composed: false,
-            notes: &[],
-        });
-        let shown: Vec<_> = placements
-            .pages
-            .iter()
-            .flat_map(|page| {
-                page.regions.iter().flat_map(move |region| {
-                    region.items.iter().filter_map(move |item| {
-                        matches!(item, PlacedItem::Block(LayoutBlock::Shape(_)))
-                            .then_some(page.page_index)
-                    })
-                })
-            })
-            .collect();
-        assert_eq!(shown, painted, "leading_height={leading_height}");
+    let (_, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    for (kind, position) in [
+        ("shape", "pmStart"),
+        ("shape", "pmEnd"),
+        ("paragraph", "pmStart"),
+        ("paragraph", "pmEnd"),
+    ] {
+        let mut layout = layout.clone();
+        let table = layout["measured"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["block"]["kind"] == "table")
+            .unwrap();
+        let block = table["block"]["rows"][0]["cells"][1]["blocks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["kind"] == kind)
+            .unwrap();
+        assert!(block.as_object_mut().unwrap().remove(position).is_some());
+        assert_cell_text_box_at_stack_origin(&layout);
     }
 }
 
