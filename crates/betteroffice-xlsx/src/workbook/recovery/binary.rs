@@ -710,23 +710,8 @@ impl Codec for Op {
                     .collect::<Vec<StyledTable>>()
                     .write(w);
             }
-            Self::RestoreTableColumn {
-                sheet,
-                at,
-                table,
-                caption,
-                cell,
-                formulas,
-                defined_names,
-            } => {
-                w.u8(45);
-                sheet.write(w);
-                at.write(w);
-                table.write(w);
-                caption.write(w);
-                cell.write(w);
-                formulas.write(w);
-                defined_names.write(w);
+            Self::RestoreTableColumn { .. } => {
+                unreachable!("table column history must use absolute recovery operations")
             }
         }
     }
@@ -947,15 +932,6 @@ impl Codec for Op {
                     .into_iter()
                     .map(styled_table)
                     .collect(),
-            },
-            45 => Self::RestoreTableColumn {
-                sheet: Codec::read(r)?,
-                at: Codec::read(r)?,
-                table: Codec::read(r)?,
-                caption: Codec::read(r)?,
-                cell: Codec::read(r)?,
-                formulas: Codec::read(r)?,
-                defined_names: Codec::read(r)?,
             },
             _ => return Err(SnapshotError::new("invalid recovery Op")),
         })
