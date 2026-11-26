@@ -4,7 +4,7 @@
 use xlsx_model::Workbook as WorkbookModel;
 use xlsx_ops::Op;
 
-use super::hidden_sizes::HiddenSizeHistory;
+use super::hidden_sizes::{DimensionTransition, HiddenSizeHistory};
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
     retain_array_formulas, retain_formula_caches, validate_collaboration_size,
@@ -216,7 +216,7 @@ impl Workbook {
             let step = self.derive_replica_hidden_sizes(
                 &mut model,
                 structure,
-                Some(hidden_sizes),
+                DimensionTransition::Local(hidden_sizes),
                 if record {
                     HiddenSizeHistory::Record
                 } else {

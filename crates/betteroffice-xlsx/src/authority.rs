@@ -1,14 +1,16 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sheet_json::{
     check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
     encode_charts, encode_hyperlinks,
 };
-use crate::workbook::hidden_sizes::{HiddenSizes, dimension_sheets};
+use crate::workbook::hidden_sizes::{
+    AuthoredDimensions, HiddenSizes, LocalDimensions, RemoteDimensions, dimension_changes,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
@@ -25,13 +27,13 @@ use yrs::block::{
 use yrs::encoding::read::{Error as DecodeError, Read};
 use yrs::encoding::write::Write;
 use yrs::sync::time::Clock;
-use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
+use yrs::types::{Event, PathSegment, TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, Assoc, BranchID, Doc, ID, IndexedSequence, Map, MapPrelim, MapRef,
-    Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
+    Any, Array, ArrayRef, Assoc, BranchID, DeepObservable, Doc, ID, IndexedSequence, Map, MapPrelim,
+    MapRef, Options, Origin, Out, ReadTxn, StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
 mod auto_filters;
@@ -875,6 +877,7 @@ pub(crate) enum SnapshotAdoption {
 
 pub(crate) struct StagedUpdate {
     pub(crate) commit_update: Vec<u8>,
+    pub(crate) dimensions: RemoteDimensions,
     pub(crate) dormant_names: Vec<DefinedName>,
     pub(crate) effective: bool,
     pub(crate) model: WorkbookModel,
@@ -887,7 +890,7 @@ pub(crate) struct StagedUpdate {
 
 pub(crate) struct StagedLocalUpdate {
     pub(crate) model: WorkbookModel,
-    pub(crate) hidden_sizes: BTreeMap<usize, HiddenSizes>,
+    pub(crate) hidden_sizes: LocalDimensions,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -905,7 +908,7 @@ struct CarriedState {
 struct ReplicaOverlay<'a> {
     model: &'a WorkbookModel,
     keys: &'a [String],
-    hidden_sizes: &'a mut BTreeMap<usize, HiddenSizes>,
+    hidden_sizes: &'a mut LocalDimensions,
 }
 
 /// Which history an adopted local update enters.
@@ -1691,9 +1694,9 @@ impl WorkbookAuthority {
         let (mut model, structure) = self
             .materialize_internal(false)
             .map_err(AuthorityError::InvalidState)?;
-        let dimensions = replica.as_ref().map(|_| dimension_sheets(ops));
+        let dimensions = replica.as_ref().map(|_| dimension_changes(ops));
         if let (Some(replica), Some(dimensions)) = (&replica, &dimensions) {
-            for &index in dimensions {
+            for &index in dimensions.keys() {
                 let Some(key) = structure.sheet_keys.get(index) else {
                     continue;
                 };
@@ -1769,10 +1772,11 @@ impl WorkbookAuthority {
         self.sync_model(&model, ops, origin, &authored_styles, collaborative)
             .map_err(AuthorityError::InvalidState)?;
         if let (Some(replica), Some(dimensions)) = (replica, dimensions) {
-            for index in dimensions {
+            for (index, changes) in dimensions {
+                let sizes = HiddenSizes::take(&mut model.sheets[index]);
                 replica
                     .hidden_sizes
-                    .insert(index, HiddenSizes::take(&mut model.sheets[index]));
+                    .insert(index, AuthoredDimensions { sizes, changes });
             }
         }
         if let [Op::SetCell { at, cell, .. }] = ops
@@ -2421,6 +2425,53 @@ impl WorkbookAuthority {
         };
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, before).map_err(AuthorityError::InvalidState)?;
+        let dimensions = Arc::new(Mutex::new(RemoteDimensions::new()));
+        let sheets = staged_doc.transact().get_map(SHEETS);
+        let observer = sheets.map(|_| {
+            let sheets = staged_doc.get_or_insert_map(SHEETS);
+            let dimensions = Arc::clone(&dimensions);
+            sheets.observe_deep(move |txn, events| {
+                let mut dimensions = dimensions.lock().unwrap();
+                for event in events.iter() {
+                    let Event::Map(event) = event else {
+                        continue;
+                    };
+                    let path = event.path();
+                    match (path.front(), path.get(1), path.len()) {
+                        (None, _, 0) => {
+                            for key in event.keys(txn).keys() {
+                                let sheet = dimensions.entry(key.to_string()).or_default();
+                                sheet.rows.replaced = true;
+                                sheet.cols.replaced = true;
+                            }
+                        }
+                        (Some(PathSegment::Key(key)), _, 1) => {
+                            let keys = event.keys(txn);
+                            let (rows, cols) =
+                                (keys.contains_key(ROW_HEIGHTS), keys.contains_key(COL_WIDTHS));
+                            if rows || cols {
+                                let sheet = dimensions.entry(key.to_string()).or_default();
+                                sheet.rows.replaced |= rows;
+                                sheet.cols.replaced |= cols;
+                            }
+                        }
+                        (Some(PathSegment::Key(key)), Some(PathSegment::Key(axis)), 2) => {
+                            let rows = match axis.as_ref() {
+                                ROW_HEIGHTS => true,
+                                COL_WIDTHS => false,
+                                _ => continue,
+                            };
+                            let sheet = dimensions.entry(key.to_string()).or_default();
+                            let axis = if rows { &mut sheet.rows } else { &mut sheet.cols };
+                            axis.tracks.extend(
+                                event.keys(txn).keys().filter_map(|key| key.parse::<u32>().ok()),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        });
         let known = staged_doc.transact().state_vector();
         let (held_back, applied_deletes) = match hold_back_unreachable_v1(bytes, &layout, &known) {
             Some(reachable) => {
@@ -2438,6 +2489,8 @@ impl WorkbookAuthority {
         {
             return Err(AuthorityError::InvalidState(error));
         }
+        drop(observer);
+        let dimensions = std::mem::take(&mut *dimensions.lock().unwrap());
         let after = staged.encode_state_as_update_v1();
         let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
         let after_vector = staged.doc.transact().state_vector();
@@ -2459,6 +2512,7 @@ impl WorkbookAuthority {
                     let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
                     return Ok(StagedUpdate {
                         commit_update: integrated.clone(),
+                        dimensions,
                         dormant_names,
                         effective: true,
                         model,
@@ -2478,6 +2532,7 @@ impl WorkbookAuthority {
             };
             return Ok(StagedUpdate {
                 commit_update: Update::EMPTY_V1.to_vec(),
+                dimensions: RemoteDimensions::new(),
                 dormant_names: Vec::new(),
                 effective: false,
                 model: current_model,
@@ -2500,6 +2555,7 @@ impl WorkbookAuthority {
         let dormant_names = staged.dormant_defined_names(&structure.sheet_keys)?;
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
+            dimensions,
             dormant_names,
             effective,
             model,

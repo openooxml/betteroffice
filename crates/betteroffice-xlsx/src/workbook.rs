@@ -31,8 +31,8 @@ pub(crate) mod target;
 mod update_tests;
 
 use self::hidden_sizes::{
-    HiddenSizeHistory, HiddenSizeStep, HiddenSizes, ReplicaHiddenSizes, derive_source_hidden_sizes,
-    dimension_sheets, with_shared_model,
+    DimensionTransition, HiddenSizeHistory, HiddenSizeStep, HiddenSizes, ReplicaHiddenSizes,
+    derive_source_hidden_sizes, dimension_changes, with_shared_model,
 };
 use self::proposals::proposal_edit_is_stale;
 
@@ -1436,7 +1436,7 @@ impl Workbook {
         self.derive_replica_hidden_sizes(
             &mut model,
             &structure,
-            None,
+            DimensionTransition::Incoming,
             HiddenSizeHistory::None,
         );
         self.install_model(model)?;
@@ -1716,7 +1716,7 @@ impl Workbook {
         self.derive_replica_hidden_sizes(
             &mut model,
             &new_structure,
-            None,
+            DimensionTransition::Remote(staged.dimensions),
             HiddenSizeHistory::None,
         );
         self.install_model(model)?;
@@ -2993,10 +2993,10 @@ impl Workbook {
             && !drawings_move
             && self.with_staged_model(|baseline| *baseline == preview)
         {
-            if self.is_collaborative() {
-                let dimensions = dimension_sheets(&ops);
+            if let WorkbookMode::Collaborative { structure } = &self.mode {
+                let dimensions = dimension_changes(&ops);
                 if !dimensions.is_empty() {
-                    for &index in &dimensions {
+                    for &index in dimensions.keys() {
                         let prior = &self.model.sheets[index];
                         let sheet = &mut preview.sheets[index];
                         sheet.hidden_row_heights.clone_from(&prior.hidden_row_heights);
@@ -3006,7 +3006,8 @@ impl Workbook {
                     for op in &ops {
                         batch.apply(op)?;
                     }
-                    for index in dimensions {
+                    for (index, changes) in dimensions {
+                        self.hidden_sizes.forget_touched(&structure.sheet_keys[index], changes);
                         HiddenSizes::take(&mut preview.sheets[index])
                             .put(&mut self.model.sheets[index]);
                     }
@@ -3307,13 +3308,19 @@ impl Workbook {
         retain_array_formulas(&self.model, &mut restored);
         let authority = self.built_authority();
         let (undo_depth, redo_depth) = (authority.undo_depth(), authority.redo_depth());
-        let step = self.hidden_sizes.move_step(redo, undo_depth, redo_depth);
-        self.derive_replica_hidden_sizes(
+        let (from_depth, to_depth) = if redo {
+            (redo_depth, undo_depth)
+        } else {
+            (undo_depth, redo_depth)
+        };
+        let step = self.hidden_sizes.take_step(redo, from_depth);
+        let moved = self.derive_replica_hidden_sizes(
             &mut restored,
             &new_structure,
-            None,
+            DimensionTransition::Incoming,
             HiddenSizeHistory::Restore(&step, redo),
         );
+        self.hidden_sizes.store_moved_step(redo, to_depth, moved);
         self.install_model(restored)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -4441,7 +4448,7 @@ impl Workbook {
             self.derive_replica_hidden_sizes(
                 &mut model,
                 &new_structure,
-                Some(staged.hidden_sizes),
+                DimensionTransition::Local(staged.hidden_sizes),
                 HiddenSizeHistory::None,
             );
             self.truncate_hidden_size_history();
@@ -5525,14 +5532,14 @@ impl Workbook {
         &mut self,
         model: &mut WorkbookModel,
         next: &WorkbookStructure,
-        authored: Option<BTreeMap<usize, HiddenSizes>>,
+        transition: DimensionTransition,
         history: HiddenSizeHistory<'_>,
     ) -> HiddenSizeStep {
         if let WorkbookMode::Collaborative { structure } = &self.mode {
             self.hidden_sizes.reconcile(
                 (model, &next.sheet_keys),
                 (&mut self.model, &structure.sheet_keys),
-                authored,
+                transition,
                 history,
             )
         } else {

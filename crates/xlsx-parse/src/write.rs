@@ -561,6 +561,24 @@ fn serialize_package<'p>(
             .enumerate()
             .all(|(index, origin)| *origin == Some(index))
         && active_sheet == package.active_sheet
+        && (!check_hidden_sizes
+            || !wb
+                .sheets
+                .iter()
+                .zip(sheet_axes)
+                .enumerate()
+                .any(|(index, (sheet, axes))| {
+                    axes.is_some()
+                        && package
+                            .sheets
+                            .get(index)
+                            .is_some_and(PreservedSheet::is_worksheet)
+                        && package
+                            .original_workbook
+                            .sheets
+                            .get(index)
+                            .is_some_and(|original| !hidden_sizes_match(sheet, original))
+                }))
     {
         return Ok(package
             .parts
@@ -1378,9 +1396,7 @@ fn sheet_body_matches(
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
-        && (!check_hidden_sizes
-            || (sheet.hidden_col_widths == original.hidden_col_widths
-                && sheet.hidden_row_heights == original.hidden_row_heights))
+        && (!check_hidden_sizes || hidden_sizes_match(sheet, original))
         && sheet.col_styles == original.col_styles
         && sheet.row_styles == original.row_styles
         && sheet.array_formulas().eq(original.array_formulas())
@@ -1397,6 +1413,11 @@ fn sheet_body_matches(
         } else {
             sheet.iter_cells().eq(original.iter_cells())
         }
+}
+
+fn hidden_sizes_match(sheet: &Sheet, original: &Sheet) -> bool {
+    sheet.hidden_col_widths == original.hidden_col_widths
+        && sheet.hidden_row_heights == original.hidden_row_heights
 }
 
 #[derive(Clone)]
