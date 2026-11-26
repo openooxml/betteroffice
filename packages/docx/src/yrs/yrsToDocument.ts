@@ -3653,6 +3653,174 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
+function isFieldRunContent(entry: RunContent): boolean {
+  return entry.type === 'fieldChar' || entry.type === 'instrText';
+}
+
+function fieldProjectionText(child: ParagraphContent): string {
+  switch (child.type) {
+    case 'run':
+      return child.content.map((entry) => entry.type === 'text' ? entry.text
+        : entry.type === 'tab' ? '\t'
+        : isFieldRunContent(entry) ? '' : '\ufffc'.repeat(runContentLength(entry))).join('');
+    case 'hyperlink':
+      return (child.structuredChildren ?? child.children).map(fieldProjectionText).join('');
+    case 'complexField':
+      return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
+        .filter((item) => item.type === 'hyperlink' || item.type === 'simpleField')
+        .map(fieldProjectionText).join('') + '\ufffc';
+    case 'insertion':
+    case 'deletion':
+    case 'moveFrom':
+    case 'moveTo':
+      return child.content.map(fieldProjectionText).join('');
+    default:
+      return '\ufffc'.repeat(paragraphContentLength(child));
+  }
+}
+
+function fieldContainerKey(child: ParagraphContent): string | undefined {
+  if (child.type === 'hyperlink') return `link:${child.anchor || child.href?.replace(/^#/, '') || child.rId || ''}`;
+  if (child.type === 'complexField') return `field:${child.instruction}`;
+  if (child.type === 'inlineSdt') return `sdt:${child.properties.id ?? ''}`;
+  if (isTrackedWrapper(child)) return `${child.type}:${child.info.id}`;
+  return undefined;
+}
+
+function restoreFieldRuns(
+  content: ParagraphContent[], source: readonly ParagraphContent[], keepRuns = true
+): ParagraphContent[] {
+  const runs: Run[] = [];
+  const offsets: CommentBoundary[] = [];
+  const containers = new Map<string, ParagraphContent[]>();
+  let offset = 0;
+  for (const child of source) {
+    if (keepRuns && child.type === 'run') {
+      for (const entry of child.content) {
+        if (isFieldRunContent(entry)) {
+          offsets.push({ id: runs.length, kind: 'start', offset });
+          runs.push({ ...child, content: [entry] });
+        } else {
+          offset += runContentLength(entry);
+        }
+      }
+    } else {
+      offset += fieldProjectionText(child).length;
+    }
+    const key = fieldContainerKey(child);
+    if (key !== undefined) {
+      const matches = containers.get(key) ?? [];
+      matches.push(child);
+      containers.set(key, matches);
+    }
+  }
+  if (runs.length && !content.some(child => child.type === 'run' && child.content.some(isFieldRunContent))) {
+    const recorded = source.map(fieldProjectionText).join('');
+    const live = content.map(fieldProjectionText).join('');
+    const alignment = textAlignment(recorded, live, false);
+    for (const boundary of offsets) {
+      boundary.offset = boundary.offset >= recorded.length - alignment.suffix
+        ? boundary.offset + live.length - recorded.length
+        : mapRecordedOffset(boundary.offset, recorded, live, alignment);
+    }
+    content = insertBoundaries(content, offsets, boundary => runs[boundary.id]!);
+  }
+  if (containers.size === 0) return content;
+  let changed = false;
+  const restored = content.map((child): ParagraphContent => {
+    const key = fieldContainerKey(child);
+    const original = key === undefined ? undefined : containers.get(key)?.shift();
+    if (child.type === 'hyperlink' && original?.type === 'hyperlink') {
+      const children = child.structuredChildren ?? child.children;
+      const restored = restoreFieldRuns(children, original.structuredChildren ?? original.children);
+      if (restored !== children) {
+        changed = true;
+        return linkPart(child, restored as HyperlinkContent[])!;
+      }
+    } else if (child.type === 'complexField' && original?.type === 'complexField') {
+      const restorePart = (
+        current: StructuredFieldContent | undefined, base: StructuredFieldContent | undefined,
+      ): StructuredFieldContent | undefined => {
+        if (!current?.inline || !base?.inline) return current;
+        const inline = restoreFieldRuns(current.inline, base.inline);
+        return inline === current.inline ? current : { ...current, inline: inline as FieldInlineContent[] };
+      };
+      const code = restorePart(child.structuredCode, original.structuredCode);
+      const result = restorePart(child.structuredResult, original.structuredResult);
+      if (code !== child.structuredCode || result !== child.structuredResult) {
+        const flattened = (part: StructuredFieldContent | undefined): Run[] => (part?.inline ?? []).flatMap(node => {
+          if (node.type === 'run') return [node];
+          if (node.type === 'hyperlink') return node.children.filter((run): run is Run => run.type === 'run');
+          return node.type === 'simpleField' ? node.content : [];
+        });
+        const field: ComplexField = { ...child };
+        if (code !== child.structuredCode) {
+          field.structuredCode = code;
+          field.fieldCode = flattened(code);
+        }
+        if (result !== child.structuredResult) {
+          field.structuredResult = result;
+          field.fieldResult = flattened(result);
+        }
+        if (field.fieldTree) {
+          field.fieldTree = { ...field.fieldTree };
+          if (field.fieldTree.code) field.fieldTree.code = code;
+          if (field.fieldTree.result) field.fieldTree.result = result;
+        }
+        changed = true;
+        return field;
+      }
+    } else if (child.type === 'inlineSdt' && original?.type === 'inlineSdt') {
+      const inner = restoreFieldRuns(child.content, original.content, keepRuns);
+      if (inner !== child.content) {
+        changed = true;
+        return { ...child, content: inner as InlineSdt['content'] };
+      }
+    } else if (isTrackedWrapper(child) && isTrackedWrapper(original)) {
+      const inner = restoreFieldRuns(child.content, original.content, keepRuns);
+      if (inner !== child.content) {
+        changed = true;
+        return { ...child, content: inner } as ParagraphContent;
+      }
+    }
+    return child;
+  });
+  return changed ? restored : content;
+}
+
+function restoreSpanningFieldRuns(
+  blocks: BlockContent[], base: readonly BlockContent[], storyId: string,
+): BlockContent[] {
+  const live = new Map(storyBlockKeys(blocks, storyId).map((key, index) => [key, blocks[index]!]));
+  const keys = storyBlockKeys(base, storyId);
+  const sources = new Map<string, { paragraph: Paragraph; keepRuns: boolean }>();
+  let last = -1;
+  let kept = -1;
+  for (const [index, block] of base.entries()) {
+    const key = keys[index];
+    if (block.type !== 'paragraph' || key === undefined) continue;
+    const current = live.get(key);
+    for (const field of spanningFields(block.content)) {
+      const end = index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult);
+      if (end <= index) continue;
+      last = Math.max(last, end);
+      if (current?.type === 'paragraph' && spanningFields(current.content).some(candidate => candidate.instruction === field.instruction)) {
+        kept = Math.max(kept, end);
+      }
+    }
+    if (index <= last) sources.set(key, { paragraph: block, keepRuns: index <= kept });
+  }
+  if (sources.size === 0) return blocks;
+  return blocks.map((block) => {
+    if (block.type !== 'paragraph') return block;
+    const key = projectedSessionKey(block);
+    const source = key === undefined ? undefined : sources.get(`P${key}`);
+    if (!source) return block;
+    const content = restoreFieldRuns(block.content, source.paragraph.content, source.keepRuns);
+    return content === block.content ? block : cloneProjectedParagraph(block, { content });
+  });
+}
+
 /** Story blocks a complex field's code and result span after its paragraph. */
 interface FieldBlockSpan {
   code: number;
@@ -3682,13 +3850,31 @@ function parsedBlockCount(content: StructuredFieldContent | undefined): number {
   return content?.blockCount ?? content?.blocks?.length ?? 0;
 }
 
-/**
- * The story blocks a spanning field's code and result span in `blocks`, the projected story its
- * paragraph sits at `owner` in, with `keys` its block ids. While the blocks its embed recorded
- * at seed time (`fieldSpanBlocks`) still follow its paragraph in order with nothing between
- * them, or it recorded none, this is the parsed span. Otherwise it is the blocks up to the last
- * of the leading recorded blocks that still do. Raw blocks count as they did when parsed.
- */
+function* fieldCharacters(content: readonly ParagraphContent[]): Iterable<'begin' | 'separate' | 'end'> {
+  for (const child of content) {
+    if (child.type === 'run') {
+      for (const entry of child.content) {
+        if (entry.type === 'fieldChar') yield entry.charType;
+      }
+    } else if (child.type === 'hyperlink') {
+      yield* fieldCharacters(child.structuredChildren ?? child.children);
+    } else if (child.type === 'inlineSdt' || isTrackedWrapper(child)) {
+      yield* fieldCharacters(child.content);
+    }
+  }
+}
+
+function externalFieldCharacter(block: BlockContent | undefined, wanted: 'separate' | 'end'): boolean {
+  if (block?.type !== 'paragraph') return false;
+  let depth = 0;
+  for (const kind of fieldCharacters(block.content)) {
+    if (depth === 0 && kind === wanted) return true;
+    if (kind === 'begin') depth += 1;
+    else if (kind === 'end') depth = Math.max(0, depth - 1);
+  }
+  return false;
+}
+
 function keptSpan(
   field: ComplexField,
   payload: Attrs | undefined,
@@ -3700,6 +3886,14 @@ function keptSpan(
   const result = parsedBlockCount(field.structuredResult);
   const recorded = payload?.fieldSpanBlocks;
   if (!Array.isArray(recorded)) return { code, result };
+  const last = recorded.at(-1);
+  const closing = typeof last === 'string' ? keys.indexOf(last, owner + 1) : -1;
+  if (externalFieldCharacter(blocks[closing], 'end')) {
+    const kept = closing - owner;
+    const separate = blocks.slice(owner + 1, closing + 1).findIndex(block => externalFieldCharacter(block, 'separate'));
+    if (separate >= 0) return { code: separate, result: kept - separate };
+    return result > 0 ? { code: 0, result: kept } : { code: kept, result: 0 };
+  }
   let index = owner + 1;
   let end = owner;
   for (const id of recorded) {
@@ -4923,8 +5117,9 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
+    const restored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
     const projected = withKeptBlockCounts(
-      restoreRawBlocks(blocks, baseBlocks ?? [], storyId),
+      baseBlocks && spanningEmbeds.size ? restoreSpanningFieldRuns(restored, baseBlocks, storyId) : restored,
       storyId,
       spanningEmbeds
     );

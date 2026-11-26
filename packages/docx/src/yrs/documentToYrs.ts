@@ -1556,6 +1556,11 @@ function unitsForParagraphContent(content: ParagraphContent): number {
   return paragraphContentUnitCounts.get(content as object) ?? 0;
 }
 
+function fieldEndRun(run: Run): boolean {
+  const markers = run.content.filter(entry => entry.type !== 'instrText');
+  return markers.length > 0 && markers.every(entry => entry.type === 'fieldChar' && entry.charType === 'end');
+}
+
 function paragraphUnits(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
@@ -1567,12 +1572,15 @@ function paragraphUnits(
   const commentMarks: CommentMark[] = [];
   const rawMarks: RawMark[] = [];
   let boundaries: Attrs[] | undefined = [];
+  let fieldEnds = 0;
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
     if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
       commentMarks.push({ unit: start, start: content.type === 'commentRangeStart', id: content.id });
+    } else if (content.type === 'run' && fieldEndRun(content)) {
+      fieldEnds += 1;
     } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
@@ -1585,7 +1593,7 @@ function paragraphUnits(
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex, opaqueSequences));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex - fieldEnds, opaqueSequences));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
@@ -2138,7 +2146,8 @@ function cachedResultBlocks(
   if (span === null || span.result === 0) return null;
   const start = owner + 1 + span.code;
   const last = blocks[start + span.result - 1];
-  if (!last || isRawXml(last) || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  if (!last || isRawXml(last) || last.type !== 'paragraph' ||
+      last.content?.some(child => child.type !== 'run' || !fieldEndRun(child))) return null;
   return { start, count: span.result };
 }
 

@@ -4964,6 +4964,23 @@ fn raw_mark_assoc(xml: &str) -> Option<yrs::Assoc> {
     })
 }
 
+fn field_end_run(value: &Value) -> bool {
+    if string(field(Some(value), "type")) != Some("run") {
+        return false;
+    }
+    let mut ends = false;
+    for entry in array(field(Some(value), "content")) {
+        match string(field(Some(entry), "type")) {
+            Some("instrText") => {}
+            Some("fieldChar") if string(field(Some(entry), "charType")) == Some("end") => {
+                ends = true;
+            }
+            _ => return false,
+        }
+    }
+    ends
+}
+
 fn paragraph_units(
     paragraph: &Value,
     styles: &StyleResolver,
@@ -4978,6 +4995,7 @@ fn paragraph_units(
     let mut raw_marks = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
+    let mut field_ends = 0;
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
@@ -4992,6 +5010,7 @@ fn paragraph_units(
                     });
                 }
             }
+            "run" if field_end_run(content) => field_ends += 1,
             "run" => {
                 let run_units =
                     run_to_units(content, style_formatting.as_deref(), styles, &[], source);
@@ -5024,7 +5043,7 @@ fn paragraph_units(
                     style_formatting.as_deref(),
                     styles,
                     source,
-                    unit_counts.len(),
+                    unit_counts.len() - field_ends,
                     &mut opaque_sequences,
                 ));
             }
@@ -6297,7 +6316,7 @@ fn cached_result_blocks(data: &Value, blocks: &[Value], owner: usize) -> Option<
     let start = owner + 1 + code;
     let last = blocks.get(start + count.checked_sub(1)?)?;
     let empty_paragraph = string(field(Some(last), "type")) == Some("paragraph")
-        && array(field(Some(last), "content")).is_empty();
+        && array(field(Some(last), "content")).iter().all(field_end_run);
     empty_paragraph.then_some((start, count))
 }
 

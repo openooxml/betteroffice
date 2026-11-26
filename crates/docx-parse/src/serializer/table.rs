@@ -22,7 +22,7 @@ use super::paragraph::{is_safe_attribute_name, on_off};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
-use super::sdt::serialize_block_content;
+use super::sdt::serialize_story_blocks;
 use super::xml_writer::{XmlWriter, int_attr};
 
 pub fn serialize_table(
@@ -368,9 +368,8 @@ fn write_cell(
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
     context.vmerge_continuation += u32::from(covered);
-    let content = cell.content.iter().try_for_each(|block| {
-        append_generated(&mut writer, &serialize_block_content(block, context)?);
-        Ok::<_, ParseError>(())
+    let content = serialize_story_blocks(&cell.content, context, |xml| {
+        append_generated(&mut writer, xml);
     });
     context.vmerge_continuation -= u32::from(covered);
     content?;

@@ -15,7 +15,7 @@ use crate::xml::ParseError;
 use super::context::SerializerContext;
 use super::paragraph::is_safe_attribute_name;
 use super::raw::{validate_raw_subtree, validate_replayed_fragment};
-use super::sdt::serialize_block_content;
+use super::sdt::serialize_story_blocks;
 use super::section::serialize_section_properties;
 use super::splice::{required_prefixes, root_binds, root_tag, root_with_prefixes};
 use super::watermark::serialize_watermark;
@@ -185,9 +185,7 @@ pub fn serialize_document_body(
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut output = String::new();
-    for block in &body.content {
-        output.push_str(&serialize_block_content(block, context)?);
-    }
+    serialize_story_blocks(&body.content, context, |xml| output.push_str(xml))?;
     if let Some(properties) = body.final_section_properties.as_ref() {
         output.push_str(&serialize_section_properties(Some(properties)));
     }
@@ -239,9 +237,7 @@ pub fn serialize_header_footer_part(
     if let Some(watermark) = story.watermark.as_ref() {
         content.push_str(&serialize_watermark(watermark));
     }
-    for block in &story.content {
-        content.push_str(&serialize_block_content(block, context)?);
-    }
+    serialize_story_blocks(&story.content, context, |xml| content.push_str(xml))?;
     if content.is_empty() {
         content.push_str("<w:p><w:pPr/></w:p>");
     }
@@ -312,9 +308,7 @@ fn serialize_notes_part(
             content.push_str(&story_ignorable(&note.custom_root_bindings));
         }
         content.push('>');
-        for block in &note.content {
-            content.push_str(&serialize_block_content(block, context)?);
-        }
+        serialize_story_blocks(&note.content, context, |xml| content.push_str(xml))?;
         content.push_str("</w:");
         content.push_str(element_name);
         content.push('>');

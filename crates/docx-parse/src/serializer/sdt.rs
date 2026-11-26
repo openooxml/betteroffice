@@ -26,6 +26,21 @@ pub fn serialize_block_content(
     }
 }
 
+pub(super) fn serialize_story_blocks(
+    blocks: &[BlockContent],
+    context: &mut SerializerContext,
+    mut append: impl FnMut(&str),
+) -> Result<(), ParseError> {
+    let spans = super::field_spans::FieldSpans::in_story(blocks);
+    let previous = std::mem::replace(&mut context.field_spans, spans);
+    let result = blocks.iter().try_for_each(|block| {
+        append(&serialize_block_content(block, context)?);
+        Ok(())
+    });
+    context.field_spans = previous;
+    result
+}
+
 pub fn serialize_block_sdt(
     sdt: &BlockSdt,
     context: &mut SerializerContext,
@@ -60,9 +75,7 @@ pub fn serialize_block_sdt(
     append_generated(&mut writer, &properties);
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
-    for block in &sdt.content {
-        append_generated(&mut writer, &serialize_block_content(block, context)?);
-    }
+    serialize_story_blocks(&sdt.content, context, |xml| append_generated(&mut writer, xml))?;
     writer.end_element().end_element();
     Ok(writer.finish())
 }

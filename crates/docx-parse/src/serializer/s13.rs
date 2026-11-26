@@ -32,8 +32,9 @@ use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
 use super::context::{S13SaveReport, SerializerContext};
+use super::field_spans::FieldSpans;
 use super::numbering::serialize_numbering_xml;
-use super::paragraph::serialize_paragraph;
+use super::paragraph::{field_result_nodes, field_result_nodes_mut, serialize_paragraph};
 use super::paragraph_ids::{
     COMMENTS_PART, S13ParagraphIds, S13SplicedPart, S13TouchedPart, S13WholePart,
     apply_assignments, comment_companions, model_paragraph_ids, patch_comment_parts, patch_part,
@@ -2848,11 +2849,7 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
         }
         InlineNode::ComplexField(field) => {
             control && revision && field.field_code.iter().any(run_has_drawing_image)
-                || field
-                    .structured_result
-                    .as_ref()
-                    .filter(|result| !result.spans_paragraphs())
-                    .and_then(|result| result.inline.as_ref())
+                || field_result_nodes(field)
                     .map_or_else(
                         || {
                             control
@@ -2967,12 +2964,7 @@ fn visit_inline_images(
                     visit_run_images(run, visit)?;
                 }
             }
-            if let Some(nodes) = field
-                .structured_result
-                .as_mut()
-                .filter(|result| !result.spans_paragraphs())
-                .and_then(|result| result.inline.as_mut())
-            {
+            if let Some(nodes) = field_result_nodes_mut(field) {
                 for node in nodes {
                     visit_inline_images(node, visit, control, revision)?;
                 }
@@ -3409,11 +3401,7 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
             .content
             .iter()
             .any(|child| inline_has_hyperlink(child, control, true)),
-        InlineNode::ComplexField(field) => field
-            .structured_result
-            .as_ref()
-            .filter(|result| !result.spans_paragraphs())
-            .and_then(|result| result.inline.as_ref())
+        InlineNode::ComplexField(field) => field_result_nodes(field)
             .is_some_and(|nodes| {
                 nodes
                     .iter()
@@ -3447,12 +3435,7 @@ fn visit_inline_hyperlinks(
             &mut change.content
         }
         InlineNode::ComplexField(field) => {
-            let Some(nodes) = field
-                .structured_result
-                .as_mut()
-                .filter(|result| !result.spans_paragraphs())
-                .and_then(|result| result.inline.as_mut())
-            else {
+            let Some(nodes) = field_result_nodes_mut(field) else {
                 return;
             };
             nodes
@@ -3612,6 +3595,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
     }
 
     fn story(&mut self, blocks: &[BlockContent]) -> Option<()> {
+        if !FieldSpans::in_story(blocks).is_empty() {
+            return None;
+        }
         for block in blocks {
             match block {
                 BlockContent::Paragraph(paragraph) => self.paragraph(paragraph)?,
@@ -3705,12 +3691,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 for run in &field.field_code {
                     self.run(run)?;
                 }
-                match field
-                    .structured_result
-                    .as_ref()
-                    .filter(|result| !result.spans_paragraphs())
-                    .and_then(|result| result.inline.as_ref())
-                {
+                match field_result_nodes(field) {
                     Some(nodes) => {
                         for node in nodes {
                             self.inline(node)?;
@@ -3950,6 +3931,7 @@ fn build_source_patched_document_xml(
         .find(|(_, element)| element.matches_name("w", "body"))
         .ok_or_else(|| save_error("the main document part has no body"))?;
     let blocks = crate::block::story_block_elements(body);
+    let mut field_spans = FieldSpans::in_story(&document.content);
     let mut replacements = Vec::with_capacity(sources.paragraphs.len());
     for target in &sources.paragraphs {
         let Some((relative, element)) = blocks.get(target.block) else {
@@ -3975,7 +3957,10 @@ fn build_source_patched_document_xml(
         };
         let span = element_span(original_xml, &target.path)
             .ok_or_else(|| save_error("an addressed paragraph has no lexical span"))?;
-        let serialized = serialize_paragraph(paragraph, context)?;
+        std::mem::swap(&mut context.field_spans, &mut field_spans);
+        let serialized = serialize_paragraph(paragraph, context);
+        std::mem::swap(&mut context.field_spans, &mut field_spans);
+        let serialized = serialized?;
         let replacement = replace_paragraph_content(&original_xml[span.clone()], &serialized)
             .ok_or_else(|| save_error("an addressed paragraph cannot be patched"))?;
         replacements.push((span, replacement));

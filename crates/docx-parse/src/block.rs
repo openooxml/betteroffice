@@ -380,7 +380,7 @@ impl StoryParser<'_, '_> {
                 _ => unreachable!(),
             };
 
-            remove_external_field_end_runs(&mut parsed, events.external_ends);
+            remove_orphan_field_end_runs(&mut parsed, events.external_ends, open_fields.len());
             let parsed_index = content.len();
             extend_open_fields(&mut records, &open_fields, parsed_index);
             for _ in 0..events.external_ends {
@@ -1149,7 +1149,10 @@ fn complex_field_mut(
     Some(field)
 }
 
-fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
+fn remove_orphan_field_end_runs(block: &mut BlockContent, count: usize, open: usize) {
+    if count <= open {
+        return;
+    }
     let BlockContent::Paragraph(paragraph) = block else {
         return;
     };
@@ -1173,12 +1176,11 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
                     RunContent::FieldChar { char_type, .. } if char_type == "end"
                 )
             });
-        if end_only {
-            remaining -= 1;
-            false
-        } else {
-            true
+        if !end_only {
+            return true;
         }
+        remaining -= 1;
+        count - remaining <= open
     });
 }
 
@@ -1443,10 +1445,10 @@ mod tests {
         let BlockContent::Paragraph(closing) = &blocks[3] else {
             panic!("closing")
         };
-        assert_eq!(closing.content.len(), 1);
         assert!(matches!(
-            closing.content[0],
-            ParagraphContent::Inline(InlineNode::BookmarkEnd(_))
+            closing.content.as_slice(),
+            [ParagraphContent::Inline(InlineNode::Run(run)), ParagraphContent::Inline(InlineNode::BookmarkEnd(_))]
+                if matches!(&run.content[..], [RunContent::FieldChar { char_type, .. }] if char_type == "end")
         ));
     }
 

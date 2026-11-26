@@ -8,7 +8,8 @@ use crate::formatting::{
 };
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
-    MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
+    MathEquation, Run, RunContent, SdtProperties, SimpleField, StructuredFieldContent,
+    field_run_digest, field_runs, inline_holds_field,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -919,12 +920,36 @@ fn field_result_bookmarks(field: &ComplexField) -> Vec<(usize, &InlineNode)> {
     bookmarks
 }
 
+fn writes_field_nodes(part: &StructuredFieldContent) -> bool {
+    !part.spans_paragraphs() || part.inline.as_deref().is_some_and(inline_holds_field)
+}
+
+pub(super) fn field_result_nodes(field: &ComplexField) -> Option<&[InlineNode]> {
+    field
+        .structured_result
+        .as_ref()
+        .filter(|part| writes_field_nodes(part))?
+        .inline
+        .as_deref()
+}
+
+pub(super) fn field_result_nodes_mut(field: &mut ComplexField) -> Option<&mut [InlineNode]> {
+    field
+        .structured_result
+        .as_mut()
+        .filter(|part| writes_field_nodes(part))?
+        .inline
+        .as_deref_mut()
+}
+
 fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let shared = complex_field_direction_scopes(field);
+    let separate_later = context.field_spans.has_separate_later(field);
     if let Some(source) = field.source_run_xml.as_deref()
+        && separate_later.is_none()
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
@@ -973,7 +998,7 @@ fn serialize_complex_field(
     let code_nodes = field
         .structured_code
         .as_ref()
-        .filter(|content| !content.spans_paragraphs())
+        .filter(|content| writes_field_nodes(content))
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
@@ -1024,17 +1049,13 @@ fn serialize_complex_field(
             output.push_str(&serialize_context_run(run, context)?);
         }
     }
-    output.push_str(&context.direction.transition(result_scopes));
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
-    let structured = field
-        .structured_result
-        .as_ref()
-        .filter(|content| !content.spans_paragraphs())
-        .and_then(|content| content.inline.as_ref());
-    if let Some(nodes) = structured {
+    if separate_later.is_none_or(|later| !later && field.structured_result.is_some()) {
+        output.push_str(&context.direction.transition(result_scopes));
+        output.push_str("<w:r>");
+        output.push_str(&properties);
+        output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
+    }
+    if let Some(nodes) = field_result_nodes(field) {
         let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
         for (index, node) in nodes.iter().enumerate() {
             upcoming.look_ahead(index, context);
@@ -1060,10 +1081,12 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
-    output.push_str(&context.direction.transition(result_scopes));
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    if separate_later.is_none() {
+        output.push_str(&context.direction.transition(result_scopes));
+        output.push_str("<w:r>");
+        output.push_str(&properties);
+        output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    }
     Ok(output)
 }
 
@@ -1391,11 +1414,7 @@ fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
                 .field_code
                 .iter()
                 .any(|run| run_has_comment_reference(run, id))
-                || field
-                    .structured_result
-                    .as_ref()
-                    .filter(|content| !content.spans_paragraphs())
-                    .and_then(|content| content.inline.as_ref())
+                || field_result_nodes(field)
                     .map_or_else(
                         || {
                             field
