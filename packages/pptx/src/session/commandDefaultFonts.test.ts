@@ -818,7 +818,7 @@ test('Arabic in bold italic Arial installs the shared Naskh face once at the req
       ['arabic', true, true, 'Arial'], ['arabic', false, false, 'Arial'],
       ['arabic', true, true, 'Unknown Family'], ['arabic', false, false, 'Unknown Family'],
     ]);
-    const style = { family: 'Noto Naskh Arabic', bold: true, italic: true, kind: 'coverage', ownWeight: true };
+    const style: DefaultFontLanding = { family: 'Noto Naskh Arabic', bold: true, italic: true, kind: 'coverage', ownWeight: true };
     expect(results.flat()).toMatchObject([style]);
     expect(install).toHaveBeenCalledTimes(1);
     expect(install.mock.calls[0][0]).toEqual([{ ...style, bytes: arabic }]);
