@@ -15,12 +15,14 @@ const middle = run('MRID') + value(' xxxxxxxx');
 const replaced = run('MRID') + value(' 12345678');
 const empty = '<w:r w:rsidR="12345678"><w:rPr/><w:t/></w:r>';
 const tab = '<w:r><w:rPr/><w:t>]</w:t><w:tab/></w:r>';
+const plainPrefix = value('Pref&#x69;x ');
+const plainWord = run('M&#x52;ID');
 
 for (const [name, source, expected] of [
   ['brackets', run('[') + middle + run(']'), replaced],
-  ['italic run after prefix', value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>[</w:t></w:r>' + middle + run(']'),
-    value('Prefix ') + '<w:r><w:rPr><w:i/></w:rPr><w:t>MRID</w:t></w:r>' +
-    '<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> 12345678</w:t></w:r>'],
+  ['plain runs beside a deleted italic bracket',
+    plainPrefix + '<w:r><w:rPr><w:i/></w:rPr><w:t>[</w:t></w:r>' + plainWord + value(' xxxxxxxx') + run(']'),
+    plainPrefix + plainWord + value(' 12345678')],
   ['partial final run', run('[') + middle + value('] suffix'),
     run('MRID') + '<w:r><w:rPr/><w:t xml:space="preserve"> 12345678</w:t><w:t xml:space="preserve"> suffix</w:t></w:r>'],
   ['source empty run', empty + run('[') + middle + run(']'), empty + replaced],

@@ -210,6 +210,7 @@ impl EditSessionCore {
         let (envelope, parts, media) =
             crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
+        self.engine.doc().clear_edit_provenance();
         // Only stories seeded into an empty replica are what a fresh seed of the package holds.
         let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
         let fonts = if seed_stories {

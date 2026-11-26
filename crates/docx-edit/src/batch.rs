@@ -1041,6 +1041,7 @@ struct Staged {
     executed: Vec<Option<Executed>>,
     changed_stories: Vec<String>,
     update: Vec<u8>,
+    tracks_text_provenance: bool,
 }
 
 fn unsupported(message: impl Into<String>, target: &EditTarget) -> EditFailure {
@@ -3629,6 +3630,9 @@ impl EditingDoc {
         }
         history.add_undo_barrier();
         let valued = {
+            let _watch = (!staged.tracks_text_provenance)
+                .then(|| self.watch_provenance(crate::provenance::WatchKind::All))
+                .flatten();
             let mut txn = match history_mode {
                 EditHistory::Separate => self.yrs_doc().transact_mut_with(self.client_id),
                 EditHistory::None => self.yrs_doc().transact_mut_with(HOST_ORIGIN),
@@ -3642,6 +3646,9 @@ impl EditingDoc {
             let valued = valued_embeds(&txn, &plan.steps)?;
             txn.apply_update(adoption)
                 .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+            if staged.tracks_text_provenance {
+                self.adopt_staged_provenance(&staged.stage);
+            }
             valued
         };
         history.add_undo_barrier();
@@ -3667,6 +3674,9 @@ impl EditingDoc {
         }
         history.add_undo_barrier();
         let (changed_stories, receipts) = {
+            let _watch = (plan.source != EditSource::Agent)
+                .then(|| self.watch_provenance(crate::provenance::WatchKind::All))
+                .flatten();
             let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
             if self.epoch.load(Ordering::Relaxed) != plan.epoch
                 || self.version_nonce.load(Ordering::Relaxed) != plan.nonce
@@ -3699,6 +3709,16 @@ impl EditingDoc {
     /// rehearses the resulting update against the base.
     fn stage(&self, plan: &Plan, base: Base) -> EditResult<Result<Staged, EditRefusal>> {
         let stage = self.fork(&base.update)?;
+        let tracks_text_provenance = plan.source == EditSource::Agent
+            && plan.steps.iter().all(|step| {
+                matches!(
+                    step.effect,
+                    None | Some(
+                        Effect::Insert { .. } | Effect::Replace { .. } | Effect::Delete { .. }
+                    )
+                )
+            })
+            && self.stage_text_provenance(&stage);
         let executed = execute(&stage, &plan.steps)?;
         if let Some(failure) = executed
             .iter()
@@ -3724,6 +3744,7 @@ impl EditingDoc {
             executed,
             changed_stories,
             update,
+            tracks_text_provenance,
         }))
     }
 
@@ -3785,6 +3806,7 @@ impl EditingDoc {
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         history.add_undo_barrier();
         {
+            let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
             let mut txn = self.yrs_doc().transact_mut_with(HOST_ORIGIN);
             if self.version_nonce.load(Ordering::Relaxed) != nonce
                 || self.epoch.load(Ordering::Relaxed) != epoch
