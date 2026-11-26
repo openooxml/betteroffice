@@ -2135,7 +2135,7 @@ mod tests {
         ]
     }
 
-    fn context() -> PatchContext<'static> {
+    fn context<'a>() -> PatchContext<'a> {
         PatchContext {
             ordinal: 0,
             session_key: "p1",
