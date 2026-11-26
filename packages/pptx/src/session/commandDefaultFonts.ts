@@ -23,8 +23,8 @@ type PendingSliceOpen = {
 const DEFAULT_FONT_MAX_ATTEMPTS = 3;
 /** @internal */
 const DEFAULT_FONT_RETRY_DELAYS_MS = [2000, 8000];
-const NASKH_FAMILIES = new Set(['simplified arabic', 'traditional arabic']);
-export const UNCOVERED_EDITOR_SCRIPTS = new Set(['arabic']);
+const ARABIC_FAMILIES = new Set(['simplified arabic', 'traditional arabic', 'noto sans arabic', 'noto naskh arabic']);
+export const UNCOVERED_EDITOR_SCRIPTS = new Set<string>();
 
 let decoderReady: Promise<unknown> = Promise.resolve();
 
@@ -332,8 +332,12 @@ export function createCommandDefaultFonts(
         let loaded = preferred;
         if (lastResort) loaded = { family: lastResort.family, bold: lastResort.weight === 700,
           italic: lastResort.style === 'italic', bytes, kind: 'coverage' };
-        else if (face.kind === 'coverage') loaded = await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily);
-        else loaded ??= { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
+        else if (face.kind === 'coverage') {
+          loaded = await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily);
+          if (loaded && face.script === 'arabic' && (loaded.bold !== face.bold || loaded.italic !== face.italic)) {
+            loaded = { ...loaded, bold: face.bold, italic: face.italic, ownWeight: true };
+          }
+        } else loaded ??= { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
         if (!loaded) {
           if (!disposed && !suppliedFamily(face)) failed(id);
           return undefined;
@@ -383,8 +387,7 @@ export function createCommandDefaultFonts(
       for (const face of collect(slideId)) {
         const family = face.family.trim().toLowerCase();
         const scripts = face.scripts?.filter((script) => !UNCOVERED_EDITOR_SCRIPTS.has(script));
-        const naskh = NASKH_FAMILIES.has(family);
-        const preferArabic = naskh && scripts?.includes('arabic') === true && !families.has(family);
+        const preferArabic = ARABIC_FAMILIES.has(family) && scripts?.includes('arabic') === true && !families.has(family);
         const primary: FontRequest = { kind: 'primary', family: face.family, bold: face.bold, italic: face.italic, preferArabic };
         wanted.set(key(primary), primary);
         for (const script of scripts ?? []) {
