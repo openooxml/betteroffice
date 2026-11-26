@@ -200,7 +200,8 @@ fn write_deflated(
         .start_file(
             name,
             zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated),
+                .compression_method(zip::CompressionMethod::Deflated)
+                .system(zip::System::Unix),
         )
         .map_err(|e| format!("start_file {name}: {e}"))?;
     writer
@@ -463,6 +464,40 @@ mod tests {
         let zipped = rezip_parts(&sample()).expect("rezip");
         let back = unzip_parts(&zipped).expect("unzip");
         assert_eq!(back, sample());
+    }
+
+    fn hosts(zipped: &[u8]) -> Vec<zip::System> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(zipped)).expect("archive");
+        (0..archive.len())
+            .map(|i| archive.by_index(i).expect("entry").system())
+            .collect()
+    }
+
+    #[test]
+    fn written_entries_name_the_same_host_on_every_platform() {
+        let zipped = rezip_parts(&sample()).expect("rezip");
+        assert_eq!(hosts(&zipped), vec![zip::System::Unix; sample().len()]);
+
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, bytes) in sample() {
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated)
+                    .system(zip::System::Dos);
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let source = cursor.into_inner();
+        let mut changed = sample();
+        changed[1].1 = b"<w:document><w:body/></w:document>".to_vec();
+        let preserved = rezip_parts_preserving(&changed, &source).expect("rezip preserving");
+        assert_eq!(
+            hosts(&preserved),
+            vec![zip::System::Dos, zip::System::Unix, zip::System::Dos]
+        );
     }
 
     fn names(parts: &[(String, Vec<u8>)]) -> Vec<&str> {
