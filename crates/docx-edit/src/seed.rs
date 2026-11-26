@@ -2931,6 +2931,7 @@ fn cached_result_children(field_value: &Value) -> impl DoubleEndedIterator<Item 
 enum CachedResultScope {
     Owner,
     OwnerHyperlink,
+    OwnerSimpleField,
     Container,
     Nested,
 }
@@ -2951,25 +2952,16 @@ fn cached_result_text(
     let Some(inline) = structured_field_result(field_value) else {
         return (cached_text, has_cached_result);
     };
-    let default_character = styles
-        .and_then(|styles| styles.default_style("character"))
-        .and_then(|style| field(Some(style), "rPr"));
-    let default_run = default_character
+    let default_character = styles.and_then(|styles| styles.default_style("character"));
+    let default_character_id = string(field(default_character, "styleId"));
+    let default_run = field(default_character, "rPr")
         .and_then(|formatting| merge_style_run_formatting(style_formatting, Some(formatting)));
-    let style_formatting = default_run.as_ref().or(style_formatting);
     let flattened_complex_result =
         !projected && string(field(Some(field_value), "type")) == Some("complexField");
     let mut owner_runs = owner_runs.peekable();
     let mut pending: Vec<_> = inline
         .iter()
         .rev()
-        .filter(|child| {
-            !projected
-                || !matches!(
-                    string(field(Some(child), "type")),
-                    Some("hyperlink" | "simpleField")
-                )
-        })
         .map(|child| (child, CachedResultScope::Owner))
         .collect();
     let mut fragments = Vec::new();
@@ -2978,62 +2970,88 @@ fn cached_result_text(
         let kind = string(field(Some(node), "type"));
         let (children, child_scope) = match kind {
             Some("run") => {
-                if scope == CachedResultScope::Nested {
+                if matches!(
+                    scope,
+                    CachedResultScope::Owner
+                        | CachedResultScope::OwnerHyperlink
+                        | CachedResultScope::OwnerSimpleField
+                ) && let Some(run) =
+                    owner_runs.next_if(|run| cached_run_texts(run).eq(cached_run_texts(node)))
+                {
+                    fragments.extend(cached_run_texts(run));
+                } else if matches!(
+                    scope,
+                    CachedResultScope::Nested | CachedResultScope::OwnerSimpleField
+                ) {
                     if !show_hidden_text {
                         let direct = field(Some(node), "formatting");
-                        let formatting = styles
-                            .and_then(|styles| styles.run_formatting(style_formatting, direct));
+                        let style_id = string(field(direct, "styleId"));
+                        let inherited = if style_id.is_some() && style_id == default_character_id {
+                            style_formatting
+                        } else {
+                            default_run.as_ref().or(style_formatting)
+                        };
+                        let formatting =
+                            styles.and_then(|styles| styles.run_formatting(inherited, direct));
                         if boolean(field(formatting.as_ref().or(direct), "hidden")) == Some(true) {
                             continue;
                         }
                     }
                     fragments.extend(cached_run_texts(node));
-                } else if matches!(
-                    scope,
-                    CachedResultScope::Owner | CachedResultScope::OwnerHyperlink
-                ) && let Some(run) =
-                    owner_runs.next_if(|run| cached_run_texts(run).eq(cached_run_texts(node)))
-                {
-                    fragments.extend(cached_run_texts(run));
                 }
                 continue;
             }
             Some("complexField" | "simpleField") => {
-                has_nested_result = true;
-                if flattened_complex_result
-                    && scope == CachedResultScope::Owner
-                    && kind == Some("simpleField")
-                {
-                    for run in flat_field_result(node)
-                        .iter()
-                        .filter(|run| string(field(Some(run), "type")) == Some("run"))
-                    {
-                        let _ = owner_runs
-                            .next_if(|owner| cached_run_texts(owner).eq(cached_run_texts(run)));
-                    }
+                let owner_simple_field =
+                    scope == CachedResultScope::Owner && kind == Some("simpleField");
+                if projected && owner_simple_field {
+                    continue;
                 }
+                has_nested_result = true;
+                let result_scope = if flattened_complex_result && owner_simple_field {
+                    CachedResultScope::OwnerSimpleField
+                } else {
+                    CachedResultScope::Nested
+                };
                 pending.extend(
                     cached_result_children(node)
                         .rev()
-                        .map(|child| (child, CachedResultScope::Nested)),
+                        .map(|child| (child, result_scope)),
                 );
                 continue;
             }
             Some("inlineSdt") => (field(Some(node), "content"), CachedResultScope::Container),
-            Some("hyperlink") => (
-                field(Some(node), "structuredChildren")
+            Some("hyperlink") => {
+                let children = field(Some(node), "structuredChildren")
                     .filter(|value| !value.is_null())
-                    .or_else(|| field(Some(node), "children")),
-                if flattened_complex_result && scope == CachedResultScope::Owner {
+                    .or_else(|| field(Some(node), "children"));
+                if projected && scope == CachedResultScope::Owner {
+                    pending.extend(
+                        array(children)
+                            .iter()
+                            .rev()
+                            .filter(|child| {
+                                string(field(Some(child), "type")) == Some("inlineSdt")
+                                    && !has_tracked_control(child, false, false)
+                            })
+                            .map(|child| (child, CachedResultScope::Container)),
+                    );
+                    continue;
+                }
+                let child_scope = if flattened_complex_result && scope == CachedResultScope::Owner {
                     CachedResultScope::OwnerHyperlink
                 } else {
                     CachedResultScope::Container
-                },
-            ),
+                };
+                (children, child_scope)
+            }
             _ => continue,
         };
-        let child_scope = if scope == CachedResultScope::Nested {
-            scope
+        let child_scope = if matches!(
+            scope,
+            CachedResultScope::Nested | CachedResultScope::OwnerSimpleField
+        ) {
+            CachedResultScope::Nested
         } else {
             child_scope
         };

@@ -635,35 +635,34 @@ function firstFieldRunFormatting(runs: readonly ParagraphContent[]): TextFormatt
 
 function cachedRunTexts(run: Run): string[] {
   if (!Array.isArray(run.content)) return [];
-  return run.content.flatMap((content) =>
-    content?.type === 'text' && typeof content.text === 'string' ? [content.text] : []
-  );
+  return run.content.flatMap((content) => content?.type === 'text' ? [content.text] : []);
 }
 
-type CachedResultScope = 'owner' | 'ownerHyperlink' | 'container' | 'nested';
+type CachedResultScope = 'owner' | 'ownerHyperlink' | 'ownerSimpleField' | 'container' | 'nested';
+type CachedOwnerRun = { texts: string[]; text: string };
 
 function cachedResultFragments(
   field: SimpleField | ComplexField,
-  ownerRuns: readonly string[][],
+  ownerRuns: readonly CachedOwnerRun[],
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
   projected: boolean
 ): string[] | undefined {
   const inline = field.structuredResult?.inline;
   if (!Array.isArray(inline)) return undefined;
-  const defaultCharacter = styleResolver?.getDefaultCharacterStyle()?.rPr;
-  const defaultRun = defaultCharacter
-    ? mergeStyleRunFormatting(styleFormatting, defaultCharacter)
+  const defaultCharacter = styleResolver?.getDefaultCharacterStyle();
+  const defaultRun = defaultCharacter?.rPr
+    ? mergeStyleRunFormatting(styleFormatting, defaultCharacter.rPr)
     : styleFormatting;
   const flattenedComplexResult = !projected && field.type === 'complexField';
   const fragments: string[] = [];
   let hasNestedResult = false;
   let ownerIndex = 0;
-  const takeOwnerRun = (run: Run): string[] | undefined => {
+  const takeOwnerRun = (run: Run): CachedOwnerRun | undefined => {
     const expected = ownerRuns[ownerIndex];
     if (!expected) return undefined;
     const texts = cachedRunTexts(run);
-    if (texts.length !== expected.length || !texts.every((text, index) => text === expected[index])) return undefined;
+    if (texts.length !== expected.texts.length || !texts.every((text, index) => text === expected.texts[index])) return undefined;
     ownerIndex++;
     return expected;
   };
@@ -675,52 +674,63 @@ function cachedResultFragments(
       if (node) pending.push({ node, scope });
     }
   };
-  const ownerResult = projected
-    ? inline.filter((child) => child?.type !== 'hyperlink' && child?.type !== 'simpleField')
-    : inline;
-  push(ownerResult, 'owner');
+  push(inline, 'owner');
   while (pending.length > 0) {
     const { node, scope } = pending.pop()!;
     switch (node.type) {
       case 'run': {
-        if (scope === 'nested') {
-          const style = styleResolver?.getRunStyleOwnProperties(node.formatting?.styleId);
+        if (scope === 'container') break;
+        const ownerRun = scope === 'nested' ? undefined : takeOwnerRun(node);
+        if (ownerRun) {
+          fragments.push(ownerRun.text);
+        } else if (scope === 'nested' || scope === 'ownerSimpleField') {
+          const styleId = node.formatting?.styleId;
+          const inherited = styleId && styleId === defaultCharacter?.styleId ? styleFormatting : defaultRun;
+          const style = styleResolver?.getRunStyleOwnProperties(styleId);
           const effective = mergeTextFormatting(
-            mergeStyleRunFormatting(defaultRun, style),
+            mergeStyleRunFormatting(inherited, style),
             node.formatting
           );
           if (effective?.hidden === true) break;
-          for (const text of cachedRunTexts(node)) fragments.push(text);
-        } else if (scope === 'owner' || scope === 'ownerHyperlink') {
-          for (const text of takeOwnerRun(node) ?? []) fragments.push(text);
+          for (const text of cachedRunTexts(node)) {
+            if (typeof text === 'string') fragments.push(text);
+          }
         }
         break;
       }
       case 'complexField':
       case 'simpleField': {
+        const ownerSimpleField = scope === 'owner' && node.type === 'simpleField';
+        if (projected && ownerSimpleField) break;
         hasNestedResult = true;
-        if (flattenedComplexResult && scope === 'owner' && node.type === 'simpleField' && Array.isArray(node.content)) {
-          for (const run of node.content) {
-            if (run?.type === 'run') takeOwnerRun(run);
-          }
-        }
+        const resultScope = flattenedComplexResult && ownerSimpleField ? 'ownerSimpleField' : 'nested';
         const result = node.structuredResult?.inline;
         const flat = flatFieldResult(node);
-        if (Array.isArray(result)) push(result, 'nested');
-        else if (Array.isArray(flat)) push(flat.filter((child) => child?.type === 'run'), 'nested');
+        if (Array.isArray(result)) push(result, resultScope);
+        else if (Array.isArray(flat)) push(flat.filter((child) => child?.type === 'run'), resultScope);
         break;
       }
       case 'inlineSdt':
-        push(node.content, scope === 'nested' ? scope : 'container');
+        push(node.content, scope === 'nested' || scope === 'ownerSimpleField' ? 'nested' : 'container');
         break;
       case 'hyperlink': {
+        const children = node.structuredChildren ?? node.children;
+        if (projected && scope === 'owner') {
+          if (Array.isArray(children)) {
+            push(
+              children.filter((child) => child?.type === 'inlineSdt' && !hasTrackedControlContent(child)),
+              'container'
+            );
+          }
+          break;
+        }
         const childScope = flattenedComplexResult && scope === 'owner' ? 'ownerHyperlink' : 'container';
-        push(node.structuredChildren ?? node.children, scope === 'nested' ? scope : childScope);
+        push(children, scope === 'nested' || scope === 'ownerSimpleField' ? 'nested' : childScope);
         break;
       }
     }
   }
-  return hasNestedResult ? fragments.concat(ownerRuns.slice(ownerIndex).flat()) : undefined;
+  return hasNestedResult ? fragments.concat(ownerRuns.slice(ownerIndex).map((run) => run.text)) : undefined;
 }
 
 function fieldPayload(
@@ -734,9 +744,13 @@ function fieldPayload(
 } {
   const runs = projected ? field.structuredResult?.inline ?? [] : flatFieldResult(field);
   const ownerRuns = Array.isArray(runs)
-    ? runs.flatMap((child) => child?.type === 'run' ? [cachedRunTexts(child)] : [])
+    ? runs.flatMap((child) => {
+        if (child?.type !== 'run') return [];
+        const texts = cachedRunTexts(child);
+        return [{ texts, text: texts.reduce((text, value) => text + value, '') }];
+      })
     : [];
-  const cachedText = ownerRuns.flat().join('');
+  const cachedText = ownerRuns.map((run) => run.text).join('');
   const fragments = cachedResultFragments(field, ownerRuns, styleFormatting, styleResolver, projected);
   const displayText = fragments?.join('') ?? cachedText;
   const formatting = fieldResultFormatting(field, runs);
