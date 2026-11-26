@@ -15,6 +15,7 @@ import type { Document } from '../types/document';
 const ROOT = resolve(import.meta.dir, '../../../..');
 const CORE = 'docProps/core.xml';
 const CODE = 'DOCX_MODEL_PARTS_REWRITTEN';
+const UNAVAILABLE_WARNING = `${CODE} (part names unavailable) Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`;
 const NOW = '2030-01-02T03:04:05.006Z';
 const WITHOUT_STAMP = { updateModifiedDate: false };
 const parse = (bytes: Uint8Array) => parseDocx(bytes, { preloadFonts: false });
@@ -56,6 +57,30 @@ test('unchanged synthetic model saves byte for byte with stamping disabled', asy
     .toEqual(Uint8Array.from(bytes));
 });
 
+test('an unchanged save reads the source once and copies its bytes', async () => {
+  class SourceBuffer extends ArrayBuffer {
+    override slice(): ArrayBuffer {
+      return new ArrayBuffer(0);
+    }
+  }
+
+  const { bytes } = oneSavePackage();
+  const source = new SourceBuffer(bytes.byteLength);
+  new Uint8Array(source).set(bytes);
+  const document = await parseDocx(source, { preloadFonts: false });
+  let reads = 0;
+  Object.defineProperty(document, 'originalBuffer', {
+    get() {
+      reads++;
+      return source;
+    },
+  });
+  const saved = await repackDocx(document, WITHOUT_STAMP);
+  expect(reads).toBe(1);
+  expect(saved).not.toBe(source);
+  expect(new Uint8Array(saved)).toEqual(Uint8Array.from(bytes));
+});
+
 test('saving an unchanged model still applies the writer’s relationship ID updates', async () => {
   const word = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const relationships = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -93,11 +118,12 @@ test('saving an unchanged model still applies the writer’s relationship ID upd
   expect(link.rId).toBe('first');
 });
 
-test('the default stamp returns the plain writer output for an unchanged model', async () => {
+test('the default stamp returns the plain writer output with opaque ZIP members', async () => {
   const { bytes } = oneSavePackage();
   const parts = new Map(Object.entries(unzipContainer(bytes)));
   const opaque = toBytes('opaque member');
   parts.set('__proto__', opaque);
+  parts.set('length', toBytes('another opaque member'));
   const source = rezipPartsToArrayBuffer(parts);
   const document = await parseDocx(source, { preloadFonts: false });
   setSystemTime(new Date(NOW));
@@ -108,8 +134,7 @@ test('the default stamp returns the plain writer output for an unchanged model',
     const after = unzipContainer(new Uint8Array(saved.buffer));
     expect(new TextDecoder().decode(after[CORE])).toContain(`${NOW}</dcterms:modified>`);
     expect(Object.getPrototypeOf(after)).toEqual(opaque);
-    expect(saved.warnings.slice(0, -1)).toEqual(plain.warnings);
-    expect(saved.warnings.at(-1)).toContain(`"${CORE}"`);
+    expect(saved.warnings).toEqual([...plain.warnings, UNAVAILABLE_WARNING]);
   } finally {
     setSystemTime();
   }
@@ -129,11 +154,11 @@ test('modifiedBy uses the plain writer with timestamp stamping disabled', async 
   const saved = await repackDocxWithWarnings(await parse(new Uint8Array(source)), {
     ...WITHOUT_STAMP,
     get modifiedBy() {
-      if (++reads > 2) throw new Error('Unexpected modifiedBy read');
+      reads++;
       return 'Alice';
     },
   });
-  expect(reads).toBe(2);
+  expect(reads).toBe(1);
   expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
   const writtenCore = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.buffer))[CORE]);
   expect(writtenCore).toContain('<cp:lastModifiedBy>Alice</cp:lastModifiedBy>');
@@ -169,6 +194,23 @@ function editableRun(document: Document) {
   }
   return { run, textNode: run.content[0] };
 }
+
+test('the timestamp option is read once before matching the model', async () => {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  const { textNode } = editableRun(document);
+  let reads = 0;
+  const saved = await repackDocx(document, {
+    get updateModifiedDate() {
+      reads++;
+      textNode.text = 'Edited by save option';
+      return false;
+    },
+  });
+  expect(reads).toBe(1);
+  const xml = unzipContainer(new Uint8Array(saved))['word/document.xml'];
+  expect(new TextDecoder().decode(xml)).toContain('Edited by save option');
+});
 
 test('model matching uses the value the writer serializes from a text proxy', async () => {
   const { bytes } = oneSavePackage();
@@ -222,6 +264,17 @@ test('the rewritten parts warning includes additions and removals', () => {
     `${CODE} ["added.xml","removed.xml"] Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`
   );
   expect(modelPartsRewrittenWarning(original, original)).toBeUndefined();
+});
+
+test.each(['length', 'word/media/'])('the warning accounts for the ZIP member %s', async (name) => {
+  const { bytes } = oneSavePackage();
+  const parts = new Map(Object.entries(unzipContainer(bytes)));
+  parts.set(name, new Uint8Array());
+  const source = rezipPartsToArrayBuffer(parts);
+  const document = await parseDocx(source, { preloadFonts: false });
+  editableRun(document).textNode.text = 'Edited model';
+  const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+  expect(saved.warnings.at(-1)).toBe(UNAVAILABLE_WARNING);
 });
 
 test('a changed Yrs projection is saved as a caller model', async () => {

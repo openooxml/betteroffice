@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use betteroffice_docx::{
-    BlockContent, Document, InlineNode, ParagraphContent, RunContent, SaveOptions,
+    BlockContent, Document, InlineNode, ParagraphContent, RunContent, SaveOptions, SaveReport,
 };
 use docx_parse::{
     S9ParseOptions, S13SaveOptions, S13SaveRequest, SerializerDeterminism, parse_docx_s9_wire,
@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 const CORE: &str = "docProps/core.xml";
 const NOW: &str = "2030-01-02T03:04:05.006Z";
-const ORIGINAL_TIME: &str = "2024-01-02T03:04:05Z";
+const ORIGINAL_TIME: &str = "2024-01-02T03:04:05.000Z";
 
 fn synthetic_package() -> Vec<u8> {
     let parts = [
@@ -51,7 +51,7 @@ fn synthetic_package() -> Vec<u8> {
                 r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/"#,
                 r#"metadata/core-properties" xmlns:dcterms="http://purl.org/dc/terms/" "#,
                 r#"xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">"#,
-                r#"<dcterms:modified xsi:type="dcterms:W3CDTF">2024-01-02T03:04:05Z"#,
+                r#"<dcterms:modified xsi:type="dcterms:W3CDTF">2024-01-02T03:04:05.000Z"#,
                 "</dcterms:modified><cp:lastModifiedBy>Before</cp:lastModifiedBy>",
                 "</cp:coreProperties>",
             ),
@@ -70,7 +70,7 @@ fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     unzip_parts(bytes).unwrap().into_iter().collect()
 }
 
-fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOptions) {
+fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOptions) -> SaveReport {
     let model = document.model();
     let request = S13SaveRequest {
         determinism: SerializerDeterminism {
@@ -101,6 +101,7 @@ fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOpt
         saved.bytes == expected,
         "the save differs from the plan-less writer"
     );
+    saved
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn a_mutably_borrowed_unchanged_model_saves_the_original_bytes() {
 }
 
 #[test]
-fn stamping_an_unchanged_model_only_updates_core_properties() {
+fn stamping_an_unchanged_model_uses_the_writer_output_when_core_changes() {
     let source = synthetic_package();
     let mut document = Document::open(&source).unwrap();
     document.model_mut();
@@ -126,24 +127,49 @@ fn stamping_an_unchanged_model_only_updates_core_properties() {
         update_modified_date: true,
         modified_by: Some("Fixture author".to_owned()),
     };
-    let saved = document.save_report_with_options(options.clone()).unwrap();
+    let saved = assert_whole_model_write(&source, &document, options.clone());
+    let written_parts = parts(&saved.bytes);
+    let core = std::str::from_utf8(&written_parts[CORE]).unwrap();
+    assert!(core.contains(NOW));
+    assert!(core.contains("<cp:lastModifiedBy>Fixture author</cp:lastModifiedBy>"));
+    assert_eq!(document.save_with_options(options).unwrap(), saved.bytes);
+}
+
+#[test]
+fn stamping_an_unchanged_model_keeps_the_source_when_core_bytes_match() {
+    let source = synthetic_package();
+    let mut document = Document::open(&source).unwrap();
+    document.model_mut();
+    let saved = document
+        .save_report_with_options(SaveOptions {
+            now: ORIGINAL_TIME.to_owned(),
+            update_modified_date: true,
+            modified_by: Some("Before".to_owned()),
+        })
+        .unwrap();
+    assert_eq!(saved.bytes, source);
     assert!(!saved.whole_model_write);
-    assert!(saved.kept_unchanged.is_none());
-    assert!(saved.structure_dropped.is_none());
-    let mut expected = parts(&source);
-    let updated = std::str::from_utf8(&expected[CORE])
-        .unwrap()
-        .replace(ORIGINAL_TIME, NOW)
-        .replace(
-            "<cp:lastModifiedBy>Before</cp:lastModifiedBy>",
-            "<cp:lastModifiedBy>Fixture author</cp:lastModifiedBy>",
-        );
-    assert_ne!(updated.as_bytes(), expected[CORE].as_slice());
-    expected.insert(CORE.to_owned(), updated.into_bytes());
-    assert_eq!(parts(&saved.bytes), expected);
-    assert_eq!(
-        parts(&document.save_with_options(options).unwrap()),
-        expected
+}
+
+#[test]
+fn non_utf8_core_bytes_follow_the_writer_even_with_an_empty_modifier() {
+    let mut entries = unzip_parts(&synthetic_package()).unwrap();
+    let (_, core) = entries.iter_mut().find(|(path, _)| path == CORE).unwrap();
+    let offset = core
+        .windows(b"Before".len())
+        .position(|bytes| bytes == b"Before")
+        .unwrap();
+    core[offset] = 0xe9;
+    let source = rezip_parts(&entries).unwrap();
+    let mut document = Document::open(&source).unwrap();
+    document.model_mut();
+    assert_whole_model_write(
+        &source,
+        &document,
+        SaveOptions {
+            modified_by: Some(String::new()),
+            ..SaveOptions::default()
+        },
     );
 }
 

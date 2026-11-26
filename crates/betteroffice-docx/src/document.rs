@@ -1773,7 +1773,7 @@ mod session_save_tests {
         let counts = counted(|| {
             assert_eq!(document.save().unwrap(), source);
         });
-        assert_eq!(counts, (0, 0));
+        assert_eq!(counts, (0, 1));
     }
 
     #[test]

@@ -13,7 +13,9 @@ No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency
 
 ## Usage
 
-Parse a DOCX and save it. An unchanged model saves byte for byte with `updateModifiedDate: false` and no change to `modifiedBy`. To keep unchanged content while editing, use `createYrsSession`, `seedFromDocx` and `saveYrsDocx`.
+An unchanged model saves byte for byte when the writer leaves the core properties unchanged.
+To save without stamping, set `updateModifiedDate: false` and leave `modifiedBy` unset.
+To keep unchanged content while editing, use `createYrsSession`, `seedFromDocx` and `saveYrsDocx`.
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';
@@ -22,7 +24,7 @@ import { parseDocx, repackDocx } from '@betteroffice/docx';
 const document = await parseDocx(await readFile('input.docx'));
 // document.package.document.content: the body's paragraphs and tables
 // document.package also holds styles, numbering, theme, media, headers and footers
-const bytes = await repackDocx(document);
+const bytes = await repackDocx(document, { updateModifiedDate: false });
 await writeFile('output.docx', new Uint8Array(bytes));
 ```
 

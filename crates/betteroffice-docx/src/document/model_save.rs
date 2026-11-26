@@ -1,7 +1,6 @@
-use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism, update_core_properties};
-use docx_parse::{
-    S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report,
-};
+use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism};
+use docx_parse::{S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report};
+use ooxml_opc::{MAX_TOTAL_UNCOMPRESSED_BYTES, unzip_parts_where};
 
 use super::{body_from_wire, save_report};
 use crate::{Document, Result, SaveOptions, SaveReport};
@@ -20,21 +19,20 @@ impl Document {
             options.modified_by,
             None,
         );
-        if self.model_matches_source(&request)
-            && let Some(bytes) = self.save_unchanged_model(&request)
-        {
+        let matches = self.model_matches_source(&request);
+        #[cfg(test)]
+        super::session_save_tests::count_package_write();
+        let (bytes, report) =
+            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
+        if matches && self.core_properties_match(&bytes) {
             return Ok(SaveReport {
-                bytes,
+                bytes: self.source.clone(),
                 kept_unchanged: None,
                 structure_dropped: None,
                 whole_model_write: false,
             });
         }
 
-        #[cfg(test)]
-        super::session_save_tests::count_package_write();
-        let (bytes, report) =
-            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
         Ok(save_report(bytes, report, true))
     }
 
@@ -75,35 +73,18 @@ impl Document {
         }
     }
 
-    fn save_unchanged_model(&self, request: &S13SaveRequest) -> Option<Vec<u8>> {
-        request.determinism.validate().ok()?;
-        let options = &request.options;
-        if !options.update_modified_date && options.modified_by.is_none() {
-            return Some(self.source.clone());
-        }
-        let Some((index, (_, core))) = self
-            .original_parts
-            .iter()
-            .enumerate()
-            .find(|(_, (path, _))| path == CORE_PROPERTIES)
+    fn core_properties_match(&self, written: &[u8]) -> bool {
+        let Ok(written_parts) =
+            unzip_parts_where(written, MAX_TOTAL_UNCOMPRESSED_BYTES, |path| path == CORE_PROPERTIES)
         else {
-            return Some(self.source.clone());
+            return false;
         };
-        let updated = update_core_properties(
-            &String::from_utf8_lossy(core),
-            options.update_modified_date,
-            options.modified_by.as_deref(),
-            &request.determinism.now,
-        );
-        if updated.as_bytes() == core.as_slice() {
-            return Some(self.source.clone());
-        }
-        let mut parts: Vec<_> = self
+        let source_core = self
             .original_parts
             .iter()
-            .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
-            .collect();
-        parts[index].1 = updated.as_bytes();
-        ooxml_opc::rezip_parts_preserving(&parts, &self.source).ok()
+            .find(|(path, _)| path == CORE_PROPERTIES)
+            .map(|(_, bytes)| bytes.as_slice());
+        let written_core = written_parts.first().map(|(_, bytes)| bytes.as_slice());
+        source_core == written_core
     }
 }

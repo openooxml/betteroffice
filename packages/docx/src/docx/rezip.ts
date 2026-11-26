@@ -79,30 +79,33 @@ async function repackModel(
   options: RepackOptions,
   includeWarnings: boolean
 ): Promise<RepackResult> {
-  if (!doc.originalBuffer) {
+  const source = doc.originalBuffer;
+  if (!source) {
     throw new Error(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const source = doc.originalBuffer;
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(new Uint8Array(source)).buffer);
   const determinism = {
     seed: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
     now: new Date().toISOString(),
   };
+  const writerOptions = {
+    updateModifiedDate: options.updateModifiedDate,
+    modifiedBy: options.modifiedBy,
+  };
   const matches = modelMatchesSource(doc, source, determinism);
-  const { buffer, warnings } = await writeDocumentWithRust(doc, source, options, undefined, determinism);
+  const { buffer, warnings } = await writeDocumentWithRust(doc, source, writerOptions, undefined, determinism);
   if (!matches && !includeWarnings) return { buffer, warnings };
 
   const original = readModelSaveParts(source);
   const written = readModelSaveParts(buffer);
-  const core = 'docProps/core.xml';
-  if (matches && samePartBytes(original.get(core), written.get(core))) {
-    return { buffer: source.slice(0), warnings };
+  if (matches && samePartBytes(original.core, written.core)) {
+    return { buffer: new Uint8Array(source).slice().buffer, warnings };
   }
   if (includeWarnings) {
-    const warning = modelPartsRewrittenWarning(original, written);
+    const warning = modelPartsRewrittenWarning(original.parts, written.parts);
     if (warning) warnings.push(warning);
   }
   return { buffer, warnings };

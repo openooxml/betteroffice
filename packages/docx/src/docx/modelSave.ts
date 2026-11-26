@@ -6,6 +6,7 @@ import { isSessionRevisionInfo, withSessionRevisionIds } from './sessionRevision
 import { unzipContainer } from './wasm';
 
 const MODEL_PARTS_REWRITTEN = 'DOCX_MODEL_PARTS_REWRITTEN';
+const CORE_PROPERTIES = 'docProps/core.xml';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function readSaveValue<T extends object, K extends keyof T>(object: T, key: K): T[K] {
@@ -101,13 +102,41 @@ export function modelMatchesSource(
   }
 }
 
-export function readModelSaveParts(buffer: ArrayBuffer): Map<string, Uint8Array> {
+function zipEntryCount(buffer: ArrayBuffer): number | undefined {
+  const view = new DataView(buffer);
+  const footerSize = 22;
+  const last = view.byteLength - footerSize;
+  const first = Math.max(0, last - 0xffff);
+  for (let at = last; at >= first; at--) {
+    if (view.getUint32(at, true) !== 0x06054b50) continue;
+    const end = at + footerSize + view.getUint16(at + 20, true);
+    if (end > view.byteLength) continue;
+    if (end < view.byteLength) return undefined;
+
+    const count = view.getUint16(at + 10, true);
+    const directorySize = view.getUint32(at + 12, true);
+    const directoryOffset = view.getUint32(at + 16, true);
+    if (
+      view.getUint32(at + 4, true) !== 0 || view.getUint16(at + 8, true) !== count ||
+      count === 0xffff || (at >= 20 && view.getUint32(at - 20, true) === 0x07064b50) ||
+      directorySize < count * 46 || directoryOffset + directorySize !== at ||
+      (count !== 0 && view.getUint32(directoryOffset, true) !== 0x02014b50)
+    ) {
+      return undefined;
+    }
+    return count;
+  }
+  return undefined;
+}
+
+export function readModelSaveParts(buffer: ArrayBuffer) {
   const entries = unzipContainer(new Uint8Array(buffer));
-  const parts = new Map(Object.entries(entries));
-  // The ZIP reader's assignment to __proto__ can set the result object's prototype.
-  const prototype = Object.getPrototypeOf(entries);
-  if (prototype instanceof Uint8Array) parts.set('__proto__', prototype);
-  return parts;
+  const core = Object.hasOwn(entries, CORE_PROPERTIES) ? entries[CORE_PROPERTIES] : undefined;
+  const members = Object.entries(entries);
+  const reliable = Object.getPrototypeOf(entries) === Object.prototype &&
+    members.length === zipEntryCount(buffer) &&
+    members.every(([name]) => !(name in Object.prototype || name in Uint8Array.prototype));
+  return { core, parts: reliable ? new Map(members) : undefined };
 }
 
 export function samePartBytes(before?: Uint8Array, after?: Uint8Array): boolean {
@@ -117,12 +146,14 @@ export function samePartBytes(before?: Uint8Array, after?: Uint8Array): boolean 
 }
 
 export function modelPartsRewrittenWarning(
-  original: Map<string, Uint8Array>,
-  written: Map<string, Uint8Array>
+  original: Map<string, Uint8Array> | undefined,
+  written: Map<string, Uint8Array> | undefined
 ): string | undefined {
+  const guidance = 'Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.';
+  if (!original || !written) return `${MODEL_PARTS_REWRITTEN} (part names unavailable) ${guidance}`;
   const paths = [...new Set([...original.keys(), ...written.keys()])]
     .filter((path) => !samePartBytes(original.get(path), written.get(path)))
     .sort();
   if (!paths.length) return undefined;
-  return `${MODEL_PARTS_REWRITTEN} ${JSON.stringify(paths)} Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`;
+  return `${MODEL_PARTS_REWRITTEN} ${JSON.stringify(paths)} ${guidance}`;
 }

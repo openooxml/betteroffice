@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { parseDocx } from '../docx';
+import { parseDocx, repackDocx } from '../docx';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import { unzipContainer } from '../docx/wasm';
@@ -63,7 +63,10 @@ async function save(
     session.seedFromDocx(bytes);
     edit?.(session);
     const projected = yrsToDocument(session, parsed);
-    return [savedBody((await writeDocumentWithRust(projected, projected.originalBuffer!)).buffer), control];
+    const buffer = edit
+      ? await repackDocx(projected)
+      : (await writeDocumentWithRust(projected, projected.originalBuffer!)).buffer;
+    return [savedBody(buffer), control];
   } finally {
     session.destroy();
   }
