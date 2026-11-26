@@ -998,8 +998,30 @@ mod tests {
             };
             assert!(matches!(*start, Expr::Ref { sheet: None, .. }), "{source}");
         }
-        for source in ["A1!B2", "TRUE!A1", "Sheet1:B2!A1", "1:2!A1", "$1:$2!A1"] {
+        for source in ["Sheet1:B2!A1", "1:2!A1", "$1:$2!A1"] {
             assert!(parse_formula(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn unquoted_address_shaped_sheet_names_print_quoted() {
+        for (sheet, address) in [
+            ("A1", "B2"),
+            ("TRUE", "A1"),
+            ("FALSE", "A1"),
+            ("R", "A1"),
+            ("C", "A1"),
+            ("RC", "A1"),
+            ("R1", "A1"),
+            ("C1", "A1"),
+            ("R2C3", "A1"),
+        ] {
+            let source = format!("{sheet}!{address}");
+            let quoted = format!("'{sheet}'!{address}");
+            let parsed = parse_formula(&source).unwrap();
+            assert!(matches!(&parsed, Expr::Ref { sheet: Some(name), .. } if name == sheet));
+            assert_eq!(parsed.to_formula(), quoted);
+            assert_eq!(parse_formula(&quoted).unwrap(), parsed);
         }
     }
 

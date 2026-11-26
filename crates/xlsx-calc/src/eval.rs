@@ -2277,7 +2277,8 @@ mod tests {
             ("R2C3x!A1", "'R2C3x'!A1"),
             ("RCPT!A1:B5", "'RCPT'!A1:B5"),
             ("RC_Data!Total", "'RC_Data'!Total"),
-            ("'RC'!A1", "'RC'!A1"),
+            ("RC!A1", "'RC'!A1"),
+            ("R2C3!A1", "'R2C3'!A1"),
         ] {
             let ast = parse_formula(source).unwrap();
             assert_eq!(ast.to_formula(), printed);
@@ -2285,8 +2286,6 @@ mod tests {
         }
         assert!(crate::parser::is_formula_source("[1]RCost!A1"));
         assert!(parse_formula("_xlpm.c:RCost!A2").is_ok());
-        assert!(parse_formula("RC!A1").is_err());
-        assert!(parse_formula("R2C3!A1").is_err());
     }
 
     #[test]

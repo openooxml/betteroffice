@@ -180,6 +180,66 @@ pub fn lex_for_rewrite(input: &str) -> Result<Vec<Token>, ParseError> {
 }
 
 #[doc(hidden)]
+pub fn ensure_unambiguous_spaced_calls(input: &str, tokens: &[Token]) -> Result<(), ParseError> {
+    for (index, paren) in tokens.iter().enumerate() {
+        if paren.kind != TokKind::LParen || index == 0 {
+            continue;
+        }
+        let previous = &tokens[index - 1];
+        let reference = if previous.kind == TokKind::Intersection && index >= 2 {
+            &tokens[index - 2]
+        } else {
+            previous
+        };
+        if reference.end == paren.start {
+            continue;
+        }
+        let kind = match &reference.kind {
+            TokKind::ThreeDRef { target, .. } => target.as_ref(),
+            kind => kind,
+        };
+        if !matches!(
+            kind,
+            TokKind::Ref { .. } | TokKind::Range { .. } | TokKind::ColumnRange { .. }
+        ) {
+            continue;
+        }
+        let endpoint = input[reference.start..reference.end]
+            .rsplit(['!', ':'])
+            .next()
+            .unwrap_or_default()
+            .trim_start();
+        if crate::functions::resolve(endpoint).is_none() && !crate::array::is_array_builtin(endpoint)
+        {
+            continue;
+        }
+        let single_address = matches!(
+            tokens.get(index + 1..index + 3),
+            Some([
+                Token {
+                    kind: TokKind::Ref { .. }
+                        | TokKind::Range { .. }
+                        | TokKind::ColumnRange { .. }
+                        | TokKind::RowRange { .. },
+                    ..
+                },
+                Token {
+                    kind: TokKind::RParen,
+                    ..
+                }
+            ])
+        );
+        if !matches!(kind, TokKind::ColumnRange { .. }) || !single_address {
+            return Err(ParseError::new(
+                reference.start,
+                "ambiguous spaced function call",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
 pub fn rewrite_table_column(
     input: &str,
     table: &str,
@@ -308,6 +368,7 @@ pub fn rewrite_table_columns<'a>(
     if spans.is_empty() {
         return Ok(None);
     }
+    ensure_unambiguous_spaced_calls(input, &tokens)?;
     let mut chars = input.chars().count();
     for (span, new, bracket) in &spans {
         if !new.chars().all(|ch| {
@@ -378,12 +439,15 @@ fn is_word_char(ch: char) -> bool {
 }
 
 pub(crate) fn is_unquoted_sheet(word: &str) -> bool {
-    word.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
-        && !word.contains(['$', '\\'])
+    has_unquoted_sheet_chars(word)
         && !word.eq_ignore_ascii_case("TRUE")
         && !word.eq_ignore_ascii_case("FALSE")
         && CellRef::parse_a1(&word.to_ascii_uppercase()).is_err()
         && !is_r1c1_reference(word)
+}
+
+fn has_unquoted_sheet_chars(word: &str) -> bool {
+    word.starts_with(|ch: char| ch.is_alphabetic() || ch == '_') && !word.contains(['$', '\\'])
 }
 
 fn is_reference(kind: &TokKind) -> bool {
@@ -639,10 +703,12 @@ impl Lexer<'_> {
         if let Some(kind) = self.try_external_ref(start)? {
             return Ok(kind);
         }
-        if self.input[start..].starts_with("[]") {
+        let kind = self.lex_table_ref(None, String::new(), start)?;
+        if matches!(&self.input[start..self.pos], "[,]" | "[:]")
+            || matches!(&kind, TokKind::TableRef { spec, .. } if *spec == TableSpec::default())
+        {
             return Err(ParseError::new(start, "empty local structured reference"));
         }
-        let kind = self.lex_table_ref(None, String::new(), start)?;
         if self
             .peek()
             .is_some_and(|ch| matches!(ch, '[' | '\'') || is_word_char(ch))
@@ -765,7 +831,7 @@ impl Lexer<'_> {
                     ParseError::new(start, "expected an address after a 3-D qualifier")
                 });
             }
-            if !quoted && !is_unquoted_sheet(first) {
+            if !quoted && !has_unquoted_sheet_chars(first) {
                 return Err(ParseError::new(start, "sheet name must be quoted"));
             }
             return self.lex_reference(first.to_owned(), start).map(Some);
@@ -792,9 +858,7 @@ impl Lexer<'_> {
             {
                 return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
             }
-            if (quoted_last
-                || (last.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
-                    && !last.contains(['$', '\\'])))
+            if (quoted_last || has_unquoted_sheet_chars(&last))
                 && let Some(kind) = self.read_3d_target(first, &last)
             {
                 return Ok(Some(kind));
@@ -848,7 +912,7 @@ impl Lexer<'_> {
         if self.peek() == Some('[') {
             return self.lex_table_ref(None, word, start);
         }
-        if self.is_call(&word) {
+        if self.peek() == Some('(') {
             return Ok(TokKind::Ident(word));
         }
         if word.eq_ignore_ascii_case("TRUE") {
@@ -1002,7 +1066,7 @@ impl Lexer<'_> {
         if let Some(range) = self.try_range_token(sheet, word) {
             return Some(range);
         }
-        if !self.ends_address(word) {
+        if !self.ends_address() {
             return None;
         }
         let cell = CellRef::parse_a1(&word.to_ascii_uppercase()).ok()?;
@@ -1012,15 +1076,8 @@ impl Lexer<'_> {
         })
     }
 
-    fn is_call(&self, word: &str) -> bool {
-        self.peek() == Some('(')
-            || (self.after_ws().starts_with('(')
-                && (crate::functions::resolve(word).is_some()
-                    || crate::array::is_array_builtin(word)))
-    }
-
-    fn ends_address(&self, word: &str) -> bool {
-        self.peek() != Some('[') && !self.after_ws().starts_with('!') && !self.is_call(word)
+    fn ends_address(&self) -> bool {
+        !matches!(self.peek(), Some('[' | '(')) && !self.after_ws().starts_with('!')
     }
 
     fn try_range_token(&mut self, sheet: &Option<String>, word: &str) -> Option<TokKind> {
@@ -1032,7 +1089,7 @@ impl Lexer<'_> {
         self.bump();
         self.skip_ws();
         let end = self.read_word();
-        if self.ends_address(&end) {
+        if self.ends_address() {
             if let (Ok(first), Ok(last)) = (
                 CellRef::parse_a1(&word.to_ascii_uppercase()),
                 CellRef::parse_a1(&end.to_ascii_uppercase()),
@@ -1268,6 +1325,8 @@ mod tests {
             "SUM(Amt:IF(C1,B1,B2))",
             "SUM(Amt:LET(x,B1,x))",
             "SUM(Amt:LET (x,B1,x),Amt:Tax (1:2),A1:B2 (C1:D2))",
+            "SUM(A:N (1:2),A:T (1:2),Amt:MAX (1:2),Amt:IF (C1,B1,B2),LOG10 (1))",
+            "A1!B2+TRUE!A1+R2C3!A1",
             "SUM([2024] Prices[Amt])",
             "SUM([1] Prices)",
             "SUM([1]Sheet1!A1 [@Old])",
@@ -1427,10 +1486,88 @@ mod tests {
 
     #[test]
     fn whitespace_distinguishes_builtin_calls_from_reference_intersections() {
-        assert!(matches!(&kinds("LOG10 (1)")[0], TokKind::Ident(name) if name == "LOG10"));
+        for name in ["LOG10", "IF"] {
+            assert!(matches!(
+                &kinds(&format!("{name}(1)"))[0], TokKind::Ident(word) if word == name
+            ));
+        }
+        assert!(matches!(
+            kinds("LOG10 (1)")[0],
+            TokKind::Ref { sheet: None, .. }
+        ));
+        for columns in ["A:N", "A:T", "Amt:MAX", "Amt:IF", "Amt:LET"] {
+            let source = format!("SUM({columns} (1:2))");
+            let tokens = lex(&source).unwrap();
+            assert!(
+                matches!(tokens[2].kind, TokKind::ColumnRange { .. }),
+                "{source}"
+            );
+            assert_eq!(&source[tokens[2].start..tokens[2].end], columns);
+            assert_eq!(tokens[3].kind, TokKind::Intersection);
+        }
         assert_eq!(kinds("A1 (B1)")[1], TokKind::Intersection);
         assert!(!kinds("A1\tB1").contains(&TokKind::Intersection));
         assert!(lex("[Col][Col2]").is_err());
+    }
+
+    #[test]
+    fn ambiguous_spaced_calls_refuse_table_column_rewrites() {
+        for reference in ["LOG10 (1)", "Amt:IF (C1,B1,B2)", "Amt:LET (x,B1,x)"] {
+            let source = format!("SUM({reference})+T[Old]");
+            let tokens = lex_for_rewrite(&source).unwrap();
+            assert!(matches!(
+                tokens[2].kind,
+                TokKind::Ref { .. } | TokKind::ColumnRange { .. }
+            ));
+            assert_eq!(
+                rewrite_table_column(&source, "T", "Data", false, "Old", "New"),
+                Err(ParseError::new(4, "ambiguous spaced function call")),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            rewrite_table_column("SUM(Amt:MAX (1:2))+T[Old]", "T", "Data", false, "Old", "New"),
+            Ok(Some("SUM(Amt:MAX (1:2))+T[New]".into())),
+        );
+    }
+
+    #[test]
+    fn quoted_workbook_paths_without_book_brackets_lex_as_external() {
+        assert!(matches!(
+            &kinds(r"'C:\Books\Data.xlsx'!A1")[..],
+            [TokKind::ExternalRef(target)] if matches!(target.as_ref(), TokKind::Ref { .. })
+        ));
+        assert!(matches!(
+            &kinds("'https://example.com/book.xlsx'!MyName")[..],
+            [TokKind::ExternalRef(target)] if matches!(target.as_ref(), TokKind::Name { .. })
+        ));
+    }
+
+    #[test]
+    fn existing_unquoted_sheet_qualifiers_and_spans_keep_their_token_kinds() {
+        for source in ["R1C1b!B2", "RCost!A1", "R2C3x!A1"] {
+            assert!(matches!(
+                &kinds(source)[..],
+                [TokKind::Ref { sheet: Some(_), .. }]
+            ));
+        }
+        assert!(matches!(
+            &kinds("RCPT!A1:B5")[..],
+            [TokKind::Range { sheet: Some(_), .. }]
+        ));
+        assert!(matches!(
+            &kinds("RC_Data!Total")[..],
+            [TokKind::Name { scope: Some(_), .. }]
+        ));
+        for first in ["Sheet1", "R2C3x"] {
+            for target in ["A1", "#REF!"] {
+                let source = format!("{first}:Sheet2!{target}");
+                assert!(matches!(
+                    &kinds(&source)[..],
+                    [TokKind::ThreeDRef { first: start, last, .. }] if start == first && last == "Sheet2"
+                ));
+            }
+        }
     }
 
     #[test]
@@ -1464,10 +1601,16 @@ mod tests {
 
     #[test]
     fn empty_local_structured_references_require_a_table_name() {
-        assert_eq!(
-            rewrite_table_column("[]+T[Old]", "T", "Data", true, "Old", "New"),
-            Err(ParseError::new(0, "empty local structured reference")),
-        );
+        for selector in ["[]", "[[]]", "[,]", "[:]"] {
+            let error = Err(ParseError::new(0, "empty local structured reference"));
+            assert_eq!(lex(selector), error, "{selector}");
+            assert_eq!(lex_for_rewrite(selector), error, "{selector}");
+            assert_eq!(
+                rewrite_table_column(&format!("{selector}+T[Old]"), "T", "Data", true, "Old", "New"),
+                Err(ParseError::new(0, "empty local structured reference")),
+                "{selector}"
+            );
+        }
         assert_eq!(
             rewrite_table_column("T[]+T[Old]", "T", "Data", true, "Old", "New"),
             Ok(Some("T[]+T[New]".into())),

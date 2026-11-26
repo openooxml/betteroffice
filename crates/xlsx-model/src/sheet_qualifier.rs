@@ -25,6 +25,15 @@ impl Qualifier {
     pub fn is_span(&self) -> bool {
         self.first != self.last
     }
+
+    #[doc(hidden)]
+    pub fn has_ambiguous_target(&self, source: &str) -> bool {
+        self.bound
+            && !self.external
+            && qualified_target(source, self.span.end).is_some_and(|target| {
+                ambiguous_target(source, target, source[self.span.clone()].contains(':'))
+            })
+    }
 }
 
 /// Every sheet qualifier in `source`, in order, skipping strings and the
@@ -143,6 +152,7 @@ fn can_start_span(name: &str) -> bool {
 fn is_span_target(source: &str, target: usize) -> bool {
     let address = &source[target..reference_end(source, target)];
     address == "#REF!"
+        || ambiguous_target(source, target, true)
         || (address_shape(address) == Some(AddressShape::Cell)
             && !source[target + address.len()..]
                 .trim_start()
@@ -371,6 +381,9 @@ pub fn rename_sheets_with_sheets(
         if first.is_none() && last.is_none() {
             continue;
         }
+        if qualifier.has_ambiguous_target(source) {
+            return (source.to_owned(), Vec::new());
+        }
         used.extend(first.into_iter().chain(last));
         let first = first.map_or(qualifier.first.as_str(), |at| renamed[at].1.as_str());
         let last = last.map_or(qualifier.last.as_str(), |at| renamed[at].1.as_str());
@@ -426,6 +439,24 @@ mod tests {
             "'New Data:Other'!A1"
         );
     }
+
+    #[test]
+    fn quoted_workbook_paths_without_book_brackets_scan_as_local_spans() {
+        for (source, expected_first, expected_last) in [
+            (r"'C:\Books\Data.xlsx'!A1", "C", r"\Books\Data.xlsx"),
+            (
+                "'https://example.com/book.xlsx'!MyName",
+                "https",
+                "//example.com/book.xlsx",
+            ),
+        ] {
+            let qualifiers = super::sheet_qualifiers(source);
+            let qualifier = &qualifiers[0];
+            assert!(qualifier.bound && qualifier.is_span() && !qualifier.external);
+            assert_eq!(qualifier.first, expected_first);
+            assert_eq!(qualifier.last, expected_last);
+        }
+    }
 }
 
 /// `Some(Some(text))` narrows the span onto the sheets that remain,
@@ -472,30 +503,47 @@ fn reference_end(source: &str, start: usize) -> usize {
     if source[start..].starts_with("#REF!") {
         return start + "#REF!".len();
     }
-    let run = |from: usize| {
-        from + source[from..]
-            .chars()
-            .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '$' | '_' | '.' | '\\'))
-            .map(char::len_utf8)
-            .sum::<usize>()
-    };
-    let end = run(start);
+    let end = reference_word_end(source, start);
     if source.as_bytes().get(end) == Some(&b'[') {
         return table_reference_end(source, end);
     }
-    if let Some(tail) = source[end..].trim_start().strip_prefix(':') {
-        let far_start = source.len() - tail.trim_start().len();
-        let further = run(far_start);
-        let next = source[further..].trim_start();
-        if further > far_start
-            && address_shape(&source[start..end]).is_some()
-            && address_shape(&source[start..end]) == address_shape(&source[far_start..further])
-            && !next.starts_with([':', '!', '(', '['])
-        {
-            return further;
-        }
+    if let Some(further) = range_address_end(source, start, end)
+        && !source[further..].trim_start().starts_with([':', '!', '(', '['])
+    {
+        return further;
     }
     end
+}
+
+fn reference_word_end(source: &str, start: usize) -> usize {
+    start + source[start..]
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '$' | '_' | '.' | '\\'))
+        .map(char::len_utf8)
+        .sum::<usize>()
+}
+
+fn range_address_end(source: &str, start: usize, end: usize) -> Option<usize> {
+    let tail = source[end..].trim_start().strip_prefix(':')?;
+    let far_start = source.len() - tail.trim_start().len();
+    let further = reference_word_end(source, far_start);
+    let shape = address_shape(&source[start..end])?;
+    (address_shape(&source[far_start..further]) == Some(shape)).then_some(further)
+}
+
+fn ambiguous_target(source: &str, start: usize, span: bool) -> bool {
+    let end = reference_word_end(source, start);
+    if end == start {
+        return false;
+    }
+    let range = range_address_end(source, start, end);
+    if span && range.is_none() && address_shape(&source[start..end]) != Some(AddressShape::Cell) {
+        return false;
+    }
+    let suffix = &source[range.unwrap_or(end)..];
+    let next = suffix.trim_start();
+    (next.len() != suffix.len() && (next.starts_with('[') || (span && next.starts_with('('))))
+        || (span && range.is_some() && next.starts_with(':'))
 }
 
 fn table_reference_end(source: &str, start: usize) -> usize {
@@ -584,6 +632,11 @@ pub fn remove_sheet_references_noting_spans(
             continue;
         };
         let whole = || qualifier.span.start..reference_end(source, start);
+        if qualifier.has_ambiguous_target(source)
+            && narrowed_span(&qualifier, removed_name, order_before).is_some()
+        {
+            return None;
+        }
         if !qualifier.is_span() {
             if sheet_names_equal(&qualifier.first, removed_name) {
                 replacements.push((whole(), "#REF!".to_owned()));

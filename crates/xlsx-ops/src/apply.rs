@@ -793,6 +793,9 @@ fn apply_in_place_with_cell_restoration(
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            if old != *name {
+                crate::remap::ensure_sheet_edit_references_rewritable(wb, &old, None)?;
+            }
             let renamed_names = rename_defined_names(wb, &old, name)?;
             let renamed_hyperlinks = renamed_hyperlink_locations(wb, &old, name)?;
             let renamed_formats = crate::remap::renamed_conditional_formats(wb, &old, name)?;
@@ -2728,6 +2731,11 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .map(|sheet| sheet.name.clone())
         .collect::<Vec<_>>();
     let removed_name = wb.sheets[index].name.clone();
+    crate::remap::ensure_sheet_edit_references_rewritable(
+        wb,
+        &removed_name,
+        Some((index, &order_before)),
+    )?;
     let dropped_tables = wb
         .tables
         .iter()
