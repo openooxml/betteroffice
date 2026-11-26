@@ -251,7 +251,7 @@ impl Stroke<'_> {
 
     fn dash_crosses_vertex(&self, phase: f64) -> bool {
         let mut start = 0.0;
-        self.dash.chunks_exact(2).any(|pair| {
+        self.dash.as_chunks::<2>().0.iter().any(|pair| {
             let hit = phase > start && phase < start + pair[0];
             start += pair[0] + pair[1];
             hit
@@ -270,7 +270,7 @@ impl Stroke<'_> {
         let nearest = along.clamp(0.0, length);
         let offset = (phase + nearest.rem_euclid(period)).rem_euclid(period);
         let mut start = 0.0;
-        for pair in self.dash.chunks_exact(2) {
+        for pair in self.dash.as_chunks::<2>().0 {
             let relative = start - offset;
             for shift in [-period, 0.0, period] {
                 let first = nearest + (relative + shift);
