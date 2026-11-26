@@ -12042,15 +12042,20 @@ impl TablePaintPlan {
         }
     }
 
+    fn is_header_row(&self, block: &TableBlockIn, row_index: usize) -> bool {
+        row_index < self.semantic_header_count || block.rows[row_index].is_header == Some(true)
+    }
+
     fn places_cell_shapes(
         &self,
         frag: &TableFragmentIn,
+        block: &TableBlockIn,
         g: &GridCell,
         frame: &CellContentFrame,
         nested: bool,
     ) -> bool {
         !nested
-            && g.row_index >= self.semantic_header_count
+            && !self.is_header_row(block, g.row_index)
             && frag.cell_window(g).is_none()
             && frag.cell_row_cuts(g) == (false, false)
             && frame.rotation == 0.0
@@ -12185,8 +12190,7 @@ fn emit_table_fragment_inner(
         // Grid position stamped on every primitive inside this cell. A vertical
         // merge continuation keeps the anchor cell's row and column and flags
         // itself so consumers know it is a re-paint.
-        let is_header = p.g.row_index < semantic_header_count
-            || block.rows[p.g.row_index].is_header == Some(true);
+        let is_header = plan.is_header_row(block, p.g.row_index);
         let row_headers = semantic_header_count > 0 && block.first_column == Some(true);
         let is_row_header = row_headers
             && !is_header
@@ -12219,8 +12223,7 @@ fn emit_table_fragment_inner(
                 .then(|| {
                     grid.iter().find(|cell| {
                         cell.column_index == 0
-                            && cell.row_index >= semantic_header_count
-                            && block.rows[cell.row_index].is_header != Some(true)
+                            && !plan.is_header_row(block, cell.row_index)
                             && block.rows[cell.row_index].cells[cell.cell_index].merge_continuation
                                 != Some(true)
                             && p.g.row_index >= cell.row_index
@@ -12571,9 +12574,9 @@ fn emit_table_fragment_inner(
         } else {
             cell_clip_bottom
         };
-        let shape_ranges = if let Some((frame, cell_measure)) = content_frame {
+        if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
-            let place_cell_shapes = plan.places_cell_shapes(frag, g, &frame, nested);
+            let place_cell_shapes = plan.places_cell_shapes(frag, block, g, &frame, nested);
             emit_cell_content(
                 prims,
                 cell,
@@ -12586,19 +12589,14 @@ fn emit_table_fragment_inner(
                 &cell_ref,
                 &block_ref,
                 place_cell_shapes,
-            )
-        } else {
-            [0..0, 0..0]
-        };
+            );
+        }
         let clip_id = format!(
             "clip-{table_id}-r{}-c{}",
             block.source_row(p.g.row_index),
             p.g.column_index
         );
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
-            if shape_ranges.iter().any(|range| range.contains(&index)) {
-                continue;
-            }
             if windowed_lines
                 && index >= content_stamp_from
                 && let Primitive::Line(line) = primitive
@@ -13028,7 +13026,7 @@ fn emit_cell_content(
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
     place_cell_shapes: bool,
-) -> [std::ops::Range<usize>; 2] {
+) {
     let stamp_from = prims.len();
     let CellContentFrame {
         rotation,
@@ -13058,17 +13056,19 @@ fn emit_cell_content(
         for shape in shapes.iter().filter(|shape| shape.behind == behind) {
             emit_shape_fragment(prims, &shape.fragment, shape.block, ctx);
         }
-        for primitive in &mut prims[start..] {
-            if !selectable {
-                strip_doc_positions(primitive);
-            }
-            set_cell_ref(primitive, cell_ref);
-        }
-        start..prims.len()
+        postprocess_cell_primitives(
+            prims,
+            start,
+            cull_top_y,
+            cull_bottom_y,
+            windowed_lines,
+            selectable,
+            Some(cell_ref),
+        );
     };
 
     // Behind-document floats paint below cell content.
-    let behind_shapes = paint_shapes(prims, true);
+    paint_shapes(prims, true);
     emit_cell_floating_images(
         prims,
         cell,
@@ -13326,6 +13326,7 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    paint_shapes(prims, false);
     if windowed_lines {
         let mut index = stamp_from;
         while index < prims.len() {
@@ -13337,7 +13338,6 @@ fn emit_cell_content(
             }
         }
     }
-    let front_shapes = paint_shapes(prims, false);
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
     }
@@ -13348,7 +13348,6 @@ fn emit_cell_content(
         (cull_top_y, cull_bottom_y),
         rotated.then_some((physical, rotation)),
     );
-    [behind_shapes, front_shapes]
 }
 
 fn cell_shape_fragment(sb: &ShapeBlockIn, sm: &BoxExtentIn, selectable: bool) -> ShapeFragmentIn {
@@ -13868,7 +13867,7 @@ fn visit_table_fragment(
         let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
         let continuation =
             inherited.1 || !paint.selectable || (row_split && g.row_index == frag.row_start);
-        let shapes = if plan.places_cell_shapes(frag, g, &frame, !path.is_empty()) {
+        let shapes = if plan.places_cell_shapes(frag, block, g, &frame, !path.is_empty()) {
             cell_floating_shapes(cell, cell_measure, &frame, paint.selectable)
         } else {
             Vec::new()

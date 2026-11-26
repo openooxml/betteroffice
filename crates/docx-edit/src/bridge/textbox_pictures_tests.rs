@@ -913,7 +913,9 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
     let (table, measure) = cell_anchor_table(&layout);
     assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
     assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 4.0 + 16.0);
-    assert!(shape["clipGroup"].is_null());
+    let clip = &shape["clipGroup"]["clip"];
+    assert_eq!(clip["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+    assert_eq!(clip["w"].as_f64(), Some(360.0));
     let shape_index = primitives.iter().position(|item| item == shape).unwrap();
     assert!(shape_index > text_run_index(primitives, "Cell tail"));
     assert_eq!(
@@ -987,6 +989,9 @@ fn cell_text_box_offset_into_an_exact_height_row_is_in_the_page_map() {
     let (table, measure) = cell_anchor_table(&layout);
     assert_eq!(measure["rows"][0]["height"], 24.0);
     assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 14.0);
+    let clip = &shape["clipGroup"]["clip"];
+    assert_eq!(clip["y"].as_f64(), table["y"].as_f64());
+    assert_eq!(clip["h"].as_f64(), Some(24.0));
 
     let mut input = serde_json::from_value(layout).unwrap();
     let paginated = docx_layout::compute_layout_input(&mut input).unwrap();
@@ -1217,6 +1222,31 @@ fn repeating_header_text_box_keeps_the_cell_stack_origin_on_each_page() {
         let primitives = page["primitives"].as_array().unwrap();
         assert_cell_text_box_at_fragment_origin(primitives, fragment);
     }
+}
+
+#[test]
+fn header_after_a_body_row_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replacen(
+            "<w:tr>",
+            r#"<w:tr><w:trPr><w:trHeight w:val="300" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p/></w:tc></w:tr><w:tr><w:trPr><w:tblHeader/></w:trPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(shape["cell"]["row"].as_u64(), Some(1));
+    assert_eq!(shape["cell"]["isHeader"].as_bool(), Some(true));
+    assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+    assert_eq!(shape["y"].as_f64(), Some(table["y"].as_f64().unwrap() + 20.0));
 }
 
 #[test]
