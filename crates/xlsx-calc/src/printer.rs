@@ -38,11 +38,18 @@ fn binary_token(op: &BinaryOp) -> &'static str {
     }
 }
 
-/// quote a sheet name when it needs it (anything beyond ascii alnum + `_`).
 pub(crate) fn sheet_prefix(sheet: &Option<String>) -> String {
-    sheet
-        .as_deref()
-        .map_or_else(String::new, |name| format!("{}!", sheet_token(name)))
+    sheet.as_deref().map_or_else(String::new, |name| {
+        let has_r1c1_prefix = name.strip_prefix(['R', 'r']).is_some_and(|rest| {
+            rest.trim_start_matches(|ch: char| ch.is_ascii_digit())
+                .starts_with(['C', 'c'])
+        });
+        if has_r1c1_prefix {
+            format!("'{}'!", name.replace('\'', "''"))
+        } else {
+            format!("{}!", sheet_token(name))
+        }
+    })
 }
 
 impl Expr {
@@ -265,6 +272,7 @@ mod tests {
             parse_formula("'R1C1b'!B2").unwrap().to_formula(),
             "'R1C1b'!B2"
         );
+        round_trips("R1C1b!B2");
         for source in ["'a1'!B2", "'TRUE'!B2", "'false'!B2"] {
             assert_eq!(parse_formula(source).unwrap().to_formula(), source);
             round_trips(source);

@@ -2273,8 +2273,15 @@ mod tests {
                 num(7.0),
             );
         }
-        for source in ["R2C3x!A1", "RCPT!A1:B5", "RC_Data!Total", "'RC'!A1"] {
-            assert_eq!(parse_formula(source).unwrap().to_formula(), source);
+        for (source, printed) in [
+            ("R2C3x!A1", "'R2C3x'!A1"),
+            ("RCPT!A1:B5", "'RCPT'!A1:B5"),
+            ("RC_Data!Total", "'RC_Data'!Total"),
+            ("'RC'!A1", "'RC'!A1"),
+        ] {
+            let ast = parse_formula(source).unwrap();
+            assert_eq!(ast.to_formula(), printed);
+            assert_eq!(parse_formula(printed).unwrap(), ast);
         }
         assert!(crate::parser::is_formula_source("[1]RCost!A1"));
         assert!(parse_formula("_xlpm.c:RCost!A2").is_ok());

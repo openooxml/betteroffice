@@ -1629,6 +1629,21 @@ mod tests {
     }
 
     #[test]
+    fn lexes_unquoted_sheet_names_with_r1c1_prefixes() {
+        for name in ["R1C1b", "RCost", "R2C3x"] {
+            let source = format!("{name}!B2");
+            assert!(
+                matches!(
+                    &kinds(&source)[..],
+                    [TokKind::Ref { sheet: Some(sheet), cell }]
+                        if sheet == name && *cell == CellRef::new(1, 1)
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn lexes_sheet_qualified_refs() {
         match &kinds("Sheet1!A1")[0] {
             TokKind::Ref {
