@@ -1,6 +1,7 @@
 import type { BundledFontFace, BundledFontLoader, BundledFontScript, ProgressiveFontFace, SliceLocation } from '@betteroffice/fonts';
 import { importFonts, importProgressiveFonts } from '../../../../shared/office-session/fontModules';
 import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import type { DefaultFontPaintFace } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnDiagnostic, type FontCdnReporter } from '../../../../shared/fontCdnDiagnostics';
@@ -10,7 +11,7 @@ import { decodeFontFace } from '../wasm/loader';
 import { sessionFontDecoder } from './sessionFontDecoder';
 import type { createSlicedFontFaces } from './commandSlicedFonts';
 
-type SessionDefaultFontFace = DefaultFontFace & Pick<PngFontFace, 'face'>;
+type SessionDefaultFontFace = DefaultFontPaintFace & Pick<PngFontFace, 'face'>;
 
 type FontRequest =
   | { kind: 'primary'; family: string; bold: boolean; italic: boolean; preferArabic?: boolean }
@@ -273,6 +274,7 @@ export function createCommandDefaultFonts(
         let light: (() => Promise<ArrayBuffer>) | undefined;
         let preferred: SessionDefaultFontFace | undefined;
         let lastResort: BundledFontFace | undefined;
+        let usingLastResort = false;
         if (face.kind === 'coverage') {
           const script = face.script as BundledFontScript;
           const family: [string?] = face.requestedFamily === undefined ? [] : [face.requestedFamily];
@@ -306,7 +308,8 @@ export function createCommandDefaultFonts(
               }
             }
           }
-          load = named ?? light ?? (preferred ? undefined : source.resolveLastResort(face.family, bold, italic, 'powerpoint'));
+          usingLastResort = !named && !light && !preferred;
+          load = named ?? light ?? (usingLastResort ? source.resolveLastResort(face.family, bold, italic, 'powerpoint') : undefined);
         }
         if (!load && !preferred) return undefined;
         if (load?.slices && sliced?.supported()) {
@@ -343,6 +346,10 @@ export function createCommandDefaultFonts(
           return undefined;
         }
         const substitute = session.substitutes.get(bytes);
+        const family = loaded.family.trim().toLowerCase();
+        if (face.kind === 'primary' && ARABIC_FAMILIES.has(family) && (usingLastResort || substitute !== undefined)) {
+          loaded.paintFamily = `bo-pptx-editor-${family}`;
+        }
         const substituteFailure = substitute === undefined ? undefined : await recordFailure(substitute);
         if (disposed || suppliedFamily(face)) return undefined;
         const previous = registered.get(faceKey(loaded, loaded.kind));
@@ -352,7 +359,7 @@ export function createCommandDefaultFonts(
           if (previous) return undefined;
           faceStatus.set(loaded, 'substitute');
         }
-        const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic,
+        const identity = JSON.stringify([family, loaded.bold, loaded.italic, loaded.paintFamily,
           Boolean(preferred), substitute !== undefined]);
         let installation = installations.get(identity);
         if (!installation) {
