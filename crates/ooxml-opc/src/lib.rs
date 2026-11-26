@@ -477,7 +477,8 @@ mod tests {
         for _ in 0..count {
             assert_eq!(&zipped[pos..pos + 4], b"PK\x01\x02");
             hosts.push(zipped[pos + 5]);
-            let field = |at: usize| u16::from_le_bytes([zipped[pos + at], zipped[pos + at + 1]]) as usize;
+            let field =
+                |at: usize| u16::from_le_bytes([zipped[pos + at], zipped[pos + at + 1]]) as usize;
             pos += 46 + field(28) + field(30) + field(32);
         }
         hosts
