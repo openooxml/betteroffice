@@ -67,19 +67,57 @@ function packageBytes(body: string): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function outerEndParagraph(xml: string): number | 'none' {
-  const fields: boolean[] = [];
+function instructionText(text: string): string {
+  const entities: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  return text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[\da-fA-F]+);/g, (entity, name: string) => {
+    if (!name.startsWith('#')) return entities[name] ?? entity;
+    const code = name.startsWith('#x') ? Number.parseInt(name.slice(2), 16) : Number(name.slice(1));
+    return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+  }).trim();
+}
+
+function fieldDiagnostics(xml: string) {
+  const fields: { begin: number; end?: number; outer?: boolean }[] = [];
+  const open: typeof fields = [];
+  const instrs: string[] = [];
+  let endPara: number | 'none' = 'none';
   for (const [index, paragraph] of xml.split('</w:p>').entries()) {
     for (const [, tag, attributes = '', text = ''] of paragraph.matchAll(/<w:(fldChar|instrText)\b([^>]*)>([^<]*)/g)) {
       if (tag === 'fldChar') {
-        if (attributes.includes('w:fldCharType="begin"')) fields.push(false);
-        else if (attributes.includes('w:fldCharType="end"') && fields.pop()) return index;
-      } else if (fields.length > 0 && /^(?:QUOTE|TOC)\b/.test(text.trimStart())) {
-        fields[fields.length - 1] = true;
+        if (attributes.includes('w:fldCharType="begin"')) {
+          const field = { begin: index };
+          fields.push(field);
+          open.push(field);
+        } else if (attributes.includes('w:fldCharType="end"')) {
+          const field = open.pop();
+          if (field) {
+            field.end = index;
+            if (field.outer && endPara === 'none') endPara = index;
+          }
+        }
+      } else {
+        const code = attributes.endsWith('/') ? '' : instructionText(text);
+        const field = open.at(-1);
+        if (field && /^(?:QUOTE|TOC)(?:\s|$)/.test(code)) field.outer = true;
+        instrs.push(code);
       }
     }
   }
-  return 'none';
+  return {
+    endPara,
+    instrs: instrs.join(';'),
+    fields: fields.map(({ begin, end }) => `b${begin}-e${end ?? '?'}`).join(','),
+  };
+}
+
+function errorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const prefix = message.split(/<|&lt;/, 1)[0] ?? '';
+  const clean = prefix.replace(/\s+/g, ' ').trim().replace(
+    /(?:SPANSTART|SPANEND|AFTERSPAN|ENTRYONE|ENTRYTWO|ENTRYTHREE|PAGEONE|PAGETWO|PAGETHREE|BODYNEXT|INSERTED)(?: edited)?/g,
+    '[redacted]',
+  );
+  return Array.from(clean).slice(0, 120).join('');
 }
 
 function hasMarker(value: unknown, marker: string): boolean {
@@ -121,6 +159,9 @@ test('measure paragraph-spanning field ends after a session save', async () => {
       let nested = 'nnn';
       let nestedModel = 'nnn';
       let routeNote = 'n/a';
+      let instrs = '';
+      let fields = '';
+      let error = '';
       try {
         const source = await packageBytes(body(scenario));
         const session = await createYrsSession();
@@ -128,8 +169,17 @@ test('measure paragraph-spanning field ends after a session save', async () => {
           session.seedFromDocx(source);
           if (marker !== null) {
             const match = session.searchText(marker, { caseSensitive: true }).find(({ story }) => story === 'body');
-            if (!match) throw new Error(`Missing edit marker ${marker}`);
-            session.insertText({ story: match.story, paraId: match.paraId, offset: match.end }, ' edited');
+            if (match) {
+              session.insertText({ story: match.story, paraId: match.paraId, offset: match.end }, ' edited');
+            } else if (scenario === 'S1' && edit === 'first') {
+              const [paragraph] = session.paragraphSpans('body');
+              const [field] = session.storySegments('body');
+              if (paragraph?.length !== 1 || field?.kind !== 'embed' || field.embedKind !== 'field' ||
+                  field.payload.displayText !== marker) throw new Error('Missing cached field result at the edit position');
+              session.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.length }, ' edited');
+            } else {
+              throw new Error('Missing searchable edit marker');
+            }
           } else if (edit === 'insert_inside' || edit === 'delete_middle') {
             const story = 'body';
             const paragraph = session.paragraphs(story)[scenario === 'S1' ? 0 : 1];
@@ -151,7 +201,7 @@ test('measure paragraph-spanning field ends after a session save', async () => {
           const xml = await part.async('string');
           begins = (xml.match(/w:fldCharType="begin"/g) ?? []).length;
           ends = (xml.match(/w:fldCharType="end"/g) ?? []).length;
-          endPara = outerEndParagraph(xml);
+          ({ endPara, instrs, fields } = fieldDiagnostics(xml));
           const text = Array.from(xml.matchAll(/<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g), (match) => match[1]).join('');
           nested = nestedFlags((target) => text.includes(target));
           const deletedMiddle = edit === 'delete_middle';
@@ -170,11 +220,13 @@ test('measure paragraph-spanning field ends after a session save', async () => {
         } finally {
           session.destroy();
         }
-      } catch {
+      } catch (caught) {
         reopen = 'err';
+        error = errorMessage(caught);
       }
       console.log(`SPAN session ${scenario} ${edit} | begins=${begins} ends=${ends} | end_para=${endPara} | ` +
-        `text_ok=${textOk ? 'yes' : 'no'} | reopen=${reopen} | nested=${nested} | nested_model=${nestedModel} | route_note=${routeNote}`);
+        `text_ok=${textOk ? 'yes' : 'no'} | reopen=${reopen} | nested=${nested} | nested_model=${nestedModel} | ` +
+        `route_note=${routeNote} | instrs=${instrs} | fields=${fields}${reopen === 'err' ? ` | error=${error}` : ''}`);
     }
   }
 }, 30_000);

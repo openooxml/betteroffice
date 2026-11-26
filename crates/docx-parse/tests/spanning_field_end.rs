@@ -234,27 +234,98 @@ fn save(source: &[u8], edit: Edit) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(write_docx_s13(request, source)?)
 }
 
-fn outer_end_paragraph(xml: &str) -> Option<usize> {
+struct FieldSpan {
+    begin: usize,
+    end: Option<usize>,
+    outer: bool,
+}
+
+fn field_diagnostics(xml: &str) -> (Option<usize>, String, String) {
     let mut fields = Vec::new();
+    let mut open = Vec::new();
+    let mut instrs = Vec::new();
+    let mut end_para = None;
     for (index, paragraph) in xml.split("</w:p>").enumerate() {
         for tag in paragraph.split("<w:").skip(1) {
-            if tag.starts_with("fldChar ") {
-                if tag.contains(BEGIN) {
-                    fields.push(false);
-                } else if tag.contains(END) && fields.pop() == Some(true) {
-                    return Some(index);
+            let Some((opening, content)) = tag.split_once('>') else {
+                continue;
+            };
+            let name = opening
+                .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
+                .next();
+            match name {
+                Some("fldChar") if opening.contains(BEGIN) => {
+                    open.push(fields.len());
+                    fields.push(FieldSpan {
+                        begin: index,
+                        end: None,
+                        outer: false,
+                    });
                 }
-            } else if tag.starts_with("instrText")
-                && let Some((_, text)) = tag.split_once('>')
-                && let Some((code, _)) = text.split_once('<')
-                && matches!(code.split_whitespace().next(), Some("QUOTE" | "TOC"))
-                && let Some(field) = fields.last_mut()
-            {
-                *field = true;
+                Some("fldChar") if opening.contains(END) => {
+                    if let Some(field) = open.pop() {
+                        fields[field].end = Some(index);
+                        if fields[field].outer {
+                            end_para.get_or_insert(index);
+                        }
+                    }
+                }
+                Some("instrText") => {
+                    let raw = if opening.ends_with('/') {
+                        ""
+                    } else {
+                        content.split('<').next().unwrap_or_default()
+                    };
+                    let code = quick_xml::escape::unescape(raw).unwrap_or_else(|_| raw.into());
+                    if matches!(code.split_whitespace().next(), Some("QUOTE" | "TOC"))
+                        && let Some(&field) = open.last()
+                    {
+                        fields[field].outer = true;
+                    }
+                    instrs.push(code.trim().to_owned());
+                }
+                _ => {}
             }
         }
     }
-    None
+    let fields = fields
+        .iter()
+        .map(|field| {
+            let end = field
+                .end
+                .map_or_else(|| "?".to_owned(), |index| index.to_string());
+            format!("b{}-e{end}", field.begin)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    (end_para, instrs.join(";"), fields)
+}
+
+fn error_message(error: &dyn Error) -> String {
+    let message = error.to_string();
+    let mut message = message.split('<').next().unwrap_or_default();
+    if let Some((prefix, _)) = message.split_once("&lt;") {
+        message = prefix;
+    }
+    let mut message = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    for marker in [
+        BODY_NEXT,
+        INSERTED,
+        "SPANSTART",
+        "SPANEND",
+        "AFTERSPAN",
+        "ENTRYONE",
+        ENTRY_TWO,
+        "ENTRYTHREE",
+    ]
+    .into_iter()
+    .chain(PAGE_MARKERS)
+    {
+        message = message
+            .replace(&format!("{marker} edited"), "[redacted]")
+            .replace(marker, "[redacted]");
+    }
+    message.chars().take(120).collect()
 }
 
 fn visible(xml: &str) -> String {
@@ -357,6 +428,9 @@ struct Measurement {
     reopen: &'static str,
     nested: String,
     nested_model: String,
+    instrs: String,
+    fields: String,
+    error: Option<String>,
 }
 
 fn edits(scenario: &str) -> &'static [(&'static str, Edit)] {
@@ -389,15 +463,22 @@ fn measure(scenario: &str, edit: Edit) -> Result<Measurement, Box<dyn Error>> {
             }
         }) && (scenario == "S1" || nested == expected_nested)
         && (!deleted_middle || !text.contains(ENTRY_TWO));
-    let (reopen, nested_model) = reopen(&saved).unwrap_or_else(|_| ("err", "nnn".to_owned()));
+    let (end_para, instrs, fields) = field_diagnostics(&xml);
+    let (reopen, nested_model, error) = match reopen(&saved) {
+        Ok((status, nested)) => (status, nested, None),
+        Err(error) => ("err", "nnn".to_owned(), Some(error_message(error.as_ref()))),
+    };
     Ok(Measurement {
         begins: xml.matches(BEGIN).count(),
         ends: xml.matches(END).count(),
-        end_para: outer_end_paragraph(&xml),
+        end_para,
         text_ok,
         reopen,
         nested,
         nested_model,
+        instrs,
+        fields,
+        error,
     })
 }
 
@@ -406,7 +487,7 @@ fn measure(scenario: &str, edit: Edit) -> Result<Measurement, Box<dyn Error>> {
 fn spanning_field_end_probe() {
     for scenario in ["S1", "TA", "TB"] {
         for &(name, edit) in edits(scenario) {
-            let measured = measure(scenario, edit).unwrap_or_else(|_| Measurement {
+            let measured = measure(scenario, edit).unwrap_or_else(|error| Measurement {
                 begins: 0,
                 ends: 0,
                 end_para: None,
@@ -414,18 +495,29 @@ fn spanning_field_end_probe() {
                 reopen: "err",
                 nested: "nnn".to_owned(),
                 nested_model: "nnn".to_owned(),
+                instrs: String::new(),
+                fields: String::new(),
+                error: Some(error_message(error.as_ref())),
             });
             let end_para = measured
                 .end_para
                 .map_or_else(|| "none".to_owned(), |index| index.to_string());
             let text_ok = if measured.text_ok { "yes" } else { "no" };
+            let error = measured
+                .error
+                .as_deref()
+                .map_or_else(String::new, |message| format!(" | error={message}"));
             println!(
-                "SPAN facade {scenario} {name} | begins={} ends={} | end_para={end_para} | text_ok={text_ok} | reopen={} | nested={} | nested_model={} | route_note=n/a",
+                "SPAN facade {scenario} {name} | begins={} ends={} | end_para={end_para} | \
+                 text_ok={text_ok} | reopen={} | nested={} | nested_model={} | route_note=n/a | \
+                 instrs={} | fields={}{error}",
                 measured.begins,
                 measured.ends,
                 measured.reopen,
                 measured.nested,
-                measured.nested_model
+                measured.nested_model,
+                measured.instrs,
+                measured.fields
             );
         }
     }
