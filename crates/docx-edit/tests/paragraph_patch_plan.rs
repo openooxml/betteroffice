@@ -4,9 +4,9 @@ use std::sync::Arc;
 use docx_edit::session::{EditSessionCore, Host};
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
-    FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
-    Patch, Position, StoryRange, StrikePatch, StyleResolver, UnderlinePatch, UndoSession,
-    seed_from_docx,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef,
+    ParagraphTarget, Patch, Position, StoryRange, StrikePatch, StyleResolver, UnderlinePatch,
+    UndoSession, seed_from_docx,
 };
 use docx_parse::paragraph_patch::{
     Attrs, DonorV1, ParagraphPatchV1, PatchErrorCode, SlotV1, UnitV1, result_sha256, unit_sha256,
@@ -640,7 +640,10 @@ fn save_font_pick(bytes: &[u8], ordinal: usize, from: u32, to: u32, delta: &str)
     session
         .format_range("body", id, from, id, to, delta, None, None)
         .unwrap();
+    save_font_edit(&session, bytes, ordinal)
+}
 
+fn save_font_edit(session: &EditSessionCore, bytes: &[u8], ordinal: usize) -> Vec<u8> {
     let source = docx_parse::parse_docx_s9_wire(
         bytes,
         docx_parse::S9ParseOptions {
@@ -800,11 +803,121 @@ fn latin_only_font_delta_preserves_the_east_asian_run_font() {
 
 #[test]
 fn latin_font_pick_keeps_the_source_font_hint() {
-    let bytes = package(&font_run("café", "Calibri", r#" w:hint="eastAsia""#));
-    let saved = save_font_pick(&bytes, 0, 0, 4, FONT_PICK);
+    let bytes = package(&font_run("abc", "Calibri", r#" w:hint="eastAsia""#));
+    let saved = save_font_pick(&bytes, 0, 0, 3, FONT_PICK);
     let runs = saved_run_fonts(&saved, 0);
-    assert_font_slots(&runs, &[("café", "Microsoft YaHei", "SimSun")]);
+    assert_font_slots(&runs, &[("abc", "Microsoft YaHei", "SimSun")]);
     assert_eq!(runs[0].1.attribute(Some("w"), "hint"), Some("eastAsia"));
+}
+
+#[test]
+fn batch_clear_all_then_font_pick_resets_direct_font_slots() {
+    for (text, east_asia) in [("abc", None), ("中文", Some("Georgia"))] {
+        let bytes = package(&format!(
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:eastAsia="SimSun" w:eastAsiaTheme="minorEastAsia" w:cs="Arial"/></w:rPr><w:t>{text}</w:t></w:r>"#
+        ));
+        let session = font_session(&bytes);
+        let request = json!({
+            "expectVersion": session.version(),
+            "steps": [{
+                "op": "formatText",
+                "target": {"kind": "paragraph", "story": "body", "paraId": "00000001"},
+                "clear": "all",
+                "set": {"fontFamily": "Georgia"}
+            }]
+        });
+        let result: serde_json::Value =
+            serde_json::from_str(&session.apply_edits_json(&request.to_string()).unwrap()).unwrap();
+        assert_eq!(result["applied"], true, "{result}");
+
+        let runs = saved_run_fonts(&save_font_edit(&session, &bytes, 0), 0);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, text);
+        let fonts = &runs[0].1;
+        for (slot, expected) in [
+            ("ascii", Some("Georgia")),
+            ("hAnsi", Some("Georgia")),
+            ("eastAsia", east_asia),
+            ("eastAsiaTheme", None),
+            ("cs", None),
+        ] {
+            assert_eq!(fonts.attribute(Some("w"), slot), expected, "{text} {slot}");
+        }
+    }
+}
+
+#[test]
+fn font_pick_uses_live_run_font_slot_flags() {
+    for (text, complex_script, expected) in [
+        ("café", false, vec![("caf", "SimSun"), ("é", "Georgia")]),
+        (
+            "“Hello”",
+            false,
+            vec![("“", "Georgia"), ("Hello", "SimSun"), ("”", "Georgia")],
+        ),
+        ("中𠮷", true, vec![("中𠮷", "SimSun")]),
+    ] {
+        let doc = open(&font_run(text, "Calibri", ""));
+        let len = text.encode_utf16().count() as u32;
+        let fonts = Any::Map(Arc::new(std::collections::HashMap::from([
+            ("ascii".to_owned(), Any::from("Calibri")),
+            ("hAnsi".to_owned(), Any::from("Calibri")),
+            ("eastAsia".to_owned(), Any::from("SimSun")),
+            ("hint".to_owned(), Any::from("eastAsia")),
+        ])));
+        format(
+            &doc,
+            0,
+            len,
+            InlineFormatDelta {
+                other: BTreeMap::from([
+                    ("fontFamily".to_owned(), Some(fonts)),
+                    (
+                        "complexScript".to_owned(),
+                        complex_script.then_some(Any::Bool(true)),
+                    ),
+                ]),
+                ..Default::default()
+            },
+        );
+        format(
+            &doc,
+            0,
+            len,
+            InlineFormatDelta {
+                font_family: Patch::Set(FontFamilyPatch {
+                    ascii: "Georgia".to_owned(),
+                    h_ansi: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let segments = doc.story_segments("body").unwrap();
+        assert_eq!(segments.len(), expected.len() + 1);
+        for (segment, (text, east_asia)) in segments.iter().zip(expected) {
+            assert!(matches!(&segment.content, docx_edit::SegmentContent::Text(s) if s == text));
+            let Some(Any::Map(fonts)) = segment.attributes.get("fontFamily") else {
+                panic!("fontFamily");
+            };
+            assert_eq!(fonts["ascii"], Any::from("Georgia"));
+            assert_eq!(fonts["eastAsia"], Any::from(east_asia));
+            assert_eq!(fonts["hint"], Any::from("eastAsia"));
+        }
+    }
+}
+
+#[test]
+fn font_pick_classifies_a_selected_combining_mark_with_its_base() {
+    let bytes = package(&font_run("中\u{301}a", "Calibri", ""));
+    let saved = save_font_pick(&bytes, 0, 1, 2, FONT_PICK);
+    assert_font_slots(
+        &saved_run_fonts(&saved, 0),
+        &[
+            ("中", "Calibri", "SimSun"),
+            ("\u{301}", "Microsoft YaHei", "Microsoft YaHei"),
+            ("a", "Calibri", "SimSun"),
+        ],
+    );
 }
 
 #[test]
