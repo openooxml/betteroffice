@@ -22024,7 +22024,10 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             let properties = request["regions"]["sections"][0]["properties"]
                 .as_object_mut()
                 .expect("first section properties");
-            properties.insert("docGrid".to_owned(), json!({"type": "lines", "linePitch": 480}));
+            properties.insert(
+                "docGrid".to_owned(),
+                json!({"type": "lines", "linePitch": 480}),
+            );
             let request = request.to_string();
             let (measured, full) = certified_float_layout(&engine, &request, trigger);
             assert_eq!(full, 0, "{trigger:?}");
