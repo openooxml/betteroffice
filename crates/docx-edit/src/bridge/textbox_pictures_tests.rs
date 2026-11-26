@@ -858,6 +858,16 @@ fn cell_anchor_package(drawing: &str, text: &str) -> Vec<u8> {
     )
 }
 
+fn cell_anchor_after_text(drawing: &str) -> Vec<u8> {
+    rewrite_document(&cell_anchor_package(drawing, "Anchor text"), |source| {
+        source.replacen(
+            "<w:p><w:pPr>",
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/></w:pPr><w:r><w:t>Cell lead</w:t></w:r></w:p><w:p><w:pPr>"#,
+            1,
+        )
+    })
+}
+
 fn painted_cell_anchor(primitives: &[Value]) -> &Value {
     primitives
         .iter()
@@ -865,13 +875,17 @@ fn painted_cell_anchor(primitives: &[Value]) -> &Value {
         .unwrap()
 }
 
-fn cell_anchor_table(layout: &Value) -> (&Value, &Value) {
-    let fragment = layout["layout"]["pages"][0]["fragments"]
+fn cell_anchor_fragment(page: &Value) -> &Value {
+    page["fragments"]
         .as_array()
         .unwrap()
         .iter()
         .find(|item| item["kind"] == "table")
-        .unwrap();
+        .unwrap()
+}
+
+fn cell_anchor_table(layout: &Value) -> (&Value, &Value) {
+    let fragment = cell_anchor_fragment(&layout["layout"]["pages"][0]);
     let table = layout["measured"]
         .as_array()
         .unwrap()
@@ -903,8 +917,8 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
     let shape_index = primitives.iter().position(|item| item == shape).unwrap();
     assert!(shape_index > text_run_index(primitives, "Cell tail"));
     assert_eq!(
-        measure["rows"][0]["height"],
-        cell_anchor_table(&control_layout).1["rows"][0]["height"]
+        measure["rows"][0]["height"].as_f64(),
+        cell_anchor_table(&control_layout).1["rows"][0]["height"].as_f64()
     );
     for label in ["Anchor text", "Cell tail"] {
         assert_eq!(
@@ -929,6 +943,66 @@ fn cell_text_box_centers_across_the_content_width() {
     assert_eq!(
         shape["x"],
         table["x"].as_f64().unwrap() + 160.0 + (360.0 - 64.0) / 2.0
+    );
+}
+
+#[test]
+fn behind_document_cell_text_box_paints_before_preceding_cell_text() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>-285750</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    )
+    .replace(r#"behindDoc="0""#, r#"behindDoc="1""#);
+    let (display, layout) = display_with_layout(&cell_anchor_after_text(&drawing), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index < text_run_index(primitives, "Cell lead"));
+}
+
+#[test]
+fn cell_text_box_offset_into_an_exact_height_row_is_in_the_page_map() {
+    use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
+    use docx_layout::types::LayoutBlock;
+
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:posOffset>-285750</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_after_text(&drawing), |source| {
+        source.replacen(
+            "<w:tr>",
+            r#"<w:tr><w:trPr><w:trHeight w:val="360" w:hRule="exact"/></w:trPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, measure) = cell_anchor_table(&layout);
+    assert_eq!(measure["rows"][0]["height"], 24.0);
+    assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 14.0);
+
+    let mut input = serde_json::from_value(layout).unwrap();
+    let paginated = docx_layout::compute_layout_input(&mut input).unwrap();
+    let placements = place_layout(&PlacementInput {
+        layout: &paginated,
+        measured: &input.measured,
+        headers_footers: None,
+        bands_composed: false,
+        notes: &[],
+    });
+    assert!(
+        placements.pages[0]
+            .regions
+            .iter()
+            .flat_map(|region| &region.items)
+            .any(|item| matches!(item, PlacedItem::Block(LayoutBlock::Shape(_))))
     );
 }
 
@@ -1026,7 +1100,7 @@ fn nested_table_text_box_keeps_the_cell_stack_origin() {
         shape["x"].as_f64(),
         Some(start_x(text_run(primitives, "Nested anchor")))
     );
-    assert_eq!(shape["y"], cell_anchor_table(&layout).0["y"]);
+    assert_eq!(shape["y"].as_f64(), cell_anchor_table(&layout).0["y"].as_f64());
 }
 
 #[test]
@@ -1062,7 +1136,7 @@ fn cell_text_box_before_lowered_inline_box_keeps_the_cell_stack_origin() {
         shape["x"].as_f64(),
         Some(table["x"].as_f64().unwrap() + 160.0)
     );
-    assert_eq!(shape["y"], table["y"]);
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
 }
 
 #[test]
@@ -1107,13 +1181,42 @@ fn assert_cell_text_box_at_stack_origin(layout: &Value) {
     let display = docx_layout::build_display_list_value(&layout.to_string()).unwrap();
     let display = serde_json::to_value(display).unwrap();
     let primitives = display["pages"][0]["primitives"].as_array().unwrap();
-    let shape = painted_cell_anchor(primitives);
     let (table, _) = cell_anchor_table(layout);
+    assert_cell_text_box_at_fragment_origin(primitives, table);
+}
+
+fn assert_cell_text_box_at_fragment_origin(primitives: &[Value], table: &Value) {
+    let shape = painted_cell_anchor(primitives);
     assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
     assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
     assert!(!shape["clipGroup"].is_null());
     let shape_index = primitives.iter().position(|item| item == shape).unwrap();
     assert!(shape_index < text_run_index(primitives, "Anchor text"));
+}
+
+#[test]
+fn repeating_header_text_box_keeps_the_cell_stack_origin_on_each_page() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        let body = r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="6000" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Table body</w:t></w:r></w:p></w:tc></w:tr>"#.repeat(3);
+        source
+            .replacen("<w:tr>", "<w:tr><w:trPr><w:tblHeader/></w:trPr>", 1)
+            .replacen("</w:tbl>", &format!("{body}</w:tbl>"), 1)
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let pages = display["pages"].as_array().unwrap();
+    assert!(pages.len() > 1);
+    for (index, page) in pages.iter().enumerate() {
+        let fragment = cell_anchor_fragment(&layout["layout"]["pages"][index]);
+        assert_eq!(fragment["headerRowCount"].as_f64(), (index > 0).then_some(1.0));
+        let primitives = page["primitives"].as_array().unwrap();
+        assert_cell_text_box_at_fragment_origin(primitives, fragment);
+    }
 }
 
 #[test]

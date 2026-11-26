@@ -12041,6 +12041,20 @@ impl TablePaintPlan {
             (cy, self.cell_clip_top(g), self.clip_bottom_y)
         }
     }
+
+    fn places_cell_shapes(
+        &self,
+        frag: &TableFragmentIn,
+        g: &GridCell,
+        frame: &CellContentFrame,
+        nested: bool,
+    ) -> bool {
+        !nested
+            && g.row_index >= self.semantic_header_count
+            && frag.cell_window(g).is_none()
+            && frag.cell_row_cuts(g) == (false, false)
+            && frame.rotation == 0.0
+    }
 }
 
 /// Whether a grid cell is on the table's outer leading edge, whose border insets content.
@@ -12559,10 +12573,7 @@ fn emit_table_fragment_inner(
         };
         let shape_ranges = if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
-            let place_cell_shapes = !nested
-                && !windowed_lines
-                && frag.cell_row_cuts(g) == (false, false)
-                && frame.rotation == 0.0;
+            let place_cell_shapes = plan.places_cell_shapes(frag, g, &frame, nested);
             emit_cell_content(
                 prims,
                 cell,
@@ -13857,6 +13868,12 @@ fn visit_table_fragment(
         let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
         let continuation =
             inherited.1 || !paint.selectable || (row_split && g.row_index == frag.row_start);
+        let shapes = if plan.places_cell_shapes(frag, g, &frame, !path.is_empty()) {
+            cell_floating_shapes(cell, cell_measure, &frame, paint.selectable)
+        } else {
+            Vec::new()
+        };
+        let mut shapes = shapes.iter().peekable();
         for (index, (cell_block, cell_block_measure)) in
             cell.blocks.iter().zip(&cell_measure.blocks).enumerate()
         {
@@ -13925,6 +13942,9 @@ fn visit_table_fragment(
                         MeasureIn::Shape(extent) | MeasureIn::Chart(extent) => extent.height,
                         MeasureIn::Unsupported => 0.0,
                     };
+                    let (y, height) = shapes
+                        .next_if(|shape| shape.index == index)
+                        .map_or((y, height), |shape| (shape.fragment.y, shape.fragment.height));
                     shown(y, height).map(|_| ShownPart::Whole)
                 }
             };
