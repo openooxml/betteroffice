@@ -2688,8 +2688,11 @@ mod tests {
         }
         put_formula(&mut wb, s, "A5", r#"INDIRECT("'[1]Data'!A1")"#);
         rebuild_and_recalc_all(&mut wb, None);
-        for address in ["A1", "A2", "A3", "A4", "A6"] {
+        for address in ["A1", "A2"] {
             assert_eq!(value(&wb, s, address), num(42.0), "{address}");
+        }
+        for address in ["A3", "A4", "A6"] {
+            assert_eq!(value(&wb, s, address), num(0.0), "{address}");
         }
         assert_eq!(value(&wb, s, "A5"), CellValue::Empty);
     }

@@ -138,6 +138,37 @@ fn check_indirect_recalculation(formula: &str, expected: CellValue, has_gap: boo
 }
 
 #[test]
+fn indirect_release_a1_external_names_and_unquoted_references_have_handleable_gaps() {
+    for reference in [
+        "'[1]Data'!Rate",
+        "'[1]Data'!XFE1",
+        "[1]!Rate",
+        "[1]Data!A1",
+        "[1]Data:Other!A1",
+    ] {
+        check_indirect_recalculation(&format!(r#"INDIRECT("{reference}")"#), n(42.0), true);
+        check_indirect_recalculation(
+            &format!(r#"IFERROR(INDIRECT("{reference}"),0)"#),
+            n(0.0),
+            false,
+        );
+    }
+}
+
+#[test]
+fn indirect_release_r1c1_unquoted_external_qualifiers_return_ref_without_a_gap() {
+    for reference in ["[1]!R1C1", "[1]Data!R1C1", "[1]Data:Other!R1C1"] {
+        check_indirect_recalculation(
+            &format!(r#"INDIRECT("{reference}",FALSE)"#),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            false,
+        );
+    }
+}
+
+#[test]
 fn indirect_release_nested_this_row_range_keeps_cache() {
     check_indirect_recalculation(
         r#"INDIRECT("Table1[@[Unit Price]]:Table1[@[Qty]]")"#,
