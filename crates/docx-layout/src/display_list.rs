@@ -19643,4 +19643,47 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn grouped_connector_serializes_without_an_owned_doc_start() {
+        let input = serde_json::json!({
+            "measured": [{"block": {"kind": "shape", "id": "group", "shapeType": "rect",
+                "width": 80, "height": 30, "children": [{"id": "group:child:0",
+                    "shapeType": "bentConnector2", "x": 15, "y": 15, "width": 70, "height": 20,
+                    "geometryPath": [{"type": "move", "x": 0, "y": 0},
+                        {"type": "line", "x": 1, "y": 0}],
+                    "stroke": {"color": "#000000", "width": 1}}]},
+                "measure": {"kind": "shape", "width": 80, "height": 30}}],
+            "options": {}, "layout": {"pages": [{"size": {"w": 800, "h": 1000},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [{"kind": "shape", "blockId": "group", "x": 100, "y": 35,
+                    "width": 80, "height": 30, "docStart": 10, "docEnd": 11}]}]}
+        });
+        let mut list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .unwrap();
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let child = page["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["blockKey"] == "group:child:0")
+            .unwrap();
+        assert!(child.get("docStart").is_none());
+        assert_eq!(crate::hit::hit_test(&list, 0, 150.0, 50.0), Some(10));
+
+        list.pages[0].header = Some(HfRegion {
+            r_id: "rIdHeader".to_owned(),
+            kind: HfKind::Header,
+            y: px(0.0),
+            height: px(80.0),
+            primitives: Vec::new(),
+        });
+        let hit = crate::hit::hit_test_regions(&list, 0, 150.0, 50.0).unwrap();
+        assert_eq!(hit.region, crate::hit::HitRegion::Body);
+        assert_eq!(hit.target, crate::hit::HoverTarget::Image);
+        assert_eq!(hit.pos, Some(10));
+    }
 }

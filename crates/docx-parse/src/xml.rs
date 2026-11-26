@@ -2981,4 +2981,20 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn budget_clones_share_preview_connector_captures() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.preview_connectors = Some(Default::default());
+        let shape = crate::shape::Shape::empty("bentConnector2".to_owned(), Default::default());
+        let guides = || vec![(Vec::new(), "bentConnector2".to_owned(), Default::default())];
+        budget.connector_story("word/header1.xml", None);
+        budget.record_connector(&shape, guides());
+
+        let checkpoint = budget.clone();
+        budget.connector_story("word/footer1.xml", None);
+        budget.record_connector(&shape, guides());
+        assert!(format!("{:?}", checkpoint.preview_connectors).contains("word/footer1.xml"));
+    }
 }

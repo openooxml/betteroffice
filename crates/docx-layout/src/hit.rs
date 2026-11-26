@@ -4131,4 +4131,49 @@ mod tests {
         );
         assert_eq!(hit_test(&dl, 0, 200.0, 37.0), Some(10));
     }
+
+    #[test]
+    fn zero_alpha_connector_arrowhead_leaves_band_clicks_to_the_band() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let y = top + 35.0;
+            let connector = serde_json::json!({
+                "kind": "shape", "shapeType": "bentConnector2",
+                "x": 100, "y": y, "w": 80, "h": 30, "docStart": 10,
+                "geometryPath": [
+                    {"type": "move", "x": 100, "y": y}, {"type": "line", "x": 180, "y": y}
+                ],
+                "stroke": {"color": "#000000", "width": 8},
+                "strokePaint": {"color": "#00000000", "tailEnd": {"type": "triangle"}}
+            });
+            let dl = band_page(kind, top, vec![connector]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 151.0, y + 13.0).unwrap().region,
+                region
+            );
+        }
+    }
+
+    #[test]
+    fn flat_cap_connectors_keep_pointer_tolerance_beyond_both_endpoints() {
+        let connector = serde_json::json!({
+            "kind": "shape", "shapeType": "bentConnector2",
+            "x": 100, "y": 35, "w": 80, "h": 30, "docStart": 10,
+            "geometryPath": [
+                {"type": "move", "x": 100, "y": 35}, {"type": "line", "x": 180, "y": 35}
+            ],
+            "stroke": {"color": "#000000", "width": 1},
+            "strokePaint": {"cap": "flat"}
+        });
+        let dl = band_page("header", 0.0, vec![connector]);
+        for x in [98.0, 182.0] {
+            assert_eq!(hit_test(&dl, 0, x, 35.0), Some(10));
+            assert_eq!(
+                hit_test_regions(&dl, 0, x, 35.0).unwrap().region,
+                HitRegion::Header
+            );
+        }
+    }
 }
