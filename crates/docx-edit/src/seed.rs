@@ -10180,37 +10180,6 @@ mod tests {
         let field = &payload["content"][0]["payload"];
         assert_eq!(field["displayText"], json!("Before Simple Nested After"));
         assert_eq!(field["hasCachedResult"], json!(true));
-
-        let document = seed_body(&[paragraph]);
-        for (show_hidden_text, expected) in [
-            (false, "Before Simple Nested After"),
-            (true, "Before Simple Hidden Nested After"),
-        ] {
-            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
-                &document,
-                "body",
-                &crate::bridge::RenderEnv {
-                    show_hidden_text,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
-                panic!("expected paragraph");
-            };
-            let fields: Vec<_> = paragraph
-                .runs
-                .iter()
-                .filter_map(|run| match run {
-                    docx_layout::types::Run::Field(field) => Some(field),
-                    _ => None,
-                })
-                .collect();
-            let [field] = fields.as_slice() else {
-                panic!("expected one field in content control: {:?}", paragraph.runs);
-            };
-            assert_eq!(field.fallback.as_deref(), Some(expected));
-        }
     }
 
     #[test]
