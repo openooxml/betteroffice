@@ -4,11 +4,7 @@ use serde_json::json;
 
 #[test]
 fn language_delta_parses_and_lowers_keep_set_clear_slots() {
-    let parse = |value: Value| {
-        parse_inline_format_delta(value.as_object().unwrap())
-            .unwrap()
-            .0
-    };
+    let parse = |value: Value| parse_inline_format_delta(value.as_object().unwrap()).unwrap();
     assert_eq!(parse(json!({})).language, Patch::Keep);
     let delta = parse(json!({"language": {"lang": "de-DE", "eastAsia": null}}));
     assert_eq!(
@@ -19,7 +15,7 @@ fn language_delta_parses_and_lowers_keep_set_clear_slots() {
             bidi: Patch::Keep,
         })
     );
-    let attributes = delta.to_attrs(None).unwrap();
+    let attributes = delta.to_attrs().unwrap();
     assert_eq!(
         serde_json::to_value(&attributes["language"]).unwrap(),
         json!({"latin": "de-DE", "eastAsia": null})
@@ -27,7 +23,7 @@ fn language_delta_parses_and_lowers_keep_set_clear_slots() {
     assert_eq!(
         serde_json::to_value(
             parse(json!({"language": null}))
-                .to_attrs(None)
+                .to_attrs()
                 .unwrap()
                 .get("language")
                 .unwrap()
@@ -51,7 +47,7 @@ fn language_range_merges_each_runs_live_slots() {
     let ctx = EditCtx::local("", "");
     let range = StoryRange::new("body", 0, 6);
     let apply = |range: StoryRange, slots: Value| {
-        let (delta, _) =
+        let delta =
             parse_inline_format_delta(json!({"language": slots}).as_object().unwrap()).unwrap();
         doc.format_range(&ctx, range, &delta).unwrap();
     };

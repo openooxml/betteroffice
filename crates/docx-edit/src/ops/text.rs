@@ -105,7 +105,11 @@ pub(crate) fn overlaid(base: &[(String, Any)], run: RunSlice<'_>) -> Vec<(String
             let previous = base
                 .iter()
                 .find_map(|(key, value)| (key == "fontFamily").then_some(value));
-            crate::format::merge_font_family(previous, value, run.text, 0, u32::MAX)
+            crate::format::merge_font_family(
+                previous,
+                value,
+                crate::format::has_east_asian_font_pick_text(run.text),
+            )
         } else {
             value.clone()
         };
