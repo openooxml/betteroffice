@@ -136,6 +136,8 @@ test('the default stamp returns the plain writer output with opaque ZIP members'
     expect(Object.getPrototypeOf(after)).toEqual(opaque);
     const warning = modelPartsRewrittenWarning(source, plain.buffer);
     expect(warning).toContain(`"${CORE}"`);
+    expect(warning).not.toContain('"__proto__"');
+    expect(warning).not.toContain('"length"');
     expect(saved.warnings).toEqual([...plain.warnings, warning]);
   } finally {
     setSystemTime();
@@ -284,6 +286,33 @@ test('the completed write survives a warnings iterator detaching the source', as
   ]);
 });
 
+test('a completed write reports unavailable part names when ZIP inspection throws', async () => {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  editableRun(document).textNode.text = 'Edited model';
+  const Decoder = globalThis.TextDecoder;
+  document.warnings = [];
+  Object.defineProperty(document.warnings, Symbol.iterator, {
+    value: function* () {
+      globalThis.TextDecoder = class extends Decoder {
+        constructor() {
+          super();
+          throw new Error('ZIP inspection failed');
+        }
+      };
+      yield 'Caller warning';
+    },
+  });
+
+  const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP).finally(() => {
+    globalThis.TextDecoder = Decoder;
+  });
+  const xml = unzipContainer(new Uint8Array(saved.buffer))['word/document.xml'];
+  expect(new TextDecoder().decode(xml)).toContain('Edited model');
+  expect(saved.warnings).toContain('Caller warning');
+  expect(saved.warnings.at(-1)).toBe(UNAVAILABLE_WARNING);
+});
+
 test('model matching uses the value the writer serializes from a text proxy', async () => {
   const { bytes } = oneSavePackage();
   const document = await parse(bytes);
@@ -340,6 +369,8 @@ test('the rewritten parts warning includes additions, removals and changed conte
     `${CODE} ["added.xml","changed.xml","removed.xml"] Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`
   );
   expect(modelPartsRewrittenWarning(original, original)).toBeUndefined();
+  expect(modelPartsRewrittenWarning(new ArrayBuffer(1), new ArrayBuffer(1))).toBeUndefined();
+  expect(modelPartsRewrittenWarning(new ArrayBuffer(1), Uint8Array.of(1).buffer)).toBe(UNAVAILABLE_WARNING);
   expect(modelPartsRewrittenWarning(original, new ArrayBuffer(0))).toBe(UNAVAILABLE_WARNING);
 });
 
@@ -430,11 +461,7 @@ test.each(['__proto__', 'length', 'word/media/'])('the warning accounts for the 
     expect(after?.has(name)).toBe(true);
     expect(after?.get(name)?.crc32).toBe(before?.get(name)?.crc32);
     expect(after?.get(name)?.uncompressedSize).toBe(before?.get(name)?.uncompressedSize);
-    if (name === '__proto__') {
-      expect(warning).toContain(`"${name}"`);
-    } else {
-      expect(warning).not.toContain(`"${name}"`);
-    }
+    expect(warning).not.toContain(`"${name}"`);
   }
 });
 

@@ -11,6 +11,8 @@ const ZIP_FOOTER_SIZE = 22;
 const ZIP_ENTRY_SIZE = 46;
 const ZIP_LOCAL_HEADER_SIZE = 30;
 const ZIP64_SENTINEL = 0xffffffff;
+const ZIP_MEMBER_ALIAS = 'part';
+const ZIP_MEMBER_ALIAS_BYTES = new TextEncoder().encode(ZIP_MEMBER_ALIAS);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CP437_HIGH_BYTES = 'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»' +
   '░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
@@ -111,12 +113,11 @@ export function modelMatchesSource(
 
 interface ZipMember {
   crc32: number;
+  method: number;
   compressedSize: number;
   uncompressedSize: number;
   localOffset: number;
   centralOffset: number;
-  centralEnd: number;
-  zip64LocalOffsetField?: number;
   duplicate?: boolean;
 }
 
@@ -169,7 +170,6 @@ function findZipExtra(view: DataView, start: number, end: number, id: number) {
 function readZipMember(
   view: DataView,
   centralOffset: number,
-  centralEnd: number,
   extraStart: number,
   extraEnd: number,
   archiveOffset: number
@@ -178,7 +178,6 @@ function readZipMember(
   let uncompressedSize = view.getUint32(centralOffset + 24, true);
   let localOffset = view.getUint32(centralOffset + 42, true);
   let disk = view.getUint16(centralOffset + 34, true);
-  let zip64LocalOffsetField: number | undefined;
   if (
     compressedSize === ZIP64_SENTINEL || uncompressedSize === ZIP64_SENTINEL ||
     localOffset === ZIP64_SENTINEL || disk === 0xffff
@@ -195,7 +194,6 @@ function readZipMember(
     };
     uncompressedSize = takeZip64(uncompressedSize);
     compressedSize = takeZip64(compressedSize);
-    if (localOffset === ZIP64_SENTINEL) zip64LocalOffsetField = offset;
     localOffset = takeZip64(localOffset);
     if (disk === 0xffff && offset + 4 <= extra.end) disk = view.getUint32(offset, true);
   }
@@ -205,12 +203,11 @@ function readZipMember(
   ) return undefined;
   return {
     crc32: view.getUint32(centralOffset + 16, true),
+    method: view.getUint16(centralOffset + 10, true),
     compressedSize,
     uncompressedSize,
     localOffset: localOffset + archiveOffset,
     centralOffset,
-    centralEnd,
-    zip64LocalOffsetField,
   };
 }
 
@@ -284,7 +281,7 @@ export function readModelSaveDirectory(buffer: ArrayBuffer): Map<string, ZipMemb
     const extraEnd = extraStart + view.getUint16(offset + 30, true);
     const next = extraEnd + view.getUint16(offset + 32, true);
     if (nameSize === 0 || next > directory.end) return undefined;
-    const member = readZipMember(view, offset, next, extraStart, extraEnd, archiveOffset);
+    const member = readZipMember(view, offset, extraStart, extraEnd, archiveOffset);
     if (!member) return undefined;
 
     const name = readZipName(view, decoder, offset, extraStart, extraEnd);
@@ -301,20 +298,65 @@ export function readModelSaveDirectory(buffer: ArrayBuffer): Map<string, ZipMemb
   return undefined;
 }
 
-function readZipContents(bytes: Uint8Array): Record<string, Uint8Array> | undefined {
-  try {
-    return unzipContainer(bytes);
-  } catch {
-    return undefined;
-  }
-}
-
-function readZipPart(contents: Record<string, Uint8Array> | undefined, path: string) {
-  return contents && Object.hasOwn(contents, path) ? contents[path] : undefined;
-}
-
 function sameBytes(before: Uint8Array, after: Uint8Array): boolean {
   return before.byteLength === after.byteLength && before.every((byte, index) => byte === after[index]);
+}
+
+function readZipPayload(view: DataView<ArrayBuffer>, member: ZipMember): Uint8Array | undefined {
+  const local = member.localOffset;
+  if (
+    view.getUint32(local, true) !== 0x04034b50 ||
+    view.getUint16(local + 8, true) !== member.method ||
+    ((view.getUint16(local + 6, true) | view.getUint16(member.centralOffset + 8, true)) & 1)
+  ) return undefined;
+  const dataStart = local + ZIP_LOCAL_HEADER_SIZE +
+    view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+  if (dataStart + member.compressedSize > member.centralOffset) return undefined;
+  return new Uint8Array(view.buffer, dataStart, member.compressedSize);
+}
+
+function unpackZipPayload(member: ZipMember, payload: Uint8Array): Uint8Array | undefined {
+  if (member.compressedSize >= ZIP64_SENTINEL || member.uncompressedSize >= ZIP64_SENTINEL) {
+    return undefined;
+  }
+
+  // Decode a single payload under a fixed name because the WASM reader returns a plain object.
+  const nameSize = ZIP_MEMBER_ALIAS_BYTES.byteLength;
+  const dataStart = ZIP_LOCAL_HEADER_SIZE + nameSize;
+  const central = dataStart + payload.byteLength;
+  const centralSize = ZIP_ENTRY_SIZE + nameSize;
+  const footer = central + centralSize;
+  const single = new Uint8Array(footer + ZIP_FOOTER_SIZE);
+  single.set(ZIP_MEMBER_ALIAS_BYTES, ZIP_LOCAL_HEADER_SIZE);
+  single.set(payload, dataStart);
+  single.set(ZIP_MEMBER_ALIAS_BYTES, central + ZIP_ENTRY_SIZE);
+  const output = new DataView(single.buffer);
+  output.setUint32(0, 0x04034b50, true);
+  output.setUint16(4, 20, true);
+  output.setUint16(8, member.method, true);
+  output.setUint32(14, member.crc32, true);
+  output.setUint32(18, member.compressedSize, true);
+  output.setUint32(22, member.uncompressedSize, true);
+  output.setUint16(26, nameSize, true);
+  output.setUint32(central, 0x02014b50, true);
+  output.setUint16(central + 4, 20, true);
+  output.setUint16(central + 6, 20, true);
+  output.setUint16(central + 10, member.method, true);
+  output.setUint32(central + 16, member.crc32, true);
+  output.setUint32(central + 20, member.compressedSize, true);
+  output.setUint32(central + 24, member.uncompressedSize, true);
+  output.setUint16(central + 28, nameSize, true);
+  output.setUint32(footer, 0x06054b50, true);
+  output.setUint16(footer + 8, 1, true);
+  output.setUint16(footer + 10, 1, true);
+  output.setUint32(footer + 12, centralSize, true);
+  output.setUint32(footer + 16, central, true);
+
+  const parts = unzipContainer(single);
+  const bytes = Object.prototype.hasOwnProperty.call(parts, ZIP_MEMBER_ALIAS)
+    ? parts[ZIP_MEMBER_ALIAS]
+    : undefined;
+  return bytes?.byteLength === member.uncompressedSize ? bytes : undefined;
 }
 
 function readModelSaveCore(buffer: ArrayBuffer): Uint8Array | null | undefined {
@@ -322,82 +364,54 @@ function readModelSaveCore(buffer: ArrayBuffer): Uint8Array | null | undefined {
   if (!members) return null;
   const member = members.get(CORE_PROPERTIES);
   if (!member) return undefined;
-  if (
-    member.duplicate || member.compressedSize >= ZIP64_SENTINEL ||
-    member.uncompressedSize >= ZIP64_SENTINEL
-  ) {
-    return null;
-  }
-
-  const source = new Uint8Array(buffer);
-  const view = new DataView(buffer);
-  const local = member.localOffset;
-  if (view.getUint32(local, true) !== 0x04034b50) return null;
-  const headerEnd = local + ZIP_LOCAL_HEADER_SIZE + view.getUint16(local + 26, true);
-  const dataStart = headerEnd + view.getUint16(local + 28, true);
-  const dataEnd = dataStart + member.compressedSize;
-  if (dataEnd > member.centralOffset) return null;
-
-  // Give the container reader a ZIP containing only the original compressed core part.
-  const central = headerEnd - local + member.compressedSize;
-  const centralSize = member.centralEnd - member.centralOffset;
-  const footer = central + centralSize;
-  const single = new Uint8Array(footer + ZIP_FOOTER_SIZE);
-  single.set(source.subarray(local, headerEnd));
-  single.set(source.subarray(dataStart, dataEnd), headerEnd - local);
-  single.set(source.subarray(member.centralOffset, member.centralEnd), central);
-  const output = new DataView(single.buffer);
-  output.setUint16(6, output.getUint16(6, true) & ~8, true);
-  output.setUint32(14, member.crc32, true);
-  output.setUint32(18, member.compressedSize, true);
-  output.setUint32(22, member.uncompressedSize, true);
-  output.setUint16(28, 0, true);
-  output.setUint16(central + 8, output.getUint16(central + 8, true) & ~8, true);
-  if (member.zip64LocalOffsetField === undefined) {
-    output.setUint32(central + 42, 0, true);
-  } else {
-    output.setBigUint64(central + member.zip64LocalOffsetField - member.centralOffset, 0n, true);
-  }
-  output.setUint32(footer, 0x06054b50, true);
-  output.setUint16(footer + 8, 1, true);
-  output.setUint16(footer + 10, 1, true);
-  output.setUint32(footer + 12, centralSize, true);
-  output.setUint32(footer + 16, central, true);
-  const core = readZipPart(readZipContents(single), CORE_PROPERTIES);
-  return core?.byteLength === member.uncompressedSize ? core : null;
+  if (member.duplicate) return null;
+  const payload = readZipPayload(new DataView(buffer), member);
+  return (payload && unpackZipPayload(member, payload)) ?? null;
 }
 
 export function sameModelSaveCore(original: ArrayBuffer, written: ArrayBuffer): boolean {
-  const before = readModelSaveCore(original);
-  const after = readModelSaveCore(written);
-  if (before === undefined && after === undefined) return true;
-  return !!before && !!after && sameBytes(before, after);
+  try {
+    const before = readModelSaveCore(original);
+    const after = readModelSaveCore(written);
+    if (before === undefined && after === undefined) return true;
+    return !!before && !!after && sameBytes(before, after);
+  } catch {
+    return false;
+  }
 }
 
 export function modelPartsRewrittenWarning(
   original: ArrayBuffer,
   written: ArrayBuffer
 ): string | undefined {
+  if (sameBytes(new Uint8Array(original), new Uint8Array(written))) return undefined;
   const guidance = 'Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.';
-  const before = readModelSaveDirectory(original);
-  const after = readModelSaveDirectory(written);
-  if (!before || !after) return `${MODEL_PARTS_REWRITTEN} (part names unavailable) ${guidance}`;
-  let contents: [Record<string, Uint8Array> | undefined, Record<string, Uint8Array> | undefined] | undefined;
-  const paths = [...new Set([...before.keys(), ...after.keys()])]
-    .filter((path) => {
-      const old = before.get(path);
-      const current = after.get(path);
-      if (
-        !old || !current || old.duplicate || current.duplicate ||
-        old.crc32 !== current.crc32 || old.uncompressedSize !== current.uncompressedSize
-      ) return true;
-      contents ??= [readZipContents(new Uint8Array(original)), readZipContents(new Uint8Array(written))];
-      const oldBytes = readZipPart(contents[0], path);
-      const currentBytes = readZipPart(contents[1], path);
-      return !oldBytes || !currentBytes || oldBytes.byteLength !== old.uncompressedSize ||
-        !sameBytes(oldBytes, currentBytes);
-    })
-    .sort();
-  if (!paths.length) return undefined;
-  return `${MODEL_PARTS_REWRITTEN} ${JSON.stringify(paths)} ${guidance}`;
+  const unavailable = `${MODEL_PARTS_REWRITTEN} (part names unavailable) ${guidance}`;
+  try {
+    const before = readModelSaveDirectory(original);
+    const after = readModelSaveDirectory(written);
+    if (!before || !after) return unavailable;
+    const originalView = new DataView(original);
+    const writtenView = new DataView(written);
+    const paths = [...new Set([...before.keys(), ...after.keys()])]
+      .filter((path) => {
+        const old = before.get(path);
+        const current = after.get(path);
+        if (
+          !old || !current || old.duplicate || current.duplicate ||
+          old.crc32 !== current.crc32 || old.uncompressedSize !== current.uncompressedSize
+        ) return true;
+        const oldPayload = readZipPayload(originalView, old);
+        const currentPayload = readZipPayload(writtenView, current);
+        if (!oldPayload || !currentPayload) return true;
+        if (old.method === current.method && sameBytes(oldPayload, currentPayload)) return false;
+        const oldBytes = unpackZipPayload(old, oldPayload);
+        const currentBytes = unpackZipPayload(current, currentPayload);
+        return !oldBytes || !currentBytes || !sameBytes(oldBytes, currentBytes);
+      })
+      .sort();
+    return paths.length ? `${MODEL_PARTS_REWRITTEN} ${JSON.stringify(paths)} ${guidance}` : undefined;
+  } catch {
+    return unavailable;
+  }
 }
