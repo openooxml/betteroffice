@@ -1,4 +1,4 @@
-use pptx_edit::{DeckSession, EditCtx, TextCaps, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, TextCaps, TextStyle, TextStylePatch};
 
 const NS: &str = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -77,6 +77,58 @@ fn runs(xml: &str) -> Vec<&str> {
         .skip(1)
         .map(|run| run.split("</a:r>").next().unwrap())
         .collect()
+}
+
+fn format_east_asian_run(patch: &TextStylePatch) -> String {
+    let source = slide(concat!(
+        r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr>"#,
+        "<a:t>中文字体</a:t></a:r></a:p>",
+    ));
+    let session = DeckSession::open(&deck(&source), 7101).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story = &snapshot.slides[0].shapes[0].text_stories[0];
+    let receipt = session
+        .format_text(
+            &EditCtx::local("test"),
+            &story.id,
+            0,
+            story.length - 1,
+            patch,
+        )
+        .unwrap();
+    assert_eq!(receipt.text, "中文字体");
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs = runs(&saved);
+    assert_eq!(saved_runs.len(), 1, "{saved}");
+    let (properties, text) = saved_runs[0].split_once("<a:t>").unwrap();
+    assert_eq!(text, "中文字体</a:t>");
+    properties.to_owned()
+}
+
+#[test]
+fn explicit_font_updates_latin_and_east_asian_typefaces() {
+    let properties = format_east_asian_run(&TextStylePatch {
+        font_family: Some("Microsoft YaHei".into()),
+        ..Default::default()
+    });
+    assert!(
+        properties.contains(r#"<a:latin typeface="Microsoft YaHei"/>"#),
+        "{properties}"
+    );
+    assert!(
+        properties.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{properties}"
+    );
+}
+
+#[test]
+fn bold_only_preserves_the_east_asian_typeface() {
+    let properties = format_east_asian_run(&TextStylePatch {
+        bold: Some(true),
+        ..Default::default()
+    });
+    assert!(properties.contains(r#" b="1""#), "{properties}");
+    assert!(properties.contains(r#"<a:ea typeface="SimSun"/>"#), "{properties}");
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use docx_edit::session::{EditSessionCore, Host};
 use docx_edit::{
     EditCtx, EditHistory, EditOperation, EditRequest, EditSource, EditStep, EditingDoc,
     FormatPolicy, InlineFormatDelta, ParaAttrDelta, ParaSelector, ParagraphRef, ParagraphTarget,
@@ -609,6 +610,115 @@ fn font_change_diffs_only_one_slot() {
         patch.run_edits[0].deltas[0].path,
         vec!["fontFamily", "ascii"]
     );
+}
+
+const EAST_ASIAN_FONT_DELTA: &str = r#"{"fontFamily":{"ascii":"Microsoft YaHei","hAnsi":"Microsoft YaHei","eastAsia":"Microsoft YaHei"}}"#;
+
+fn saved_east_asian_run_fonts(theme: &str, delta: &str) -> docx_parse::xml::XmlElement {
+    let bytes = package(&format!(
+        r#"<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun"{theme}/></w:rPr><w:t>中文字体</w:t></w:r>"#,
+    ));
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 71), Arc::new(|| 0.0));
+    let session = EditSessionCore::new(71, host);
+    session.open_docx(&bytes, true, None, None).unwrap();
+    let paragraphs: serde_json::Value =
+        serde_json::from_str(&session.paragraphs("body").unwrap()).unwrap();
+    let id = paragraphs[0]["paraId"].as_str().unwrap();
+    session
+        .format_range("body", id, 0, id, 4, delta, None, None)
+        .unwrap();
+
+    let segments: serde_json::Value =
+        serde_json::from_str(&session.story_segments("body").unwrap()).unwrap();
+    let source = docx_parse::parse_docx_s9_wire(
+        &bytes,
+        docx_parse::S9ParseOptions {
+            source_ordinals: true,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .document
+    .package;
+    let document = save_document(&source.document, |document| {
+        document["content"][0]["content"][0]["formatting"]["fontFamily"] =
+            segments[0]["attributes"]["fontFamily"].clone();
+    });
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&session.paragraph_save_plan().unwrap()).unwrap();
+    for part in plan["splicedParts"].as_array_mut().unwrap() {
+        part.as_object_mut().unwrap().remove("sectionOnly");
+        part["paragraphs"] = json!([0]);
+    }
+    let request = serde_json::from_value(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": document,
+        "headerEntries": source.header_entries.unwrap_or_default(),
+        "relationshipEntries": source.relationship_entries,
+        "options": {"updateModifiedDate": false},
+        "paragraphIds": {"patchedParts": plan["patchedParts"], "splicedParts": plan["splicedParts"]}
+    }))
+    .unwrap();
+    let saved = docx_parse::serializer::write_docx_s13(request, &bytes).unwrap();
+    let (part, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(part, _)| part == "word/document.xml")
+        .unwrap();
+    let limits = docx_parse::ParseLimits::default();
+    let xml =
+        docx_parse::parse_xml(&xml, &part, &mut docx_parse::ParseBudget::new(&limits)).unwrap();
+    let run = xml
+        .root()
+        .unwrap()
+        .child("w", "body")
+        .unwrap()
+        .child("w", "p")
+        .unwrap()
+        .child("w", "r")
+        .unwrap();
+    assert_eq!(run.child("w", "t").unwrap().text_content(), "中文字体");
+    let fonts = run
+        .child("w", "rPr")
+        .unwrap()
+        .child("w", "rFonts")
+        .unwrap();
+    assert_eq!(fonts.attribute(Some("w"), "ascii"), Some("Microsoft YaHei"));
+    assert_eq!(fonts.attribute(Some("w"), "hAnsi"), Some("Microsoft YaHei"));
+    fonts.clone()
+}
+
+#[test]
+fn explicit_font_updates_the_east_asian_run_font() {
+    let fonts = saved_east_asian_run_fonts("", EAST_ASIAN_FONT_DELTA);
+    assert_eq!(
+        fonts.attribute(Some("w"), "eastAsia"),
+        Some("Microsoft YaHei")
+    );
+}
+
+#[test]
+fn explicit_east_asian_font_removes_the_run_theme_font() {
+    let fonts = saved_east_asian_run_fonts(
+        r#" w:eastAsiaTheme="minorEastAsia""#,
+        EAST_ASIAN_FONT_DELTA,
+    );
+    assert_eq!(
+        (
+            fonts.attribute(Some("w"), "eastAsia"),
+            fonts.attribute(Some("w"), "eastAsiaTheme"),
+        ),
+        (Some("Microsoft YaHei"), None),
+    );
+}
+
+#[test]
+fn latin_only_font_delta_preserves_the_east_asian_run_font() {
+    let fonts = saved_east_asian_run_fonts(
+        "",
+        r#"{"fontFamily":{"ascii":"Microsoft YaHei","hAnsi":"Microsoft YaHei"}}"#,
+    );
+    assert_eq!(fonts.attribute(Some("w"), "eastAsia"), Some("SimSun"));
 }
 
 #[test]

@@ -896,6 +896,102 @@ fn formatting_keeps_each_cells_base_font_and_unmodeled_style_properties() {
     assert!(xml.contains("<diagonal style=\"dotted\"><color rgb=\"FF123456\"/></diagonal>"));
 }
 
+#[test]
+fn explicit_font_drops_theme_scheme() {
+    let mut source = parts(&package(VARIANTS[0].1));
+    let styles = format!(
+        concat!(
+            r#"<styleSheet xmlns="{main}"><fonts count="1"><font><sz val="11"/><name val="Calibri"/><scheme val="minor"/></font></fonts>"#,
+            r#"<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>"#,
+            r#"<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"#,
+            r#"<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>"#,
+            r#"<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>"#,
+            r#"<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#,
+        ),
+        main = MAIN,
+    );
+    source.insert("xl/styles.xml".into(), styles.into_bytes());
+    source.insert(
+        "xl/worksheets/sheet1.xml".into(),
+        worksheet(concat!(
+            r#"<sheetData><row r="1"><c r="A1" s="0" t="inlineStr"><is><t>中文字体</t></is></c>"#,
+            r#"<c r="B1" s="0"><v>2</v></c><c r="C1" s="0"><v>3</v></c></row></sheetData>"#,
+        ))
+        .into_bytes(),
+    );
+    source.insert(
+        "xl/worksheets/sheet2.xml".into(),
+        worksheet("<sheetData/>").into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap();
+    let mut workbook = Workbook::open(&source).unwrap();
+    for (address, patch) in [
+        (
+            "A1",
+            xlsx_ops::StylePatch {
+                font_family: Some("Microsoft YaHei".into()),
+                ..Default::default()
+            },
+        ),
+        (
+            "C1",
+            xlsx_ops::StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+        ),
+    ] {
+        workbook
+            .patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1(address).unwrap(),
+                patch,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+
+    let saved = parts(&workbook.save().unwrap());
+    let saved_cells = cells(&text(&saved, "xl/worksheets/sheet1.xml"));
+    let styles = text(&saved, "xl/styles.xml");
+    let fonts = styles.split_once("<fonts").unwrap().1;
+    let fonts = fonts.split_once("</fonts>").unwrap().0;
+    let saved_font = |address: &str| {
+        let cell = &saved_cells[address];
+        let tag = cell.split_once('>').unwrap().0;
+        let style = if tag.contains(" s=\"") {
+            style_index(cell)
+        } else {
+            0
+        };
+        let xf = cell_xf(&styles, style);
+        let font_id: usize = xf
+            .split_once(" fontId=\"")
+            .unwrap()
+            .1
+            .split_once('"')
+            .unwrap()
+            .0
+            .parse()
+            .unwrap();
+        let font = fonts.split("<font>").nth(font_id + 1).unwrap();
+        font.split_once("</font>").unwrap().0
+    };
+
+    let scheme = r#"<scheme val="minor"/>"#;
+    let untouched = saved_font("B1");
+    assert!(untouched.contains(scheme), "B1 font: {untouched}");
+    let bold = saved_font("C1");
+    assert!(bold.contains("<b/>"), "C1 font: {bold}");
+    assert!(bold.contains(scheme), "C1 font: {bold}");
+    let explicit = saved_font("A1");
+    assert!(
+        explicit.contains(r#"<name val="Microsoft YaHei"/>"#),
+        "A1 font: {explicit}"
+    );
+    assert!(!explicit.contains("<scheme"), "A1 font: {explicit}");
+}
+
 /// Each `<c>` element's markup keyed by its `r` attribute.
 fn cells(xml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
