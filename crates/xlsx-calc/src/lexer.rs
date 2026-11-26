@@ -167,20 +167,27 @@ pub enum TokKind {
 
 /// tokenize a formula source string.
 pub fn lex(input: &str) -> Result<Vec<Token>, ParseError> {
-    lex_with_sheet_spans(input, &|_| false)
+    lex_with_range_names(input, is_formula_parameter)
 }
 
-pub(crate) fn lex_with_sheet_spans(
+/// Tokenize with caller-supplied names that can start a range join.
+#[doc(hidden)]
+pub fn lex_with_range_names(
     input: &str,
-    has_sheet: &dyn Fn(&str) -> bool,
+    is_range_name: impl Fn(&str) -> bool,
 ) -> Result<Vec<Token>, ParseError> {
     Lexer {
         input,
         pos: 0,
         table_refs: None,
-        has_sheet,
+        is_range_name: &is_range_name,
     }
     .run()
+}
+
+fn is_formula_parameter(name: &str) -> bool {
+    name.split_once('.')
+        .is_some_and(|(prefix, _)| prefix.eq_ignore_ascii_case("_xlpm"))
 }
 
 /// Tokenize formula text for rewrites.
@@ -393,7 +400,7 @@ pub fn rewrite_table_columns<'a>(
         input,
         pos: 0,
         table_refs: Some(Vec::new()),
-        has_sheet: &|_| false,
+        is_range_name: &is_formula_parameter,
     };
     let tokens = lexer.run()?;
     let table_refs = lexer.table_refs.take().unwrap();
@@ -533,7 +540,7 @@ struct Lexer<'a> {
     input: &'a str,
     pos: usize,
     table_refs: Option<Vec<TableRefRewrite>>,
-    has_sheet: &'a dyn Fn(&str) -> bool,
+    is_range_name: &'a dyn Fn(&str) -> bool,
 }
 
 struct TableRefRewrite {
@@ -894,32 +901,21 @@ impl Lexer<'_> {
             }
             return self.lex_reference(first.to_owned(), start).map(Some);
         }
-        if self.peek() != Some(':') || !(quoted || is_unquoted_sheet(first)) {
+        if self.peek() != Some(':')
+            || !(quoted || is_unquoted_sheet(first))
+            || (!quoted && start + first.len() == self.pos && (self.is_range_name)(first))
+        {
             return Ok(None);
         }
         let save = self.pos;
         self.bump();
         let quoted_last = self.peek() == Some('\'');
-        if quoted_last && !quoted && (start + first.len() != save || !(self.has_sheet)(first)) {
-            self.pos = save;
-            return Ok(None);
-        }
         if let Some(last) = self.read_sheet_endpoint()
             && self.consume_bang()
         {
             let first = workbook_scope(first).unwrap_or(first);
-            if quoted_last
-                && !quoted
-                && (last.is_empty() || last.contains(':') || !(self.has_sheet)(&last))
-            {
-                self.pos = save;
-                return Ok(None);
-            }
-            if quoted
-                && (first.is_empty()
-                    || last.is_empty()
-                    || first.contains(':')
-                    || last.contains(':'))
+            if (quoted || quoted_last)
+                && (first.is_empty() || last.is_empty() || first.contains(':') || last.contains(':'))
             {
                 return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
             }
@@ -1258,6 +1254,8 @@ mod tests {
         for (source, scope) in [
             ("Jan:Mar!A1", "Jan:Mar"),
             ("'Jan:Mar'!A1", "Jan:Mar"),
+            ("Jan:'End Sheet'!A1", "Jan:End Sheet"),
+            ("'Start Sheet':Mar!#REF!", "Start Sheet:Mar"),
             ("Sheet1:Sheet2!A1", "Sheet1:Sheet2"),
             ("'Sheet1:Sheet2'!A1", "Sheet1:Sheet2"),
             ("Sheet1:Sheet2!$A$1", "Sheet1:Sheet2"),
@@ -1373,6 +1371,7 @@ mod tests {
         for source in [
             "SUM(Sales:Q2!#REF!)",
             "SUM(Sheet1:Sheet2!A1,Sheet1:Sheet2!#REF!,R2C3x:Sheet2!#REF!)",
+            "SUM(Sheet1:'Sheet 2'!1:2,'Sheet 1':Sheet2!#REF!,_xlpm.start:Sheet2!A1)",
             "Amt:Tax[Old]",
             "SUM(Amt : Tax[Old])",
             "SUM(Sheet1!Amt:Tax[Old])",
@@ -1427,7 +1426,7 @@ mod tests {
                     input: source,
                     pos: 0,
                     table_refs: Some(Vec::new()),
-                    has_sheet: &|_| false,
+                    is_range_name: &is_formula_parameter,
                 }
                 .run()
                 .unwrap(),

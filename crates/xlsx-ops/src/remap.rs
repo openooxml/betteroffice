@@ -7,13 +7,14 @@ use std::rc::Rc;
 
 use xlsx_calc::lexer::{
     MAX_FORMULA_BYTES, ensure_unambiguous_spaced_calls, ensure_unambiguous_spaced_references,
+    lex_with_range_names,
 };
-use xlsx_calc::parser::{Expr, parse_formula_with_sheet_spans};
-use xlsx_calc::{ColumnRange, RowRange, TokKind, lex_for_rewrite, parse_formula};
+use xlsx_calc::parser::Expr;
+use xlsx_calc::{ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
     Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token, qualified_target,
-    qualifier_token, quoted_endpoints, sheet_names_equal, sheet_qualifiers_with_sheets,
+    qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal, sheet_qualifiers_with_sheets,
     skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
@@ -75,8 +76,6 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
         target,
         target_name: &target_name,
     };
-    let parse = |source: &str| parse_formula_with_sheet_spans(source, |name| index.has_sheet(name));
-
     let mut restores: Vec<Op> = Vec::new();
     let mut edits: Vec<(SheetId, CellRef, String)> = Vec::new();
     let mut parsed: HashMap<&str, Rc<Expr>> = HashMap::new();
@@ -112,7 +111,7 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
                 Rc::clone(expr)
             } else {
                 let expr = Rc::new(
-                    parse(src.as_str())
+                    parse_formula(src.as_str())
                         .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?,
                 );
                 if parsed.len() >= PARSE_MEMO_CAP
@@ -131,7 +130,7 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
                 let formula = new_expr.to_formula();
-                parse(&formula)
+                parse_formula(&formula)
                     .map_err(|_| OpError::FormulaNotRewritable { sheet: owner, cell })?;
                 restores.push(Op::SetCell {
                     sheet: owner,
@@ -211,7 +210,7 @@ impl<'a> ProposalSheets<'a> {
         if has_unrewritable_binding(source, &index) {
             return None;
         }
-        let expr = parse_formula_with_sheet_spans(source, |name| index.has_sheet(name)).ok()?;
+        let expr = parse_formula(source).ok()?;
         if contains_table_reference(&expr) {
             return None;
         }
@@ -222,7 +221,7 @@ impl<'a> ProposalSheets<'a> {
             return Some(source.to_string());
         }
         let formula = rewritten.to_formula();
-        parse_formula_with_sheet_spans(&formula, |name| index.has_sheet(name)).ok()?;
+        parse_formula(&formula).ok()?;
         Some(formula)
     }
 }
@@ -2052,39 +2051,22 @@ pub(crate) fn remove_table_references(
     {
         return None;
     }
-    let tokens = lex_for_rewrite(text).ok()?;
-    ensure_unambiguous_spaced_calls(text, &tokens).ok()?;
     let drops = |table: &str| dropped.iter().any(|name| sheet_names_equal(name, table));
-    let has_sheet = |name: &str| sheets.iter().any(|sheet| sheet_names_equal(sheet, name));
+    let tokens = lex_for_table_removal(text, dropped, sheets).ok()?;
+    ensure_unambiguous_spaced_calls(text, &tokens).ok()?;
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     for (at, token) in tokens.iter().enumerate() {
         let end = match &token.kind {
             TokKind::TableRef { table, .. } if drops(table) => token.end,
-            // A mixed-quoted sheet span can also lex as a name joined to a qualified range.
             TokKind::Ident(word)
                 if drops(word)
                     && !matches!(
                         tokens.get(at + 1).map(|next| &next.kind),
                         Some(TokKind::LParen)
-                    )
-                    && !(text[token.end..].starts_with(":'")
-                        && has_sheet(word)
-                        && matches!(
-                            tokens.get(at + 2).map(|next| &next.kind),
-                            Some(
-                                TokKind::Range { sheet: Some(last), .. }
-                                    | TokKind::ColumnRange { sheet: Some(last), .. }
-                                    | TokKind::RowRange { sheet: Some(last), .. }
-                            ) if has_sheet(last)
-                        )) =>
+                    ) =>
             {
                 token.end
-            }
-            TokKind::ThreeDRef { first, .. }
-                if !text[token.start..].starts_with('\'') && drops(first) && !has_sheet(first) =>
-            {
-                token.start + first.len()
             }
             _ => continue,
         };
@@ -2098,6 +2080,17 @@ pub(crate) fn remove_table_references(
     })
 }
 
+fn lex_for_table_removal(
+    text: &str,
+    dropped: &[String],
+    sheets: &[String],
+) -> Result<Vec<Token>, ParseError> {
+    lex_with_range_names(text, |name| {
+        dropped.iter().any(|table| sheet_names_equal(table, name))
+            && !sheets.iter().any(|sheet| sheet_names_equal(sheet, name))
+    })
+}
+
 /// Whether `text` names a table in `dropped` in a form the rewrite cannot
 /// read, so a deletion dropping that table would leave it behind.
 pub(crate) fn names_unrewritable_table(text: &str, dropped: &[String], sheets: &[String]) -> bool {
@@ -2105,7 +2098,7 @@ pub(crate) fn names_unrewritable_table(text: &str, dropped: &[String], sheets: &
     dropped
         .iter()
         .any(|table| lower.contains(&table.to_lowercase()))
-        && match lex_for_rewrite(text) {
+        && match lex_for_table_removal(text, dropped, sheets) {
             Err(_) => true,
             Ok(tokens) if ensure_unambiguous_spaced_calls(text, &tokens).is_err() => true,
             Ok(tokens) => {
@@ -2450,7 +2443,10 @@ fn writable_rename(source: &str, new_name: &str, renamed: String) -> Result<Stri
 }
 
 pub(crate) fn rename_formula_sheet(source: &str, old_name: &str, new_name: &str) -> String {
-    scan_sheet_rename(source, old_name, new_name, |_| true).formula
+    if old_name == new_name {
+        return source.to_owned();
+    }
+    rename_sheets(source, &[(old_name.to_owned(), new_name.to_owned())]).0
 }
 
 fn workbook_has_sheet(wb: &Workbook, name: &str) -> bool {
@@ -3223,18 +3219,34 @@ mod tests {
     }
 
     #[test]
-    fn an_unrelated_row_edit_leaves_a_defined_name_with_a_spaced_numeric_call_unchanged() {
+    fn unrelated_row_edits_distinguish_spaced_numeric_and_ambiguous_calls() {
         let source = "SUM(LOG10 (1), Data!A1)";
         let mut workbook = wb(&["Data", "Other"]);
         workbook.defined_names = vec![defined("Input", source)];
         crate::apply(&mut workbook, &insert_rows(1, 0, 1)).unwrap();
         assert_eq!(workbook.defined_names[0].formula, source);
+
+        let source = "SUM(LOG10 (A1), Data!A1)";
+        workbook.defined_names = vec![defined("Input", source)];
+        assert_sheet_edit_refuses(
+            &workbook,
+            &insert_rows(1, 0, 1),
+            &OpError::DefinedNameNotRewritable { name: "Input".into() },
+            source,
+        );
     }
 
     #[test]
     fn ambiguous_spaced_calls_refuse_dropped_table_rewrites() {
         let dropped = ["Amt".to_owned()];
-        for reference in ["LOG10 (1)", "Amt:IF (C1,B1,B2)", "Amt:LET (x,B1,x)"] {
+        for reference in [
+            "LOG10 (1)",
+            "LOG10 (A1)",
+            "Amt:IF (C1,B1,B2)",
+            "Amt:LET (x,B1,x)",
+            "A:T (A1:B2,C1:D2)",
+            "A:N (A1,B2)",
+        ] {
             let source = format!("SUM({reference})+Amt[Old]");
             assert!(names_unrewritable_table(&source, &dropped, &[]), "{source}");
             assert_eq!(
@@ -3272,10 +3284,9 @@ mod tests {
         let sheets = ["Amounts", "Data two"].map(str::to_owned);
         let dropped = &sheets[..1];
         let tokens = lex_for_rewrite(source).unwrap();
-        assert!(matches!(&tokens[2].kind, TokKind::Ident(name) if name == "Amounts"));
-        assert_eq!(tokens[3].kind, TokKind::Colon);
         assert!(matches!(
-            &tokens[4].kind, TokKind::Range { sheet: Some(name), .. } if name == "Data two"
+            &tokens[2].kind,
+            TokKind::ThreeDRef { first, last, .. } if first == "Amounts" && last == "Data two"
         ));
         assert!(!names_unrewritable_table(source, dropped, &sheets));
         assert_eq!(remove_table_references(source, dropped, &sheets), None);
@@ -3312,15 +3323,14 @@ mod tests {
             Some("SUM('Totals:Data two'!A1:B2)")
         );
 
-        let mut shifted = workbook.clone();
-        crate::apply(&mut shifted, &insert_rows(1, 0, 1)).unwrap();
-        assert_eq!(
-            formula(&shifted, report, "B1").as_deref(),
-            Some("SUM('Amounts:Data two'!A2:B3)")
-        );
-        assert_eq!(
-            shifted.defined_names[0].formula,
-            "SUM(Amounts:'Data two'!A2:B3)"
+        assert_sheet_edit_refuses(
+            &workbook,
+            &insert_rows(1, 0, 1),
+            &OpError::FormulaNotRewritable {
+                sheet: report,
+                cell: r("B1"),
+            },
+            source,
         );
 
         crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
@@ -3363,7 +3373,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_quoted_spans_shift_cells_names_and_charts_on_endpoint_and_interior_edits() {
+    fn mixed_quoted_spans_shift_names_and_charts_but_refuse_cell_remaps() {
         let source = "SUM(Jan:'End Sheet'!A1)";
         let report = SheetId(3);
         let mut workbook = wb(&["Jan", "Feb", "End Sheet", "Report"]);
@@ -3372,12 +3382,18 @@ mod tests {
         charted(&mut workbook, report, &[source]);
         for target in [0, 1, 2] {
             let mut shifted = workbook.clone();
-            crate::apply(&mut shifted, &insert_rows(target, 0, 1)).unwrap();
-            assert_eq!(
-                formula(&shifted, report, "B1").as_deref(),
-                Some("SUM('Jan:End Sheet'!A2)"),
-                "sheet {target}"
+            let op = insert_rows(target, 0, 1);
+            assert_sheet_edit_refuses(
+                &workbook,
+                &op,
+                &OpError::FormulaNotRewritable {
+                    sheet: report,
+                    cell: r("B1"),
+                },
+                source,
             );
+            remap_defined_names(&mut shifted, &op).unwrap();
+            remap_charts(&mut shifted, &op).unwrap();
             assert_eq!(shifted.defined_names[0].formula, "SUM(Jan:'End Sheet'!A2)");
             assert_eq!(
                 chart_formulas(&shifted, report),
@@ -3489,7 +3505,7 @@ mod tests {
             (
                 "SUM(Amounts:'Data two'!B5)",
                 "SUM(#REF!:'Data two'!B5)",
-                &sheets[..],
+                &sheets[1..],
             ),
             (
                 "SUM(Amounts:'Data two'!A1:B2)",
@@ -3901,14 +3917,10 @@ mod tests {
         );
     }
 
-    /// Excel's 3-D reference covers every sheet between its endpoints in
-    /// workbook order, so an edit on an interior sheet moves it just as one on
-    /// an endpoint does.
     #[test]
-    fn a_three_dimensional_reference_follows_an_edit_on_any_sheet_it_covers() {
+    fn chart_and_name_spans_follow_edits_on_any_sheet_they_cover() {
         for target in 0..3 {
             let mut workbook = wb(&["Jan", "Feb", "Mar", "Report"]);
-            set_formula(&mut workbook, SheetId(3), "A1", "SUM('Jan:Mar'!$A$1:$A$5)");
             charted(&mut workbook, SheetId(3), &["'Jan:Mar'!$A$1:$A$5"]);
             workbook.defined_names = vec![defined("Span", "'Jan:Mar'!$A$1:$A$5")];
             let op = Op::InsertRows {
@@ -3916,14 +3928,8 @@ mod tests {
                 at: 0,
                 count: 2,
             };
-            remap_formulas(&mut workbook, &op).unwrap();
             remap_defined_names(&mut workbook, &op).unwrap();
             remap_charts(&mut workbook, &op).unwrap();
-            assert_eq!(
-                formula(&workbook, SheetId(3), "A1").as_deref(),
-                Some("SUM('Jan:Mar'!$A$3:$A$7)"),
-                "sheet {target}"
-            );
             assert_eq!(
                 chart_formulas(&workbook, SheetId(3)),
                 ["'Jan:Mar'!$A$3:$A$7"],
@@ -3937,36 +3943,30 @@ mod tests {
     }
 
     #[test]
-    fn proposal_remaps_unquoted_sheet_spans_and_leaves_external_spans_alone() {
+    fn proposal_remaps_refuse_local_and_external_sheet_spans() {
         let names = ["Jan", "Feb", "Mar", "Report"].map(str::to_owned);
         let op = insert_rows(1, 0, 1);
-        let source = "SUM(Jan:Mar!$A$1:$A$5)+'[1]Jan:Mar'!B1";
-        assert_eq!(
-            remap_proposal_formula(source, SheetId(3), &names, &op).as_deref(),
-            Some("SUM('Jan:Mar'!$A$2:$A$6)+'[1]Jan:Mar'!B1")
-        );
+        for source in ["SUM(Jan:Mar!$A$1:$A$5)", "Feb!A1+'[1]Jan:Mar'!B1"] {
+            assert_eq!(remap_proposal_formula(source, SheetId(3), &names, &op), None);
+        }
     }
 
     #[test]
-    fn unquoted_whole_row_sheet_spans_still_remap() {
+    fn proposal_remaps_refuse_unquoted_whole_row_sheet_spans() {
         let names = [
             "Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report",
         ]
         .map(str::to_owned);
-        for (source, target, expected) in [
-            ("SUM(Sheet1:Sheet3!1:2)", 1, "SUM('Sheet1:Sheet3'!2:3)"),
-            ("SUM(Sheet1:Sheet2!$1:$5)", 0, "SUM('Sheet1:Sheet2'!$2:$6)"),
-            ("Sheet1:Sheet3!1:1", 2, "'Sheet1:Sheet3'!2:2"),
-            (
-                "SUM(Q1_Sales:Q2_Sales!1:10)",
-                3,
-                "SUM('Q1_Sales:Q2_Sales'!2:11)",
-            ),
+        for (source, target) in [
+            ("SUM(Sheet1:Sheet3!1:2)", 1),
+            ("SUM(Sheet1:Sheet2!$1:$5)", 0),
+            ("Sheet1:Sheet3!1:1", 2),
+            ("SUM(Q1_Sales:Q2_Sales!1:10)", 3),
         ] {
             let op = insert_rows(target, 0, 1);
             assert_eq!(
-                remap_proposal_formula(source, SheetId(5), &names, &op).as_deref(),
-                Some(expected),
+                remap_proposal_formula(source, SheetId(5), &names, &op),
+                None,
                 "{source}"
             );
         }
@@ -4010,34 +4010,26 @@ mod tests {
     }
 
     #[test]
-    fn structural_edits_refuse_external_spans_that_cannot_round_trip() {
+    fn structural_edits_refuse_external_sheet_spans_atomically() {
         let mut workbook = wb(&["Data", "Report"]);
         let owner = SheetId(1);
         let op = insert_rows(0, 0, 1);
-        set_formula(&mut workbook, owner, "A1", "'[1]Sheet1:Sheet2'!A1+Data!A1");
-        remap_formulas(&mut workbook, &op).unwrap();
-        assert_eq!(
-            formula(&workbook, owner, "A1").as_deref(),
-            Some("'[1]Sheet1:Sheet2'!A1+Data!A2"),
-        );
+        set_formula(&mut workbook, owner, "A1", "Data!A1");
         for source in [
+            "'[1]Sheet1:Sheet2'!A1+Data!A1",
             "'[1]Sheet1':'Sheet2'!A1+Data!A1",
             "'[Book.xlsx]Sheet1':'Sheet2'!A1+Data!A1",
             "'[1]Sheet1':Sheet2!A1+Data!A1",
         ] {
             set_formula(&mut workbook, owner, "B1", source);
-            assert_eq!(
-                remap_formulas(&mut workbook, &op).unwrap_err(),
-                OpError::FormulaNotRewritable {
+            assert_sheet_edit_refuses(
+                &workbook,
+                &op,
+                &OpError::FormulaNotRewritable {
                     sheet: owner,
                     cell: r("B1"),
                 },
-                "{source}"
-            );
-            assert_eq!(formula(&workbook, owner, "B1").as_deref(), Some(source));
-            assert_eq!(
-                formula(&workbook, owner, "A1").as_deref(),
-                Some("'[1]Sheet1:Sheet2'!A1+Data!A2"),
+                source,
             );
         }
     }
@@ -4417,6 +4409,7 @@ mod tests {
             "SUM(Jan:Mar!1:2:3)",
             "SUM(Jan:Mar!A1 (A1:B2))",
             "SUM('Jan:Mar'!A:B:C)",
+            "SUM(Jan:Mar!A1:B2 (1:2))+Feb!A1",
         ] {
             set_formula(&mut workbook, owner, "B1", source);
             for endpoint in [0, 2] {
@@ -4432,6 +4425,7 @@ mod tests {
                 }
             }
             assert_sheet_edit_refuses(&workbook, &insert_rows(1, 0, 1), &error, source);
+            assert_sheet_edit_refuses(&workbook, &Op::RemoveSheet { index: 1 }, &error, source);
         }
     }
 

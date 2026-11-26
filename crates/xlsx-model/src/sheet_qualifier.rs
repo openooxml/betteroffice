@@ -113,10 +113,7 @@ pub fn sheet_qualifiers_with_sheets(
             && let Some(second) = parse_sheet_token(source, first.end + 1)
             && (quoted
                 || bytes[second.start] != b'\''
-                || (!external
-                    && !second.name.is_empty()
-                    && !second.name.contains(':')
-                    && has_sheet(&second.name)))
+                || (!external && !second.name.is_empty() && !second.name.contains(':')))
             && let Some(target) = qualified_target(source, second.end)
             && is_span_target(source, target)
         {

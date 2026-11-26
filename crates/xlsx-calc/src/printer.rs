@@ -297,9 +297,9 @@ mod tests {
         for source in [
             "A1:A1B : Data!B5",
             "A1B : (Data!B5:INDEX(Data!A:A,2))",
-            "A1B:'Data Set'!B5",
-            "Table1:Data!B5",
-            "Start_1:Data!B5",
+            "A1B : 'Data Set'!B5",
+            "Table1 : Data!B5",
+            "Start_1 : Data!B5",
         ] {
             round_trips(source);
         }

@@ -1,10 +1,9 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::sheet_qualifier::{can_start_span, parse_sheet_token, qualified_target};
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
-use crate::lexer::{ParseError, TokKind, Token, lex_with_sheet_spans};
+use crate::lexer::{ParseError, TokKind, Token, lex};
 use crate::{ColumnRange, RowRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -118,75 +117,23 @@ pub enum BinaryOp {
 
 /// public entry point: parse a formula body (no leading `=`) into an ast.
 pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
-    parse_source(src, &|_| false, false)
-}
-
-#[doc(hidden)]
-pub fn parse_formula_with_sheet_spans(
-    src: &str,
-    has_sheet: impl Fn(&str) -> bool,
-) -> Result<Expr, ParseError> {
-    parse_source(src, &has_sheet, false)
+    parse_source(src, false)
 }
 
 #[doc(hidden)]
 pub fn is_formula_source(src: &str) -> bool {
-    parse_source(src, &|_| false, true).is_ok()
+    parse_source(src, true).is_ok()
 }
 
-fn parse_source(
-    src: &str,
-    has_sheet: &dyn Fn(&str) -> bool,
-    accept_indexed_external: bool,
-) -> Result<Expr, ParseError> {
-    let tokens = lex_with_sheet_spans(src, has_sheet)?;
+fn parse_source(src: &str, accept_indexed_external: bool) -> Result<Expr, ParseError> {
+    let tokens = lex(src)?;
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
-    let tokens = if tokens
-        .iter()
-        .any(|token| is_name_range_join(token, src, has_sheet))
-    {
-        let mut joined = Vec::with_capacity(tokens.len() + 2);
-        for token in tokens {
-            if is_name_range_join(&token, src, has_sheet)
-                && let TokKind::ThreeDRef {
-                    first,
-                    last,
-                    target,
-                } = &token.kind
-            {
-                let colon = token.start + first.len();
-                joined.extend([
-                    Token {
-                        kind: TokKind::Ident(first.clone()),
-                        start: token.start,
-                        end: colon,
-                    },
-                    Token {
-                        kind: TokKind::Colon,
-                        start: colon,
-                        end: colon + 1,
-                    },
-                    Token {
-                        kind: qualify_reference(*target.clone(), last.clone()),
-                        start: colon + 1,
-                        end: token.end,
-                    },
-                ]);
-            } else {
-                joined.push(token);
-            }
-        }
-        joined
-    } else {
-        tokens
-    };
     let mut p = Parser {
         tokens: &tokens,
         pos: 0,
         source: src,
-        has_sheet,
         accept_indexed_external,
     };
     let expr = p.expr_bp(0, 0)?;
@@ -194,28 +141,6 @@ fn parse_source(
         return Err(ParseError::new(tok.start, "unexpected trailing token"));
     }
     Ok(expr.expr)
-}
-
-fn is_name_range_join(token: &Token, source: &str, has_sheet: &dyn Fn(&str) -> bool) -> bool {
-    // A bare name can also be the left operand of a join to a qualified address.
-    matches!(&token.kind, TokKind::ThreeDRef { first, last, target }
-    if !source[token.start..].starts_with('\'') && !address_shaped(first)
-        && !matches!(target.as_ref(), TokKind::RowRange { .. })
-        && !has_sheet(first)
-        && (can_start_span(last) || first.split_once('.').is_some_and(|(prefix, _)| {
-            prefix.eq_ignore_ascii_case("_xlpm")
-        })))
-}
-
-fn qualify_reference(kind: TokKind, sheet: String) -> TokKind {
-    let sheet = Some(sheet);
-    match kind {
-        TokKind::Ref { cell, .. } => TokKind::Ref { sheet, cell },
-        TokKind::Range { range, .. } => TokKind::Range { sheet, range },
-        TokKind::ColumnRange { range, .. } => TokKind::ColumnRange { sheet, range },
-        TokKind::RowRange { range, .. } => TokKind::RowRange { sheet, range },
-        other => other,
-    }
 }
 
 struct ParsedExpr {
@@ -233,7 +158,6 @@ struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     source: &'a str,
-    has_sheet: &'a dyn Fn(&str) -> bool,
     accept_indexed_external: bool,
 }
 
@@ -374,17 +298,6 @@ impl<'a> Parser<'a> {
             return Err(ParseError::new(pos, "unexpected end of formula"));
         };
         let kind = match tok.kind.clone() {
-            TokKind::ThreeDRef {
-                first,
-                last,
-                target,
-            } if (self.has_sheet)(&first)
-                || (self.source[pos..].starts_with('\'')
-                    && parse_sheet_token(self.source, pos)
-                        .is_some_and(|token| token.name.contains(':'))) =>
-            {
-                qualify_reference(*target, format!("{first}:{last}"))
-            }
             TokKind::ExternalRef(reference) => self.external_reference(*reference, tok)?,
             other => other,
         };
@@ -452,22 +365,13 @@ impl<'a> Parser<'a> {
         let pos = token.start;
         let err = || ParseError::new(pos, "external references are unsupported");
         if self.source[pos..].starts_with('\'') {
-            return match kind {
-                TokKind::ThreeDRef { target, .. } => {
-                    let qualifier = parse_sheet_token(self.source, pos)
-                        .filter(|qualifier| qualified_target(self.source, qualifier.end).is_some())
-                        .ok_or_else(err)?;
-                    Ok(qualify_reference(*target, qualifier.name))
-                }
-                other => Ok(other),
-            };
+            return Ok(kind);
         }
         if !self.accept_indexed_external || !crate::deps::names_other_workbook(&self.source[pos..])
         {
             return Err(err());
         }
         match kind {
-            TokKind::ThreeDRef { .. } => Err(err()),
             TokKind::Name {
                 scope: None,
                 ref name,
@@ -984,8 +888,7 @@ mod tests {
 
     #[test]
     fn quoted_sheet_span_endpoints_cannot_themselves_be_spans() {
-        assert_eq!(parse("'A:B'!A1").to_formula(), "'A:B'!A1");
-        for source in ["'A:B':'C'!A1", "'A':'B:C'!A1"] {
+        for source in ["'A:B':'C'!A1", "'A':'B:C'!A1", "Sheet1:'B:C'!A1"] {
             assert_eq!(
                 parse_formula(source),
                 Err(ParseError::new(0, "invalid 3-D sheet qualifier")),
@@ -1070,21 +973,19 @@ mod tests {
     }
 
     #[test]
-    fn quoted_spans_and_deleted_addresses_keep_their_reference_ast() {
-        for (source, expected) in [
-            ("'Jan:Mar'!A1", "Jan:Mar"),
-            ("'A1:Sheet2'!B2", "A1:Sheet2"),
-            (r"'C:\x\[Book.xlsx]Sheet1'!A1", r"C:\x\[Book.xlsx]Sheet1"),
-        ] {
-            assert!(
-                matches!(parse_formula(source).unwrap(),
-                Expr::Ref { sheet: Some(sheet), .. } if sheet == expected),
+    fn quoted_spans_are_unsupported_but_single_sheet_external_references_keep_their_ast() {
+        for source in ["'Jan:Mar'!A1", "'A1:Sheet2'!B2", "'Jan:Mar'!#REF!"] {
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(0, "3-D references are unsupported")),
                 "{source}"
             );
         }
-        for source in ["'Jan:Mar'!#REF!", "'[1]Rates'!#REF!"] {
-            assert_eq!(parse_formula(source).unwrap(), Expr::Error(ErrorValue::Ref));
-        }
+        assert!(matches!(
+            parse(r"'C:\x\[Book.xlsx]Sheet1'!A1"),
+            Expr::Ref { sheet: Some(sheet), .. } if sheet == r"C:\x\[Book.xlsx]Sheet1"
+        ));
+        assert_eq!(parse("'[1]Rates'!#REF!"), Expr::Error(ErrorValue::Ref));
     }
 
     #[test]
