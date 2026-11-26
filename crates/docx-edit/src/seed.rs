@@ -2893,21 +2893,30 @@ fn field_payload(
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
-    let runs = if kind == "simpleField" {
-        array(field(Some(field_value), "content"))
-    } else {
-        array(field(Some(field_value), "fieldResult"))
-    };
     let mut display_text = String::new();
-    for child in runs {
-        if string(field(Some(child), "type")) != Some("run") {
-            continue;
-        }
-        for content in array(field(Some(child), "content")) {
-            if string(field(Some(content), "type")) == Some("text") {
-                display_text.push_str(string(field(Some(content), "text")).unwrap_or_default());
+    let mut pending = vec![field_value];
+    while let Some(node) = pending.pop() {
+        let children = match string(field(Some(node), "type")) {
+            Some("run") => {
+                for content in array(field(Some(node), "content")) {
+                    if string(field(Some(content), "type")) == Some("text") {
+                        display_text
+                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
+                    }
+                }
+                None
             }
-        }
+            Some("complexField") => field(field(Some(node), "structuredResult"), "inline")
+                .or_else(|| field(Some(node), "fieldResult")),
+            Some("simpleField") => field(field(Some(node), "structuredResult"), "inline")
+                .or_else(|| field(Some(node), "content")),
+            Some("inlineSdt") => field(Some(node), "content"),
+            Some("hyperlink") => {
+                field(Some(node), "structuredChildren").or_else(|| field(Some(node), "children"))
+            }
+            _ => None,
+        };
+        pending.extend(array(children).iter().rev());
     }
     let formatting = field_result_formatting(field_value);
     let merged = merge_text_formatting(style_formatting, formatting);
@@ -3536,10 +3545,16 @@ fn field_to_units(
     visible["fieldResult"] = Value::Array(
         result
             .iter()
-            .filter(|child| string(field(Some(child), "type")) == Some("run"))
+            .filter(|child| {
+                !matches!(
+                    string(field(Some(child), "type")),
+                    Some("hyperlink" | "simpleField")
+                )
+            })
             .cloned()
             .collect(),
     );
+    visible["structuredResult"] = json!({"inline": visible["fieldResult"]});
     let (mut payload, marks) = field_payload(&visible, style_formatting, source);
     let sequence_owner = string(field(Some(value), "instruction"))
         .and_then(docx_layout::sequence_fields::sequence_name)
@@ -9492,6 +9507,45 @@ mod tests {
             .map(|run| run["fallback"].clone())
             .collect();
         assert_eq!(captions, [json!("2")]);
+    }
+
+    #[test]
+    fn cached_nested_field_results_are_visible_without_field_codes() {
+        let run = |text: &str| json!({"type":"run", "content":[{"type":"text","text":text}]});
+        for instruction in ["AUTOTEXTLIST", "QUOTE"] {
+            let inner = json!({"type":"complexField", "instruction":instruction,
+                "fieldCode":[run("HIDDEN CODE")], "fieldResult":[run("Sincerely,")]});
+            let outer = json!({"type":"complexField", "instruction":instruction,
+                "fieldCode":[run("OUTER CODE")], "fieldResult":[],
+                "structuredResult":{"inline":[run("Before "),inner,run(" After")]}});
+            let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+            assert_eq!(payload["displayText"], json!("Before Sincerely, After"));
+            assert_eq!(payload["hasCachedResult"], json!(true));
+
+            let mut mixed = outer.clone();
+            mixed["structuredResult"]["inline"]
+                .as_array_mut()
+                .unwrap()
+                .extend([
+                    json!({"type":"hyperlink", "anchor":"top", "children":[run("Link")]}),
+                    json!({"type":"simpleField", "instruction":"QUOTE", "content":[run("Simple")]}),
+                ]);
+            let styles = StyleResolver::new(None);
+            let units =
+                paragraph_units(&json!({"content":[mixed]}), &styles, None, &BTreeMap::new()).units;
+            assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Link"));
+            let UnitContent::Embed {
+                payload: simple, ..
+            } = &units[1].content
+            else {
+                panic!("expected projected simple field");
+            };
+            assert_eq!(simple["displayText"], json!("Simple"));
+            let UnitContent::Embed { payload: owner, .. } = &units[2].content else {
+                panic!("expected complex field owner");
+            };
+            assert_eq!(owner["displayText"], json!("Before Sincerely, After"));
+        }
     }
 
     #[test]

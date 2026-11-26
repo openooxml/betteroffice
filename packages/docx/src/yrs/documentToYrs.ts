@@ -626,10 +626,35 @@ function fieldPayload(
   const runs = field.type === 'simpleField' ? field.content : field.fieldResult;
   for (const child of runs) {
     if (child.type !== 'run') continue;
-    for (const content of child.content) {
-      if (content.type === 'text') displayText += content.text;
-    }
     if (!fieldFormatting && child.formatting) fieldFormatting = child.formatting;
+  }
+  const pending: ParagraphContent[] = [field];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (!node) continue;
+    let children: readonly ParagraphContent[] = [];
+    switch (node.type) {
+      case 'run':
+        if (!Array.isArray(node.content)) break;
+        for (const content of node.content) {
+          if (content?.type === 'text') displayText += content.text;
+        }
+        break;
+      case 'complexField':
+        children = node.structuredResult?.inline ?? node.fieldResult;
+        break;
+      case 'simpleField':
+        children = node.structuredResult?.inline ?? node.content;
+        break;
+      case 'inlineSdt':
+        children = node.content;
+        break;
+      case 'hyperlink':
+        children = node.structuredChildren ?? node.children;
+        break;
+    }
+    if (!Array.isArray(children)) continue;
+    for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
   }
   const formatting =
     fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
@@ -809,7 +834,13 @@ function fieldToUnits(
     for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
     units.push(...projected);
   });
-  const visible = { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') };
+  const visible = {
+    ...value,
+    fieldResult: result.filter((child): child is Run => child.type === 'run'),
+    structuredResult: {
+      inline: result.filter((child) => child.type !== 'hyperlink' && child.type !== 'simpleField'),
+    },
+  };
   const field = fieldPayload(visible, styleFormatting);
   opaqueSequences.push(
     ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)

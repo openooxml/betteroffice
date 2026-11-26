@@ -217,6 +217,32 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it.each(['AUTOTEXTLIST', 'QUOTE'])('keeps nested %s cached text without field codes', async (instruction) => {
+    const text = (value: string) => `<w:r><w:t xml:space="preserve">${value}</w:t></w:r>`;
+    const field = (result: string) => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> ${instruction} HIDDEN CODE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const cached = text('Before ') + field(text('Sincerely,')) + text(' After');
+    const projected = '<w:hyperlink w:anchor="top">' + text('Link') + '</w:hyperlink><w:fldSimple w:instr="QUOTE">' + text('Simple') + '</w:fldSimple>';
+    const bytes = sequencePackage(`<w:p>${field(cached)}</w:p><w:p>${field(cached + projected)}</w:p>`);
+    const seeded = await seedSequenceSessions(bytes);
+    try {
+      for (const session of seeded.sessions) {
+        const payloads = session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
+        );
+        expect(payloads.map((payload) => payload.displayText)).toEqual([
+          'Before Sincerely, After', 'Simple', 'Before Sincerely, After',
+        ]);
+        for (const payload of payloads) expect(payload.hasCachedResult).toBe(true);
+        const links = session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'text' ? [segment.text] : []
+        );
+        expect(links.join('')).toBe('Link');
+      }
+    } finally {
+      for (const session of seeded.sessions) session.destroy();
+    }
+  });
+
   it('seeds nested SEQ names without adding them to plain fields', async () => {
     const sequence = (cached: string): ComplexField => ({
       type: 'complexField',
