@@ -17,6 +17,9 @@ jobs:
     name: ${{ matrix.platform.target }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: ${{ matrix.platform.timeout || 45 }}
+    env:
+      ZIG_VERSION: '0.14.1'
+      ZIGBUILD_VERSION: '0.23.4'
     strategy:
       fail-fast: false
       matrix:
@@ -28,8 +31,10 @@ jobs:
             timeout: 75
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            zig: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            zig: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
@@ -48,6 +53,17 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
 
+      - uses: actions/checkout@v7.0.1
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .glibc-tools
+          sparse-checkout: |
+            scripts/cargo-glibc.sh
+            scripts/glibc-floor.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
@@ -59,20 +75,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}
+          key: >-
+            ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') &&
+            format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}
 
       - uses: mlugg/setup-zig@v2
         if: matrix.platform.zig
         with:
-          version: 0.14.1
+          version: ${{ env.ZIG_VERSION }}
 
       - uses: taiki-e/install-action@v2
         if: matrix.platform.zig
         with:
-          tool: cargo-zigbuild@0.23.4
+          tool: cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Pin the glibc floor
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: echo "CARGO=$PWD/.glibc-tools/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"
 
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked
@@ -80,7 +103,7 @@ jobs:
       - name: Check glibc floor
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
+        run: node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
 
       - name: Build the font packages
         shell: bash
@@ -96,7 +119,12 @@ jobs:
       - name: Smoke test on Debian 12
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+
+      - name: Smoke test on Debian 11
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}
