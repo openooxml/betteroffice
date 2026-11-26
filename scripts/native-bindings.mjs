@@ -1,5 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { fetchRegistry } from './registry-fetch.mjs';
 
 export const NATIVE_PACKAGES = [
   'bindings/docx-native',
@@ -64,19 +65,19 @@ export async function pendingPublishNames({ fetchImpl = fetch } = {}) {
       )
     ];
     for (const { name } of packages) {
-      const response = await fetchImpl(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
+      const isRoot = name === root.name;
+      const metadata = await fetchRegistry(`https://registry.npmjs.org/${encodeURIComponent(name)}`, {
         headers: { Accept: 'application/vnd.npm.install-v1+json' },
-        signal: AbortSignal.timeout(15_000)
+        readBody: isRoot,
+        fetchImpl
+      }).catch((error) => {
+        throw new Error(`cannot read npm for ${name}: ${error.message}`, { cause: error });
       });
-      if (response.status === 404) {
+      if (metadata === null) {
         missing.push(name);
         continue;
       }
-      if (!response.ok) throw new Error(`npm answered ${response.status} for ${name}`);
-      if (name === root.name) {
-        const metadata = await response.json();
-        if (!(root.version in (metadata.versions ?? {}))) pending.push(bindingName(path));
-      }
+      if (isRoot && !(root.version in (metadata.versions ?? {}))) pending.push(bindingName(path));
     }
   }
   if (missing.length > 0) {
