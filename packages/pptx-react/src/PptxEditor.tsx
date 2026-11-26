@@ -5,7 +5,7 @@ import type {
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { Component, lazy, Suspense, useEffect, useMemo, useState, type CSSProperties, type JSX, type ReactNode } from 'react';
 import { LocaleProvider, useTranslation } from './i18n';
-import type { PptxCommandStore } from './commands/types';
+import type { PptxCommandId, PptxCommandStore } from './commands/types';
 import type { PptxShortcuts } from './commands/shortcuts';
 import type { ShortcutIssue } from '../../../shared/keyboard/resolve';
 import { shouldSlicePresentationFonts } from '../../../shared/office-session/render/pptxSlicedFonts';
@@ -200,6 +200,11 @@ export interface PptxInThreadEditorProps extends PptxEditorPluginProps {
   toolbar?: ReactNode;
   /** Shows the toolbar region; defaults to true. */
   showToolbar?: boolean;
+  /**
+   * Leaves these commands' controls out of the default toolbar and its overflow menu; shortcuts still run them.
+   * @experimental
+   */
+  hiddenToolbarCommands?: readonly PptxCommandId[];
   /**
    * Remaps or disables keyboard shortcuts; menus and tooltips follow.
    * @experimental

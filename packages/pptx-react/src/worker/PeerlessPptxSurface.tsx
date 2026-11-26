@@ -14,7 +14,7 @@ import type { PptxAsyncEditorInternalProps } from '../PptxEditor';
 import { EditorToolbar } from '../components/EditorToolbar';
 import { PresentButton } from '../components/PresentButton';
 import { ProposalsButton } from '../components/ProposalsButton';
-import { EditorChromeContext } from '../components/EditorToolbarContext';
+import { EditorChromeContext, HiddenToolbarCommandsContext, useHiddenToolbarCommands } from '../components/EditorToolbarContext';
 import { useTranslation } from '../i18n';
 import { pptxCommandController } from '../commands/createPptxCommandStore';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
@@ -191,6 +191,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     invalidateCommandFrameCanvas(surface);
   }, [empty]);
   const { toolbar, showToolbar } = props;
+  const hiddenToolbarCommands = useHiddenToolbarCommands(props.hiddenToolbarCommands);
   const [zoom, setZoom] = useState<number | 'fit'>(() => initialPptxZoom(props.initialZoom));
   const initialZoom = useRef(props.initialZoom);
   initialZoom.current = props.initialZoom;
@@ -312,9 +313,12 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   const insertionScale = presentation?.getVisualSnapshot()?.fit.scale ?? 1;
   return <PptxCommandContext.Provider value={commands}><div dir="ltr" ref={editor} className={props.className} style={{ ...styles.editor, ...props.style }} data-testid="pptx-worker-editor">
     {toolbarVisible && (editorToolbar || chrome) && <div style={styles.toolbarShell}><EditorChromeContext.Provider value>
-      {editorToolbar && <div style={styles.toolbar}>{toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}</div>}
-      {toolbar === undefined && !props.readOnly && reviewState?.proposals && <ProposalsButton count={proposals.length} />}
-      {toolbar === undefined && chrome && <PresentButton />}
+      <HiddenToolbarCommandsContext.Provider value={hiddenToolbarCommands}>
+        {editorToolbar && <div style={styles.toolbar}>{toolbar ?? (chrome ? <EditorToolbar mode="commands" /> : null)}</div>}
+      </HiddenToolbarCommandsContext.Provider>
+      {toolbar === undefined && !props.readOnly && reviewState?.proposals && !hiddenToolbarCommands.has('proposalsPanel') &&
+        <ProposalsButton count={proposals.length} />}
+      {toolbar === undefined && chrome && !hiddenToolbarCommands.has('slideshow') && <PresentButton />}
     </EditorChromeContext.Provider></div>}
     {!failure && (!props.file || !presentation || empty) && <div role="status" data-testid="pptx-worker-status" style={{ position: 'absolute' }}>
       {!props.file ? t('editor.openPrompt') : empty ? t('editor.noSlides')

@@ -19,6 +19,7 @@ import {
 import { createPptxCommandController } from '../../commands/createPptxCommandStore';
 import { testBinding } from '../../commands/testing';
 import { LocaleProvider } from '../../i18n';
+import { HiddenToolbarCommandsContext } from '../EditorToolbarContext';
 import { loadMenuList } from '../../../../../shared/react-toolbar/menuListLoader';
 
 await loadMenuList();
@@ -501,5 +502,24 @@ describe('PPTX toolbar overflow', () => {
     expect(screen().queryByRole('dialog', { name: 'More controls' })).toBeNull();
     expect(document.activeElement).toBe(more());
     expect(menu.isConnected).toBe(false);
+  });
+
+  test('leaves hidden default controls out of the More menu', () => {
+    railWidth = 1000;
+    const harness = testBinding();
+    const controller = createPptxCommandController();
+    controller.attach(harness.binding);
+    render(
+      <PptxCommandProvider commands={controller.store}>
+        <HiddenToolbarCommandsContext.Provider value={new Set(['bold', 'alignment'] as const)}>
+          <EditorToolbar mode="commands" />
+        </HiddenToolbarCommandsContext.Provider>
+      </PptxCommandProvider>
+    );
+    resize(60);
+    const labels = items(openMenu()).map((item) => item.dataset.label);
+    expect(labels).toContain('Italic');
+    expect(labels).not.toContain('Bold');
+    expect(labels).not.toContain('Alignment');
   });
 });
