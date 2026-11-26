@@ -514,11 +514,13 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
     { pending: false, pick: null, read: -Infinity });
   const refreshFonts = useRef(() => {});
   const settings = useRef({ readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-    theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded });
+    theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded,
+    preloadFontScripts: props.preloadFontScripts });
   useLayoutEffect(() => {
     settings.current = { readOnly: effectiveReadOnly, workerLimitBytes: memoryBudget?.workerLimitBytes, measurementFontProvider,
-      theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded };
-  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, tableGridlines, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded]);
+      theme: props.theme, showHiddenText: props.showHiddenText ?? false, showTableGridlines: tableGridlines, previewFirstPage: props.previewFirstPage, mediaTokens: props.mediaTokens, fonts: props.fonts, reportFonts: !!props.onFontsLoaded,
+      preloadFontScripts: props.preloadFontScripts };
+  }, [effectiveReadOnly, memoryBudget?.workerLimitBytes, measurementFontProvider, props.theme, props.showHiddenText, tableGridlines, props.previewFirstPage, props.mediaTokens, props.fonts, props.onFontsLoaded, props.preloadFontScripts]);
   type Ticket = ReturnType<PeerlessEditSessionBinding['session']['submit']>;
   const active = useRef<{
     binding: PeerlessEditSessionBinding;
@@ -660,6 +662,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
           },
           bundled: settings.current.measurementFontProvider,
           progressive: true,
+          fill: settings.current.preloadFontScripts,
         });
         measurement.setCompat(metadata.package.settings?.compatibilityFlags);
         const embeddedFaces = await extractEmbeddedFontFaces(metadata);
@@ -934,7 +937,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
         requirements = uncovered;
         const embedded = await extractEmbeddedFontFaces(opened.document);
         payload = await prepareWorkerFontEnvironment({ fonts, provider, runtime: client.fontRuntime, embedded, requirements, own: next, families: opened.families,
-          progressive: !whole,
+          progressive: !whole, fill: settings.current.preloadFontScripts,
           compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       }
       if (!isCurrent()) return;
@@ -993,7 +996,7 @@ export const PeerlessDocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(fun
       const embedded = await extractEmbeddedFontFaces(opened.document);
       let covers: ((requirements: ResidentFontRequirement[]) => boolean) | undefined;
       const payload = await prepareWorkerFontEnvironment({ fonts: settings.current.fonts,
-        runtime: client.fontRuntime, progressive: opened.wholeFaces === false,
+        runtime: client.fontRuntime, progressive: opened.wholeFaces === false, fill: settings.current.preloadFontScripts,
         provider: settings.current.measurementFontProvider, embedded, requirements, own, families: [...opened.families, family],
         compat: opened.document.package.settings?.compatibilityFlags, signal: abort.signal, onCoverage: check => { covers = check; } });
       if (active.current !== current || fontSource.current !== opened || worker.current !== client) throw new Error('Document was replaced');

@@ -478,6 +478,23 @@ export class TextMeasureFontRegistry {
     });
   }
 
+  /** Registers the sliced face of each script's bundled fallback; a fallback that is not sliced or does not open is skipped, never loaded whole. */
+  async getSlicedScriptFallbackIds(scripts: readonly FontScript[]): Promise<number[]> {
+    if (this.progressive === undefined) return [];
+    const bundled = await this.bundled();
+    const ids = await Promise.all([...new Set(scripts)].map(async (script) => {
+      let loader: BundledFontLoader | undefined;
+      try {
+        loader = bundled?.resolveScriptFallback?.(script, false, false);
+      } catch {
+        return null;
+      }
+      if (loader?.slices === undefined) return null;
+      return this.registerFaceLoader(loader, script, false).catch(() => null);
+    }));
+    return [...new Set(ids.filter((id): id is number => id !== null))];
+  }
+
   /** Synchronous settled view; retryable results are evicted after one pass. */
   getCachedScriptFallbackIds(
     scripts: FontScript[],
@@ -765,11 +782,13 @@ export class TextMeasureFontRegistry {
     if (coverage) this.coverage.set(id, coverage);
   }
 
-  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
-  private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
+  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face; `whole` false fails instead. */
+  private registerFaceLoader(loader: BundledFontLoader, label: string, whole = true): Promise<number> {
     const open = this.progressive;
     const slices = loader.slices;
-    if (open === undefined || slices === undefined) return this.registerLoader(loader);
+    if (open === undefined || slices === undefined) {
+      return whole ? this.registerLoader(loader) : Promise.reject(new Error(`"${label}" has no sliced face`));
+    }
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
@@ -779,7 +798,7 @@ export class TextMeasureFontRegistry {
         try {
           face = await open(slices);
         } catch (error) {
-          if (isImplicitFontCdnError(error)) throw error;
+          if (!whole || isImplicitFontCdnError(error)) throw error;
           this.warnFailure(
             `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
               `${error instanceof Error ? error.message : String(error)}`

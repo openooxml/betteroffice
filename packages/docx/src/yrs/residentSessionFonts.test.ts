@@ -66,9 +66,11 @@ test('sliced faces reach registration with their files and get no CSS face; malf
   const inlined = { ...source, urls: { ...source.urls, 'face/c001.zst': `data:application/octet-stream;base64,${'A'.repeat(20_000)}` } };
   await expect(s.first.prepare({ ...environment, progressive: [{ slot: 0, source: inlined }] })).resolves.toBeDefined();
   expect(s.faces.size).toBe(1);
+  await expect(s.first.prepare({ ...environment, progressive: [{ slot: 0, source, fill: true }] })).resolves.toBeDefined();
   for (const progressive of [
     [{ slot: 2, source }],
     [{ slot: 0, source }, { slot: 0, source }],
+    [{ slot: 0, source, fill: 'yes' }],
     [{ slot: 0, source: { ...source, urls: { 'face/slices.json': 7 } } }],
     [{ slot: 0, source: { ...source, ref: { ...source.ref, indexSha256: 'not hex' } } }],
     [{ slot: 0, source: { ...source, urls: { 'face/slices.json': `https://fonts.example/${'a'.repeat(9000)}` } } }],

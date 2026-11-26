@@ -65,7 +65,8 @@ function validProgressiveSpecs(specs: unknown, faces: readonly DocxFontFace[]): 
       validSliceUrls(urls) &&
       (implicitCdnFiles === undefined || (Array.isArray(implicitCdnFiles) && implicitCdnFiles.length <= 4096 &&
         implicitCdnFiles.every((file) => typeof file === 'string' && Object.prototype.hasOwnProperty.call(urls, file)))) &&
-      (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0));
+      (timeoutMs === undefined || (Number.isSafeInteger(timeoutMs) && timeoutMs > 0)) &&
+      (spec.fill === undefined || typeof spec.fill === 'boolean');
   });
 }
 

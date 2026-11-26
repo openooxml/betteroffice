@@ -62,7 +62,9 @@ import { decodePackedFontFace, preloadEditWasm, preloadEditWasmFrom } from './wa
 import { shipsWasmAsset } from '../wasm/assetEdit';
 import { engineKind } from '../wasm/engineEdit';
 import { copyDecodedFace, fontBytes } from '../../../../shared/office-session/fontDecoder';
-import { glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import {
+  glyphsByFont, ResidentProgressiveFonts, type ProgressiveFontSpec, type SharedOutlineFaces,
+} from './residentProgressiveFonts';
 import {
   createProposalRegistry,
   proposalRevisionPreview,
@@ -1418,6 +1420,8 @@ let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 let echoGlyphState: EchoGlyphState | null = null;
 let progressiveFonts: ResidentProgressiveFonts | null = null;
+/** Sliced faces this worker opened, kept across font environments so loaded outlines are not fetched again. */
+const sharedOutlineFaces: SharedOutlineFaces = new Map();
 /** Set while `commandInit` builds and sends its reply: whole-face requests wait until the host knows the session. */
 let holdWholeFaceRequests = false;
 let heldWholeFaceRequest: { session: string; incarnation: number; epoch: number } | null = null;
@@ -3358,8 +3362,14 @@ function openProgressiveFonts(
     specs, slots.ids, slots.substituteOf,
     { updateFontOutlines: (fontId, bytes) => owner.updateFontOutlines(fontId, bytes) },
     async (encoded, maxOutput) => copyDecodedFace(decodePackedFontFace(new Uint8Array(encoded), 'zstd', undefined, maxOutput)).font,
+    undefined, undefined, sharedOutlineFaces,
   );
   if (fonts.size === 0) return null;
+  fonts.onFilled((owners) => {
+    if (session !== owner || progressiveFonts !== fonts) return;
+    glyphCache?.invalidateFonts(fonts.fontIdsOf(new Set(owners)));
+    echoGlyphState = null;
+  });
   fonts.onLateInstall(() => {
     if (session !== owner || progressiveFonts !== fonts) return;
     glyphCache = null;
@@ -3372,6 +3382,9 @@ function openProgressiveFonts(
       if (session !== owner || progressiveFonts !== fonts) return;
       requestWholeFaces(identity);
     });
+    fonts.onTrapped((error) => trapped(0, error));
+    // A preview is about to be replaced; only an editing session fills its faces.
+    fonts.scheduleFill();
   }
   return fonts;
 }
