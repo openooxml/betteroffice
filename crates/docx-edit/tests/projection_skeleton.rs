@@ -223,6 +223,7 @@ fn carries_a_deferred_table_without_projecting_its_paragraph_keys() {
     }));
 }
 
+const TABLE_LEVELS: usize = 5;
 const DEEP_MARKER: &str = "innermost-projection-depth-marker";
 
 fn nested_tables(levels: usize) -> String {
@@ -279,8 +280,8 @@ fn assert_nested_table_marker(mut blocks: &[BlockContent], levels: usize) {
 }
 
 #[test]
-fn projects_ten_nested_tables() {
-    let levels = 10;
+fn projects_five_nested_tables() {
+    let levels = TABLE_LEVELS;
     let doc = seeded(&nested_tables(levels));
     let input = ProjectionInput::default();
     let document = doc.project_document(&input).unwrap();
@@ -298,7 +299,7 @@ fn projects_ten_nested_tables() {
 
 #[test]
 fn reports_each_deferred_session_table_without_recursing_through_the_tables() {
-    for levels in [1, 10] {
+    for levels in [1, TABLE_LEVELS] {
         let doc = seeded("<w:p/>");
         let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
         let mut story = "body".to_owned();

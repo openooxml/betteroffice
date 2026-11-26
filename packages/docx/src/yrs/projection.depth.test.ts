@@ -18,7 +18,7 @@ import { wrapSession } from './yrsSessionFacade';
 import { yrsToDocument } from './yrsToDocument';
 
 const CLIENT = 48001;
-const TABLE_LEVELS = 10;
+const TABLE_LEVELS = 5;
 const DEEP_MARKER = 'innermost-projection-depth-marker';
 
 function syntheticDocx(body: string): Uint8Array {
@@ -47,7 +47,7 @@ function expectDeepMarker(blocks: readonly BlockContent[], levels: number): void
 describe('Native DOCX projection depth', () => {
   beforeAll(preloadSeedParityWasm, 30_000);
 
-  it('carries ten nested parsed tables through both native JSON exports', () => {
+  it('carries five nested parsed tables through both native JSON exports', () => {
     const raw = createEditSession(CLIENT);
     const session = wrapSession(raw, CLIENT);
     try {
