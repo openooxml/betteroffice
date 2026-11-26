@@ -32,7 +32,7 @@ mod update_tests;
 
 use self::hidden_sizes::{
     HiddenSizeHistory, HiddenSizeStep, HiddenSizes, ReplicaHiddenSizes, derive_source_hidden_sizes,
-    dimension_sheets, matches_shared_baseline,
+    dimension_sheets, with_shared_model,
 };
 use self::proposals::proposal_edit_is_stale;
 
@@ -1351,7 +1351,7 @@ impl Workbook {
         {
             self.pending_remote_updates.remove(index);
         }
-        let before = self.model.clone();
+        let before = self.with_staged_model(WorkbookModel::clone);
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }
@@ -1436,7 +1436,7 @@ impl Workbook {
         self.derive_replica_hidden_sizes(
             &mut model,
             &structure,
-            Default::default(),
+            None,
             HiddenSizeHistory::None,
         );
         self.install_model(model)?;
@@ -1716,7 +1716,7 @@ impl Workbook {
         self.derive_replica_hidden_sizes(
             &mut model,
             &new_structure,
-            Default::default(),
+            None,
             HiddenSizeHistory::None,
         );
         self.install_model(model)?;
@@ -2630,7 +2630,7 @@ impl Workbook {
         self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell), protection)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
-        let mut preview = self.model.clone();
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for (index, edit) in edits.iter().enumerate() {
@@ -2663,7 +2663,9 @@ impl Workbook {
                 ops.push(format);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || self.with_staged_model(|model| models_semantically_equal(&preview, model))
+        {
             return Ok(MutationResult::default());
         }
         let mut inverse = Vec::new();
@@ -2906,17 +2908,7 @@ impl Workbook {
         if self.is_collaborative() {
             refuse_collaborative_structure(&ops, self.model.sheets.len())?;
         }
-        let mut preview = self.model.clone();
-        let dimensions = if self.is_collaborative() {
-            dimension_sheets(&ops)
-        } else {
-            BTreeSet::new()
-        };
-        for &index in &dimensions {
-            if let Some(sheet) = preview.sheets.get_mut(index) {
-                HiddenSizes::take(sheet);
-            }
-        }
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let mut origins = self.preserved.origins.clone();
         let mut axes = self.preserved.axes.clone();
         let mut drawings_move = false;
@@ -2999,8 +2991,27 @@ impl Workbook {
             .is_some_and(|proposals| proposals != self.proposals.list());
         if !proposals_changed
             && !drawings_move
-            && matches_shared_baseline(&mut self.model, &preview, dimensions)
+            && self.with_staged_model(|baseline| *baseline == preview)
         {
+            if self.is_collaborative() {
+                let dimensions = dimension_sheets(&ops);
+                if !dimensions.is_empty() {
+                    for &index in &dimensions {
+                        let prior = &self.model.sheets[index];
+                        let sheet = &mut preview.sheets[index];
+                        sheet.hidden_row_heights.clone_from(&prior.hidden_row_heights);
+                        sheet.hidden_col_widths.clone_from(&prior.hidden_col_widths);
+                    }
+                    let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut preview);
+                    for op in &ops {
+                        batch.apply(op)?;
+                    }
+                    for index in dimensions {
+                        HiddenSizes::take(&mut preview.sheets[index])
+                            .put(&mut self.model.sheets[index]);
+                    }
+                }
+            }
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -3291,7 +3302,7 @@ impl Workbook {
         }
         let new_structure = history.structure;
         let previous_keys = structure.sheet_keys.clone();
-        let before = self.model.clone();
+        let before = self.with_staged_model(WorkbookModel::clone);
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
         let authority = self.built_authority();
@@ -3300,7 +3311,7 @@ impl Workbook {
         self.derive_replica_hidden_sizes(
             &mut restored,
             &new_structure,
-            Default::default(),
+            None,
             HiddenSizeHistory::Restore(&step, redo),
         );
         self.install_model(restored)?;
@@ -3443,7 +3454,7 @@ impl Workbook {
         let mut touched = Vec::with_capacity(proposal.edits.len());
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut per_op = Vec::with_capacity(proposal.edits.len());
-        let mut preview = self.model.clone();
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
@@ -3487,7 +3498,9 @@ impl Workbook {
                 ops.push(op);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || self.with_staged_model(|model| models_semantically_equal(&preview, model))
+        {
             self.proposals.remove(id);
             return Ok(ProposalAcceptance {
                 proposal_id: id.to_string(),
@@ -4428,7 +4441,7 @@ impl Workbook {
             self.derive_replica_hidden_sizes(
                 &mut model,
                 &new_structure,
-                staged.hidden_sizes,
+                Some(staged.hidden_sizes),
                 HiddenSizeHistory::None,
             );
             self.truncate_hidden_size_history();
@@ -5500,17 +5513,25 @@ impl Workbook {
         Ok(())
     }
 
+    fn with_staged_model<T>(&mut self, read: impl FnOnce(&WorkbookModel) -> T) -> T {
+        if self.is_collaborative() {
+            with_shared_model(&mut self.model, read)
+        } else {
+            read(&self.model)
+        }
+    }
+
     fn derive_replica_hidden_sizes(
         &mut self,
         model: &mut WorkbookModel,
         next: &WorkbookStructure,
-        authored: BTreeMap<usize, HiddenSizes>,
+        authored: Option<BTreeMap<usize, HiddenSizes>>,
         history: HiddenSizeHistory<'_>,
     ) -> HiddenSizeStep {
         if let WorkbookMode::Collaborative { structure } = &self.mode {
             self.hidden_sizes.reconcile(
                 (model, &next.sheet_keys),
-                (&self.model, &structure.sheet_keys),
+                (&mut self.model, &structure.sheet_keys),
                 authored,
                 history,
             )

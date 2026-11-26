@@ -21,7 +21,7 @@ impl HiddenSizes {
         }
     }
 
-    fn put(self, sheet: &mut Sheet) {
+    pub(super) fn put(self, sheet: &mut Sheet) {
         sheet.hidden_row_heights = self.rows;
         sheet.hidden_col_widths = self.cols;
     }
@@ -43,20 +43,24 @@ pub(crate) fn dimension_sheets(ops: &[Op]) -> BTreeSet<usize> {
         .collect()
 }
 
-pub(super) fn matches_shared_baseline(
-    baseline: &mut WorkbookModel,
-    preview: &WorkbookModel,
-    sheets: BTreeSet<usize>,
-) -> bool {
-    let local = sheets
-        .into_iter()
-        .filter_map(|index| Some((index, HiddenSizes::take(baseline.sheets.get_mut(index)?))))
+pub(super) fn with_shared_model<T>(
+    model: &mut WorkbookModel,
+    read: impl FnOnce(&WorkbookModel) -> T,
+) -> T {
+    let local = model
+        .sheets
+        .iter_mut()
+        .enumerate()
+        .filter(|(_, sheet)| {
+            !sheet.hidden_row_heights.is_empty() || !sheet.hidden_col_widths.is_empty()
+        })
+        .map(|(index, sheet)| (index, HiddenSizes::take(sheet)))
         .collect::<Vec<_>>();
-    let equal = *baseline == *preview;
+    let result = read(model);
     for (index, sizes) in local {
-        sizes.put(&mut baseline.sheets[index]);
+        sizes.put(&mut model.sheets[index]);
     }
-    equal
+    result
 }
 
 pub(super) fn derive_source_hidden_sizes(
@@ -160,52 +164,73 @@ impl ReplicaHiddenSizes {
     pub(super) fn reconcile(
         &mut self,
         installed: (&mut WorkbookModel, &[String]),
-        previous: (&WorkbookModel, &[String]),
-        mut authored: BTreeMap<usize, HiddenSizes>,
+        previous: (&mut WorkbookModel, &[String]),
+        mut authored_sheets: Option<BTreeMap<usize, HiddenSizes>>,
         history: HiddenSizeHistory<'_>,
     ) -> HiddenSizeStep {
-        let previous = previous
-            .1
-            .iter()
-            .map(String::as_str)
-            .zip(&previous.0.sheets)
-            .collect::<HashMap<_, _>>();
-        let mut remembered = std::mem::take(&mut self.remembered);
+        let (previous, previous_keys) = previous;
+        let mut previous_indices = None;
         let mut step = HiddenSizeStep::new();
         let record = matches!(history, HiddenSizeHistory::Record);
         let (model, keys) = installed;
         for (index, (sheet, key)) in model.sheets.iter_mut().zip(keys).enumerate() {
-            let authored = authored.remove(&index);
-            let mut memory = remembered.remove(key).unwrap_or_default();
+            let prior = match previous_keys.get(index) {
+                Some(prior) if prior == key => Some(index),
+                None if previous_indices.is_none() => None,
+                _ => previous_indices
+                    .get_or_insert_with(|| {
+                        previous_keys
+                            .iter()
+                            .enumerate()
+                            .map(|(index, key)| (key.as_str(), index))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .get(key.as_str())
+                    .copied(),
+            };
+            let mut prior = prior.map(|prior| &mut previous.sheets[prior]);
+            let mut hidden = prior.as_deref_mut().map(HiddenSizes::take).unwrap_or_default();
+            let authored = authored_sheets.as_mut().and_then(|sheets| sheets.remove(&index));
+            if authored_sheets.is_some() && authored.is_none() {
+                hidden.put(sheet);
+                continue;
+            }
             let (restore, redo) = match history {
                 HiddenSizeHistory::Restore(step, redo) => (step.get(key), redo),
                 _ => (None, false),
             };
-            let prior = previous.get(key.as_str()).copied();
             let empty = Sizes::new();
-            let (rows, row_steps) = reconcile_axis(
+            let (rows, cols) = prior.map_or((&empty, &empty), |prior| {
+                (&prior.row_heights, &prior.col_widths)
+            });
+            if authored.is_none()
+                && restore.is_none()
+                && rows == &sheet.row_heights
+                && cols == &sheet.col_widths
+            {
+                hidden.put(sheet);
+                continue;
+            }
+            let mut memory = self.remembered.remove(key).unwrap_or_default();
+            let row_steps = reconcile_axis(
                 &sheet.row_heights,
-                prior.map_or((&empty, &empty), |sheet| {
-                    (&sheet.row_heights, &sheet.hidden_row_heights)
-                }),
+                (rows, &mut hidden.rows),
                 authored.as_ref().map(|sizes| &sizes.rows),
                 &mut memory.rows,
                 restore.map_or(&[], |step| step.rows.as_slice()),
                 redo,
                 record,
             );
-            let (cols, col_steps) = reconcile_axis(
+            let col_steps = reconcile_axis(
                 &sheet.col_widths,
-                prior.map_or((&empty, &empty), |sheet| {
-                    (&sheet.col_widths, &sheet.hidden_col_widths)
-                }),
+                (cols, &mut hidden.cols),
                 authored.as_ref().map(|sizes| &sizes.cols),
                 &mut memory.cols,
                 restore.map_or(&[], |step| step.cols.as_slice()),
                 redo,
                 record,
             );
-            (sheet.hidden_row_heights, sheet.hidden_col_widths) = (rows, cols);
+            hidden.put(sheet);
             if !memory.rows.is_empty() || !memory.cols.is_empty() {
                 self.remembered.insert(key.clone(), memory);
             }
@@ -219,24 +244,27 @@ impl ReplicaHiddenSizes {
                 );
             }
         }
+        if previous_indices.is_some() || previous_keys.len() > keys.len() {
+            self.remembered.retain(|key, _| keys.contains(key));
+        }
         step
     }
 }
 
 fn reconcile_axis(
     installed: &Sizes,
-    (previous, hidden): (&Sizes, &Sizes),
+    (previous, hidden): (&Sizes, &mut Sizes),
     authored: Option<&Sizes>,
     remembered: &mut Sizes,
     restore: &[TrackSizeStep],
     redo: bool,
     record: bool,
-) -> (Sizes, Vec<TrackSizeStep>) {
-    if authored.is_none_or(|authored| authored == hidden)
+) -> Vec<TrackSizeStep> {
+    if authored.is_none_or(|authored| authored == &*hidden)
         && restore.is_empty()
         && installed == previous
     {
-        return (hidden.clone(), Vec::new());
+        return Vec::new();
     }
 
     let mut projected = installed
@@ -244,7 +272,7 @@ fn reconcile_axis(
         .filter(|&(_, &size)| size == 0.0)
         .filter_map(|(&at, _)| {
             let size = authored
-                .unwrap_or(hidden)
+                .unwrap_or(&*hidden)
                 .get(&at)
                 .or_else(|| previous.get(&at).filter(|&&size| size > 0.0))
                 .or_else(|| remembered.get(&at))
@@ -253,7 +281,7 @@ fn reconcile_axis(
         })
         .collect::<Sizes>();
 
-    let previous_memory = record.then(|| remembered.clone());
+    let previous_memory = (record || !restore.is_empty()).then(|| remembered.clone());
     for (&at, &size) in previous {
         if !installed.contains_key(&at)
             && let Some(size) = hidden.get(&at).copied().or((size > 0.0).then_some(size))
@@ -271,6 +299,13 @@ fn reconcile_axis(
         };
         if previous.get(&step.at).copied() == from.shared
             && installed.get(&step.at).copied() == to.shared
+            && hidden
+                .get(&step.at)
+                .or_else(|| {
+                    previous_memory.as_ref().and_then(|memory| memory.get(&step.at))
+                })
+                .copied()
+                == from.local
         {
             let local = match to.shared {
                 Some(0.0) => &mut projected,
@@ -286,13 +321,19 @@ fn reconcile_axis(
     }
 
     let mut changes = Vec::new();
-    if let Some(previous_memory) = previous_memory {
+    if record && let Some(previous_memory) = previous_memory {
         let tracks = hidden
             .keys()
             .chain(previous_memory.keys())
             .chain(projected.keys())
             .chain(remembered.keys())
             .copied()
+            .chain(previous.iter().filter_map(|(&at, &size)| {
+                (size == 0.0 && installed.get(&at) != Some(&0.0)).then_some(at)
+            }))
+            .chain(installed.iter().filter_map(|(&at, &size)| {
+                (size == 0.0 && previous.get(&at) != Some(&0.0)).then_some(at)
+            }))
             .collect::<BTreeSet<_>>();
         for at in tracks {
             let before = TrackSize {
@@ -308,5 +349,6 @@ fn reconcile_axis(
             }
         }
     }
-    (projected, changes)
+    *hidden = projected;
+    changes
 }

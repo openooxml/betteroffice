@@ -216,7 +216,7 @@ impl Workbook {
             let step = self.derive_replica_hidden_sizes(
                 &mut model,
                 structure,
-                hidden_sizes,
+                Some(hidden_sizes),
                 if record {
                     HiddenSizeHistory::Record
                 } else {

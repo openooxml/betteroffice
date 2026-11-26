@@ -40,7 +40,8 @@ fn hidden_size_only_commit_matches_released_checkpoint_bytes() {
     ] {
         let mut current = Workbook::open_collaborative(&source, 7).unwrap();
         let mut released = Workbook::open_collaborative(&source, 7).unwrap();
-        HiddenSizes::take(&mut released.model.sheets[0]);
+        released.model.sheets[0].hidden_row_heights.clear();
+        released.model.sheets[0].hidden_col_widths.clear();
         released.adopt_peer_version(current.version().as_str()).unwrap();
         let ops = vec![op, visibility(true)];
         for book in [&mut current, &mut released] {
@@ -102,8 +103,10 @@ fn authored_and_default_unhides_use_the_existing_dimension_update_bytes() {
         let mut current = Workbook::open_collaborative(&source, 7).unwrap();
         let mut explicit = Workbook::open_collaborative(&source, 7).unwrap();
         let mut cleared = Workbook::open_collaborative(&source, 7).unwrap();
-        HiddenSizes::take(&mut explicit.model.sheets[0]);
-        HiddenSizes::take(&mut cleared.model.sheets[0]);
+        for book in [&mut explicit, &mut cleared] {
+            book.model.sheets[0].hidden_row_heights.clear();
+            book.model.sheets[0].hidden_col_widths.clear();
+        }
         let mut released = Workbook::from_model_collaborative(cleared.model.clone(), 7).unwrap();
         assert_eq!(
             current.encode_state_as_update_v1(),

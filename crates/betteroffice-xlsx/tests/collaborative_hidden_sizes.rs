@@ -1,4 +1,6 @@
-use betteroffice_xlsx::{CalculationOptions, CellRef, Op, Sheet, SheetId, Workbook, WorkbookModel};
+use betteroffice_xlsx::{
+    CalculationOptions, CellRef, CellState, CellValue, Op, Sheet, SheetId, Workbook, WorkbookModel,
+};
 
 const DATA: SheetId = SheetId(0);
 type Sizes = (Option<f64>, Option<f64>, Option<f64>);
@@ -7,6 +9,16 @@ const DEFAULT: Sizes = (None, None, None);
 const HIDDEN: Sizes = (Some(0.0), Some(0.0), Some(0.0));
 
 fn source() -> Vec<u8> {
+    source_with_worksheet(concat!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<cols><col min="2" max="2" width="18" customWidth="1" hidden="1"/></cols>"#,
+        r#"<sheetData><row r="1" ht="25" customHeight="1" hidden="1"><c r="A1"><v>7</v></c></row>"#,
+        r#"<row r="2" ht="30" customHeight="1" hidden="1"><c r="B2"><v>2</v></c></row>"#,
+        r#"<row r="3"><c r="A3"><v>3</v></c></row></sheetData></worksheet>"#,
+    ))
+}
+
+fn source_with_worksheet(xml: &str) -> Vec<u8> {
     let model = WorkbookModel {
         sheets: vec![Sheet::new("Data")],
         ..Default::default()
@@ -16,15 +28,7 @@ fn source() -> Vec<u8> {
         .iter_mut()
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap();
-    sheet.1 = concat!(
-        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
-        r#"<cols><col min="2" max="2" width="18" customWidth="1" hidden="1"/></cols>"#,
-        r#"<sheetData><row r="1" ht="25" customHeight="1" hidden="1"><c r="A1"><v>7</v></c></row>"#,
-        r#"<row r="2" ht="30" customHeight="1" hidden="1"><c r="B2"><v>2</v></c></row>"#,
-        r#"<row r="3"><c r="A3"><v>3</v></c></row></sheetData></worksheet>"#,
-    )
-    .as_bytes()
-    .to_vec();
+    sheet.1 = xml.as_bytes().to_vec();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -222,6 +226,92 @@ fn undo_of_unhide_and_resize_restores_pre_step_hidden_sizes() {
 }
 
 #[test]
+fn undo_of_unhide_and_resize_restores_an_unknown_hidden_size() {
+    let mut model = Workbook::open(&source()).unwrap().into_model();
+    model.sheets[0].hidden_row_heights.remove(&0);
+    let mut workbook = Workbook::from_model_collaborative(model, 7).unwrap();
+    apply(
+        &mut workbook,
+        vec![row_visibility(0, false), row_height(0, 40.0)],
+    );
+    assert_eq!(sizes(&workbook).0, Some(40.0));
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_eq!(sizes(&workbook), HIDDEN);
+    assert_eq!(hidden_sizes(&workbook), (None, Some(30.0), Some(18.0)));
+}
+
+#[test]
+fn undo_of_a_cell_and_hidden_resize_preserves_a_newer_peer_size() {
+    let source = source();
+    let mut left = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 8).unwrap();
+    apply(
+        &mut left,
+        vec![
+            Op::SetCell {
+                sheet: DATA,
+                at: CellRef::new(2, 0),
+                cell: CellState {
+                    value: CellValue::Number { value: 4.0 },
+                    ..Default::default()
+                },
+            },
+            row_height(0, 40.0),
+            row_visibility(0, true),
+        ],
+    );
+    assert_eq!(hidden_sizes(&left).0, Some(40.0));
+    let update = diff(&left, &right);
+    receive(&mut right, &update);
+    for op in [row_height(0, 55.0), row_visibility(0, true)] {
+        apply(&mut right, vec![op]);
+        let update = diff(&right, &left);
+        receive(&mut left, &update);
+    }
+    assert_eq!(hidden_sizes(&left).0, Some(55.0));
+    assert!(left.undo(CalculationOptions::default()).unwrap().applied);
+    assert_eq!(
+        (sizes(&left).0, hidden_sizes(&left).0),
+        (Some(0.0), Some(55.0)),
+    );
+    assert_eq!(
+        left.sheet(DATA)
+            .unwrap()
+            .cell(CellRef::new(2, 0))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 3.0 },
+    );
+}
+
+#[test]
+fn received_undo_remembers_the_last_visible_size_seen() {
+    let source = source();
+    let mut left = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut right = Workbook::open_collaborative(&source, 8).unwrap();
+    assert_eq!(
+        (hidden_sizes(&left).0, hidden_sizes(&right).0),
+        (Some(25.0), Some(25.0)),
+    );
+    apply(&mut left, vec![row_visibility(0, false), row_height(0, 40.0)]);
+    let update = diff(&left, &right);
+    receive(&mut right, &update);
+    assert_eq!(sizes(&right).0, Some(40.0));
+    left.undo(CalculationOptions::default()).unwrap();
+    let update = diff(&left, &right);
+    receive(&mut right, &update);
+    assert_eq!(sizes(&left), HIDDEN);
+    assert_eq!(
+        (hidden_sizes(&left).0, hidden_sizes(&right).0),
+        (Some(25.0), Some(40.0)),
+    );
+    assert_eq!(
+        left.encode_state_as_update_v1(),
+        right.encode_state_as_update_v1(),
+    );
+}
+
+#[test]
 fn replicas_without_local_sizes_receive_authored_unhides_and_send_default_unhides() {
     let source = source();
     for new_peer_unhides in [true, false] {
@@ -259,6 +349,29 @@ fn released_unhide_then_undo_restores_remembered_hidden_sizes() {
     let update = diff(&released, &current);
     receive(&mut current, &update);
     assert_saved_hidden(&current);
+}
+
+#[test]
+fn zero_height_released_unhide_then_undo_remembers_the_default_height() {
+    let source = source_with_worksheet(concat!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<sheetFormatPr defaultRowHeight="15" zeroHeight="1"/>"#,
+        r#"<sheetData><row r="1" ht="25" customHeight="1" hidden="1"/></sheetData></worksheet>"#,
+    ));
+    let mut current = Workbook::open_collaborative(&source, 7).unwrap();
+    let mut released = Workbook::from_model_collaborative(stripped_model(&source), 8).unwrap();
+    assert_eq!(hidden_sizes(&current).0, Some(25.0));
+    apply(&mut released, vec![row_visibility(0, false)]);
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_eq!(sizes(&current).0, Some(15.0));
+    released.undo(CalculationOptions::default()).unwrap();
+    let update = diff(&released, &current);
+    receive(&mut current, &update);
+    assert_eq!(
+        (sizes(&current).0, hidden_sizes(&current).0),
+        (Some(0.0), Some(15.0)),
+    );
 }
 
 #[test]
@@ -404,6 +517,72 @@ fn hidden_size_only_batch_commits_without_a_shared_update_and_keeps_the_resize()
     assert_eq!(hidden_sizes(&reopen(&workbook)).0, Some(40.0));
     apply(&mut workbook, vec![row_visibility(0, false)]);
     assert_eq!(sizes(&workbook).0, Some(40.0));
+}
+
+#[test]
+fn no_op_reset_then_hide_forgets_the_local_size_without_committing() {
+    let mut workbook = Workbook::open_collaborative(&source(), 7).unwrap();
+    let options = CalculationOptions::default();
+    let version = workbook.version();
+    let history = workbook.history_state();
+    let state = workbook.encode_state_as_update_v1();
+    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
+    assert_eq!(hidden_sizes(&workbook), AUTHORED);
+    let result = workbook
+        .apply_ops(
+            vec![
+                Op::SetRowHeight {
+                    sheet: DATA,
+                    row: 0,
+                    height: None,
+                },
+                row_visibility(0, true),
+            ],
+            options,
+        )
+        .unwrap();
+    assert!(!result.applied);
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.history_state(), history);
+    assert_eq!(workbook.encode_state_as_update_v1(), state);
+    assert_eq!(workbook.recovery_checkpoint(1, None).unwrap(), checkpoint);
+    assert_eq!(sizes(&workbook), HIDDEN);
+    assert_eq!(hidden_sizes(&workbook), (None, Some(30.0), Some(18.0)));
+    apply(&mut workbook, vec![row_visibility(0, false)]);
+    assert_eq!(sizes(&workbook).0, None);
+}
+
+#[test]
+fn cell_edit_preserves_hidden_sizes_on_an_untouched_sheet_with_many_overrides() {
+    let mut dimensions = Sheet::new("Dimensions");
+    dimensions.row_heights.extend((0..5_000).map(|row| (row, 0.0)));
+    dimensions
+        .hidden_row_heights
+        .extend((0..5_000).map(|row| (row, 25.0)));
+    dimensions.col_widths.insert(1, 0.0);
+    dimensions.hidden_col_widths.insert(1, 18.0);
+    let mut workbook = Workbook::from_model_collaborative(
+        WorkbookModel {
+            sheets: vec![Sheet::new("Data"), dimensions.clone()],
+            ..Default::default()
+        },
+        7,
+    )
+    .unwrap();
+    apply(
+        &mut workbook,
+        vec![Op::SetCell {
+            sheet: DATA,
+            at: CellRef::new(0, 0),
+            cell: CellState {
+                value: CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        }],
+    );
+    let sheet = workbook.sheet(SheetId(1)).unwrap();
+    assert_eq!(sheet.hidden_row_heights, dimensions.hidden_row_heights);
+    assert_eq!(sheet.hidden_col_widths, dimensions.hidden_col_widths);
 }
 
 #[test]
