@@ -1355,7 +1355,9 @@ export interface YrsSession extends CollaborationReplica {
     /** The Word paragraph ID each paragraph of a story saves with, in pilcrow order. @internal */
     storyParagraphIds(story: string): Array<string | null>;
     /** The paragraph IDs a save of the session applies. @internal */
-    paragraphSavePlan(useLocalProvenance?: boolean): DocxParagraphSavePlan;
+    paragraphSavePlan(): DocxParagraphSavePlan;
+    /** @internal */
+    paragraphSavePlanWithLocalProvenance(): DocxParagraphSavePlan;
     /**
      * Publishes the `[owner, paraId]` pairs a save captured and returns those
      * whose binding changed since. @internal

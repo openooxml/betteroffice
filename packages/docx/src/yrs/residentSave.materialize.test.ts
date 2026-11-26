@@ -93,13 +93,13 @@ it('keeps worker and main-thread peer editor saves on base alignment after a rec
     return new Uint8Array(await saveResidentDocument(raw, 411, source, hostJson, host.document, [], { full: false }, dirty));
   };
   const savePeer = async () => new Uint8Array(await saveEditorDocument(peer, projected, [], { full: false }));
-  expect(await saveWorker()).toEqual(base.bytes);
-  expect(await savePeer()).toEqual(base.bytes);
+  expect(await saveWorker()).toEqual(new Uint8Array(base.bytes));
+  expect(await savePeer()).toEqual(new Uint8Array(base.bytes));
 
   const recorded = await saveYrsDocx(session, { useLocalProvenance: true });
   expect(unzipContainer(recorded.bytes)['word/document.xml']).not.toEqual(unzipContainer(base.bytes)['word/document.xml']);
-  expect(await saveWorker()).toEqual(base.bytes);
-  expect(await savePeer()).toEqual(base.bytes);
+  expect(await saveWorker()).toEqual(new Uint8Array(base.bytes));
+  expect(await savePeer()).toEqual(new Uint8Array(base.bytes));
 });
 
 it('warms the resident writer with a separate edited document and preserves the opened session', async () => {

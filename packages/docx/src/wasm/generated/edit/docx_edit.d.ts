@@ -111,6 +111,9 @@ export class EditSession {
      * the edit; remote/collaboration updates must use `apply_update` instead.
      */
     apply_local_update(update: Uint8Array): void;
+    /**
+     * @internal
+     */
     apply_local_update_with_provenance(update: Uint8Array, sidecar: Uint8Array): void;
     /**
      * Applies a paragraph style and rebases inherited character formatting, preserving direct
@@ -181,6 +184,9 @@ export class EditSession {
      */
     begin_shared_reads(): void;
     bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | null): void;
+    /**
+     * @internal
+     */
     bootstrap_peer_with_provenance(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | null | undefined, sidecar: Uint8Array): void;
     /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
@@ -415,6 +421,9 @@ export class EditSession {
      * limit.
      */
     encode_diff_chunks(remote_state_vector: Uint8Array, max_chunk_bytes: number): Array<any>;
+    /**
+     * @internal
+     */
     encode_edit_provenance_for_transfer(bytes: Uint8Array, base?: Uint8Array | null): Uint8Array;
     encode_peer_metadata(): Uint8Array;
     /**
@@ -874,7 +883,11 @@ export class EditSession {
      * whose session keys the caller resolves to the model paragraphs it marks
      * with their ordinals.
      */
-    paragraph_save_plan(use_local_provenance?: boolean | null): string;
+    paragraph_save_plan(): string;
+    /**
+     * @internal
+     */
+    paragraph_save_plan_with_local_provenance(): string;
     /**
      * Compact paragraph-position projection built in one story traversal:
      * `[{"paraId","length"}, …]` in document order, where `length` counts the
@@ -2018,7 +2031,8 @@ export interface InitOutput {
     readonly editsession_page_texts_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];
-    readonly editsession_paragraph_save_plan: (a: number, b: number) => [number, number, number, number];
+    readonly editsession_paragraph_save_plan: (a: number) => [number, number, number, number];
+    readonly editsession_paragraph_save_plan_with_local_provenance: (a: number) => [number, number, number, number];
     readonly editsession_paragraph_spans: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_style_numbers: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_unit: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];

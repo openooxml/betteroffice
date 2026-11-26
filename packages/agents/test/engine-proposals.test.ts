@@ -1019,7 +1019,7 @@ for (const peer of [false, true]) {
 
       expect(await doc.accept(proposal.id)).toEqual({ id: proposal.id, status: 'accepted', tracked: false, changes: 1 });
 
-      const accepted = records.map(({ id }) => ({ id, state: 'accepted' }));
+      const accepted = records.map(({ id }) => ({ id, state: 'accepted' as const }));
       if (peer) expect(decisions.map(batch => batch.map(({ id, state }) => ({ id, state })))).toEqual([accepted]);
       expect(owner.session.getProposals().proposals).toEqual([]);
       expect(owner.session.listRevisions()).toEqual([]);
@@ -1084,7 +1084,7 @@ for (const peer of [false, true]) {
       })).toMatchObject({ ok: true });
       const partial = owner.session.getProposals();
       const beforeState = owner.session.encodeState();
-      const records = proposals.map(({ id }) => ({ id, state: id === middle.id ? 'accepted' : 'proposed' }));
+      const records = proposals.map(({ id }) => ({ id, state: id === middle.id ? 'accepted' as const : 'proposed' as const }));
       expect(partial.proposals.map(({ id, state }) => ({ id, state }))).toEqual(records);
       expect(proposalRevisionPreview(partial)).toEqual(Object.fromEntries(middle.revisionIds.map(id => [id, 'accepted'])));
       expect(doc.review(proposal.id)).toMatchObject({ status: 'pending', records });
