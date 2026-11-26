@@ -287,6 +287,15 @@ pub fn rewrite_table_columns<'a>(
         let TokKind::TableRef { sheet, table, spec } = &token.kind else {
             continue;
         };
+        if table.is_empty()
+            && spec.bands.is_empty()
+            && index >= 2
+            && tokens[index - 1].kind == TokKind::Intersection
+            && matches!(&tokens[index - 2].kind, TokKind::ExternalRef(reference)
+                if matches!(reference.as_ref(), TokKind::Name { scope: Some(_), .. }))
+        {
+            continue;
+        }
         for (column, span) in columns {
             if let Some(new) = caption(sheet.as_deref(), table, &column) {
                 let prefix = &input[selector_start + 1..span.start];
@@ -1335,11 +1344,20 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_local_selector_after_an_external_name_follows_a_header_rename() {
-        let source = "SUM([1]Sheet1!ExternalName [Old])+[1]!T[Old]";
+    fn unambiguous_local_selectors_after_external_names_follow_a_header_rename() {
+        let source = concat!(
+            "SUM([1]Sheet1!ExternalName [Old])+",
+            "SUM([1]Sheet1!ExternalName [@Old])+",
+            "SUM(([1]Sheet1!ExternalName) [Old])+[1]!T[Old]",
+        );
+        let expected = concat!(
+            "SUM([1]Sheet1!ExternalName [Old])+",
+            "SUM([1]Sheet1!ExternalName [@New])+",
+            "SUM(([1]Sheet1!ExternalName) [New])+[1]!T[Old]",
+        );
         assert_eq!(
             rewrite_table_column(source, "T", "Data", true, "Old", "New"),
-            Ok(Some("SUM([1]Sheet1!ExternalName [New])+[1]!T[Old]".into()))
+            Ok(Some(expected.into()))
         );
     }
 

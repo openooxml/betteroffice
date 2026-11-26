@@ -2033,24 +2033,36 @@ pub(crate) fn remove_table_references(
     }
     let tokens = lex_for_rewrite(text).ok()?;
     let drops = |table: &str| dropped.iter().any(|name| sheet_names_equal(name, table));
+    let has_sheet = |name: &str| sheets.iter().any(|sheet| sheet_names_equal(sheet, name));
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
     for (at, token) in tokens.iter().enumerate() {
         let end = match &token.kind {
             TokKind::TableRef { table, .. } if drops(table) => token.end,
+            // A mixed-quoted sheet span can also lex as a name joined to a qualified range.
             TokKind::Ident(word)
                 if drops(word)
                     && !matches!(
                         tokens.get(at + 1).map(|next| &next.kind),
                         Some(TokKind::LParen)
-                    ) =>
+                    )
+                    && !(text[token.end..].starts_with(":'")
+                        && has_sheet(word)
+                        && matches!(
+                            tokens.get(at + 2).map(|next| &next.kind),
+                            Some(
+                                TokKind::Range { sheet: Some(last), .. }
+                                    | TokKind::ColumnRange { sheet: Some(last), .. }
+                                    | TokKind::RowRange { sheet: Some(last), .. }
+                            ) if has_sheet(last)
+                        )) =>
             {
                 token.end
             }
             TokKind::ThreeDRef { first, .. }
                 if !text[token.start..].starts_with('\'')
                     && drops(first)
-                    && !sheets.iter().any(|sheet| sheet_names_equal(sheet, first)) =>
+                    && !has_sheet(first) =>
             {
                 token.start + first.len()
             }
@@ -3078,6 +3090,16 @@ mod tests {
                 &sheets[..],
             ),
             (
+                "SUM(Amounts:'Data two'!A1:B2)",
+                "SUM(#REF!:'Data two'!A1:B2)",
+                &sheets[1..],
+            ),
+            (
+                "SUM(Amounts : 'Data two'!A1:B2)",
+                "SUM(#REF! : 'Data two'!A1:B2)",
+                &sheets[..],
+            ),
+            (
                 "[1]!#REF!+SUM(Amounts[Amt])",
                 "[1]!#REF!+SUM(#REF!)",
                 &sheets[..],
@@ -3086,7 +3108,8 @@ mod tests {
             assert!(!names_unrewritable_table(source, &dropped, sheet_names));
             assert_eq!(
                 remove_table_references(source, &dropped, sheet_names).as_deref(),
-                Some(expected)
+                Some(expected),
+                "{source}"
             );
         }
     }
