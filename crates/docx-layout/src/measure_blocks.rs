@@ -1919,6 +1919,7 @@ impl FloatingZone {
 }
 
 /// A block's replay record for [`FloatFlowReplay`].
+#[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct FloatFlowStep {
     starts: bool,
@@ -1934,6 +1935,7 @@ impl FloatFlowStep {
 }
 
 /// The state of an earlier float flow, rebuilt one [`FloatFlowStep`] at a time.
+#[doc(hidden)]
 #[derive(Clone, Debug, Default)]
 pub struct FloatFlowReplay {
     state: FlowState,
@@ -1954,6 +1956,7 @@ impl FloatFlowReplay {
 }
 
 /// Incremental measurement of a float flow segment.
+#[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct FloatSegmentFlow {
     state: FlowState,
@@ -2124,6 +2127,7 @@ impl FloatFlow {
     }
 
     /// Enables replay recording before measurement, except for margin-relative zones.
+    #[doc(hidden)]
     pub fn record_steps(mut self) -> Self {
         assert!(self.measured.is_empty(), "enable replay before measuring");
         if self.zones_by_anchor.is_empty() {
@@ -2147,11 +2151,13 @@ impl FloatFlow {
     }
 
     /// Replay records for measured blocks, if recording is enabled.
+    #[doc(hidden)]
     pub fn steps(&self) -> Option<&[FloatFlowStep]> {
         self.steps.as_deref()
     }
 
     /// Takes the replay records and stops recording.
+    #[doc(hidden)]
     pub fn take_steps(&mut self) -> Option<Vec<FloatFlowStep>> {
         self.steps.take()
     }
