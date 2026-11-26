@@ -43,6 +43,19 @@
     "newSlide": "नई स्लाइड",
     "newSlideWithLayout": "लेआउट के साथ नई स्लाइड",
     "layoutOption": "लेआउट {number}",
+    "layouts": {
+      "title": "शीर्षक स्लाइड",
+      "obj": "शीर्षक और सामग्री",
+      "secHead": "अनुभाग शीर्षलेख",
+      "twoObj": "दो सामग्री",
+      "twoTxTwoObj": "तुलना",
+      "titleOnly": "केवल शीर्षक",
+      "blank": "रिक्त",
+      "objTx": "कैप्शन सहित सामग्री",
+      "picTx": "कैप्शन सहित चित्र",
+      "vertTx": "शीर्षक और ऊर्ध्वाधर पाठ",
+      "vertTitleAndTx": "ऊर्ध्वाधर शीर्षक और पाठ"
+    },
     "fit": "फ़िट",
     "zoomValue": "ज़ूम: {value}",
     "textBoxTool": "टेक्स्ट बॉक्स",
@@ -113,7 +126,12 @@
     "loadError": "संपादक लोड नहीं हो सका",
     "loadErrorDescription": "अपना कनेक्शन जांचें, फिर पेज को फिर से लोड करें।",
     "reloadPage": "पेज फिर से लोड करें",
-    "showDetails": "विवरण दिखाएं"
+    "showDetails": "विवरण दिखाएं",
+    "placeholders": {
+      "title": "शीर्षक जोड़ने के लिए क्लिक करें",
+      "subtitle": "उपशीर्षक जोड़ने के लिए क्लिक करें",
+      "body": "पाठ जोड़ने के लिए क्लिक करें"
+    }
   },
   "objects": {
     "defaultTextBoxName": "टेक्स्ट बॉक्स",

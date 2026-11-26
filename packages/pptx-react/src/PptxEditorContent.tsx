@@ -11,8 +11,10 @@ import type {
   PptxEditRefusal, PptxEditRequest, PptxEditResult, PptxPresencePeer, PresentationHandle, Proposal,
   ProposalDiffSlide, SlideDisplayList, StorySnapshot, TextBoxPrimitive, TextStylePatch,
 } from '@betteroffice/pptx';
-import { presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
+import { presentationMetadata, presentationStoryFormatting, type PptxWorkerEditorRecovery } from '@betteroffice/pptx/worker';
 import { useTranslation } from './i18n';
+import { defaultInsertLayoutPath } from './slideLayouts';
+import { PlaceholderGuides } from './components/PlaceholderGuides';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   memo,
@@ -2422,11 +2424,15 @@ export function PptxEditorContent({
     const current = modelRef.current;
     if (!handle || !current) return false;
     const index = current.slideIndex + 1;
+    let layouts;
+    try { layouts = presentationMetadata(handle).layouts; } catch {}
     const layout =
       layoutPartPath === undefined
-        ? current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined
+        ? defaultInsertLayoutPath(layouts, current.snapshot.slides[current.slideIndex]?.layoutPartPath)
         : layoutPartPath ?? undefined;
-    handle.insertSlide(index, layout);
+    handle.addUndoBoundary();
+    handle.insertSlide(index, layout, { instantiatePlaceholders: true });
+    handle.addUndoBoundary();
     setSelection(null);
     setShapeSelection(null);
     setDragPreview(null);
@@ -3072,6 +3078,18 @@ export function PptxEditorContent({
                         height: Math.max(1, editedShapeBounds.height * scale),
                       }}
                       aria-hidden="true"
+                    />
+                  ) : null}
+                  {!readOnly && model.frame ? (
+                    <PlaceholderGuides
+                      displayList={model.frame}
+                      scale={scale}
+                      selectedShapeId={shapeSelection?.shapeId ?? null}
+                      editingShapeId={selection?.shapeId ?? null}
+                      hiddenShapeId={
+                        dragPreview?.shapeId ??
+                        (resizePreview ? shapeSelection?.shapeId ?? null : null)
+                      }
                     />
                   ) : null}
                   {textBoxPreview ? (

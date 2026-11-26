@@ -8,7 +8,7 @@ import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, SlideDisplayList, TextStyle, TextStyleSnapshot } from '../types';
 import type {
-  PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame,
+  PresentationSessionOpenOptions, PresentationSlideLayoutSummary, PresentationSlideSummary, PresentationWireFrame,
 } from './methods';
 import type { SlicedFontRead } from './commandSlicedFonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -97,6 +97,10 @@ export type PresentationCommandPayloads = {
   collabPipe: PresentationCommandInput & PipeCommandPayload<PptxPresenceCursor>;
   applyEdits: PresentationCommandInput & { request: PptxEditRequest };
   registerFont: PresentationCommandInput & { font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback?: boolean };
+  insertSlide: PresentationCommandInput & {
+    index: number;
+    layoutPartPath?: string;
+  };
   insertTextBox: PresentationCommandInput & { slideId: string; draft: ShapeDraft };
   insertShape: PresentationCommandInput & { slideId: string; draft: PresetShapeDraft };
   insertPicture: PresentationCommandInput & {
@@ -150,7 +154,7 @@ export const PRESENTATION_COMMAND_ADMISSION = Object.freeze({
   setChangeObserver: 'mode', invoke: 'local-write',
   applyRemoteUpdate: 'remote-update', collabPipe: 'remote-update',
   applyEdits: 'local-write', registerFont: 'local-write',
-  insertTextBox: 'local-write', insertShape: 'local-write', insertPicture: 'local-write',
+  insertSlide: 'local-write', insertTextBox: 'local-write', insertShape: 'local-write', insertPicture: 'local-write',
   moveShape: 'local-write', setShapeRect: 'local-write', undo: 'local-write', redo: 'local-write',
   insertText: 'local-write', replaceText: 'local-write', formatText: 'local-write',
   setParagraphAlignment: 'local-write', deleteBackward: 'local-write', deleteForward: 'local-write',
@@ -259,6 +263,7 @@ export interface PresentationCommandAck extends PresentationCommandIdentity {
   activeSlideId?: string | null;
   historyThroughSeq?: number;
   slides?: PresentationSlideSummary[];
+  layouts?: PresentationSlideLayoutSummary[];
   size?: { width: number; height: number };
   frame?: PresentationCommandFrame | null;
 }
@@ -278,6 +283,7 @@ export interface PresentationCommandOpenResult extends PresentationCommandAck {
   recoveryEngine?: string;
   recoveryUpdate?: ArrayBuffer;
   slides: PresentationSlideSummary[];
+  layouts?: PresentationSlideLayoutSummary[];
   size: { width: number; height: number };
   activeSlideId: string | null;
   frame: PresentationCommandFrame | null;

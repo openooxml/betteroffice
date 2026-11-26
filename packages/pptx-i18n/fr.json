@@ -43,6 +43,19 @@
     "newSlide": "Nouvelle diapositive",
     "newSlideWithLayout": "Nouvelle diapositive avec disposition",
     "layoutOption": "Disposition {number}",
+    "layouts": {
+      "title": "Diapositive de titre",
+      "obj": "Titre et contenu",
+      "secHead": "Titre de section",
+      "twoObj": "Deux contenus",
+      "twoTxTwoObj": "Comparaison",
+      "titleOnly": "Titre seul",
+      "blank": "Vide",
+      "objTx": "Contenu avec légende",
+      "picTx": "Image avec légende",
+      "vertTx": "Titre et texte vertical",
+      "vertTitleAndTx": "Titre et texte verticaux"
+    },
     "fit": "Ajuster",
     "zoomValue": "Zoom : {value}",
     "textBoxTool": "Zone de texte",
@@ -113,7 +126,12 @@
     "loadError": "L’éditeur n’a pas pu se charger",
     "loadErrorDescription": "Vérifiez votre connexion, puis rechargez la page.",
     "reloadPage": "Recharger la page",
-    "showDetails": "Afficher les détails"
+    "showDetails": "Afficher les détails",
+    "placeholders": {
+      "title": "Cliquez pour ajouter un titre",
+      "subtitle": "Cliquez pour ajouter un sous-titre",
+      "body": "Cliquez pour ajouter du texte"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Zone de texte",

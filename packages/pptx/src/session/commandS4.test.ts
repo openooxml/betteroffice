@@ -32,7 +32,7 @@ async function deck(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-async function open() {
+async function open(sourceBytes?: Uint8Array) {
   const pair = createInProcessPair();
   const registration = registerPresentationCommandHandlers({ initWasm: async () => {
     await wasm.initWasm(await readFile(new URL('../wasm/generated/pptx_wasm_bg.wasm', import.meta.url)));
@@ -50,7 +50,7 @@ async function open() {
     { methods: PRESENTATION_COMMAND_METHODS });
   try {
     const font = await readFile(new URL('../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf', import.meta.url));
-    const state = await rpc.call.openCommandEditor(new Uint8Array(await deck()).buffer,
+    const state = await rpc.call.openCommandEditor(new Uint8Array(sourceBytes ?? await deck()).buffer,
       { ...identity, fonts: [{ family: 'Liberation Sans', bytes: new Uint8Array(font).buffer }] });
     const result = (await rpc.call.readEditor({ ...identity, seq: 0 })).result;
     if (!result.ok) throw new Error(result.failure.message);
@@ -279,6 +279,53 @@ test('redoing_an_inserted_slide_reselects_it', async () => {
     expect(redone.slides?.[1]?.id).toBe(insertedId);
     expect(redone.activeSlideId).toBe(insertedId);
     expect(redone.frame?.slideId).toBe(insertedId);
+  } finally { await session.dispose(); }
+});
+
+test('insertSlide_command_instantiates_layout_placeholders_with_single_undo', async () => {
+  const bytes = await readFile(new URL('../../../../crates/pptx-edit/tests/fixtures/proposal-slide-props.pptx', import.meta.url));
+  const session = await open(bytes);
+  try {
+    expect(session.state.layouts?.length).toBe(3);
+    const first = session.state.slides[0]!;
+    const layoutPath = session.state.layouts![0]!.partPath;
+    const refused = await session.command(session.state, 1, {
+      kind: 'insertSlide',
+      payload: { ...input, index: 99, layoutPartPath: layoutPath },
+    });
+    expect(refused.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+
+    const unknownLayout = await session.command(refused, 2, {
+      kind: 'insertSlide',
+      payload: { ...input, index: 1, layoutPartPath: 'ppt/slideLayouts/missing.xml' },
+    });
+    expect(unknownLayout.outcomes[0]).toMatchObject({ status: 'refused', reason: 'invalid-payload', committed: false });
+
+    const initialCount = session.state.slides.length;
+    const inserted = await session.command(unknownLayout, 3, {
+      kind: 'insertSlide',
+      payload: { ...input, index: 1, layoutPartPath: layoutPath },
+    });
+    expect(inserted.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(inserted.slides).toHaveLength(initialCount + 1);
+    const insertedId = inserted.activeSlideId!;
+    expect(inserted.slides?.[1]?.id).toBe(insertedId);
+    expect(inserted.slides?.[1]?.layoutPartPath).toBe(layoutPath);
+    const shapes = session.handle().snapshot().slides[1]!.shapes;
+    expect(shapes).toHaveLength(1);
+    expect(shapes[0]!.placeholder).toMatchObject({ placeholderType: 'title' });
+    expect(shapes[0]!.textStories[0]!.paragraphs[0]!.runs.map((run) => run.text).join('')).toBe('');
+
+    const undone = await session.command(inserted, 4, { kind: 'undo', payload: input });
+    expect(undone.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(undone.slides).toHaveLength(initialCount);
+    expect(undone.slides?.[0]?.id).toBe(first.id);
+
+    const redone = await session.command(undone, 5, { kind: 'redo', payload: input });
+    expect(redone.outcomes[0]).toMatchObject({ status: 'applied', committed: true });
+    expect(redone.slides).toHaveLength(initialCount + 1);
+    expect(redone.slides?.[1]?.id).toBe(insertedId);
+    expect(session.handle().snapshot().slides[1]!.shapes).toHaveLength(1);
   } finally { await session.dispose(); }
 });
 

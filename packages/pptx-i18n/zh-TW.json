@@ -43,6 +43,19 @@
     "newSlide": "新增投影片",
     "newSlideWithLayout": "新增含版面配置的投影片",
     "layoutOption": "版面配置 {number}",
+    "layouts": {
+      "title": "標題投影片",
+      "obj": "標題及物件",
+      "secHead": "節標題",
+      "twoObj": "兩項物件",
+      "twoTxTwoObj": "比較",
+      "titleOnly": "僅標題",
+      "blank": "空白",
+      "objTx": "含有標題的內容",
+      "picTx": "含有標題的圖片",
+      "vertTx": "標題及垂直文字",
+      "vertTitleAndTx": "垂直標題及文字"
+    },
     "fit": "調整為適當大小",
     "zoomValue": "縮放：{value}",
     "textBoxTool": "文字方塊",
@@ -113,7 +126,12 @@
     "loadError": "編輯器無法載入",
     "loadErrorDescription": "請檢查連線，然後重新載入頁面。",
     "reloadPage": "重新載入頁面",
-    "showDetails": "顯示詳細資料"
+    "showDetails": "顯示詳細資料",
+    "placeholders": {
+      "title": "按一下以新增標題",
+      "subtitle": "按一下以新增副標題",
+      "body": "按一下以新增文字"
+    }
   },
   "objects": {
     "defaultTextBoxName": "文字方塊",

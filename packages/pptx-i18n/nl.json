@@ -43,6 +43,19 @@
     "newSlide": "Nieuwe dia",
     "newSlideWithLayout": "Nieuwe dia met indeling",
     "layoutOption": "Indeling {number}",
+    "layouts": {
+      "title": "Titeldia",
+      "obj": "Titel en inhoud",
+      "secHead": "Sectiekop",
+      "twoObj": "Twee inhoudsblokken",
+      "twoTxTwoObj": "Vergelijking",
+      "titleOnly": "Alleen titel",
+      "blank": "Leeg",
+      "objTx": "Inhoud met bijschrift",
+      "picTx": "Afbeelding met bijschrift",
+      "vertTx": "Titel en verticale tekst",
+      "vertTitleAndTx": "Verticale titel en tekst"
+    },
     "fit": "Aanpassen aan venster",
     "zoomValue": "Zoomen: {value}",
     "textBoxTool": "Tekstvak",
@@ -113,7 +126,12 @@
     "loadError": "De editor kan niet worden geladen",
     "loadErrorDescription": "Controleer uw verbinding en laad de pagina opnieuw.",
     "reloadPage": "Pagina opnieuw laden",
-    "showDetails": "Details weergeven"
+    "showDetails": "Details weergeven",
+    "placeholders": {
+      "title": "Klik om een titel toe te voegen",
+      "subtitle": "Klik om een ondertitel toe te voegen",
+      "body": "Klik om tekst toe te voegen"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Tekstvak",

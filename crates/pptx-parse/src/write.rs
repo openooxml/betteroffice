@@ -192,6 +192,7 @@ pub struct ShapeAdd {
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
+    pub placeholder: Option<crate::Placeholder>,
     pub paragraphs: Option<Vec<ParagraphWrite>>,
     /// A picture instead of an autoshape; mints its own media part and relationship.
     pub picture: Option<PictureAdd>,
@@ -3866,6 +3867,23 @@ fn shape_element(
     if add.text_box {
         non_visual_properties.set_attribute("txBox", "1");
     }
+    let mut nv_pr = XmlElement::new(prefixes.presentation("nvPr"));
+    if let Some(placeholder) = &add.placeholder {
+        let mut ph = XmlElement::new(prefixes.presentation("ph"));
+        if let Some(kind) = &placeholder.placeholder_type {
+            ph.set_attribute("type", kind.clone());
+        }
+        if let Some(index) = placeholder.index {
+            ph.set_attribute("idx", index.to_string());
+        }
+        if let Some(orientation) = &placeholder.orientation {
+            ph.set_attribute("orient", orientation.clone());
+        }
+        if let Some(size) = &placeholder.size {
+            ph.set_attribute("sz", size.clone());
+        }
+        nv_pr = nv_pr.with_child(ph);
+    }
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
@@ -3873,7 +3891,7 @@ fn shape_element(
                 .with_attribute("name", add.name.clone()),
         )
         .with_child(non_visual_properties)
-        .with_child(XmlElement::new(prefixes.presentation("nvPr")));
+        .with_child(nv_pr);
     let transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
             XmlElement::new(prefixes.drawing("off"))
@@ -4239,6 +4257,7 @@ mod tests {
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
+            placeholder: None,
             paragraphs: Some(vec![ParagraphWrite {
                 source_paragraphs: Vec::new(),
                 source_index: None,

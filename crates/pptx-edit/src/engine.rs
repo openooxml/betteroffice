@@ -305,6 +305,8 @@ struct ParagraphBreakArgs {
 struct InsertSlideArgs {
     index: u32,
     layout_part_path: Option<String>,
+    #[serde(default)]
+    instantiate_placeholders: bool,
 }
 
 #[derive(Deserialize)]
@@ -1423,13 +1425,20 @@ impl Document {
     }
 
     fn insert_slide(&self, args: InsertSlideArgs) -> Result<SlideReceipt, EngineError> {
-        self.session
-            .insert_slide(
+        if args.instantiate_placeholders {
+            self.session.insert_slide_with_placeholders(
                 &local_context(),
                 args.index,
                 args.layout_part_path.as_deref(),
             )
-            .map_err(message_error)
+        } else {
+            self.session.insert_slide(
+                &local_context(),
+                args.index,
+                args.layout_part_path.as_deref(),
+            )
+        }
+        .map_err(message_error)
     }
 
     fn add_text_box(&self, args: AddTextBoxArgs) -> Result<ShapeReceipt, EngineError> {

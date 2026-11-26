@@ -285,6 +285,7 @@ fn an_added_and_a_removed_shape_keep_the_survivors_byte_identical() {
                 adjust_values: BTreeMap::new(),
                 fill: None,
                 outline: None,
+                placeholder: None,
                 paragraphs: Some(vec![ParagraphWrite {
                     source_index: None,
                     source_paragraphs: Vec::new(),

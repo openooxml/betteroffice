@@ -6,7 +6,7 @@ export {
 /** @internal */
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
-export { presentationStoryFormatting } from './wasm/loader';
+export { presentationMetadata, presentationStoryFormatting } from './wasm/loader';
 /** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
 export { decodeBrowserPresentationImage } from './render/browserImage';
@@ -41,6 +41,7 @@ export type {
   PresentationSessionMethods,
   PresentationSessionOpenOptions,
   PresentationSessionState,
+  PresentationSlideLayoutSummary,
   PresentationSlideSummary,
 } from './session/methods';
 /** @internal */

@@ -43,6 +43,19 @@
     "newSlide": "Slide Baru",
     "newSlideWithLayout": "Slide baru dengan tata letak",
     "layoutOption": "Tata Letak {number}",
+    "layouts": {
+      "title": "Slide Judul",
+      "obj": "Judul dan Konten",
+      "secHead": "Header Bagian",
+      "twoObj": "Dua Konten",
+      "twoTxTwoObj": "Perbandingan",
+      "titleOnly": "Hanya Judul",
+      "blank": "Kosong",
+      "objTx": "Konten dengan Keterangan",
+      "picTx": "Gambar dengan Keterangan",
+      "vertTx": "Judul dan Teks Vertikal",
+      "vertTitleAndTx": "Judul dan Teks Vertikal"
+    },
     "fit": "Pas",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Kotak Teks",
@@ -113,7 +126,12 @@
     "loadError": "Editor tidak dapat dimuat",
     "loadErrorDescription": "Periksa koneksi Anda, lalu muat ulang halaman.",
     "reloadPage": "Muat ulang halaman",
-    "showDetails": "Tampilkan detail"
+    "showDetails": "Tampilkan detail",
+    "placeholders": {
+      "title": "Klik untuk menambahkan judul",
+      "subtitle": "Klik untuk menambahkan subjudul",
+      "body": "Klik untuk menambahkan teks"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Kotak Teks",

@@ -122,6 +122,7 @@ export function registerPresentationCommandHandlers(
     | { kind: 'remote'; bytes?: readonly ArrayBuffer[]; pipe?: PipeCommandPayload<PptxPresenceCursor>; receipt?: PresentationHistoryReceipt }
     | { kind: 'batch'; request: PptxEditRequest; result?: PptxEditResult; receipt?: PresentationHistoryReceipt }
     | { kind: 'font'; font: { family: string; bytes: ArrayBuffer; bold?: boolean; italic?: boolean }; fallback: boolean; fontId?: number }
+    | { kind: 'insertSlide'; index: number; layoutPartPath?: string; receipt?: PresentationHistoryReceipt }
     | { kind: 'insertion'; slideId: string; draft: ShapeDraft | PresetShapeDraft | PictureDraft; receipt?: ShapeReceipt }
     | { kind: 'object'; object: PresentationCommandObjectSelection }
     | { kind: 'transform'; object: PresentationCommandObjectSelection; rect: ShapeRect; move: boolean }
@@ -973,19 +974,33 @@ export function registerPresentationCommandHandlers(
         fallback !== undefined && typeof fallback !== 'boolean') return 'invalid-payload';
       return { kind: 'font', font, fallback: fallback ?? false };
     }
+    if (command.kind === 'insertSlide') {
+      if (composition) return 'invalid-composition';
+      if (command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
+      const { index, layoutPartPath } = command.payload;
+      const current = refreshMetadata();
+      if (!Number.isSafeInteger(index) || index < 0 || index > current.slides.length) return 'invalid-payload';
+      if (layoutPartPath !== undefined) {
+        if (typeof layoutPartPath !== 'string') return 'invalid-payload';
+        const known = current.layouts
+          ? current.layouts.some((layout) => layout.partPath === layoutPartPath)
+          : presentation().snapshot().slides.some((slide) => slide.layoutPartPath === layoutPartPath);
+        if (!known) return 'invalid-payload';
+      }
+      return { kind: 'insertSlide', index, layoutPartPath };
+    }
     if (command.kind === 'insertTextBox' || command.kind === 'insertShape' || command.kind === 'insertPicture') {
       if (composition) return 'invalid-composition';
       const { slideId } = command.payload;
       if (typeof slideId !== 'string' || !slideIndices.has(slideId) || slideId !== activeSlideId) return 'bad-target';
       if (command.basis.version !== version || presentation().version() !== version) return 'stale-basis';
       const draft = command.kind === 'insertPicture' ? command.payload : command.payload.draft;
-      if (!draft || !validText(draft.name) || !draft.rect ||
-        ![draft.rect.x, draft.rect.y, draft.rect.width, draft.rect.height].every(Number.isSafeInteger) ||
-        draft.rect.width <= 0 || draft.rect.height <= 0) return 'invalid-payload';
+      if (!draft || !validText(draft.name) || !validShapeRectBase(draft.rect)) return 'invalid-payload';
       if (command.kind === 'insertTextBox') {
-        const draft = command.payload.draft;
-        if (!validText(draft.text) || !validStyle(draft.style)) return 'invalid-payload';
-        return { kind: 'insertion', slideId, draft };
+        const textDraft = command.payload.draft;
+        return validText(textDraft.text) && validStyle(textDraft.style)
+          ? { kind: 'insertion', slideId, draft: textDraft }
+          : 'invalid-payload';
       }
       if (command.kind === 'insertShape') {
         const draft = command.payload.draft;
@@ -1471,6 +1486,22 @@ export function registerPresentationCommandHandlers(
       clearMarks();
       return true;
     }
+    if (admitted.kind === 'insertSlide') {
+      const before = opened.version();
+      opened.addUndoBoundary();
+      const slideReceipt = opened.insertSlide(admitted.index, admitted.layoutPartPath, {
+        instantiatePlaceholders: true,
+      });
+      opened.addUndoBoundary();
+      if (before === opened.version()) return false;
+      admitted.receipt = { applied: true, changedSlideIds: [...revisions.keys()], deckSizeChanged: false, slideOrderChanged: true };
+      refreshHistory(command.seq, admitted.receipt);
+      activeSlideId = slideReceipt.slideId;
+      selection = null;
+      objectSelection = null;
+      clearMarks();
+      return true;
+    }
     if (admitted.kind === 'batch') {
       const anchored = selection ? anchor(selection) : null;
       admitted.result = opened.applyEdits(admitted.request);
@@ -1645,7 +1676,9 @@ export function registerPresentationCommandHandlers(
       const beforeText = admitted.kind === 'text' ? target(admitted.selection)!.text : '';
       const committed = apply(command, admitted);
       const historyDirtySlideIds = committed && admitted.kind === 'history'
-        ? refreshHistory(command.seq, admitted.receipt!, true) : admitted.kind === 'remote' || admitted.kind === 'invoke' ? admitted.receipt?.changedSlideIds : undefined;
+        ? refreshHistory(command.seq, admitted.receipt!, true)
+        : admitted.kind === 'remote' || admitted.kind === 'invoke' || admitted.kind === 'insertSlide'
+          ? admitted.receipt?.changedSlideIds : undefined;
       if (committed && admitted.kind === 'text') refreshStory(admitted.selection, admitted.start, admitted.end);
       if (committed && (admitted.kind === 'format' || admitted.kind === 'alignment')) {
         const cached = stories.get(storyKey(admitted.selection))!;
@@ -1683,14 +1716,15 @@ export function registerPresentationCommandHandlers(
         const revision = revisions.get(slideId);
         if (revision !== undefined) revisions.set(slideId, revision + 1);
       }
-      if (committed && requestedFonts) loadDefaultFonts(admitted.kind === 'remote' || admitted.kind === 'history' || admitted.kind === 'invoke'
+      if (committed && requestedFonts) loadDefaultFonts(admitted.kind === 'remote' || admitted.kind === 'history' || admitted.kind === 'invoke' || admitted.kind === 'insertSlide'
         ? undefined : dirtySlideIds);
       const publish = () => {
         gatingFonts = false;
         const faces = gatedDefaultFonts.splice(0);
         const repainted = applyMetafileRepaint();
         const result = ack([outcome], faces.length || repainted ? [...new Set([...dirtySlideIds, ...revisions.keys()])] : dirtySlideIds,
-          admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke', admitted.kind === 'insertion' ? admitted.receipt : undefined,
+          admitted.kind === 'history' || admitted.kind === 'remote' || admitted.kind === 'invoke' || admitted.kind === 'insertSlide',
+          admitted.kind === 'insertion' ? admitted.receipt : undefined,
           admitted.kind === 'batch' ? admitted.result : undefined, admitted.kind === 'font' ? admitted.fontId : undefined);
         if (admitted.kind === 'invoke') result.value.mutationResult = admitted.result;
         return faces.length ? transferable({ ...result.value, defaultFonts: faces }, result.transfer) : result;
@@ -1837,7 +1871,7 @@ export function registerPresentationCommandHandlers(
         const recoveryUpdate = sourceBaseline ? undefined : ownedBuffer(handle.encodeStateAsUpdate());
         if (requestedFonts) loadDefaultFonts();
         return transferable({ ...result.value, shared: projection.ack(result.value),
-          slides: openedMetadata.slides, size: openedMetadata.size,
+          slides: openedMetadata.slides, ...(openedMetadata.layouts ? { layouts: openedMetadata.layouts } : {}), size: openedMetadata.size,
           activeSlideId, frame: result.value.frame ?? null, recoveryBaseline: sourceBaseline ? 'source' : 'update',
           recoveryEngine: engineVersion(), ...(recoveryUpdate ? { recoveryUpdate } : {}),
           ...(fonts ? { defaultFonts: fonts } : {}) },
@@ -2111,4 +2145,11 @@ function validStyle(value: unknown): value is TextStyle | undefined {
       default: return false;
     }
   });
+}
+
+function validShapeRectBase(rect: unknown): rect is ShapeRect {
+  if (!rect || typeof rect !== 'object' || Array.isArray(rect)) return false;
+  const candidate = rect as ShapeRect;
+  return [candidate.x, candidate.y, candidate.width, candidate.height].every(Number.isSafeInteger) &&
+    candidate.width > 0 && candidate.height > 0;
 }

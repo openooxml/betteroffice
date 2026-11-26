@@ -879,6 +879,7 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         adjust_values: shape.adjust_values.clone(),
         fill: shape.fill.clone(),
         outline: shape.outline.clone(),
+        placeholder: shape.placeholder.clone(),
         paragraphs,
         picture: None,
     })
@@ -905,6 +906,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         adjust_values: BTreeMap::new(),
         fill: None,
         outline: None,
+        placeholder: None,
         paragraphs: None,
         picture: Some(PictureAdd {
             media_bytes,
