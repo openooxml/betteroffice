@@ -641,8 +641,6 @@ fn save_font_pick(bytes: &[u8], ordinal: usize, from: u32, to: u32, delta: &str)
         .format_range("body", id, from, id, to, delta, None, None)
         .unwrap();
 
-    let segments: serde_json::Value =
-        serde_json::from_str(&session.story_segments("body").unwrap()).unwrap();
     let source = docx_parse::parse_docx_s9_wire(
         bytes,
         docx_parse::S9ParseOptions {
@@ -653,9 +651,23 @@ fn save_font_pick(bytes: &[u8], ordinal: usize, from: u32, to: u32, delta: &str)
     .unwrap()
     .document
     .package;
+    let mut plan: serde_json::Value =
+        serde_json::from_str(&session.paragraph_save_plan().unwrap()).unwrap();
+    let parts = plan["splicedParts"].as_array_mut().unwrap();
+    let has_patch = parts.iter().any(|part| {
+        part["part"] == "word/document.xml"
+            && part["paragraphPatches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|patch| patch["ordinal"].as_u64() == Some(ordinal as u64))
+    });
     let document = save_document(&source.document, |document| {
-        let source_hint = &document["content"][ordinal]["content"][0]["formatting"]["fontFamily"]
-            ["hint"];
+        if has_patch {
+            return;
+        }
+        let segments: serde_json::Value =
+            serde_json::from_str(&session.story_segments("body").unwrap()).unwrap();
         let runs: Vec<_> = segments
             .as_array()
             .unwrap()
@@ -665,22 +677,16 @@ fn save_font_pick(bytes: &[u8], ordinal: usize, from: u32, to: u32, delta: &str)
             .iter()
             .map(|segment| {
                 assert_eq!(segment["kind"], "text");
-                let mut fonts = segment["attributes"]["fontFamily"].clone();
-                if !source_hint.is_null() {
-                    fonts["hint"] = source_hint.clone();
-                }
                 json!({
                     "type": "run",
                     "content": [{"type": "text", "text": segment["text"]}],
-                    "formatting": {"fontFamily": fonts},
+                    "formatting": {"fontFamily": segment["attributes"]["fontFamily"]},
                 })
             })
             .collect();
         document["content"][ordinal]["content"] = json!(runs);
     });
-    let mut plan: serde_json::Value =
-        serde_json::from_str(&session.paragraph_save_plan().unwrap()).unwrap();
-    for part in plan["splicedParts"].as_array_mut().unwrap() {
+    for part in parts {
         let ordinals: Vec<_> = part["paragraphs"]
             .as_array()
             .unwrap()
@@ -782,7 +788,7 @@ fn latin_only_font_delta_preserves_the_east_asian_run_font() {
     let bytes = package(&font_run(
         "café",
         "Calibri",
-        r#" w:eastAsiaTheme="minorEastAsia" w:cs="Arial" w:cstheme="minorBidi" w:hint="eastAsia""#,
+        r#" w:eastAsiaTheme="minorEastAsia" w:cs="Arial" w:cstheme="minorBidi""#,
     ));
     let saved = save_font_pick(&bytes, 0, 0, 4, FONT_PICK);
     let runs = saved_run_fonts(&saved, 0);
@@ -792,10 +798,18 @@ fn latin_only_font_delta_preserves_the_east_asian_run_font() {
         ("eastAsiaTheme", "minorEastAsia"),
         ("cs", "Arial"),
         ("cstheme", "minorBidi"),
-        ("hint", "eastAsia"),
     ] {
         assert_eq!(fonts.attribute(Some("w"), slot), Some(expected));
     }
+}
+
+#[test]
+fn latin_font_pick_keeps_the_source_font_hint() {
+    let bytes = package(&font_run("café", "Calibri", r#" w:hint="eastAsia""#));
+    let saved = save_font_pick(&bytes, 0, 0, 4, FONT_PICK);
+    let runs = saved_run_fonts(&saved, 0);
+    assert_font_slots(&runs, &[("café", "Microsoft YaHei", "SimSun")]);
+    assert_eq!(runs[0].1.attribute(Some("w"), "hint"), Some("eastAsia"));
 }
 
 #[test]
@@ -811,6 +825,54 @@ fn font_pick_across_latin_and_east_asian_runs_updates_each_run() {
         &[
             ("abc", "Microsoft YaHei", "SimSun"),
             ("中文", "Microsoft YaHei", "Microsoft YaHei"),
+        ],
+    );
+}
+
+#[test]
+fn font_pick_splits_mixed_script_text_with_the_same_formatting() {
+    let theme = r#" w:eastAsiaTheme="minorEastAsia""#;
+    for content in [
+        font_run("abc中文", "Calibri", theme),
+        format!(
+            "{}{}",
+            font_run("abc", "Calibri", theme),
+            font_run("中文", "Calibri", theme),
+        ),
+    ] {
+        let bytes = package(&content);
+        let session = font_session(&bytes);
+        let segments: serde_json::Value =
+            serde_json::from_str(&session.story_segments("body").unwrap()).unwrap();
+        assert_eq!(segments[0]["text"], "abc中文");
+
+        let saved = save_font_pick(&bytes, 0, 0, 5, FONT_PICK);
+        let runs = saved_run_fonts(&saved, 0);
+        assert_font_slots(
+            &runs,
+            &[
+                ("abc", "Microsoft YaHei", "SimSun"),
+                ("中文", "Microsoft YaHei", "Microsoft YaHei"),
+            ],
+        );
+        assert_eq!(
+            runs[0].1.attribute(Some("w"), "eastAsiaTheme"),
+            Some("minorEastAsia")
+        );
+        assert_eq!(runs[1].1.attribute(Some("w"), "eastAsiaTheme"), None);
+    }
+}
+
+#[test]
+fn font_pick_selects_supplementary_han_by_utf16_offsets() {
+    let bytes = package(&font_run("A𠮷B", "Calibri", ""));
+    let saved = save_font_pick(&bytes, 0, 1, 3, FONT_PICK);
+    assert_font_slots(
+        &saved_run_fonts(&saved, 0),
+        &[
+            ("A", "Calibri", "SimSun"),
+            ("𠮷", "Microsoft YaHei", "Microsoft YaHei"),
+            ("B", "Calibri", "SimSun"),
         ],
     );
 }
@@ -876,19 +938,23 @@ fn east_asian_font_pick_survives_reopen_and_keeps_untouched_paragraph_bytes() {
 }
 
 #[test]
-fn explicit_east_asian_slot_overrides_the_picked_latin_family() {
+fn font_family_delta_ignores_extra_members() {
     let bytes = package(&font_run("中文", "Calibri", ""));
-    let saved = save_font_pick(
-        &bytes,
-        0,
-        0,
-        2,
-        r#"{"fontFamily":{"ascii":"Calibri","eastAsia":"Microsoft YaHei"}}"#,
-    );
+    let saved = save_font_pick(&bytes, 0, 0, 2, r#"{"fontFamily":{"ascii":"Arial"}}"#);
     assert_font_slots(
         &saved_run_fonts(&saved, 0),
-        &[("中文", "Calibri", "Microsoft YaHei")],
+        &[("中文", "Arial", "Arial")],
     );
+    let expected = document_xml(&saved);
+    for delta in [
+        r#"{"fontFamily":{"ascii":"Arial","eastAsia":null}}"#,
+        r#"{"fontFamily":{"ascii":"Arial","eastAsia":"Microsoft YaHei"}}"#,
+    ] {
+        assert_eq!(
+            document_xml(&save_font_pick(&bytes, 0, 0, 2, delta)),
+            expected
+        );
+    }
 }
 
 #[test]

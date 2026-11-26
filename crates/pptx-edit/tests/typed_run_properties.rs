@@ -126,6 +126,78 @@ fn explicit_font_updates_latin_and_east_asian_typefaces() {
 }
 
 #[test]
+fn east_asian_font_pick_is_projected_to_the_slide_scope() {
+    let source = slide(&format!(
+        "<a:p><a:r><a:rPr>{SOURCE_FONT_SLOTS}</a:rPr><a:t>中文</a:t></a:r></a:p>"
+    ));
+    let session = DeckSession::open(&deck(&source), 7101).unwrap();
+    let scope = session.slide_scope(0).unwrap();
+    let story = &scope.slide.shapes[0].text_stories[0];
+    assert_eq!(
+        story.paragraphs[0].runs[0].style.font_family.as_deref(),
+        Some("Arial")
+    );
+    session
+        .format_text(
+            &EditCtx::local("test"),
+            &story.id,
+            0,
+            story.length - 1,
+            &TextStylePatch {
+                font_family: Some(PICKED_FONT.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let scope = session.slide_scope(0).unwrap();
+    let runs = &scope.slide.shapes[0].text_stories[0].paragraphs[0].runs;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "中文");
+    assert_eq!(runs[0].style.font_family.as_deref(), Some(PICKED_FONT));
+}
+
+#[test]
+fn repicking_the_source_latin_family_preserves_the_source_font_slots() {
+    let source = slide(&format!(
+        "<a:p><a:r><a:rPr>{SOURCE_FONT_SLOTS}</a:rPr><a:t>中文</a:t></a:r></a:p>"
+    ));
+    let session = DeckSession::open(&deck(&source), 7101).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story = &snapshot.slides[0].shapes[0].text_stories[0];
+    let context = EditCtx::local("test");
+    session
+        .format_text(
+            &context,
+            &story.id,
+            0,
+            story.length - 1,
+            &TextStylePatch {
+                font_family: Some(PICKED_FONT.into()),
+                bold: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    session
+        .format_text(
+            &context,
+            &story.id,
+            0,
+            story.length - 1,
+            &TextStylePatch {
+                font_family: Some("Arial".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let saved = slide_xml(&session.save().unwrap());
+    let expected = format!(r#"<a:rPr b="1">{SOURCE_FONT_SLOTS}</a:rPr><a:t>中文</a:t>"#);
+    assert_eq!(runs(&saved), [expected.as_str()]);
+}
+
+#[test]
 fn bold_only_preserves_the_east_asian_typeface() {
     let properties = format_east_asian_run(&TextStylePatch {
         bold: Some(true),
