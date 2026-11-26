@@ -1421,14 +1421,7 @@ pub(crate) fn diff_paragraph_with_proof(
     proof: Option<&Proof>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let widened = Cell::new(false);
-    let result = plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof).map_err(|legacy| {
-        if !widened.get() {
-            return legacy;
-        }
-        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
-            .err()
-            .unwrap_or(legacy)
-    });
+    let result = plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof);
     if proof.is_some()
         && result
             .as_ref()
@@ -1436,7 +1429,30 @@ pub(crate) fn diff_paragraph_with_proof(
     {
         return diff_paragraph_v1(seeded, live, context);
     }
-    result
+    result.map_err(|legacy| {
+        if !widened.get() {
+            return legacy;
+        }
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
+            .err()
+            .unwrap_or(legacy)
+    })
+}
+
+pub(crate) fn diff_recorded_paragraph(
+    seeded: &[StorySegment],
+    live: &[StorySegment],
+    context: PatchContext<'_>,
+    proof: &Proof,
+) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
+    plan_paragraph(
+        seeded,
+        live,
+        context,
+        RunRules::Full,
+        &Cell::new(false),
+        Some(proof),
+    )
 }
 
 struct RecordedEdit {
@@ -2273,6 +2289,33 @@ mod tests {
         };
         let patch = diff_paragraph_with_proof(&seeded, &live, context(), Some(&proof)).unwrap();
         assert_eq!(patch, diff_paragraph_v1(&seeded, &live, context()).unwrap());
+    }
+
+    #[test]
+    fn unproven_donor_after_a_widened_run_edit_uses_base_alignment() {
+        let seeded = paragraph("abc", json!({}));
+        let mut live = paragraph("a", json!({}));
+        live[0].attributes.insert(
+            "characterSpacing".to_owned(),
+            crate::seed::any_from_value(json!({ "spacing": 20 })).unwrap(),
+        );
+        live.insert(1, paragraph("Xc", json!({})).remove(0));
+        let proof = Proof {
+            seed_width: 3,
+            live_width: 3,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 1,
+                to: 2,
+                live_from: 1,
+                live_to: 2,
+                donor: DonorV1::At { at: 0 },
+            }],
+        };
+        let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
+        assert_eq!(base.run_edits.len(), 1);
+        assert_eq!(base.text_edits.len(), 1);
+        let patch = diff_paragraph_with_proof(&seeded, &live, context(), Some(&proof)).unwrap();
+        assert_eq!(patch, base);
     }
 
     #[test]

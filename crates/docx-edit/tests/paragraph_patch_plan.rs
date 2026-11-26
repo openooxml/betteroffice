@@ -3136,11 +3136,15 @@ fn body_plan(plan: &docx_edit::ParagraphSavePlan) -> &docx_edit::SplicedPart {
         .unwrap()
 }
 
-fn assert_unproven(doc: &EditingDoc) {
-    let key = &doc.paragraphs("body").unwrap()[0].para_id;
+fn provenance_state(doc: &EditingDoc) -> serde_json::Value {
     let state = doc.encode_state_as_update_v1();
     let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
-    let value: serde_json::Value = serde_json::from_slice(&sidecar[1..sidecar.len() - 32]).unwrap();
+    serde_json::from_slice(&sidecar[1..sidecar.len() - 32]).unwrap()
+}
+
+fn assert_unproven(doc: &EditingDoc) {
+    let key = &doc.paragraphs("body").unwrap()[0].para_id;
+    let value = provenance_state(doc);
     let entry = value["entries"][key.as_str()].as_str();
     assert!(
         value["overflowed"] == json!(true)
@@ -3320,6 +3324,31 @@ fn undo_of_equal_output_is_checked_before_the_digest_gate() {
     assert!(history.undo());
     assert_unproven(&doc);
     assert!(body_plan(&doc.paragraph_save_plan()).changed.is_empty());
+}
+
+#[test]
+fn equal_output_records_beside_math_keep_source_bytes() {
+    let content = concat!(
+        r#"<w:r w:rsidR = '01234567'><w:rPr><w:noProof/></w:rPr><w:t>abc</w:t></w:r>"#,
+        r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+    );
+    let doc = open(content);
+    let before = doc.paragraph_save_plan();
+    replace(&doc, 1, 2, "b");
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let proof = provenance_state(&doc);
+    assert!(proof["entries"][paragraphs[0].para_id.as_str()]["recorded"].is_object());
+
+    let plan = doc.paragraph_save_plan();
+    assert_eq!(plan, before);
+    assert!(
+        plan.patched_parts
+            .iter()
+            .any(|(part, _)| part == "word/document.xml")
+    );
+    let (saved, warnings) = save_paragraph(&doc, content, |_| {});
+    assert!(saved.contains(content), "{saved}");
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -3510,6 +3539,33 @@ fn a_projected_seed_without_item_ids_uses_alignment_for_local_text_edits() {
 }
 
 #[test]
+fn a_projected_sender_without_seed_identities_cannot_certify_a_transfer() {
+    let source = package(ADJACENT_SOURCE);
+    let receiver = open_for_transfer(ADJACENT_SOURCE, "projected");
+    replace(&receiver, 3, 6, "YZ");
+    assert_splices(&receiver, &[(3, 6, 3, "YZ")]);
+    let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+    let projected = EditSessionCore::new(72, host);
+    projected
+        .open_docx(&source, false, Some("projected".to_owned()), None)
+        .unwrap();
+    projected.load(&receiver.encode_state_as_update_v1()).unwrap();
+    projected
+        .replace_range("body", "00000001", 0, "00000001", 3, "X", None, None)
+        .unwrap();
+
+    let base = receiver.encode_state_vector_v1();
+    let update = projected.encode_diff(&base).unwrap();
+    let sidecar = projected.encode_edit_provenance_for_transfer(&update, Some(&base));
+    assert!(sidecar.is_empty());
+    receiver
+        .apply_local_update_with_provenance(&update, &sidecar)
+        .unwrap();
+    assert_eq!(receiver.paragraphs("body").unwrap()[0].text, "XYZghi");
+    assert_unproven(&receiver);
+}
+
+#[test]
 fn editor_save_uses_alignment_for_ambiguous_single_typing() {
     let source = package(
         r#"<w:r><w:rPr><w14:cntxtAlts w14:val="false"/></w:rPr><w:t>fi ti</w:t></w:r>"#,
@@ -3633,13 +3689,21 @@ fn occurrence_byte_cap_only_invalidates_that_occurrence() {
         replace(&doc, at, at + 1, "b");
     }
     replace(&doc, 161, 162, "X");
-    let plan = doc.paragraph_save_plan();
-    let part = body_plan(&plan);
-    assert_eq!(part.changed, [0, 1]);
-    assert_eq!(part.legacy_paragraphs.len(), 1);
-    assert_eq!(part.legacy_paragraphs[0].ordinal, 0);
-    assert_eq!(part.paragraph_patches.len(), 1);
-    assert_eq!(part.paragraph_patches[0].ordinal, 1);
+    let paragraphs = doc.paragraphs("body").unwrap();
+    let proof = provenance_state(&doc);
+    assert_eq!(proof["overflowed"], json!(false));
+    assert_eq!(proof["entries"][paragraphs[0].para_id.as_str()], "unproven");
+    assert!(proof["entries"][paragraphs[1].para_id.as_str()]["recorded"].is_object());
+    let source = package(&content);
+    let state = doc.encode_state_as_update_v1();
+    let metadata = doc.encode_peer_metadata().unwrap();
+    let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
+    let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar, true);
+    assert_eq!(part["changed"], json!([0, 1]));
+    assert_eq!(
+        part,
+        bootstrap_body_plan(&source, &state, &metadata, &sidecar, false)
+    );
 }
 
 #[test]
@@ -3660,11 +3724,19 @@ fn opening_byte_cap_is_sticky_for_newly_changed_occurrences() {
     }
     let last = PARAGRAPHS * (WIDTH + 1);
     replace(&doc, last, last + 1, "x");
-    let plan = doc.paragraph_save_plan();
-    let part = body_plan(&plan);
-    assert_eq!(part.changed.len(), PARAGRAPHS as usize + 1);
-    assert_eq!(part.legacy_paragraphs.len(), part.changed.len());
-    assert!(part.paragraph_patches.is_empty());
+    let proof = provenance_state(&doc);
+    assert_eq!(proof["overflowed"], json!(true));
+    assert_eq!(proof["entries"], json!({}));
+    let source = package(&content);
+    let state = doc.encode_state_as_update_v1();
+    let metadata = doc.encode_peer_metadata().unwrap();
+    let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
+    let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar, true);
+    assert_eq!(part["changed"], json!((0..=PARAGRAPHS).collect::<Vec<_>>()));
+    assert_eq!(
+        part,
+        bootstrap_body_plan(&source, &state, &metadata, &sidecar, false)
+    );
 }
 
 #[test]

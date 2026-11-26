@@ -1135,6 +1135,30 @@ test('attached DOCX peer stales an insertion when its original prefix changes at
   } finally { doc.close(); owner.close(); }
 });
 
+test('attached DOCX peer stales an insertion after deleting its context before identical text', async () => {
+  const owner = await proposalRaceFixture('alphaalpha');
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const p = doc.list({ story: 'body' }).items[0];
+    const propose = (newText: string) => doc.proposeAsync({
+      author: 'Agent', edits: [{ ...p, start: 0, oldText: 'alpha', newText }],
+    });
+    const insertion = await propose('alpha!');
+    const deletion = await propose('');
+    await doc.accept(deletion.id);
+    expect(doc.read(p.ref).text).toBe('alpha');
+    expect(doc.review(insertion.id).staleRefs).toEqual([p.ref]);
+    await expect(doc.accept(insertion.id)).rejects.toMatchObject({
+      code: 'STALE_TARGET', details: { refs: [p.ref] },
+    });
+    expect(doc.read(p.ref).text).toBe('alpha');
+  } finally { doc.close(); owner.close(); }
+});
+
 test('attached DOCX retains ownership of more than 256 splice records across delayed decisions', async () => {
   const words = ['a', 'b', 'c'].map(word => Array(90).fill(word).join(' '));
   const owner = await proposalRaceFixture(words.join(' | '));
@@ -1166,6 +1190,71 @@ test('attached DOCX retains ownership of more than 256 splice records across del
     expect(doc.listProposals()).toEqual([]);
   } finally { doc.close(); owner.close(); }
 }, 30_000);
+
+test('attached DOCX bounds ownership per record when decision replies keep lagging', async () => {
+  const owner = await proposalRaceFixture('alpha');
+  let lagging: DocxProposalSnapshot | undefined;
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) {
+      lagging = { ...owner.session.getProposals(), previewVersion: request.expectPreviewVersion + 1 };
+      return { ok: true, snapshot: lagging };
+    },
+    async withdrawProposals() { return { ok: true, snapshot: lagging!, withdrawnIds: [] }; },
+  } });
+  try {
+    const [hit] = doc.grep({ query: 'alpha' }).matches;
+    const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+    const [record] = proposal.records!;
+    for (let i = 0; i < 257; i++) await doc.rejectAsync(proposal.id);
+    const versions = doc['ownStateVersions'].get(record.id)!;
+    expect(versions.size).toBeLessThanOrEqual(256);
+    expect(versions.has(lagging!.previewVersion)).toBe(true);
+    expect(doc.review(proposal.id).status).toBe('pending');
+  } finally { doc.close(); owner.close(); }
+});
+
+test('attached DOCX recognizes a withdrawal tombstone after a queued snapshot omits it', async () => {
+  const owner = await proposalRaceFixture('alpha');
+  let snapshot: DocxProposalSnapshot | undefined;
+  let notify: (value: DocxProposalSnapshot) => void = () => {};
+  const session = new Proxy(owner.session, { get(target, key) {
+    if (key === 'getProposals') return () => snapshot ?? target.getProposals();
+    if (key === 'onProposalChange') return (listener: typeof notify) => {
+      notify = listener;
+      return () => {};
+    };
+    return Reflect.get(target, key);
+  } });
+  const doc = attachDocx(session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) {
+      snapshot = owner.session.getProposals();
+      const result = owner.session.setProposalStates(request);
+      return result.ok ? { ok: true, snapshot } : result;
+    },
+    async withdrawProposals(request) {
+      const current = owner.session.getProposals();
+      const result = owner.session.withdrawProposals({
+        ...request, expectVersion: current.version, expectPreviewVersion: current.previewVersion,
+      });
+      if (result.ok) {
+        expect(result.snapshot.withdrawn).toHaveLength(1);
+        notify({ ...result.snapshot, withdrawn: undefined });
+      }
+      snapshot = undefined;
+      return result;
+    },
+  } });
+  try {
+    const [hit] = doc.grep({ query: 'alpha' }).matches;
+    const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+    await expect(doc.rejectAsync(proposal.id)).resolves.toMatchObject({ status: 'rejected' });
+    expect(doc.review(proposal.id).status).toBe('rejected');
+    expect(owner.session.getProposals().proposals).toEqual([]);
+    expect(doc['ownWithdrawals'].size).toBe(0);
+  } finally { doc.close(); owner.close(); }
+});
 
 test('attached DOCX close returns void and leaves editor proposal records intact', async () => {
   const owner = await proposalRaceFixture('alpha guard omega');

@@ -184,7 +184,7 @@ it('keeps adjacent replacement patches through paired adoption and bootstrap and
     );
     return peer;
   };
-  const plan = (session: YrsSession) => session.paragraphSavePlan().splicedParts!
+  const plan = (session: YrsSession, useLocalProvenance = true) => session.paragraphSavePlan(useLocalProvenance).splicedParts!
     .find(({ part }) => part === 'word/document.xml')!;
   try {
     const live = await create(41_001);
@@ -240,11 +240,7 @@ it('keeps adjacent replacement patches through paired adoption and bootstrap and
       ]);
     }
     for (const session of [swapped, unpaired]) {
-      const part = plan(session);
-      expect(part.paragraphPatches).toEqual([]);
-      expect(part.legacyParagraphs).toEqual([{
-        ordinal: 0, code: 'AMBIGUOUS_ALIGNMENT', detail: 'ambiguous: unproven edit provenance',
-      }]);
+      expect(plan(session)).toEqual(plan(session, false));
     }
   } finally {
     for (const session of sessions.reverse()) session.destroy();

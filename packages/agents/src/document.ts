@@ -88,7 +88,7 @@ type EditStep = (draft: YrsSession) => { result: Omit<DocxEditOutcome, 'index' |
 interface HeldProposal {
   value: Proposal;
   splices: ProposalChange[];
-  spliceGroups: { splices: ProposalChange[]; recordSplices: ProposalChange[]; oldText: string; insertionContext?: ProposalChange }[];
+  spliceGroups: { splices: ProposalChange[]; pendingSpan: ReturnType<typeof spliceSpan>; oldText: string; insertionContext?: ProposalChange }[];
   targets: Map<string, { story: string; paraId: string; fingerprint: string }>;
   engine: DocxProposalRecord[];
   registered: Set<string>;
@@ -98,6 +98,7 @@ interface HeldProposal {
 }
 
 const MAX_TEXT = 16_000;
+const MAX_OWN_STATE_VERSIONS = 256;
 
 function integer(value: number, min: number, max: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -481,8 +482,9 @@ export class DocxAgentDocument {
     const spliceGroups = split.map((splices, index) => {
       const change = changes[index]!;
       const { start, end } = spliceSpan(splices);
-      return { splices, recordSplices: records[index]!, oldText: change.oldText.slice(start - change.start, end - change.start),
-        insertionContext: trimmed[index]!.oldText ? undefined : change };
+      const trim = trimmed[index]!;
+      return { splices, pendingSpan: spliceSpan([trim.oldText ? trim : change]), oldText: change.oldText.slice(start - change.start, end - change.start),
+        insertionContext: trim.oldText ? undefined : change };
     });
     return { value, splices: records.flat(), spliceGroups, targets, engine: [], registered: new Set(), editorDecisions: new Map() };
   }
@@ -1071,8 +1073,8 @@ export class DocxAgentDocument {
         if (target?.fingerprint !== previous.fingerprint) continue;
         if (accepted && held !== accepted && held.value.status === 'pending') {
           if (!this.proposalPeer && changes.some(change => change.ref === p.ref)) continue;
-          if (held.spliceGroups.some(({ recordSplices }) => recordSplices[0]!.ref === p.ref &&
-            acceptedSpans.some(edit => touchesChange(spliceSpan(recordSplices), edit)))) {
+          if (held.spliceGroups.some(({ pendingSpan }) => pendingSpan.ref === p.ref &&
+            acceptedSpans.some(edit => touchesChange(pendingSpan, edit)))) {
             target.fingerprint = '\u0000stale';
             continue;
           }
@@ -1080,6 +1082,11 @@ export class DocxAgentDocument {
         target.fingerprint = p.fingerprint;
         if (held.value.status === 'pending') {
           for (const change of held.value.changes) if (change.ref === p.ref) change.start = shift(p.ref, change.start, true);
+          for (const { pendingSpan } of held.spliceGroups) if (pendingSpan.ref === p.ref) {
+            const start = shift(p.ref, pendingSpan.start, true);
+            pendingSpan.end += start - pendingSpan.start;
+            pendingSpan.start = start;
+          }
           const splices = new Set([...held.splices, ...held.spliceGroups.flatMap(group => group.splices)]);
           for (const splice of splices) if (splice.ref === p.ref) splice.start = shift(p.ref, splice.start, true);
         }
@@ -1145,7 +1152,7 @@ export class DocxAgentDocument {
     return result.snapshot;
   }
 
-  private synchronizeProposals(snapshot: DocxProposalSnapshot) {
+  private synchronizeProposals(snapshot: DocxProposalSnapshot, forgetOwnership = true) {
     if (this.proposalOperation) {
       this.proposalOperation.snapshots.push(snapshot);
       return;
@@ -1178,7 +1185,7 @@ export class DocxAgentDocument {
       });
       held.value.records = held.engine.map(({ id, state }) => ({ id, state: held.localDecision ?? state }));
       held.value.status = held.localDecision ?? (held.engine.some(record => record.state === 'proposed') ? 'pending' : this.settledStatus(held));
-      if (!held.registered.size) this.forgetProposalOwnership(held);
+      if (forgetOwnership && !held.registered.size) this.forgetProposalOwnership(held);
     }
     for (const key of touched) this.editorDecisionRevisions.set(key, (this.editorDecisionRevisions.get(key) ?? 0) + 1);
     if (touched.size) this.indexedEpoch = -1;
@@ -1203,11 +1210,19 @@ export class DocxAgentDocument {
         if (operation.withdrawal?.includes(id)) this.ownWithdrawals.add(id);
       }
     }
-    for (const snapshot of operation.snapshots) this.synchronizeProposals(snapshot);
-    if (result?.ok) this.synchronizeProposals(result.snapshot);
-    this.synchronizeProposals(this.session.getProposals());
+    for (const snapshot of operation.snapshots) this.synchronizeProposals(snapshot, false);
+    if (result?.ok) this.synchronizeProposals(result.snapshot, false);
+    this.synchronizeProposals(this.session.getProposals(), false);
+    for (const proposal of this.proposals.values()) {
+      if (!proposal.registered.size) this.forgetProposalOwnership(proposal);
+    }
     if (result?.ok && stillHeld) for (const change of operation.request?.changes ?? []) {
-      if (change.state === 'proposed') this.ownStateVersions.delete(change.id);
+      if (change.state === 'proposed') {
+        this.ownStateVersions.delete(change.id);
+      } else {
+        const versions = this.ownStateVersions.get(change.id);
+        if (versions && versions.size > MAX_OWN_STATE_VERSIONS) versions.delete(versions.values().next().value!);
+      }
     }
   }
 

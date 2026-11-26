@@ -1274,6 +1274,9 @@ impl EditingDoc {
     /// Encodes provenance for the latest diff of the current state.
     #[doc(hidden)]
     pub fn encode_edit_provenance(&self) -> Vec<u8> {
+        if !self.can_certify_edit_provenance() {
+            return Vec::new();
+        }
         let Ok(txn) = self.doc.try_transact() else {
             return Vec::new();
         };
@@ -1295,7 +1298,7 @@ impl EditingDoc {
     /// Encodes provenance bound to a diff or full bootstrap state.
     #[doc(hidden)]
     pub fn encode_edit_provenance_for_transfer(&self, bytes: &[u8], base: Option<&[u8]>) -> Vec<u8> {
-        if self.source_metadata().is_none() {
+        if !self.can_certify_edit_provenance() {
             return Vec::new();
         }
         let Ok(txn) = self.doc.try_transact() else {
@@ -1326,6 +1329,11 @@ impl EditingDoc {
             base.as_ref().map(|(bytes, vector)| (*bytes, vector)),
             digest,
         )
+    }
+
+    fn can_certify_edit_provenance(&self) -> bool {
+        self.source_metadata()
+            .is_some_and(|source| source.has_seed_identities())
     }
 
     pub(crate) fn install_bootstrap_provenance(&self, state: &[u8], sidecar: &[u8]) {

@@ -4379,18 +4379,26 @@ impl EditingDoc {
         };
         let seeded_units = ready_units.unwrap_or_else(|| units_by_key(seeded));
         let live_units = units_by_key(&live);
-        let equal_output: HashMap<_, _> = provenance
-            .equal_output_candidates()
-            .filter_map(|key| {
-                source.view_of(key)?;
-                let (story, was) = seeded_units.get(key)?;
-                let (live_story, now) = live_units.get(key)?;
-                if story != live_story || !was.same_projection(now) {
-                    return None;
-                }
-                Some((key, provenance.prove(self, &txn, story, key)?))
-            })
-            .collect();
+        let mut equal_output: HashMap<usize, Vec<_>> = HashMap::new();
+        for key in provenance.equal_output_candidates() {
+            let Some(((index, ordinal), 0)) = source.view_of(key) else {
+                continue;
+            };
+            if !source.parts[index].as_written {
+                continue;
+            }
+            let Some((&(story, was), &(live_story, now))) =
+                seeded_units.get(key).zip(live_units.get(key))
+            else {
+                continue;
+            };
+            if story == live_story
+                && was.same_projection(now)
+                && let Some(proof) = provenance.prove(self, &txn, story, key)
+            {
+                equal_output.entry(index).or_default().push((ordinal, proof));
+            }
+        }
         let stories_of = |states: &HashMap<String, Arc<StoryState>>, part: &SourcePart| {
             part_stories(states, part)
                 .into_iter()
@@ -4401,27 +4409,47 @@ impl EditingDoc {
             if seeded.is_empty() {
                 continue;
             }
-            if let Some((mut spliced, stale)) =
-                spliced_part(&source, index, seeded, &live, &by_key, &equal_output)
-            {
+            let mut patched_equal = Vec::new();
+            if let Some((mut spliced, stale)) = spliced_part(&source, index, seeded, &live, &by_key) {
                 let same_stories = part_stories(seeded, part)
                     .keys()
                     .eq(part_stories(&live, part).keys());
                 if part.as_written {
-                    for &ordinal in &spliced.changed {
-                        let legacy = || crate::paragraph_patch_plan::unproven_paragraph(ordinal);
+                    let equal = equal_output
+                        .get(&index)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(ordinal, _)| {
+                            spliced
+                                .paragraphs
+                                .binary_search_by_key(ordinal, |(at, _)| *at)
+                                .is_ok()
+                        });
+                    let mut equal_patches = Vec::new();
+                    for (ordinal, equal) in spliced
+                        .changed
+                        .iter()
+                        .map(|&ordinal| (ordinal, None))
+                        .chain(equal.map(|(ordinal, proof)| (*ordinal, Some(proof))))
+                    {
+                        let mut unavailable = || {
+                            if equal.is_none() {
+                                spliced.legacy_paragraphs.push(
+                                    crate::paragraph_patch_plan::unproven_paragraph(ordinal),
+                                );
+                            }
+                        };
                         let Some(key) = part.backed.get(&ordinal).and_then(|keys| keys.first()) else {
-                            spliced.legacy_paragraphs.push(legacy());
+                            unavailable();
                             continue;
                         };
                         let Some((&(story, was), &(live_story, now))) = seeded_units
                             .get(key.as_str())
                             .zip(live_units.get(key.as_str()))
                         else {
-                            spliced.legacy_paragraphs.push(legacy());
+                            unavailable();
                             continue;
                         };
-                        let equal = equal_output.get(key.as_str());
                         let recorded = provenance.has_records(key);
                         let checked = if equal.is_none() && recorded {
                             let proof = provenance
@@ -4434,7 +4462,6 @@ impl EditingDoc {
                         } else {
                             None
                         };
-                        let proof = equal.or(checked.as_ref());
                         if let Some(metadata) = &metadata {
                             metadata.prepare_patch_table_styles(story, &source);
                         }
@@ -4449,11 +4476,15 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
-                        if same_stories && proof.is_none() && formatting_alone(was, now) {
+                        if same_stories
+                            && equal.is_none()
+                            && checked.is_none()
+                            && formatting_alone(was, now)
+                        {
                             spliced.format_only.push(ordinal);
                         }
                         let Some(seeded) = was.segments.as_deref() else {
-                            spliced.legacy_paragraphs.push(legacy());
+                            unavailable();
                             continue;
                         };
                         let Some(live) = now
@@ -4461,12 +4492,18 @@ impl EditingDoc {
                             .as_deref()
                             .or_else(|| was.same_projection(now).then_some(seeded))
                         else {
-                            spliced.legacy_paragraphs.push(legacy());
+                            unavailable();
                             continue;
                         };
-                        let patch = crate::paragraph_patch_plan::diff_paragraph_with_proof(
-                            seeded, live, context, proof,
-                        );
+                        let patch = if let Some(proof) = equal {
+                            crate::paragraph_patch_plan::diff_recorded_paragraph(
+                                seeded, live, context, proof,
+                            )
+                        } else {
+                            crate::paragraph_patch_plan::diff_paragraph_with_proof(
+                                seeded, live, context, checked.as_ref(),
+                            )
+                        };
                         match patch {
                             Ok(mut patch) => {
                                 if stale.iter().any(|cell| {
@@ -4476,8 +4513,13 @@ impl EditingDoc {
                                 }) {
                                     patch.inheritance = InheritanceStateV1::Unknown;
                                 }
-                                spliced.paragraph_patches.push(patch);
+                                if equal.is_some() {
+                                    equal_patches.push(patch);
+                                } else {
+                                    spliced.paragraph_patches.push(patch);
+                                }
                             }
+                            Err(_) if equal.is_some() => {}
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
@@ -4497,8 +4539,9 @@ impl EditingDoc {
                         && spliced.inserted.is_empty()
                         && spliced.removed.is_empty()
                         && spliced.table_patches.is_empty();
+                    let inline_tail = ends_with_inline_tail(seeded, part);
                     if formatting_alone
-                        || !ends_with_inline_tail(seeded, part)
+                        || !inline_tail
                         || (!source.rewrite_loses_source_runs(
                             part,
                             &rewritten,
@@ -4509,6 +4552,25 @@ impl EditingDoc {
                             reformatting_loses_fields,
                         ))
                     {
+                        for patch in equal_patches {
+                            if inline_tail
+                                && !patch.run_edits.is_empty()
+                                && source.rewrite_loses_source_runs(
+                                    part,
+                                    &[patch.ordinal],
+                                    reformatting_loses_fields,
+                                )
+                            {
+                                continue;
+                            }
+                            patched_equal.push(patch.ordinal);
+                            spliced.changed.push(patch.ordinal);
+                            spliced.paragraph_patches.push(patch);
+                        }
+                        if !patched_equal.is_empty() {
+                            spliced.changed.sort_unstable();
+                            spliced.paragraph_patches.sort_unstable_by_key(|patch| patch.ordinal);
+                        }
                         plan.spliced_parts.push(spliced);
                     }
                 } else {
@@ -4523,11 +4585,10 @@ impl EditingDoc {
                             .get(ordinal)
                             .and_then(|keys| keys.first())
                             .is_some_and(|key| {
-                                !equal_output.contains_key(key.as_str())
-                                    && seeded_units
-                                        .get(key.as_str())
-                                        .zip(live_units.get(key.as_str()))
-                                        .is_some_and(|((_, was), (_, now))| formatting_alone(was, now))
+                                seeded_units
+                                    .get(key.as_str())
+                                    .zip(live_units.get(key.as_str()))
+                                    .is_some_and(|((_, was), (_, now))| formatting_alone(was, now))
                             })
                     });
                     if formatting && same_stories {
@@ -4547,13 +4608,7 @@ impl EditingDoc {
                     }
                 }
             }
-            if stories_of(seeded, part) != stories_of(&live, part)
-                || part
-                    .backed
-                    .values()
-                    .flatten()
-                    .any(|key| equal_output.contains_key(key.as_str()))
-            {
+            if !patched_equal.is_empty() || stories_of(seeded, part) != stories_of(&live, part) {
                 let mut touched: Vec<u32> = part
                     .backed
                     .iter()
@@ -4561,8 +4616,7 @@ impl EditingDoc {
                         keys.iter().any(|key| {
                             seeded_units.get(key.as_str()).is_some_and(|(story, was)| {
                                 live_units.get(key.as_str()).is_none_or(|(now_story, now)| {
-                                    equal_output.contains_key(key.as_str())
-                                        || story != now_story
+                                    story != now_story
                                         || was.blocks != now.blocks
                                         || (was.digest != now.digest && !formatting_alone(was, now))
                                 })
@@ -4571,6 +4625,7 @@ impl EditingDoc {
                     })
                     .map(|(ordinal, _)| *ordinal)
                     .collect();
+                touched.extend(patched_equal);
                 crate::sort::sort(&mut touched);
                 plan.touched_parts.push((part.path().to_owned(), touched));
                 continue;
@@ -4962,7 +5017,6 @@ fn spliced_part(
     seeded: &HashMap<String, Arc<StoryState>>,
     live: &HashMap<String, Arc<StoryState>>,
     by_key: &HashMap<&str, &Pilcrow>,
-    equal_output: &HashMap<&str, crate::provenance::Proof>,
 ) -> Option<(SplicedPart, HashSet<String>)> {
     let part = &source.parts[index];
     if part.kind == SourceStoryKind::Comment || part.backed.values().any(|views| views.len() != 1) {
@@ -5106,10 +5160,9 @@ fn spliced_part(
                 {
                     let origin = seeded_by_key.get(key)?;
                     paragraphs.push((ordinal, key.to_owned()));
-                    let recorded = equal_output.contains_key(key);
-                    if recorded || origin.content_digest != is.content_digest {
+                    if origin.content_digest != is.content_digest {
                         changed.push(ordinal);
-                        if !recorded && origin.section_digest == is.section_digest {
+                        if origin.section_digest == is.section_digest {
                             section_only.push(ordinal);
                         }
                     }
@@ -5133,11 +5186,10 @@ fn spliced_part(
             let same = was.content_digest == is.content_digest;
             match source.view_of(key) {
                 Some(((part_index, ordinal), 0)) if part_index == index => {
-                    let recorded = equal_output.contains_key(key);
                     paragraphs.push((ordinal, key.to_owned()));
-                    if recorded || !same {
+                    if !same {
                         changed.push(ordinal);
-                        if !recorded && was.section_digest == is.section_digest {
+                        if was.section_digest == is.section_digest {
                             section_only.push(ordinal);
                         }
                     }
