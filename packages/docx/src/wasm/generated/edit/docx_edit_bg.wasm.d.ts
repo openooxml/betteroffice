@@ -196,6 +196,7 @@ export const editsession_revision_stamps_json: (a: number, b: number, c: number)
 export const editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_section_margins_json: (a: number) => [number, number];
+export const editsession_section_save_plan_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
