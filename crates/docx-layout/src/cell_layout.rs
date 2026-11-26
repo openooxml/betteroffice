@@ -31,11 +31,11 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
 
 /// Whether a cell anchor only paints, reserving no row height.
 pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) -> bool {
-    positioned
-        && !matches!(
-            wrap_type,
-            Some("square" | "tight" | "through" | "topAndBottom")
-        )
+    positioned && !wraps_around_drawing(wrap_type)
+}
+
+pub(crate) fn wraps_around_drawing(wrap_type: Option<&str>) -> bool {
+    matches!(wrap_type, Some("square" | "tight" | "through" | "topAndBottom"))
 }
 
 /// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
@@ -186,7 +186,7 @@ pub fn layout_cell_content(
             flat_bottoms.push(bottom);
             prev_after = 0.0;
         } else if let Some(LayoutBlock::Shape(shape)) = block
-            && cell_overlay_drawing(shape.position.is_some(), shape.wrap_type.as_deref())
+            && shape.position.is_some()
         {
             line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {

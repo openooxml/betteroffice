@@ -739,6 +739,28 @@ pub fn vml_text_box_content_element(picture: &XmlElement) -> Option<&XmlElement>
         .child_by_full_name("w:txbxContent")
 }
 
+#[doc(hidden)]
+pub fn vml_text_box_layout_in_cell(picture: &XmlElement) -> Option<bool> {
+    vml_text_box_parts(picture).map(|parts| parts.layout_in_cell())
+}
+
+impl VmlTextBoxParts<'_> {
+    fn layout_in_cell(&self) -> bool {
+        let read = |element: &XmlElement| {
+            let value = element.attribute(Some("o"), "allowincell")?;
+            match value {
+                "f" => Some(false),
+                "t" => Some(true),
+                _ => crate::xml::parse_on_off(value),
+            }
+        };
+        self.group_element
+            .and_then(read)
+            .or_else(|| read(self.shape))
+            .unwrap_or(true)
+    }
+}
+
 pub fn parse_vml_text_box(picture: &XmlElement) -> Option<TextBox> {
     let parts = vml_text_box_parts(picture)?;
     let shape = parts.shape;
@@ -969,6 +991,7 @@ pub fn parse_vml_text_box(picture: &XmlElement) -> Option<TextBox> {
             .map(str::to_owned),
         size,
         position,
+        layout_in_cell: positioned.then(|| parts.layout_in_cell()),
         wrap,
         fill,
         outline,

@@ -3185,13 +3185,27 @@ fn extract_shape_zone(
             Some("top") => 0.0,
             _ => vertical.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
         };
+    if let Some(zone) = shape_wrap_zone(shape, (x, y, shape.width, shape.height), content_width) {
+        zones.push(AnchoredFloatingZone {
+            zone,
+            anchor_block_index: block_index,
+            margin_relative: is_margin_relative(Some(position)),
+        });
+    }
+}
+
+fn shape_wrap_zone(
+    shape: &ShapeBlock,
+    (x, y, width, height): (f64, f64, f64, f64),
+    content_width: f64,
+) -> Option<FloatingZone> {
     let distances = shape.wrap_distances.as_ref();
     let left = x - distances.map_or(0.0, |d| d.left);
-    let right = x + shape.width + distances.map_or(0.0, |d| d.right);
+    let right = x + width + distances.map_or(0.0, |d| d.right);
     let top_y = y - distances.map_or(0.0, |d| d.top);
-    let bottom_y = y + shape.height + distances.map_or(0.0, |d| d.bottom);
+    let bottom_y = y + height + distances.map_or(0.0, |d| d.bottom);
     if right <= 0.0 || left >= content_width || bottom_y <= 0.0 {
-        return;
+        return None;
     }
     let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
         || (left <= 0.0 && right >= content_width);
@@ -3231,18 +3245,14 @@ fn extract_shape_zone(
             (right.max(0.0), 0.0)
         }
     };
-    zones.push(AnchoredFloatingZone {
-        zone: FloatingZone {
-            left_margin,
-            right_margin,
-            top_y,
-            bottom_y,
-            segments,
-            full_width_block,
-        },
-        anchor_block_index: block_index,
-        margin_relative: is_margin_relative(Some(position)),
-    });
+    Some(FloatingZone {
+        left_margin,
+        right_margin,
+        top_y,
+        bottom_y,
+        segments,
+        full_width_block,
+    })
 }
 
 fn extract_image_zones(
@@ -3709,19 +3719,135 @@ fn measure_shape(
         width: shape.width,
         height: shape.height,
         inner_measures: Some(inner_measures),
+        cell_anchor: None,
     })
 }
 
-fn measure_cell_blocks_with_table_floats(
+fn cell_shape_wraps(shape: &ShapeBlock) -> bool {
+    shape.position.is_some()
+        && !shape.outside_cell
+        && shape.width > 0.0
+        && shape.height > 0.0
+        && crate::cell_layout::wraps_around_drawing(shape.wrap_type.as_deref())
+}
+
+#[doc(hidden)]
+pub fn has_page_relative_cell_shape_wrap(block: &LayoutBlock) -> bool {
+    let LayoutBlock::Table(table) = block else {
+        return false;
+    };
+    table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.blocks).any(|block| {
+        match block {
+            LayoutBlock::Shape(shape) => cell_shape_wraps(shape)
+                && shape.position.as_ref().is_some_and(crate::anchor::cell_anchor_uses_page),
+            _ => has_page_relative_cell_shape_wrap(block),
+        }
+    })
+}
+
+fn cell_needs_float_measurement(blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Table(table) => nested_table_float_offset(table.floating.as_ref()).is_some(),
+        LayoutBlock::Shape(shape) => cell_shape_wraps(shape)
+            || shape.position.as_ref().is_some_and(crate::anchor::anchor_needs_cell_text),
+        _ => false,
+    })
+}
+
+fn cell_shape_anchor_metrics(
+    shape: &ShapeBlock,
+    paragraph: &ParagraphBlock,
+    extent: &ParagraphExtent,
+    content_width: f64,
+) -> crate::anchor::CellAnchorMetrics {
+    let position = shape.position.as_ref().unwrap();
+    let paragraph_height = if position.vertical.as_ref().and_then(|axis| axis.relative_to.as_deref())
+        == Some("line")
+    {
+        extent.lines.first().map_or(0.0, |line| line.line_height)
+    } else {
+        extent.lines.iter().map(|line| line.line_height).sum()
+    };
+    let character_x = if position.horizontal.as_ref().and_then(|axis| axis.relative_to.as_deref())
+        == Some("character")
+    {
+        cell_anchor_character_x(shape.pm_start, paragraph, extent, content_width)
+    } else {
+        None
+    };
+    crate::anchor::CellAnchorMetrics { paragraph_height, character_x }
+}
+
+fn cell_anchor_character_x(
+    anchor: Option<f64>,
+    paragraph: &ParagraphBlock,
+    extent: &ParagraphExtent,
+    content_width: f64,
+) -> Option<f64> {
+    let anchor = anchor?;
+    let attrs = paragraph.attrs.as_ref();
+    let indent = attrs.and_then(|attrs| attrs.indent.as_ref());
+    let rtl = attrs.and_then(|attrs| attrs.bidi) == Some(true);
+    let alignment = attrs.and_then(|attrs| attrs.alignment.as_deref());
+    let indent_left = indent.and_then(|indent| indent.left).unwrap_or(0.0);
+    let indent_right = indent.and_then(|indent| indent.right).unwrap_or(0.0);
+    let (left, right) = if rtl { (indent_right, indent_left) } else { (indent_left, indent_right) };
+    let has_marker = attrs.and_then(|attrs| attrs.list_marker.as_deref()).is_some_and(|marker| !marker.is_empty());
+    extent.lines.iter().enumerate().flat_map(|(index, line)| {
+        let hanging = indent.and_then(|indent| indent.hanging).unwrap_or(0.0);
+        let first_line = indent.and_then(|indent| indent.first_line).unwrap_or(0.0);
+        let (pad, indent) = crate::display_list::line_text_insets(
+            left, hanging, first_line, index == 0, has_marker,
+            line.marker_tab_offset.unwrap_or(0.0),
+        );
+        let marker = line.inline_list_marker.as_ref().map_or(0.0, |marker| marker.advance);
+        let line_left = pad + indent + line.left_offset.unwrap_or(0.0);
+        let slack = (content_width - line_left - right - line.right_offset.unwrap_or(0.0)
+            - line.width - marker).max(0.0);
+        let align = match alignment {
+            Some("center") => slack / 2.0,
+            Some("right") => slack,
+            None if rtl => slack,
+            _ => 0.0,
+        };
+        line.cluster_advances.iter().flatten().filter_map(move |cluster| {
+            let run = paragraph.runs.get(usize::try_from(cluster.run_index?).ok()?)?;
+            let start = run.pm_start()? + cluster.start_char? as f64;
+            let end = run.pm_start()? + cluster.end_char? as f64;
+            let edge = if (anchor >= end) != cluster.bidi_level.is_some_and(|level| level % 2 != 0) {
+                cluster.advance?
+            } else {
+                0.0
+            };
+            let distance = (start - anchor).max(anchor - end).max(0.0);
+            Some((distance, line_left + align + marker + cluster.x_offset? + edge))
+        })
+    }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, x)| x)
+}
+
+fn measure_cell_blocks_with_floats(
     blocks: &mut [LayoutBlock],
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<Vec<BlockExtent>, String> {
     let mut measured = Vec::with_capacity(blocks.len());
     let mut zones = Vec::new();
+    let mut shapes = Vec::new();
     let mut y = 0.0_f64;
     let mut previous_after = 0.0_f64;
-    for block in blocks {
+    for index in 0..blocks.len() {
+        let (earlier, remaining) = blocks.split_at_mut(index);
+        let block = &mut remaining[0];
+        if let LayoutBlock::Shape(shape) = block
+            && let Some(position) = &shape.position
+        {
+            let needs_text = crate::anchor::anchor_needs_cell_text(position);
+            if cell_shape_wraps(shape) || needs_text {
+                shapes.push((index, needs_text));
+            }
+            measured.push(measure_block(block, content_width, config)?);
+            continue;
+        }
         let spacing = match &*block {
             LayoutBlock::Paragraph(paragraph) => paragraph
                 .attrs
@@ -3731,21 +3857,50 @@ fn measure_cell_blocks_with_table_floats(
         };
         let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
         let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
-        // `y` tracks the paragraph's top, space-before included, which is the
-        // origin the measurer probes float zones from.
         y += (previous_after - before).max(0.0);
         if let LayoutBlock::Paragraph(paragraph) = &mut *block {
             measure_inline_shape_text(paragraph, config)?;
         }
         let extent = match &*block {
             LayoutBlock::Paragraph(paragraph) => {
-                BlockExtent::Paragraph(measure_paragraph_with_context(
+                let measure = |zones: &[FloatingZone]| measure_paragraph_with_context(
                     paragraph,
                     content_width,
                     config,
-                    (!zones.is_empty()).then_some(zones.as_slice()),
+                    (!zones.is_empty()).then_some(zones),
                     y,
-                )?)
+                );
+                zones.retain(|zone: &FloatingZone| zone.bottom_y > y);
+                let zone_count = zones.len();
+                let unwrapped = shapes.iter().any(|&(_, needs_text)| needs_text)
+                    .then(|| measure(&zones)).transpose()?;
+                for (shape_index, needs_text) in shapes.drain(..) {
+                    let LayoutBlock::Shape(shape) = &earlier[shape_index] else {
+                        unreachable!();
+                    };
+                    let position = shape.position.as_ref().unwrap();
+                    let metrics = if needs_text {
+                        let metrics = cell_shape_anchor_metrics(
+                            shape, paragraph, unwrapped.as_ref().unwrap(), content_width,
+                        );
+                        if let BlockExtent::Shape(extent) = &mut measured[shape_index] {
+                            extent.cell_anchor = Some(metrics);
+                        }
+                        metrics
+                    } else {
+                        crate::anchor::CellAnchorMetrics::default()
+                    };
+                    if cell_shape_wraps(shape)
+                        && let Some(zone) = cell_shape_wrap_zone(shape, position, content_width, y + before, metrics)
+                    {
+                        zones.push(zone);
+                    }
+                }
+                let extent = match unwrapped {
+                    Some(extent) if zone_count == zones.len() => extent,
+                    _ => measure(&zones)?,
+                };
+                BlockExtent::Paragraph(extent)
             }
             _ => measure_block(block, content_width, config)?,
         };
@@ -3773,6 +3928,32 @@ fn measure_cell_blocks_with_table_floats(
         measured.push(extent);
     }
     Ok(measured)
+}
+
+fn cell_shape_wrap_zone(
+    shape: &ShapeBlock,
+    position: &ImageRunPosition,
+    content_width: f64,
+    paragraph_top: f64,
+    metrics: crate::anchor::CellAnchorMetrics,
+) -> Option<FloatingZone> {
+    let page = shape.cell_page_frame.as_ref();
+    let x = page.map_or(0.0, |frame| frame.content_x);
+    let y = page.map_or(0.0, |frame| frame.content_top);
+    let (left, top, width, height) = crate::anchor::resolve_cell_shape_rect(
+        position,
+        (shape.width, shape.height),
+        &crate::anchor::CellAnchorFrame {
+            x,
+            width: content_width,
+            paragraph_top: y + paragraph_top,
+            paragraph_height: metrics.paragraph_height,
+            character_x: metrics.character_x.map(|character_x| x + character_x),
+        },
+        page.map(|frame| &frame.page),
+        true,
+    )?;
+    shape_wrap_zone(shape, (left - x, top - y, width, height), content_width)
 }
 
 /// The width a paragraph wants when nothing forces it to wrap: its widest
@@ -4105,12 +4286,8 @@ fn measure_table_cells(
             } else {
                 cell_width - left - right
             };
-            let has_table_floats = cell.blocks.iter().any(|block| {
-                matches!(block, LayoutBlock::Table(table)
-                    if nested_table_float_offset(table.floating.as_ref()).is_some())
-            });
-            let mut measures = if has_table_floats {
-                measure_cell_blocks_with_table_floats(
+            let mut measures = if cell_needs_float_measurement(&cell.blocks) {
+                measure_cell_blocks_with_floats(
                     &mut cell.blocks,
                     measure_width.max(1.0),
                     config,
@@ -4510,10 +4687,7 @@ fn measure_table_with_compat_shift(
                     continue;
                 }
                 if let LayoutBlock::Shape(shape) = block
-                    && crate::cell_layout::cell_overlay_drawing(
-                        shape.position.is_some(),
-                        shape.wrap_type.as_deref(),
-                    )
+                    && shape.position.is_some()
                 {
                     continue;
                 }
@@ -4614,13 +4788,9 @@ fn measure_table_with_compat_shift(
                 .as_ref()
                 .map_or(0.0, |padding| padding.top + padding.bottom);
             let length = (spanned - padding).max(1.0);
-            let has_table_floats = cell.blocks.iter().any(|block| {
-                matches!(block, LayoutBlock::Table(table)
-                    if nested_table_float_offset(table.floating.as_ref()).is_some())
-            });
             let measured = &mut rows[row_index].cells[cell_index];
-            measured.blocks = if has_table_floats {
-                measure_cell_blocks_with_table_floats(&mut cell.blocks, length, config)?
+            measured.blocks = if cell_needs_float_measurement(&cell.blocks) {
+                measure_cell_blocks_with_floats(&mut cell.blocks, length, config)?
             } else {
                 measure_blocks(&mut cell.blocks, length, config)?
             };
@@ -5834,7 +6004,7 @@ mod tests {
             ]))
             .unwrap();
             let measures =
-                measure_cell_blocks_with_table_floats(&mut blocks, 600.0, &config).unwrap();
+                measure_cell_blocks_with_floats(&mut blocks, 600.0, &config).unwrap();
             let BlockExtent::Paragraph(paragraph) = &measures[1] else {
                 panic!()
             };

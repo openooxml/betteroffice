@@ -338,6 +338,9 @@ pub struct Shape {
     pub offset: Option<ShapeOffset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImagePosition>,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub layout_in_cell: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap: Option<ImageWrap>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,6 +401,7 @@ impl Shape {
             size,
             offset: None,
             position: None,
+            layout_in_cell: None,
             wrap: None,
             fill: None,
             outline: None,
@@ -1024,7 +1028,8 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
     }
     if is_anchor {
         shape.position = parse_anchor_position(container);
-        shape.wrap = Some(parse_anchor_wrap(container))
+        shape.wrap = Some(parse_anchor_wrap(container));
+        shape.layout_in_cell = Some(anchor_layout_in_cell(container));
     }
     if let Some(properties) = container.child_by_full_name("wp:docPr") {
         let title = properties.attribute(None, "title").map(str::to_owned);
@@ -1081,6 +1086,13 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
         shape.scene = Some(Box::new(scene))
     }
     Some(shape)
+}
+
+#[doc(hidden)]
+pub fn anchor_layout_in_cell(anchor: &XmlElement) -> bool {
+    anchor
+        .parse_boolean_attribute_or_false(None, "layoutInCell")
+        .unwrap_or(true)
 }
 
 pub fn is_shape_drawing(drawing: &XmlElement) -> bool {
@@ -2063,6 +2075,18 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn shape_layout_in_cell_defaults_to_true_and_stays_out_of_serialized_shapes() {
+        for (attribute, expected) in [("", true), (r#"layoutInCell="1""#, true), (r#"layoutInCell="0""#, false)] {
+            let drawing = root(&format!(
+                r#"<w:drawing><wp:anchor {attribute}><wp:extent cx="609600" cy="114300"/><a:graphic><a:graphicData><wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+            ));
+            let shape = parse_shape_from_drawing(&drawing).unwrap();
+            assert_eq!(shape.layout_in_cell, Some(expected));
+            assert!(serde_json::to_value(shape).unwrap().get("layoutInCell").is_none());
+        }
     }
 
     #[test]

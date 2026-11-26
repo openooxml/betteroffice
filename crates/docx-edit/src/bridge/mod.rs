@@ -2000,7 +2000,23 @@ fn opaque_text_box(
     let projected =
         group_pictures::project(&value, story_id, &env.group_pictures, env.media_tokens);
     let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
-    shapes::lower_shape_json(&rendered, pm_start, env)
+    let mut block = shapes::lower_shape_json(&rendered, pm_start, env)?;
+    if block.position.is_some()
+        && let Some(xml) = map_string(values, "xml").filter(|xml| xml.contains("allowincell"))
+    {
+        let limits = docx_parse::xml::ParseLimits::default();
+        if let Ok(document) = docx_parse::xml::parse_xml(
+            xml.as_bytes(),
+            "pict.xml",
+            &mut docx_parse::xml::ParseBudget::new(&limits),
+        ) {
+            block.outside_cell = document
+                .root()
+                .and_then(docx_parse::vml::vml_text_box_layout_in_cell)
+                == Some(false);
+        }
+    }
+    Some(block)
 }
 
 fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, Any>> {
@@ -3087,8 +3103,11 @@ fn lower_shape_block<T: ReadTxn>(
             let rendered = projected.unwrap_or_else(|| group_pictures::raw_projection(&value));
             let text_box = rendered.get("textBox").and_then(Value::as_bool) == Some(true)
                 || rendered.get("shapeType").and_then(Value::as_str) == Some("textBox");
-            shapes::lower_shape_json(&rendered, pm_start, env)
-                .map(|block| (block, text_box, provenance))
+            shapes::lower_shape_json(&rendered, pm_start, env).map(|mut block| {
+                block.outside_cell = block.position.is_some()
+                    && group_pictures::has_external_anchor(&env.group_pictures, story_id, &value);
+                (block, text_box, provenance)
+            })
         })
     {
         return Some((block, text_box, provenance));
@@ -3132,6 +3151,8 @@ fn lower_shape_block<T: ReadTxn>(
             text_body_properties: None,
             wrap_distances: None,
             position: None,
+            outside_cell: false,
+            cell_page_frame: None,
             wrap_type: None,
             wrap_text: None,
             relative_height: None,

@@ -98,10 +98,7 @@ fn cell_unbreakable_ranges(
             _ => None,
         };
         if let Some(LayoutBlock::Shape(shape)) = block
-            && crate::cell_layout::cell_overlay_drawing(
-                shape.position.is_some(),
-                shape.wrap_type.as_deref(),
-            )
+            && shape.position.is_some()
         {
             continue;
         }

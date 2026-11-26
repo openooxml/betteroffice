@@ -1162,6 +1162,12 @@ pub struct ShapeBlock {
     pub wrap_distances: Option<BoxEdges>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImageRunPosition>,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub outside_cell: bool,
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub cell_page_frame: Option<CellShapePageFrame>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1188,6 +1194,14 @@ pub struct ShapeBlock {
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_end: Option<f64>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellShapePageFrame {
+    pub(crate) page: crate::anchor::AnchorFrame,
+    pub(crate) content_x: f64,
+    pub(crate) content_top: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1803,6 +1817,8 @@ impl PartialEq for ShapeBlock {
             text_body_properties: _,
             wrap_distances: _,
             position: _,
+            outside_cell: _,
+            cell_page_frame: _,
             wrap_type: _,
             wrap_text: _,
             relative_height: _,
@@ -1835,6 +1851,7 @@ impl PartialEq for ShapeBlock {
             && self.text_body_properties == other.text_body_properties
             && self.wrap_distances == other.wrap_distances
             && self.position == other.position
+            && self.outside_cell == other.outside_cell
             && self.wrap_type == other.wrap_type
             && self.wrap_text == other.wrap_text
             && self.relative_height == other.relative_height
@@ -2083,6 +2100,8 @@ pub struct ShapeExtent {
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inner_measures: Option<Vec<ParagraphExtent>>,
+    #[serde(skip)]
+    pub(crate) cell_anchor: Option<crate::anchor::CellAnchorMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

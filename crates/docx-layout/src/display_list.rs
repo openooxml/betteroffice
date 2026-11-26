@@ -2666,6 +2666,8 @@ pub(crate) struct ShapeBlockIn {
     pm_end: Option<i64>,
     #[serde(default)]
     pub(crate) position: Option<crate::types::ImageRunPosition>,
+    #[serde(skip)]
+    outside_cell: bool,
     #[serde(default)]
     pub(crate) behind_doc: Option<bool>,
     #[serde(default)]
@@ -3111,6 +3113,8 @@ pub(crate) struct BoxExtentIn {
     pub(crate) width: f64,
     #[serde(default)]
     pub(crate) height: f64,
+    #[serde(skip)]
+    cell_anchor: Option<crate::anchor::CellAnchorMetrics>,
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
@@ -4988,6 +4992,7 @@ pub(crate) type FieldWidthMap = HashMap<i64, FieldWidthEntry>;
 /// PAGE and NUMPAGES resolve to, the shaping fonts, and the field widths scoped
 /// to the header/footer variant being composed.
 pub(crate) struct RenderCtx<'a> {
+    pub(crate) page: &'a PageIn,
     pub(crate) page_number: u64,
     /// Formatted PAGE label; `None` falls back to `page_number`.
     pub(crate) page_label: Option<String>,
@@ -6143,6 +6148,7 @@ fn recompose_hf_region(
         })
         .collect();
     let ctx = RenderCtx {
+        page,
         page_number: page.number.unwrap_or(page_index as u64 + 1),
         page_label: page.page_label.clone(),
         page_index,
@@ -6398,6 +6404,7 @@ fn build_display_list_selected(
         let page_reservations = std::cell::RefCell::new(Vec::new());
         let page_gridlines = std::cell::RefCell::new(Vec::new());
         let ctx = RenderCtx {
+            page,
             page_number: page.number.unwrap_or(page_index as u64 + 1),
             page_label: page.page_label.clone(),
             page_index,
@@ -12027,6 +12034,31 @@ impl TablePaintPlan {
             (cy, self.cell_clip_top(g), self.clip_bottom_y)
         }
     }
+
+    fn content_frame<'m>(
+        &self,
+        frag: &TableFragmentIn,
+        block: &TableBlockIn,
+        measure: &'m TableExtentIn,
+        paint: &CellPaint,
+    ) -> Option<(CellContentFrame, &'m TableCellExtentIn)> {
+        let g = &self.grid[paint.grid_index];
+        let (y, top, bottom) = self.cell_content_window(frag, g, paint);
+        if frag.cell_clips.is_some() && bottom <= top {
+            return None;
+        }
+        cell_content_frame(
+            &block.rows[g.row_index].cells[g.cell_index],
+            measure,
+            &CellPaintRef::from(g),
+            frag.x + g.x,
+            y,
+            paint.content_h,
+            is_first_grid_column(g, block, measure),
+            top,
+            bottom,
+        )
+    }
 }
 
 /// Whether a grid cell is on the table's outer leading edge, whose border insets content.
@@ -12496,23 +12528,9 @@ pub(crate) fn emit_table_fragment(
                 .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
         });
         let windowed_lines = cell_window.is_some();
-        let (content_y, content_clip_top, content_clip_bottom) =
+        let (_, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
-        let content_frame = if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
-            cell_content_frame(
-                cell,
-                measure,
-                &CellPaintRef::from(p.g),
-                cx,
-                content_y,
-                paint.content_h,
-                is_first_col,
-                content_clip_top,
-                content_clip_bottom,
-            )
-        } else {
-            None
-        };
+        let content_frame = plan.content_frame(frag, block, measure, paint);
         let continues_on_next = windowed_lines
             && content_frame
                 .as_ref()
@@ -12536,6 +12554,7 @@ pub(crate) fn emit_table_fragment(
         } else {
             cell_clip_bottom
         };
+        let mut page_shapes = Vec::new();
         if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
             emit_cell_content(
@@ -12549,6 +12568,8 @@ pub(crate) fn emit_table_fragment(
                 p.selectable,
                 &cell_ref,
                 &block_ref,
+                frag.x,
+                &mut page_shapes,
             );
         }
         let clip_id = format!(
@@ -12569,6 +12590,7 @@ pub(crate) fn emit_table_fragment(
                 apply_clip_group(attrs, clip_id.clone(), cell_clip.clone());
             }
         }
+        prims.extend(page_shapes);
     }
 
     // cut edges close a fragment at a page break, one rule per column so
@@ -12701,6 +12723,53 @@ struct CellContentFrame {
 }
 
 impl CellContentFrame {
+    fn shape_rect(
+        &self,
+        cell: &TableCellIn,
+        measure: &TableCellExtentIn,
+        index: usize,
+        shape: &ShapeBlockIn,
+        extent: &BoxExtentIn,
+        page: Option<&crate::anchor::AnchorFrame>,
+    ) -> (f64, f64, f64, f64) {
+        let width = if extent.width > 0.0 { extent.width } else { shape.width };
+        let height = if extent.height > 0.0 { extent.height } else { shape.height };
+        let block_rect = (self.content_x, self.content_top + self.block_tops[index], width, height);
+        let Some(position) = &shape.position else {
+            return block_rect;
+        };
+        let anchor = Self::paragraph_anchor(cell, index);
+        let metrics = extent.cell_anchor.unwrap_or_else(|| {
+            let paragraph_height = match measure.blocks.get(anchor) {
+                Some(MeasureIn::Paragraph(paragraph)) => {
+                    if position.vertical.as_ref().and_then(|axis| axis.relative_to.as_deref())
+                        == Some("line")
+                    {
+                        paragraph.lines.first().map_or(0.0, |line| line.line_height)
+                    } else {
+                        paragraph.lines.iter().map(|line| line.line_height).sum()
+                    }
+                }
+                _ => 0.0,
+            };
+            crate::anchor::CellAnchorMetrics { paragraph_height, character_x: None }
+        });
+        crate::anchor::resolve_cell_shape_rect(
+            position,
+            (width, height),
+            &crate::anchor::CellAnchorFrame {
+                x: self.content_x,
+                width: self.content_width,
+                paragraph_top: self.content_top + self.block_tops[anchor],
+                paragraph_height: metrics.paragraph_height,
+                character_x: metrics.character_x.map(|x| self.content_x + x),
+            },
+            page,
+            !shape.outside_cell,
+        )
+        .unwrap_or(block_rect)
+    }
+
     fn content_cuts(&self, frag: &TableFragmentIn, g: &GridCell) -> (bool, bool) {
         let starts_before = g.row_index < frag.row_start
             || (g.row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) > 0.0);
@@ -12722,14 +12791,7 @@ impl CellContentFrame {
         if !split_row {
             return true;
         }
-        let anchor = (index..cell.blocks.len())
-            .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
-            .or_else(|| {
-                (0..index)
-                    .rev()
-                    .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
-            })
-            .unwrap_or(index);
+        let anchor = Self::paragraph_anchor(cell, index);
         let y = self.content_top + self.block_tops[anchor];
         match measure.blocks.get(anchor) {
             Some(MeasureIn::Paragraph(paragraph)) => {
@@ -12738,6 +12800,17 @@ impl CellContentFrame {
             }
             _ => y >= self.clip_top_y && y < self.clip_bottom_y,
         }
+    }
+
+    fn paragraph_anchor(cell: &TableCellIn, index: usize) -> usize {
+        (index..cell.blocks.len())
+            .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            .or_else(|| {
+                (0..index)
+                    .rev()
+                    .find(|&i| matches!(cell.blocks[i], BlockIn::Paragraph(_)))
+            })
+            .unwrap_or(index)
     }
 }
 
@@ -12849,11 +12922,7 @@ fn cell_content_frame<'m>(
                 stack_cursor += text_box.height;
                 prev_after = 0.0;
             }
-            (BlockIn::Shape(sb), Some(MeasureIn::Shape(_)))
-                if crate::cell_layout::cell_overlay_drawing(
-                    sb.position.is_some(),
-                    sb.wrap_type.as_deref(),
-                ) =>
+            (BlockIn::Shape(sb), Some(MeasureIn::Shape(_))) if sb.position.is_some() =>
             {
                 block_tops.push(stack_cursor);
             }
@@ -12919,6 +12988,8 @@ fn emit_cell_content(
     selectable: bool,
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
+    table_x: f64,
+    page_shapes: &mut Vec<Primitive>,
 ) {
     let stamp_from = prims.len();
     let CellContentFrame {
@@ -12956,16 +13027,11 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
-        if let BlockIn::Shape(shape) = cell_block
-            && crate::cell_layout::cell_overlay_drawing(
-                shape.position.is_some(),
-                shape.wrap_type.as_deref(),
-            )
-            && !frame.shows_anchor(cell, cell_measure, i, split_row)
-        {
+        let anchored_shape = matches!(cell_block, BlockIn::Shape(shape) if shape.position.is_some());
+        if anchored_shape && !frame.shows_anchor(cell, cell_measure, i, split_row) {
             continue;
         }
-        if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
+        if windowed_lines && !anchored_shape && !matches!(cell_block, BlockIn::Paragraph(_)) {
             let height = match m {
                 MeasureIn::Table(table) => table.total_height,
                 MeasureIn::Image(image) => image.height,
@@ -13035,22 +13101,7 @@ fn emit_cell_content(
                 Some(cell_ref),
             );
         } else if let (BlockIn::Table(tb), MeasureIn::Table(tm)) = (cell_block, m) {
-            let table_y = content_top + block_tops[i];
-            let synthetic = TableFragmentIn {
-                block_id: tb.id.clone(),
-                x: content_x + nested_table_x_offset(tb, tm, content_width),
-                y: table_y,
-                width: table_total_width(tm),
-                height: tm.total_height,
-                row_start: 0,
-                row_end: tb.rows.len(),
-                clip_top: None,
-                clip_bottom: None,
-                cell_clips: None,
-                header_row_count: None,
-                carried_from_prev: None,
-                carried_to_next: None,
-            };
+            let synthetic = nested_cell_table_fragment(&frame, i, tb, tm);
             let before = prims.len();
             emit_table_fragment(prims, &synthetic, tb, tm, ctx);
             // Preserve the nested table's own inner `cell` refs so the mirror can
@@ -13137,17 +13188,17 @@ fn emit_cell_content(
                 Some(cell_ref),
             );
         } else if let (BlockIn::Shape(sb), MeasureIn::Shape(sm)) = (cell_block, m) {
-            let shape_y = content_top + block_tops[i];
+            let use_page = sb.position.as_ref().is_some_and(|position| {
+                sb.outside_cell || crate::anchor::cell_anchor_uses_page(position)
+            });
+            let page = use_page.then(|| cell_shape_page_frame(ctx.page, ctx.page_number, table_x));
+            let (x, y, width, height) = frame.shape_rect(cell, cell_measure, i, sb, sm, page.as_ref());
             let synthetic = ShapeFragmentIn {
                 block_id: sb.id.clone(),
-                x: content_x,
-                y: shape_y,
-                width: if sm.width > 0.0 { sm.width } else { sb.width },
-                height: if sm.height > 0.0 {
-                    sm.height
-                } else {
-                    sb.height
-                },
+                x,
+                y,
+                width,
+                height,
                 doc_start: if selectable { sb.doc_start } else { None },
                 doc_end: if selectable { sb.doc_end } else { None },
                 pm_start: if selectable { sb.pm_start } else { None },
@@ -13155,13 +13206,19 @@ fn emit_cell_content(
                 is_anchored: None,
                 z_index: None,
             };
+            let prims = if use_page { &mut *page_shapes } else { &mut *prims };
             let before = prims.len();
             emit_shape_fragment(prims, &synthetic, sb, ctx);
+            let (top, bottom) = if use_page {
+                (0.0, ctx.page.size.h)
+            } else {
+                (cull_top_y, cull_bottom_y)
+            };
             postprocess_cell_primitives(
                 prims,
                 before,
-                cull_top_y,
-                cull_bottom_y,
+                top,
+                bottom,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -13230,6 +13287,174 @@ fn emit_cell_content(
         (cull_top_y, cull_bottom_y),
         rotated.then_some((physical, rotation)),
     );
+}
+
+fn nested_cell_table_fragment(
+    frame: &CellContentFrame,
+    index: usize,
+    block: &TableBlockIn,
+    measure: &TableExtentIn,
+) -> TableFragmentIn {
+    TableFragmentIn {
+        block_id: block.id.clone(),
+        x: frame.content_x + nested_table_x_offset(block, measure, frame.content_width),
+        y: frame.content_top + frame.block_tops[index],
+        width: table_total_width(measure),
+        height: measure.total_height,
+        row_end: block.rows.len(),
+        ..Default::default()
+    }
+}
+
+fn cell_shape_page_frame(page: &PageIn, page_number: u64, table_x: f64) -> crate::anchor::AnchorFrame {
+    let margins = page.body_anchor_margins.as_ref().unwrap_or(&page.margins);
+    let (body, columns) = page_content_geometry(page);
+    let column = columns
+        .iter()
+        .rev()
+        .find(|column| column.x.as_f64().is_some_and(|x| x <= table_x + 1e-6))
+        .or_else(|| columns.first())
+        .unwrap_or(&body);
+    crate::anchor::AnchorFrame {
+        page_width: page.size.w,
+        page_height: page.size.h,
+        margin_left: page.margins.left,
+        margin_right: page.margins.right,
+        margin_top: margins.top,
+        margin_bottom: margins.bottom,
+        flow_x: column.x.as_f64().unwrap_or(page.margins.left),
+        flow_y: margins.top,
+        flow_width: column.width.as_f64().unwrap_or(0.0),
+        flow_height: (page.size.h - margins.top - margins.bottom).max(0.0),
+        odd_page: page_number % 2 == 1,
+    }
+}
+
+#[doc(hidden)]
+pub fn update_cell_shape_page_frames(
+    blocks: &mut [crate::types::LayoutBlock],
+    measured: &[crate::types::MeasuredBlock],
+    layout: &crate::types::Layout,
+) -> Result<bool, String> {
+    use crate::types::{Fragment, LayoutBlock};
+
+    let mut transcoder = crate::transcode::Transcoder::default();
+    let mut tables = HashMap::new();
+    for source in measured
+        .iter()
+        .filter(|source| crate::measure_blocks::has_page_relative_cell_shape_wrap(&source.block))
+    {
+        let LayoutBlock::Table(table) = &source.block else {
+            continue;
+        };
+        let mut converted: MeasuredBlockIn = transcoder.convert(source)?;
+        copy_cell_shape_anchors(
+            &mut converted.block,
+            &mut converted.measure,
+            &source.block,
+            &source.measure,
+        );
+        if let (BlockIn::Table(block), MeasureIn::Table(measure)) =
+            (converted.block, converted.measure)
+        {
+            tables.insert(resident_block_id_key(&table.id), (block, measure));
+        }
+    }
+    let mut frames = HashMap::new();
+    for page in &layout.pages {
+        let mut fragments = page.fragments.iter().filter_map(|fragment| {
+            let Fragment::Table(fragment) = fragment else {
+                return None;
+            };
+            let table = tables.get(resident_block_id_key(&fragment.block_id).as_ref())?;
+            Some((fragment, table))
+        }).peekable();
+        if fragments.peek().is_none() {
+            continue;
+        }
+        let page_in: PageIn = transcoder.convert(page)?;
+        for (fragment, (block, measure)) in fragments {
+            let fragment: TableFragmentIn = transcoder.convert(fragment)?;
+            let page_frame = cell_shape_page_frame(&page_in, u64::from(page.number), fragment.x);
+            collect_cell_shape_page_frames(&fragment, block, measure, page_frame, &mut frames);
+        }
+    }
+    Ok(apply_cell_shape_page_frames(blocks, &frames))
+}
+
+fn collect_cell_shape_page_frames(
+    fragment: &TableFragmentIn,
+    block: &TableBlockIn,
+    measure: &TableExtentIn,
+    page: crate::anchor::AnchorFrame,
+    frames: &mut HashMap<String, crate::types::CellShapePageFrame>,
+) {
+    let plan = TablePaintPlan::new(fragment, block, measure);
+    for paint in &plan.paints {
+        let grid = &plan.grid[paint.grid_index];
+        let cell = &block.rows[grid.row_index].cells[grid.cell_index];
+        let Some((frame, measured)) = plan.content_frame(fragment, block, measure, paint) else {
+            continue;
+        };
+        if frame.rotation != 0.0 {
+            continue;
+        }
+        let (starts_before, ends_after) = frame.content_cuts(fragment, grid);
+        for (index, (block, extent)) in cell.blocks.iter().zip(&measured.blocks).enumerate() {
+            match (block, extent) {
+                (BlockIn::Shape(shape), MeasureIn::Shape(_)) => {
+                    let Some(position) = &shape.position else {
+                        continue;
+                    };
+                    let (local_x, local_y) = crate::anchor::cell_axes(position);
+                    if shape.outside_cell
+                        || (local_x && local_y)
+                        || !crate::cell_layout::wraps_around_drawing(shape.wrap_type.as_deref())
+                        || !frame.shows_anchor(cell, measured, index, starts_before || ends_after)
+                    {
+                        continue;
+                    }
+                    frames.entry(block_key(&shape.id).into_owned()).or_insert(crate::types::CellShapePageFrame {
+                        page,
+                        content_x: if local_x { 0.0 } else { frame.content_x },
+                        content_top: if local_y { 0.0 } else { frame.content_top },
+                    });
+                }
+                (BlockIn::Table(block), MeasureIn::Table(measure)) => {
+                    let nested = nested_cell_table_fragment(&frame, index, block, measure);
+                    if nested.y < frame.clip_bottom_y && nested.y + nested.height > frame.clip_top_y {
+                        collect_cell_shape_page_frames(&nested, block, measure, page, frames);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn apply_cell_shape_page_frames(
+    blocks: &mut [crate::types::LayoutBlock],
+    frames: &HashMap<String, crate::types::CellShapePageFrame>,
+) -> bool {
+    use crate::types::LayoutBlock;
+
+    let mut changed = false;
+    for block in blocks {
+        match block {
+            LayoutBlock::Table(table) => {
+                for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                    changed |= apply_cell_shape_page_frames(&mut cell.blocks, frames);
+                }
+            }
+            LayoutBlock::Shape(shape) => {
+                let frame = frames.get(resident_block_id_key(&shape.id).as_ref()).copied();
+                changed |= shape.cell_page_frame != frame;
+                shape.cell_page_frame = frame;
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 /// Keeps a selectable paint's new reservation rects inside the cull band,
@@ -14034,11 +14259,42 @@ pub fn build_display_list_value_with_fonts(
     input: &str,
     fonts: &ooxml_text::FontStore,
 ) -> Result<DisplayList, String> {
+    build_display_list_value_with_cell_anchors(input, fonts, &[])
+}
+
+pub(crate) fn build_display_list_value_with_cell_anchors(
+    input: &str,
+    fonts: &ooxml_text::FontStore,
+    measured: &[crate::types::MeasuredBlock],
+) -> Result<DisplayList, String> {
     let mut wire: Value = serde_json::from_str(input).map_err(|e| format!("parse: {e}"))?;
     normalize_integral_json_numbers(&mut wire);
-    let parsed: BuildInput = serde_json::to_string(&wire)
+    let mut parsed: BuildInput = serde_json::to_string(&wire)
         .map_err(|e| format!("parse: {e}"))
         .and_then(|s| serde_json::from_str(&s).map_err(|e| format!("parse: {e}")))?;
+    if !measured.is_empty() {
+        let sources: HashMap<_, _> = measured
+            .iter()
+            .filter_map(|measured| {
+                let crate::types::LayoutBlock::Table(table) = &measured.block else {
+                    return None;
+                };
+                Some((resident_block_id_key(&table.id), measured))
+            })
+            .collect();
+        for measured in &mut parsed.measured {
+            if let BlockIn::Table(table) = &measured.block
+                && let Some(source) = sources.get(block_key(&table.id).as_ref())
+            {
+                copy_cell_shape_anchors(
+                    &mut measured.block,
+                    &mut measured.measure,
+                    &source.block,
+                    &source.measure,
+                );
+            }
+        }
+    }
     Ok(build_display_list(&parsed, fonts))
 }
 
@@ -14526,8 +14782,14 @@ fn convert_measured_block(
     #[cfg(any(test, feature = "test-support"))]
     resident_conversion_test_support::count_measured_block();
     let key = resident_block_key(&measured.block).map(Cow::into_owned);
-    match transcoder.convert(measured) {
-        Ok(block) => {
+    match transcoder.convert::<_, MeasuredBlockIn>(measured) {
+        Ok(mut block) => {
+            copy_cell_shape_anchors(
+                &mut block.block,
+                &mut block.measure,
+                &measured.block,
+                &measured.measure,
+            );
             if let Some(key) = key {
                 unreadable.retain(|known| known.page.is_some() || known.block != key);
             }
@@ -14543,6 +14805,53 @@ fn convert_measured_block(
                 },
             );
             None
+        }
+    }
+}
+
+fn copy_cell_shape_anchors(
+    block: &mut BlockIn,
+    measure: &mut MeasureIn,
+    source: &crate::types::LayoutBlock,
+    extent: &crate::types::BlockExtent,
+) {
+    use crate::types::{BlockExtent, LayoutBlock};
+
+    let (
+        BlockIn::Table(block),
+        MeasureIn::Table(measure),
+        LayoutBlock::Table(source),
+        BlockExtent::Table(extent),
+    ) = (block, measure, source, extent)
+    else {
+        return;
+    };
+    for (((row, measure), source), extent) in block.rows.iter_mut()
+        .zip(&mut measure.rows).zip(&source.rows).zip(&extent.rows)
+    {
+        for (((cell, measure), source), extent) in row.cells.iter_mut()
+            .zip(&mut measure.cells).zip(&source.cells).zip(&extent.cells)
+        {
+            for (((block, measure), source), extent) in cell.blocks.iter_mut()
+                .zip(&mut measure.blocks).zip(&source.blocks).zip(&extent.blocks)
+            {
+                if let (
+                    BlockIn::Shape(block),
+                    MeasureIn::Shape(measure),
+                    LayoutBlock::Shape(source),
+                    BlockExtent::Shape(extent),
+                ) = (&mut *block, &mut *measure, source, extent)
+                {
+                    if block_key(&block.id) == resident_block_id_key(&source.id)
+                        && block.position == source.position
+                    {
+                        block.outside_cell = source.outside_cell;
+                        measure.cell_anchor = extent.cell_anchor;
+                    }
+                } else {
+                    copy_cell_shape_anchors(block, measure, source, extent);
+                }
+            }
         }
     }
 }
@@ -15241,6 +15550,13 @@ fn refresh_resident_display_pages_reading(
             )
             .is_ok()
         {
+            let display = &mut input.measured[index];
+            copy_cell_shape_anchors(
+                &mut display.block,
+                &mut display.measure,
+                &measured.block,
+                &measured.measure,
+            );
             input
                 .unreadable
                 .retain(|known| known.page.is_some() || known.block.as_str() != key.as_ref());

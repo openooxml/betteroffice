@@ -250,6 +250,16 @@ pub fn build_display_list_value(input: &str) -> Result<display_list::DisplayList
     })
 }
 
+#[doc(hidden)]
+pub fn build_display_list_value_with_cell_anchors(
+    input: &str,
+    measured: &[types::MeasuredBlock],
+) -> Result<display_list::DisplayList, String> {
+    with_measure_fonts(|store| {
+        display_list::build_display_list_value_with_cell_anchors(input, &store.borrow(), measured)
+    })
+}
+
 /// Resident counterpart to [`build_display_list_value`]. Large measured and
 /// layout values stay inside the editing wasm; `extras` carries only the
 /// display-specific fields not owned by pagination.
