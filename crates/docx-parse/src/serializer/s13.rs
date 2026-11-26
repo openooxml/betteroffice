@@ -814,7 +814,9 @@ fn clean_deleted_comment_markers(
         .decode(bytes)
         .map_err(|error| save_error(error.to_string()))?;
     if xml.contains('\0') {
-        return Err(save_error("comment marker cleanup found unsupported XML bytes"));
+        return Err(save_error(
+            "comment marker cleanup found unsupported XML bytes",
+        ));
     }
     if encoding.name() == "UTF-8" && !xml.contains("comment") {
         return Ok(None);

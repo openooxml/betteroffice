@@ -222,7 +222,15 @@ fn write_model(
         );
     }
     request.determinism.validate()?;
-    match write_guarded(&request, bytes, parts, limits, coverage, wire, source_digest) {
+    match write_guarded(
+        &request,
+        bytes,
+        parts,
+        limits,
+        coverage,
+        wire,
+        source_digest,
+    ) {
         Ok(saved) => Ok(saved),
         Err(error) => write_fallback(request, bytes, parts, &error.to_string()),
     }
@@ -247,7 +255,8 @@ fn write_guarded(
         ..S9ParseOptions::default()
     };
     let unchanged_body = coverage.unchanged_body && !coverage.rewrite_body;
-    let (body_path, source) = parse_save_source(bytes, parts, parse_options, limits, unchanged_body)?;
+    let (body_path, source) =
+        parse_save_source(bytes, parts, parse_options, limits, unchanged_body)?;
     let part_paths = PartPaths::new(parts);
     if part_paths.0.len() != parts.len() {
         return Err(save_error("ambiguous case-insensitive package paths"));
@@ -322,8 +331,16 @@ fn write_guarded(
         },
     ];
     for (part, notes, separators) in [
-        (&note_parts[0], &request.footnotes, &request.footnote_separators),
-        (&note_parts[1], &request.endnotes, &request.endnote_separators),
+        (
+            &note_parts[0],
+            &request.footnotes,
+            &request.footnote_separators,
+        ),
+        (
+            &note_parts[1],
+            &request.endnotes,
+            &request.endnote_separators,
+        ),
     ] {
         if part.changed(notes, separators)? {
             changed.insert(part.path.to_owned());
