@@ -4286,7 +4286,11 @@ mod tests {
             '\u{1f200}',
             '𠮷',
         ] {
-            assert!(is_east_asian_character(character), "U+{:04X}", character as u32);
+            assert!(
+                is_east_asian_character(character),
+                "U+{:04X}",
+                character as u32
+            );
         }
         assert!(!is_east_asian_character('A'));
         assert!(!is_east_asian_character('🦀'));
