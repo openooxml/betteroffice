@@ -524,6 +524,177 @@ fn accepts_assigned_ids_that_equal_placeholders() {
     let mut request = request(json!([{"type": "paragraph", "content": [change(2), change(1)]}]));
     let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([1, 2])).unwrap();
     assert_eq!(ids, BTreeMap::from([(1, 2), (2, 1)]));
+    let result = serde_json::to_value(&request).unwrap();
+    let content = result["document"]["content"][0]["content"].as_array().unwrap();
+    assert_eq!(
+        content.iter().map(|site| site["info"]["id"].as_f64()).collect::<Vec<_>>(),
+        [Some(1.0), Some(2.0)]
+    );
+}
+
+#[test]
+fn clones_only_shared_blocks_on_a_revision_site_path() {
+    let original = request(json!([
+        {"type": "paragraph", "content": [{"type": "run", "content": []}]},
+        {"type": "table", "rows": [{"type": "tableRow", "cells": [{
+            "type": "tableCell", "content": [
+                {"type": "paragraph", "content": []},
+                {"type": "paragraph", "content": [change(FIRST)]}
+            ]
+        }]}]}
+    ]));
+    let session = BTreeSet::from([FIRST]);
+    let mut actual = original.clone();
+    assert_eq!(
+        assign_session_revision_ids(&mut actual, &session).unwrap(),
+        BTreeMap::from([(FIRST, 1)])
+    );
+    let [BlockContent::Paragraph(unchanged), BlockContent::Table(table)] =
+        original.document.content.as_slice()
+    else {
+        panic!("expected a paragraph and a table");
+    };
+    let [BlockContent::Paragraph(actual_unchanged), BlockContent::Table(actual_table)] =
+        actual.document.content.as_slice()
+    else {
+        panic!("expected a paragraph and a table");
+    };
+    assert!(Arc::ptr_eq(unchanged, actual_unchanged));
+    assert!(!Arc::ptr_eq(table, actual_table));
+    let [BlockContent::Paragraph(cell_unchanged), BlockContent::Paragraph(cell_changed)] =
+        table.rows[0].cells[0].content.as_slice()
+    else {
+        panic!("expected two cell paragraphs");
+    };
+    let [BlockContent::Paragraph(actual_cell_unchanged), BlockContent::Paragraph(actual_cell_changed)] =
+        actual_table.rows[0].cells[0].content.as_slice()
+    else {
+        panic!("expected two cell paragraphs");
+    };
+    assert!(Arc::ptr_eq(cell_unchanged, actual_cell_unchanged));
+    assert!(!Arc::ptr_eq(cell_changed, actual_cell_changed));
+
+    let mut probe = original.clone();
+    let mut walker = SiteWalker::new(&session, None);
+    walker.request(&mut probe).unwrap();
+    assert_eq!(walker.block_make_mut, 2);
+}
+
+#[test]
+fn inserts_each_nested_model_reservation_once() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            for count in [1_000u32, 2_000] {
+                let mut shape: Shape = serde_json::from_value(model_shape(json!([]))).unwrap();
+                let mut model = Value::Null;
+                for id in (1..=count).rev() {
+                    model = Value::Object(
+                        [
+                            ("author".to_owned(), json!("Source")),
+                            ("id".to_owned(), json!(id)),
+                            ("info".to_owned(), model),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    );
+                }
+                shape.drawing_model = Some(Value::Object(
+                    [("info".to_owned(), model)].into_iter().collect(),
+                ));
+                let found = collect(&shape, &BTreeSet::from([FIRST])).unwrap();
+                assert_eq!(found.used, (1..=count).collect());
+                assert_eq!(found.reservation_inserts, count as usize);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn model_shape(content: Value) -> Value {
+    json!({
+        "type": "shape", "shapeType": "rect", "size": {"width": 1, "height": 1},
+        "textBody": {"content": content}
+    })
+}
+
+fn assert_text_box_model_order(child: Value, placeholders: &[u64]) {
+    let shape = model_shape(json!([{"type": "paragraph", "content": [child]}]));
+    let mut request = request(json!([{"type": "paragraph", "content": [{
+        "type": "run", "content": [{"type": "shape", "shape": shape}]
+    }]}]));
+    let mut paths = Vec::new();
+    let ids = assign_session_revision_ids_with_paths(
+        &mut request,
+        &placeholders.iter().copied().collect(),
+        &mut paths,
+    )
+    .unwrap();
+    let result = serde_json::to_value(&request).unwrap();
+    for (index, ((path, id), &placeholder)) in paths.iter().zip(placeholders).enumerate() {
+        let assigned = index as u32 + 1;
+        assert_eq!(*id, placeholder, "{path}");
+        assert_eq!(ids[&placeholder], assigned, "{path}");
+        assert_eq!(result.pointer(path).and_then(Value::as_u64), Some(u64::from(assigned)));
+    }
+    assert_eq!(paths.len(), placeholders.len());
+}
+
+#[test]
+fn assigns_text_box_field_inline_sites_before_result_blocks() {
+    assert_text_box_model_order(
+        json!({
+            "type": "complexField", "instruction": "PAGE", "fieldType": "PAGE",
+            "fieldCode": [], "fieldResult": [],
+            "structuredResult": {
+                "inline": [change(FIRST)],
+                "blocks": [{"type": "paragraph", "content": [change(SECOND)]}]
+            }
+        }),
+        &[FIRST, SECOND],
+    );
+}
+
+#[test]
+fn assigns_text_box_field_tree_code_and_result_before_child_trees() {
+    assert_text_box_model_order(
+        json!({
+            "type": "complexField", "instruction": "PAGE", "fieldType": "PAGE",
+            "fieldCode": [], "fieldResult": [],
+            "fieldTree": {
+                "code": {"inline": [change(FIRST)]},
+                "result": {"inline": [change(SECOND)]},
+                "children": [{"result": {"inline": [change(FIRST - 1)]}}]
+            }
+        }),
+        &[FIRST, SECOND, FIRST - 1],
+    );
+}
+
+#[test]
+fn assigns_text_box_hyperlink_children_before_structured_children() {
+    assert_text_box_model_order(
+        json!({
+            "type": "hyperlink", "anchor": "target",
+            "children": [change(FIRST)], "structuredChildren": [change(SECOND)]
+        }),
+        &[FIRST, SECOND],
+    );
+}
+
+#[test]
+fn assigns_text_box_scene_shape_before_child_nodes() {
+    let with_revision = |id| model_shape(json!([{"type": "paragraph", "content": [change(id)]}]));
+    let mut shape = model_shape(json!([]));
+    shape["scene"] = json!({"root": {
+        "shape": with_revision(FIRST),
+        "children": [{"shape": with_revision(SECOND)}]
+    }});
+    assert_text_box_model_order(
+        json!({"type": "run", "content": [{"type": "shape", "shape": shape}]}),
+        &[FIRST, SECOND],
+    );
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::fmt::{self, Write};
 use std::sync::Arc;
 
 use docx_parse::S13SaveRequest;
@@ -20,6 +20,10 @@ use serde_json::Value;
 
 const MAX_ID: u32 = 1 << 31;
 const PLACEHOLDER_LIMIT: f64 = (1u64 << 53) as f64;
+const HYPERLINK_FIELDS: [&str; 2] = ["children", "structuredChildren"];
+const STRUCTURED_FIELDS: [&str; 2] = ["inline", "blocks"];
+const FIELD_TREE_FIELDS: [&str; 3] = ["code", "result", "children"];
+const SCENE_NODE_FIELDS: [&str; 2] = ["shape", "children"];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RevisionIdsError {
@@ -53,6 +57,24 @@ pub fn assign_session_revision_ids(
     request: &mut S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
+    assign(request, session, None)
+}
+
+#[doc(hidden)]
+pub fn assign_session_revision_ids_with_paths(
+    request: &mut S13SaveRequest,
+    session: &BTreeSet<u64>,
+    paths: &mut Vec<(String, u64)>,
+) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
+    paths.clear();
+    assign(request, session, Some(paths))
+}
+
+fn assign(
+    request: &mut S13SaveRequest,
+    session: &BTreeSet<u64>,
+    paths: Option<&mut Vec<(String, u64)>>,
+) -> Result<BTreeMap<u64, u32>, RevisionIdsError> {
     if session.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -60,11 +82,8 @@ pub fn assign_session_revision_ids(
     if found.sites.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut walker = SiteWalker {
-        session,
-        sites: Vec::new(),
-    };
-    walker.request(request);
+    let mut walker = SiteWalker::new(session, paths);
+    walker.request(request)?;
 
     let mut next = found.max;
     let mut ids = BTreeMap::new();
@@ -94,7 +113,7 @@ pub fn assign_session_revision_ids(
         }
     }
 
-    let rewritten = collect(request, session)?;
+    let rewritten = collect_at(request, session, None, true)?;
     if let Some((&id, _)) = rewritten
         .sites
         .iter()
@@ -122,7 +141,7 @@ pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
 ) -> Result<RevisionIdReservations, RevisionIdsError> {
-    let found = collect_at(request, session, Some(String::new()))?;
+    let found = collect_at(request, session, Some(String::new()), false)?;
     Ok(RevisionIdReservations {
         used: found.used,
         max: found.max,
@@ -152,40 +171,70 @@ struct Collected {
     used: BTreeSet<u32>,
     sites: BTreeMap<u64, usize>,
     reservations: BTreeMap<(String, u32), usize>,
+    pending: Vec<Observation>,
+    pending_depth: usize,
+    sites_only: bool,
+    #[cfg(test)]
+    reservation_inserts: usize,
+}
+
+enum Observation {
+    Reservation(u32, bool, Option<String>),
+    Site(u64),
 }
 
 impl Collected {
     fn note(&mut self, id: Kind, raises_base: bool, pointer: Option<&str>) {
-        if let Kind::Number(id) = id
+        if !self.sites_only
+            && let Kind::Number(id) = id
             && (0.0..f64::from(MAX_ID)).contains(&id)
             && id.fract() == 0.0
         {
-            let id = id as u32;
-            self.used.insert(id);
-            if let Some(pointer) = pointer {
-                *self
-                    .reservations
-                    .entry((pointer.to_owned(), id))
-                    .or_default() += 1;
-            }
-            if raises_base {
-                self.max = self.max.max(id);
-            }
+            self.observe(Observation::Reservation(
+                id as u32,
+                raises_base,
+                pointer.map(str::to_owned),
+            ));
         }
     }
 
-    fn site(&mut self, id: u64, count: usize) {
-        *self.sites.entry(id).or_default() += count;
+    fn observe(&mut self, observation: Observation) {
+        if self.pending_depth == 0 {
+            self.record(observation);
+        } else {
+            self.pending.push(observation);
+        }
     }
 
-    fn merge(&mut self, other: Self) {
-        self.max = self.max.max(other.max);
-        self.used.extend(other.used);
-        for (id, count) in other.sites {
-            self.site(id, count);
+    fn record(&mut self, observation: Observation) {
+        match observation {
+            Observation::Reservation(id, raises_base, pointer) => {
+                #[cfg(test)]
+                {
+                    self.reservation_inserts += 1;
+                }
+                self.used.insert(id);
+                if let Some(pointer) = pointer {
+                    *self.reservations.entry((pointer, id)).or_default() += 1;
+                }
+                if raises_base {
+                    self.max = self.max.max(id);
+                }
+            }
+            Observation::Site(id) => *self.sites.entry(id).or_default() += 1,
         }
-        for (site, count) in other.reservations {
-            *self.reservations.entry(site).or_default() += count;
+    }
+
+    fn finish_info(&mut self, start: usize, session_id: Option<u64>) {
+        self.pending_depth -= 1;
+        if let Some(id) = session_id {
+            self.pending.truncate(start);
+            self.observe(Observation::Site(id));
+        }
+        if self.pending_depth == 0 {
+            while let Some(observation) = self.pending.pop() {
+                self.record(observation);
+            }
         }
     }
 
@@ -271,19 +320,20 @@ enum Kind {
     Array,
 }
 
-fn collect<T: Serialize>(
-    value: &T,
-    session: &BTreeSet<u64>,
-) -> Result<Collected, RevisionIdsError> {
-    collect_at(value, session, None)
+fn collect<T: Serialize>(value: &T, session: &BTreeSet<u64>) -> Result<Collected, RevisionIdsError> {
+    collect_at(value, session, None, false)
 }
 
-fn collect_at<T: Serialize>(
+fn collect_at<T: Serialize + ?Sized>(
     value: &T,
     session: &BTreeSet<u64>,
     pointer: Option<String>,
+    sites_only: bool,
 ) -> Result<Collected, RevisionIdsError> {
-    let mut found = Collected::default();
+    let mut found = Collected {
+        sites_only,
+        ..Collected::default()
+    };
     value.serialize(Visitor {
         session,
         found: &mut found,
@@ -312,7 +362,7 @@ struct Record<'a> {
     visitor: Visitor<'a>,
     name: &'static str,
     key: Kind,
-    pending: Option<Collected>,
+    pending_start: Option<usize>,
     author: Kind,
     id: Kind,
     revision_id: Kind,
@@ -323,11 +373,15 @@ struct Record<'a> {
 impl<'a> Record<'a> {
     fn new(visitor: Visitor<'a>, name: &'static str) -> Self {
         let info = visitor.info || matches!(name, "TrackedChangeInfo" | "PropertyChangeInfo");
+        let pending_start = info.then(|| {
+            visitor.found.pending_depth += 1;
+            visitor.found.pending.len()
+        });
         Self {
             visitor,
             name,
             key: Kind::Other,
-            pending: info.then(Collected::default),
+            pending_start,
             author: Kind::Other,
             id: Kind::Other,
             revision_id: Kind::Other,
@@ -345,7 +399,7 @@ impl<'a> Record<'a> {
     ) -> Result<(), RevisionIdsError> {
         let kind = value.serialize(Visitor {
             session: self.visitor.session,
-            found: self.pending.as_mut().unwrap_or(&mut *self.visitor.found),
+            found: self.visitor.found,
             model,
             info: model && matches!(key, Symbol::Info),
             scan_strings: self.visitor.scan_strings,
@@ -380,16 +434,17 @@ impl<'a> Record<'a> {
 
     fn finish(self) -> Kind {
         let found = self.visitor.found;
-        if let Some(pending) = self.pending {
-            if matches!(self.author, Kind::String(_))
-                && let Kind::Number(id) = self.id
-                && let Some(id) = placeholder(id)
-                && self.visitor.session.contains(&id)
-            {
-                found.site(id, 1);
+        if let Some(start) = self.pending_start {
+            let session_id = match (&self.author, &self.id) {
+                (Kind::String(_), Kind::Number(id)) => {
+                    placeholder(*id).filter(|id| self.visitor.session.contains(id))
+                }
+                _ => None,
+            };
+            found.finish_info(start, session_id);
+            if session_id.is_some() {
                 return Kind::Other;
             }
-            found.merge(pending);
         }
         let pointer = self.visitor.pointer.as_deref();
         if matches!(self.author, Kind::String(_)) {
@@ -424,7 +479,7 @@ impl SerializeMap for Record<'_> {
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
         self.key = key.serialize(Visitor {
             session: self.visitor.session,
-            found: self.pending.as_mut().unwrap_or(&mut *self.visitor.found),
+            found: self.visitor.found,
             model: false,
             info: false,
             scan_strings: false,
@@ -568,9 +623,9 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_str(self, value: &str) -> Result<Kind, Self::Error> {
-        if self.scan_strings {
+        if self.scan_strings && !self.found.sites_only {
             self.found.scan_xml(value, self.pointer.as_deref());
-        } else if self.pointer.is_some() {
+        } else if !self.scan_strings && self.pointer.is_some() {
             return Ok(Kind::Key(value.to_owned()));
         }
         Ok(Kind::String(Symbol::from(value)))
@@ -690,122 +745,244 @@ enum Site<'a> {
     Model(&'a mut Value),
 }
 
-struct SiteWalker<'a, 's> {
+struct SiteWalker<'a, 's, 'p> {
     session: &'s BTreeSet<u64>,
     sites: Vec<(u64, Site<'a>)>,
+    paths: Option<&'p mut Vec<(String, u64)>>,
+    path: String,
+    error: Option<RevisionIdsError>,
+    #[cfg(test)]
+    block_make_mut: usize,
 }
 
-impl<'a> SiteWalker<'a, '_> {
-    fn request(&mut self, request: &'a mut S13SaveRequest) {
-        self.blocks(&mut request.document.content);
-        for section in request.document.sections.iter_mut().flatten() {
-            self.blocks(&mut section.content);
+impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
+    fn new(session: &'s BTreeSet<u64>, paths: Option<&'p mut Vec<(String, u64)>>) -> Self {
+        Self {
+            session,
+            sites: Vec::new(),
+            paths,
+            path: String::new(),
+            error: None,
+            #[cfg(test)]
+            block_make_mut: 0,
         }
-        for comment in request.document.comments.iter_mut().flatten() {
-            for paragraph in &mut comment.content {
-                self.paragraph(paragraph);
+    }
+
+    fn at(&mut self, key: &str, visit: impl FnOnce(&mut Self)) {
+        let length = self.path.len();
+        if self.paths.is_some() {
+            self.path.push('/');
+            if key.contains(['~', '/']) {
+                self.path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+            } else {
+                self.path.push_str(key);
             }
-            self.blocks(&mut comment.block_content);
         }
-        for (_, header_footer) in request
-            .header_entries
-            .iter_mut()
-            .chain(&mut request.footer_entries)
-        {
-            self.blocks(&mut header_footer.content);
+        visit(self);
+        self.path.truncate(length);
+    }
+
+    fn entries<T>(
+        &mut self,
+        values: impl IntoIterator<Item = T>,
+        mut visit: impl FnMut(&mut Self, T),
+    ) {
+        for (index, value) in values.into_iter().enumerate() {
+            let length = self.path.len();
+            if self.paths.is_some() {
+                write!(self.path, "/{index}").unwrap();
+            }
+            visit(self, value);
+            self.path.truncate(length);
         }
-        for note in request
-            .footnotes
-            .iter_mut()
-            .chain(&mut request.endnotes)
-            .chain(&mut request.footnote_separators)
-            .chain(&mut request.endnote_separators)
-        {
-            self.blocks(&mut note.content);
+    }
+
+    fn field_entries<T>(
+        &mut self,
+        key: &str,
+        values: impl IntoIterator<Item = T>,
+        visit: impl FnMut(&mut Self, T),
+    ) {
+        self.at(key, |walker| walker.entries(values, visit));
+    }
+
+    fn request(&mut self, request: &'a mut S13SaveRequest) -> Result<(), RevisionIdsError> {
+        self.at("document", |walker| {
+            walker.at("content", |walker| walker.blocks(&mut request.document.content));
+            walker.field_entries(
+                "sections",
+                request.document.sections.iter_mut().flatten(),
+                |walker, section| {
+                    walker.at("content", |walker| walker.blocks(&mut section.content));
+                },
+            );
+            walker.field_entries(
+                "comments",
+                request.document.comments.iter_mut().flatten(),
+                |walker, comment| {
+                    walker.field_entries("content", &mut comment.content, Self::paragraph);
+                    walker.at("blockContent", |walker| walker.blocks(&mut comment.block_content));
+                },
+            );
+        });
+        for (key, entries) in [
+            ("headerEntries", &mut request.header_entries),
+            ("footerEntries", &mut request.footer_entries),
+        ] {
+            self.field_entries(key, entries, |walker, (_, header_footer)| {
+                walker.at("1", |walker| {
+                    walker.at("content", |walker| walker.blocks(&mut header_footer.content));
+                });
+            });
+        }
+        for (key, notes) in [
+            ("footnotes", &mut request.footnotes),
+            ("endnotes", &mut request.endnotes),
+            ("footnoteSeparators", &mut request.footnote_separators),
+            ("endnoteSeparators", &mut request.endnote_separators),
+        ] {
+            self.field_entries(key, notes, |walker, note| {
+                walker.at("content", |walker| walker.blocks(&mut note.content));
+            });
         }
         if let Some(plan) = &mut request.paragraph_ids {
-            for part in &mut plan.spliced_parts {
-                for table in &mut part.table_patches {
-                    self.model(&mut table.before, false);
-                    self.model(&mut table.after, false);
-                }
-            }
+            self.at("paragraphIds", |walker| {
+                walker.field_entries("splicedParts", &mut plan.spliced_parts, |walker, part| {
+                    walker.field_entries("tablePatches", &mut part.table_patches, |walker, table| {
+                        walker.at("before", |walker| {
+                            walker.model(&mut table.before, ModelKind::Any, false);
+                        });
+                        walker.at("after", |walker| {
+                            walker.model(&mut table.after, ModelKind::Any, false);
+                        });
+                    });
+                });
+            });
         }
+        self.error.take().map_or(Ok(()), Err)
+    }
+
+    fn push(&mut self, placeholder: u64, site: Site<'a>) {
+        if let Some(paths) = &mut self.paths {
+            paths.push((format!("{}/id", self.path), placeholder));
+        }
+        self.sites.push((placeholder, site));
     }
 
     fn id(&mut self, id: &'a mut f64) {
         if let Some(placeholder) = self.session_placeholder(*id) {
-            self.sites.push((placeholder, Site::Typed(id)));
+            self.push(placeholder, Site::Typed(id));
         }
+    }
+
+    fn info(&mut self, id: &'a mut f64) {
+        self.at("info", |walker| walker.id(id));
     }
 
     fn session_placeholder(&self, id: f64) -> Option<u64> {
         placeholder(id).filter(|id| self.session.contains(id))
     }
 
-    fn blocks(&mut self, blocks: &'a mut [BlockContent]) {
-        for block in blocks {
-            match block {
-                BlockContent::Paragraph(paragraph) => self.paragraph(Arc::make_mut(paragraph)),
-                BlockContent::Table(table) => self.table(Arc::make_mut(table)),
-                BlockContent::BlockSdt(control) => {
-                    self.blocks(&mut Arc::make_mut(control).content);
+    fn block_mut<T: Clone + Serialize>(&mut self, block: &'a mut Arc<T>) -> Option<&'a mut T> {
+        if Arc::get_mut(block).is_some() {
+            return Arc::get_mut(block);
+        }
+        match collect_at(block.as_ref(), self.session, None, true) {
+            Ok(found) if !found.sites.is_empty() => {
+                #[cfg(test)]
+                {
+                    self.block_make_mut += 1;
                 }
-                BlockContent::RawXml(_) => {}
+                Some(Arc::make_mut(block))
+            }
+            Ok(_) => None,
+            Err(error) => {
+                self.error = Some(error);
+                None
             }
         }
+    }
+
+    fn blocks(&mut self, blocks: &'a mut [BlockContent]) {
+        self.entries(blocks, |walker, block| match block {
+            BlockContent::Paragraph(paragraph) => {
+                if let Some(paragraph) = walker.block_mut(paragraph) {
+                    walker.paragraph(paragraph);
+                }
+            }
+            BlockContent::Table(table) => {
+                if let Some(table) = walker.block_mut(table) {
+                    walker.table(table);
+                }
+            }
+            BlockContent::BlockSdt(control) => {
+                if let Some(control) = walker.block_mut(control) {
+                    walker.at("content", |walker| walker.blocks(&mut control.content));
+                }
+            }
+            BlockContent::RawXml(_) => {}
+        });
     }
 
     fn table(&mut self, table: &'a mut Table) {
-        for row in &mut table.rows {
-            for cell in &mut row.cells {
-                self.blocks(&mut cell.content);
+        self.field_entries("rows", &mut table.rows, |walker, row| {
+            walker.field_entries("cells", &mut row.cells, |walker, cell| {
+                walker.at("content", |walker| walker.blocks(&mut cell.content));
                 if let Some(change) = &mut cell.structural_change {
-                    self.id(&mut change.info.id);
+                    walker.at("structuralChange", |walker| walker.info(&mut change.info.id));
                 }
-                for change in cell.property_changes.iter_mut().flatten() {
-                    self.id(&mut change.info.id);
-                }
-            }
+                walker.field_entries(
+                    "propertyChanges",
+                    cell.property_changes.iter_mut().flatten(),
+                    |walker, change| walker.info(&mut change.info.id),
+                );
+            });
             if let Some(change) = &mut row.structural_change {
-                self.id(&mut change.info.id);
+                walker.at("structuralChange", |walker| walker.info(&mut change.info.id));
             }
-            for change in row.property_changes.iter_mut().flatten() {
-                self.id(&mut change.info.id);
-            }
-        }
-        for change in table.property_changes.iter_mut().flatten() {
-            self.id(&mut change.info.id);
-        }
+            walker.field_entries(
+                "propertyChanges",
+                row.property_changes.iter_mut().flatten(),
+                |walker, change| walker.info(&mut change.info.id),
+            );
+        });
+        self.field_entries(
+            "propertyChanges",
+            table.property_changes.iter_mut().flatten(),
+            |walker, change| walker.info(&mut change.info.id),
+        );
     }
 
     fn paragraph(&mut self, paragraph: &'a mut Paragraph) {
-        for child in &mut paragraph.content {
+        self.field_entries("content", &mut paragraph.content, |walker, child| {
             match child {
-                ParagraphContent::Inline(node) => self.inline(node),
-                ParagraphContent::Tracked(change) => self.tracked(change),
+                ParagraphContent::Inline(node) => walker.inline(node),
+                ParagraphContent::Tracked(change) => walker.tracked(change),
                 ParagraphContent::RangeStart(_)
                 | ParagraphContent::RangeEnd(_)
                 | ParagraphContent::CommentRange(_) => {}
             }
+        });
+        if let Some(info) = &mut paragraph.p_pr_ins {
+            self.at("pPrIns", |walker| walker.id(&mut info.id));
         }
-        for info in paragraph.p_pr_ins.iter_mut().chain(&mut paragraph.p_pr_del) {
-            self.id(&mut info.id);
+        if let Some(info) = &mut paragraph.p_pr_del {
+            self.at("pPrDel", |walker| walker.id(&mut info.id));
         }
-        for change in paragraph.property_changes.iter_mut().flatten() {
-            self.id(&mut change.info.id);
-        }
+        self.field_entries(
+            "propertyChanges",
+            paragraph.property_changes.iter_mut().flatten(),
+            |walker, change| walker.info(&mut change.info.id),
+        );
     }
 
     fn tracked(&mut self, change: &'a mut TrackedInline) {
-        self.id(&mut change.info.id);
-        self.inlines(&mut change.content);
+        self.info(&mut change.info.id);
+        self.inlines("content", &mut change.content);
     }
 
-    fn inlines(&mut self, nodes: &'a mut [InlineNode]) {
-        for node in nodes {
-            self.inline(node);
-        }
+    fn inlines(&mut self, key: &str, nodes: &'a mut [InlineNode]) {
+        self.field_entries(key, nodes, Self::inline);
     }
 
     fn inline(&mut self, node: &'a mut InlineNode) {
@@ -813,29 +990,27 @@ impl<'a> SiteWalker<'a, '_> {
             InlineNode::Run(run) => self.run(run),
             InlineNode::Tracked(change) => self.tracked(change),
             InlineNode::Hyperlink(link) => {
-                self.inlines(&mut link.children);
+                let [children_key, structured_key] = HYPERLINK_FIELDS;
+                self.inlines(children_key, &mut link.children);
                 if let Some(children) = &mut link.structured_children {
-                    self.inlines(children);
+                    self.inlines(structured_key, children);
                 }
             }
-            InlineNode::InlineSdt(control) => self.inlines(&mut control.content),
+            InlineNode::InlineSdt(control) => self.inlines("content", &mut control.content),
             InlineNode::SimpleField(field) => {
-                for run in &mut field.content {
-                    self.run(run);
-                }
-                self.structured(field.structured_result.as_mut());
+                self.field_entries("content", &mut field.content, Self::run);
+                self.structured("structuredResult", field.structured_result.as_mut());
                 if let Some(tree) = &mut field.field_tree {
-                    self.field_tree(tree);
+                    self.at("fieldTree", |walker| walker.field_tree(tree));
                 }
             }
             InlineNode::ComplexField(field) => {
-                for run in field.field_code.iter_mut().chain(&mut field.field_result) {
-                    self.run(run);
-                }
-                self.structured(field.structured_code.as_mut());
-                self.structured(field.structured_result.as_mut());
+                self.field_entries("fieldCode", &mut field.field_code, Self::run);
+                self.field_entries("fieldResult", &mut field.field_result, Self::run);
+                self.structured("structuredCode", field.structured_code.as_mut());
+                self.structured("structuredResult", field.structured_result.as_mut());
                 if let Some(tree) = &mut field.field_tree {
-                    self.field_tree(tree);
+                    self.at("fieldTree", |walker| walker.field_tree(tree));
                 }
             }
             InlineNode::BookmarkStart(_)
@@ -845,23 +1020,25 @@ impl<'a> SiteWalker<'a, '_> {
         }
     }
 
-    fn structured(&mut self, field: Option<&'a mut StructuredFieldContent>) {
+    fn structured(&mut self, key: &str, field: Option<&'a mut StructuredFieldContent>) {
         if let Some(field) = field {
-            if let Some(nodes) = &mut field.inline {
-                self.inlines(nodes);
-            }
-            if let Some(blocks) = &mut field.blocks {
-                self.blocks(blocks);
-            }
+            let [inline_key, blocks_key] = STRUCTURED_FIELDS;
+            self.at(key, |walker| {
+                if let Some(nodes) = &mut field.inline {
+                    walker.inlines(inline_key, nodes);
+                }
+                if let Some(blocks) = &mut field.blocks {
+                    walker.at(blocks_key, |walker| walker.blocks(blocks));
+                }
+            });
         }
     }
 
     fn field_tree(&mut self, tree: &'a mut StructuredFieldTree) {
-        self.structured(tree.code.as_mut());
-        self.structured(tree.result.as_mut());
-        for child in tree.children.iter_mut().flatten() {
-            self.field_tree(child);
-        }
+        let [code_key, result_key, children_key] = FIELD_TREE_FIELDS;
+        self.structured(code_key, tree.code.as_mut());
+        self.structured(result_key, tree.result.as_mut());
+        self.field_entries(children_key, tree.children.iter_mut().flatten(), Self::field_tree);
     }
 
     fn run(&mut self, run: &'a mut Run) {
@@ -878,51 +1055,50 @@ impl<'a> SiteWalker<'a, '_> {
     }
 
     fn run_changes(&mut self, changes: &'a mut Option<Vec<RunPropertyChange>>) {
-        for change in changes.iter_mut().flatten() {
-            self.id(&mut change.info.id);
-        }
+        self.field_entries("propertyChanges", changes.iter_mut().flatten(), |walker, change| {
+            walker.info(&mut change.info.id);
+        });
     }
 
     fn run_content(&mut self, content: &'a mut [RunContent]) {
-        for child in content {
+        self.field_entries("content", content, |walker, child| {
             match child {
-                RunContent::Shape { shape, .. } => self.shape(shape),
+                RunContent::Shape { shape, .. } => walker.at("shape", |walker| walker.shape(shape)),
                 RunContent::OpaqueDrawing {
                     text_box: Some(shape),
                     ..
-                } => self.shape(shape),
+                } => walker.at("textBox", |walker| walker.shape(shape)),
                 _ => {}
             }
-        }
+        });
     }
 
     fn shape(&mut self, shape: &'a mut Shape) {
         if let Some(model) = &mut shape.drawing_model {
-            self.model(model, false);
+            self.at("drawingModel", |walker| walker.model(model, ModelKind::Any, false));
         }
         if let Some(body) = &mut shape.text_body {
-            for block in &mut body.content {
-                self.model(block, false);
-            }
+            self.at("textBody", |walker| {
+                walker.field_entries("content", &mut body.content, |walker, block| {
+                    walker.model(block, ModelKind::Any, false);
+                });
+            });
         }
-        for child in shape.children.iter_mut().flatten() {
-            self.shape(child);
-        }
+        self.field_entries("children", shape.children.iter_mut().flatten(), Self::shape);
         if let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) {
-            self.scene(root);
+            self.at("scene", |walker| walker.at("root", |walker| walker.scene(root)));
         }
     }
 
     fn scene(&mut self, node: &'a mut DrawingSceneNode) {
+        let [shape_key, children_key] = SCENE_NODE_FIELDS;
         if let Some(shape) = &mut node.shape {
-            self.shape(shape);
+            self.at(shape_key, |walker| walker.shape(shape));
         }
-        for child in node.children.iter_mut().flatten() {
-            self.scene(child);
-        }
+        self.field_entries(children_key, node.children.iter_mut().flatten(), Self::scene);
     }
 
-    fn model(&mut self, model: &'a mut Value, info: bool) {
+    fn model(&mut self, model: &'a mut Value, kind: ModelKind, info: bool) {
         match model {
             Value::Object(record) => {
                 if info
@@ -930,45 +1106,14 @@ impl<'a> SiteWalker<'a, '_> {
                     && let Some(number) = record.get("id").and_then(Value::as_f64)
                     && let Some(placeholder) = self.session_placeholder(number)
                 {
-                    self.sites
-                        .push((placeholder, Site::Model(record.get_mut("id").unwrap())));
+                    self.push(placeholder, Site::Model(record.get_mut("id").unwrap()));
                     return;
                 }
-                let order: &[&str] = match record.get("type").and_then(Value::as_str) {
-                    Some("paragraph") => &["content", "pPrIns", "pPrDel", "propertyChanges"],
-                    Some("table") => &["rows", "propertyChanges"],
-                    Some("tableRow") => &["cells", "structuralChange", "propertyChanges"],
-                    Some("tableCell") => &["content", "structuralChange", "propertyChanges"],
-                    Some("insertion" | "deletion" | "moveFrom" | "moveTo") => &["info", "content"],
-                    Some("run") => {
-                        let drawing =
-                            record
-                                .get("content")
-                                .and_then(Value::as_array)
-                                .and_then(|content| match content.as_slice() {
-                                    [child] => child.get("type").and_then(Value::as_str),
-                                    _ => None,
-                                });
-                        if matches!(drawing, Some("shape" | "opaqueDrawing")) {
-                            &["content", "propertyChanges"]
-                        } else {
-                            &["propertyChanges", "content"]
-                        }
-                    }
-                    Some("simpleField") => &["content", "structuredResult", "fieldTree"],
-                    Some("complexField") => &[
-                        "fieldCode",
-                        "fieldResult",
-                        "structuredCode",
-                        "structuredResult",
-                        "fieldTree",
-                    ],
-                    Some("shape") => &["drawingModel", "textBody", "children", "scene"],
-                    _ => &[],
-                };
+                let kind = kind.for_record(record);
+                let order = kind.fields(record);
                 if order.is_empty() {
                     for (key, value) in record {
-                        self.model(value, matches!(Symbol::from(key.as_str()), Symbol::Info));
+                        self.model_field(kind, key, value);
                     }
                 } else {
                     let mut fields: Vec<_> = record.iter_mut().collect();
@@ -979,16 +1124,108 @@ impl<'a> SiteWalker<'a, '_> {
                             .unwrap_or(order.len())
                     });
                     for (key, value) in fields {
-                        self.model(value, matches!(Symbol::from(key.as_str()), Symbol::Info));
+                        self.model_field(kind, key, value);
                     }
                 }
             }
             Value::Array(items) => {
-                for value in items {
-                    self.model(value, false);
-                }
+                self.entries(items, |walker, item| walker.model(item, kind, false));
             }
             _ => {}
+        }
+    }
+
+    fn model_field(&mut self, parent: ModelKind, key: &str, value: &'a mut Value) {
+        let info = matches!(Symbol::from(key), Symbol::Info);
+        self.at(key, |walker| walker.model(value, parent.child(key), info));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ModelKind {
+    Any,
+    Paragraph,
+    Table,
+    Row,
+    Cell,
+    Tracked,
+    Run,
+    Hyperlink,
+    SimpleField,
+    ComplexField,
+    Structured,
+    FieldTree,
+    Shape,
+    Scene,
+    SceneNode,
+}
+
+impl ModelKind {
+    fn for_record(self, record: &serde_json::Map<String, Value>) -> Self {
+        if !matches!(self, Self::Any) {
+            return self;
+        }
+        match record.get("type").and_then(Value::as_str) {
+            Some("paragraph") => Self::Paragraph,
+            Some("table") => Self::Table,
+            Some("tableRow") => Self::Row,
+            Some("tableCell") => Self::Cell,
+            Some("insertion" | "deletion" | "moveFrom" | "moveTo") => Self::Tracked,
+            Some("run") => Self::Run,
+            Some("hyperlink") => Self::Hyperlink,
+            Some("simpleField") => Self::SimpleField,
+            Some("complexField") => Self::ComplexField,
+            Some("shape") => Self::Shape,
+            _ => Self::Any,
+        }
+    }
+
+    fn fields(self, record: &serde_json::Map<String, Value>) -> &'static [&'static str] {
+        match self {
+            Self::Paragraph => &["content", "pPrIns", "pPrDel", "propertyChanges"],
+            Self::Table => &["rows", "propertyChanges"],
+            Self::Row => &["cells", "structuralChange", "propertyChanges"],
+            Self::Cell => &["content", "structuralChange", "propertyChanges"],
+            Self::Tracked => &["info", "content"],
+            Self::Run => {
+                let drawing = record.get("content").and_then(Value::as_array).and_then(|content| {
+                    match content.as_slice() {
+                        [child] => child.get("type").and_then(Value::as_str),
+                        _ => None,
+                    }
+                });
+                if matches!(drawing, Some("shape" | "opaqueDrawing")) {
+                    &["content", "propertyChanges"]
+                } else {
+                    &["propertyChanges", "content"]
+                }
+            }
+            Self::Hyperlink => &HYPERLINK_FIELDS,
+            Self::SimpleField => &["content", "structuredResult", "fieldTree"],
+            Self::ComplexField => &[
+                "fieldCode",
+                "fieldResult",
+                "structuredCode",
+                "structuredResult",
+                "fieldTree",
+            ],
+            Self::Structured => &STRUCTURED_FIELDS,
+            Self::FieldTree => &FIELD_TREE_FIELDS,
+            Self::Shape => &["drawingModel", "textBody", "children", "scene"],
+            Self::SceneNode => &SCENE_NODE_FIELDS,
+            Self::Any | Self::Scene => &[],
+        }
+    }
+
+    fn child(self, key: &str) -> Self {
+        match (self, key) {
+            (Self::SimpleField | Self::ComplexField, "structuredCode" | "structuredResult")
+            | (Self::FieldTree, "code" | "result") => Self::Structured,
+            (Self::SimpleField | Self::ComplexField, "fieldTree")
+            | (Self::FieldTree, "children") => Self::FieldTree,
+            (Self::Shape, "scene") => Self::Scene,
+            (Self::Scene, "root") | (Self::SceneNode, "children") => Self::SceneNode,
+            _ => Self::Any,
         }
     }
 }

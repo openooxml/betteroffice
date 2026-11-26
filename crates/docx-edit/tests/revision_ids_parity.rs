@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use docx_edit::save::revision_ids::{
-    RevisionIdsError, assign_session_revision_ids, session_revision_id_reservations,
+    RevisionIdsError, assign_session_revision_ids_with_paths, session_revision_id_reservations,
 };
 use docx_parse::S13SaveRequest;
 use serde::Deserialize;
@@ -128,7 +128,19 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         .into());
     }
 
-    let actual_ids = assign_session_revision_ids(&mut request, &case.session).map_err(|error| {
+    let mut paths = Vec::new();
+    let actual_ids = assign_session_revision_ids_with_paths(&mut request, &case.session, &mut paths);
+    for index in 0..paths.len().max(case.sites.len()) {
+        let native = paths.get(index).map(|(path, id)| (path.as_str(), *id));
+        let ts = case.sites.get(index).map(|site| (site.path.as_str(), site.placeholder));
+        if native != ts {
+            return Err(format!(
+                "first differing site at index {index}: TypeScript {ts:?}, Rust {native:?}"
+            )
+            .into());
+        }
+    }
+    let actual_ids = actual_ids.map_err(|error| {
         if let RevisionIdsError::Unassigned(id) = error
             && let Some(site) = case.sites.iter().find(|site| site.placeholder == id)
         {
@@ -232,6 +244,50 @@ fn detects_dropped_reservation_with_matching_used_ids_and_max() {
         format!("reservation at {witness:?} for ID 40 differs: TypeScript 1, Rust 0")
     );
     assert!(census.reservation_mismatch);
+}
+
+#[test]
+fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
+    let paragraph = json!({"type": "paragraph", "content": [{
+        "type": "insertion", "info": {"id": 1, "author": "Reviewer"}, "content": []
+    }]});
+    let request = json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
+        "document": {"content": [paragraph]},
+        "headerEntries": [["rId1", {"type": "header", "hdrFtrType": "default", "content": [paragraph]}]]
+    });
+    let body = "/document/content/0/content/0/info/id";
+    let header = "/headerEntries/0/1/content/0/content/0/info/id";
+    let mut case = Case {
+        document: "identity-assignment".to_owned(),
+        request: request.to_string(),
+        wire: request.to_string(),
+        session: BTreeSet::from([1]),
+        sites: [body, header]
+            .into_iter()
+            .map(|path| Site { path: path.to_owned(), placeholder: 1, id: 1 })
+            .collect(),
+        reservations: Vec::new(),
+        used: BTreeSet::new(),
+        max: 0,
+        out_of_range: BTreeSet::new(),
+    };
+    let mut census = DocumentCensus::default();
+    check_case(&case, &mut census).unwrap();
+
+    case.sites.swap(0, 1);
+    let error = check_case(&case, &mut census).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("first differing site at index 0: TypeScript Some(({header:?}, 1)), Rust Some(({body:?}, 1))")
+    );
+
+    case.sites.remove(0);
+    let error = check_case(&case, &mut census).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("first differing site at index 1: TypeScript None, Rust Some(({header:?}, 1))")
+    );
 }
 
 #[test]

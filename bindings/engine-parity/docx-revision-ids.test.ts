@@ -3,6 +3,11 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { recordRevisionIdCases } from './revisionIdsRecorder';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../../packages/docx/src/docx/rezip/parts';
+import { writeDocumentWithRust } from '../../packages/docx/src/docx/rustSaveFacade';
+import { markRevisionInfo } from '../../packages/docx/src/docx/sessionRevisionIds';
+import type { ComplexField } from '../../packages/docx/src/types/content/link';
+import type { Shape } from '../../packages/docx/src/types/content/shape';
+import type { Document } from '../../packages/docx/src/types/document';
 import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
 import { preloadOpcWasm } from '../../packages/docx/src/wasm/opc';
 import { createYrsSession, saveYrsDocx, type YrsLoc, type YrsSession } from '../../packages/docx/src/yrs';
@@ -197,6 +202,46 @@ async function scriptedSave(bytes: Uint8Array, edit: (session: YrsSession) => vo
   }
 }
 
+async function saveStructuredFields() {
+  const revisedRun = (id: number, text: string) => ({
+    type: 'run' as const,
+    propertyChanges: [{
+      type: 'runPropertyChange' as const,
+      info: markRevisionInfo({ id, author: AUTHOR.name, date: AUTHOR.date }, true),
+      previousFormatting: { bold: true },
+    }],
+    content: [{ type: 'text' as const, text }],
+  });
+  const field = (placeholder: number): ComplexField => ({
+    type: 'complexField',
+    instruction: 'QUOTE',
+    fieldType: 'QUOTE',
+    fieldCode: [],
+    fieldResult: [],
+    structuredResult: {
+      inline: [revisedRun(placeholder, 'Inline result')],
+      blocks: [{ type: 'paragraph', content: [revisedRun(placeholder - 1, 'Block result')] }],
+    },
+  });
+  const textBox: Shape & { textBox: true } = {
+    type: 'shape',
+    shapeType: 'rect',
+    textBox: true,
+    size: { width: 914400, height: 457200 },
+    textBody: { content: [{ type: 'paragraph', content: [field(Number.MAX_SAFE_INTEGER - 2)] }] },
+  };
+  const document: Document = {
+    package: { document: { content: [
+      { type: 'paragraph', content: [field(Number.MAX_SAFE_INTEGER)] },
+      { type: 'paragraph', content: [{ type: 'run', content: [{ type: 'shape', shape: textBox }] }] },
+    ] } },
+  };
+  const source = pack(new Map([['word/document.xml', toBytes(
+    `<w:document xmlns:w="${W}"><w:body><w:p/></w:body></w:document>`
+  )]]));
+  await writeDocumentWithRust(document, Uint8Array.from(source).buffer, { updateModifiedDate: false });
+}
+
 function bodyEdits(session: YrsSession, mixed: boolean) {
   const story = 'body';
   let target = editableText(session, story, 3);
@@ -328,4 +373,7 @@ describe.skipIf(!OUT)('session revision IDs for the Rust save request', () => {
   scriptedDocument('synthetic-source-annotations', () => synthetic(120), true);
   scriptedDocument('synthetic-wrap', () => synthetic(2 ** 31 - 1), true);
   scriptedDocument('synthetic-separate-paragraphs', () => synthetic(120), true, false);
+  test('synthetic-structured-field-results', async () => {
+    expect(await recordRevisionIdCases('synthetic-structured-field-results', saveStructuredFields)).toBe(1);
+  }, 30_000);
 });
