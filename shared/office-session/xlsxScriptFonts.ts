@@ -14,6 +14,7 @@ export interface CellScriptFontRequest {
 export type CellScriptFamilies = (cmd: TextCmd) => string[] | undefined;
 export type ScriptFontDisplayList = DisplayList & { cellScriptFamilies?: CellScriptFamilies };
 export type EditorPngFont = PngRunFont & { scripts?: BundledFontScript[] };
+export type EditorPngFaces = ReadonlyArray<PngFontFace> & { editorFontFiles?: ReadonlyMap<string, Uint8Array | null> };
 export type PngScriptFallbackFace = PngFontFace & { scriptFallbacks: CellScriptFontRequest[] };
 export type CellScriptCache = Map<string, readonly BundledFontScript[]>;
 

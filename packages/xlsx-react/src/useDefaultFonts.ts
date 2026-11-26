@@ -60,8 +60,10 @@ export function useDefaultFonts(
 export async function editorExportFaces(
   fonts: readonly XlsxPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined, defaultFonts: boolean | undefined,
 ): Promise<XlsxFontFace[] | undefined> {
-  if (defaultFonts === false) return undefined;
-  if (fonts.length === 0) return [];
+  if (defaultFonts === false || fonts.length === 0) return undefined;
   const { exportFaces } = await defaultFontPainterModule.load();
-  return exportFaces(fonts, decoder);
+  const editorFontFiles = new Map<string, Uint8Array | null>();
+  const faces = await exportFaces(fonts, decoder, editorFontFiles);
+  if (faces.length || editorFontFiles.size) return Object.assign(faces, { editorFontFiles });
+  return undefined;
 }

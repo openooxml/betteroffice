@@ -396,6 +396,7 @@ export function createDefaultFontPainter(
  */
 export async function exportFaces(
   fonts: readonly EditorPngFont[], decoder: WorkbookSession['call']['decodeFontFace'] | null | undefined,
+  editorFontFiles?: Map<string, Uint8Array | null>,
 ): Promise<XlsxFontFace[]> {
   if (fonts.length === 0) return [];
   const bundled = await xlsxDefaultFontManager.load();
@@ -412,6 +413,7 @@ export async function exportFaces(
     let bytes: ArrayBuffer;
     try { bytes = await load(); }
     catch (error) {
+      if (scriptFallback && !editorFontFiles?.has(face.file)) editorFontFiles?.set(face.file, null);
       if (face.script && face.script !== 'arabic' && face.script !== 'hebrew' && bundled.isMissingFontAddon(error)) return undefined;
       if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
         if (!reported.has(error)) {
@@ -424,7 +426,9 @@ export async function exportFaces(
       throw new PngExportError('font-unavailable', `The font "${family}" could not load, so the sheet was not exported with a substitute.`);
     }
     if (bytes.byteLength !== face.byteLength) return undefined;
-    return { family, bold: face.weight >= 600, italic: face.style === 'italic', bytes: new Uint8Array(bytes) };
+    const data = new Uint8Array(bytes);
+    editorFontFiles?.set(face.file, data);
+    return { family, bold: face.weight >= 600, italic: face.style === 'italic', bytes: data };
   }
 
   for (const { family, bold, italic, scripts } of fonts) {
