@@ -170,11 +170,7 @@ pub fn is_formula_source(src: &str) -> bool {
 }
 
 pub(crate) fn parse_released_definition(src: &str) -> Result<Expr, ParseError> {
-    parse_source(
-        src,
-        &lex_released_definition(src)?,
-        ParseMode::Evaluation,
-    )
+    parse_source(src, &lex_released_definition(src)?, ParseMode::Evaluation)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
