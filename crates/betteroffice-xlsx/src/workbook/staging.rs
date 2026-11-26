@@ -152,6 +152,24 @@ impl Workbook {
             }
             _ => None,
         };
+        if self.needs_alternate_preview() {
+            let mut preserved = self.preserved.clone();
+            for op in &ops {
+                match *op {
+                    Op::AddSheet { index, .. } => preserved.insert(index),
+                    Op::RemoveSheet { index } => preserved.remove(index),
+                    Op::MoveSheet { from, to } => preserved.move_sheet(from, to),
+                    Op::InsertRows { sheet, .. }
+                    | Op::DeleteRows { sheet, .. }
+                    | Op::InsertCols { sheet, .. }
+                    | Op::DeleteCols { sheet, .. }
+                    | Op::MoveRows { sheet, .. }
+                    | Op::MoveCols { sheet, .. } => preserved.shift(sheet, op),
+                    _ => {}
+                }
+            }
+            self.validate_alternate_preview(&model, &preserved)?;
+        }
         let recorded = history == CommitHistory::Separate;
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
         let rebased = self.rebased_proposals(&ops);

@@ -93,8 +93,9 @@ impl Workbook {
         let removed = current
             .keys()
             .any(|origin| !origins.contains(&Some(*origin)));
-        let reordered = origins != self.preserved.origins.as_slice();
-        if !renamed && !removed && !reordered {
+        let reordered_after_removal = origins != self.preserved.origins.as_slice()
+            && current.len() < package.facts().source_sheet_count();
+        if !renamed && !removed && !reordered_after_removal {
             return Ok(());
         }
         let package = package.materialize()?;

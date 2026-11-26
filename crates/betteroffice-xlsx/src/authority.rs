@@ -2707,6 +2707,21 @@ impl WorkbookAuthority {
         }
     }
 
+    pub(crate) fn fork_history(&self) -> Result<Self, AuthorityError> {
+        let mut options = Options::with_guid_and_client_id(self.doc.guid(), self.doc.client_id());
+        options.skip_gc = true;
+        let doc = Doc::with_options(options);
+        hydrate_local_doc(&doc, &self.encode_state_as_update_v1())
+            .map_err(AuthorityError::InvalidState)?;
+        let mut fork = self.hydrated_alike(doc);
+        fork.snapshot_revision
+            .store(self.snapshot_revision(), Ordering::Relaxed);
+        fork.history = self.history.clone();
+        fork.undo_stack = self.undo_stack.clone();
+        fork.redo_stack = self.redo_stack.clone();
+        Ok(fork)
+    }
+
     pub(crate) fn restore(
         &mut self,
         checkpoint: AuthorityCheckpoint,

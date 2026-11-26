@@ -3,7 +3,7 @@ use crate::{
     EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent, Viewport,
     WorkbookModel, XlsxExportOptions,
 };
-use xlsx_model::CellRange;
+use xlsx_model::{CellProvider, CellRange};
 use xlsx_ops::{CellState, Op};
 
 use super::*;
@@ -2925,6 +2925,483 @@ fn snapshot_facts_behavior_identity() {
                 .unwrap(),
         );
         assert!(!peer.source_package_is_unmaterialized_for_test());
+    }
+}
+
+fn with_legacy_facts(chunks: Vec<Vec<u8>>, version: u8) -> Vec<Vec<u8>> {
+    if version == 2 {
+        return chunks;
+    }
+    assert_eq!(version, 1);
+    let mut digest = Sha256::new();
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let (kind, ordinal, payload) = unframe(&chunk).unwrap();
+            let mut transport = Reader::new(payload);
+            let snapshot_id = transport.var_u64().unwrap();
+            let logical_ordinal = transport.var_u64().unwrap();
+            let length = transport.var_usize().unwrap();
+            assert_eq!(transport.var_usize().unwrap(), 0);
+            let logical = transport.rest();
+            assert_eq!(logical.len(), length);
+            let logical = match kind {
+                ChunkKind::Facts => {
+                    let (_, _, payload) = unframe(logical).unwrap();
+                    let mut reader = Reader::new(payload);
+                    let mut record = reader.bytes().unwrap().to_vec();
+                    reader.finish().unwrap();
+                    match record[0] {
+                        0 => {
+                            assert_eq!(record[1], 2);
+                            record[1] = version;
+                        }
+                        1 => assert!(matches!(record.pop().unwrap(), 0 | 1)),
+                        _ => {}
+                    }
+                    let mut writer = Writer::new();
+                    writer.bytes(&record);
+                    frame(kind, logical_ordinal, &writer.into_bytes())
+                }
+                ChunkKind::End => frame(kind, logical_ordinal, &digest.clone().finalize()),
+                _ => {
+                    digest.update(logical);
+                    return chunk;
+                }
+            };
+            if kind != ChunkKind::End {
+                digest.update(&logical);
+            }
+            let mut writer = Writer::new();
+            writer.var_u64(snapshot_id);
+            writer.var_u64(logical_ordinal);
+            writer.var_usize(logical.len());
+            writer.var_usize(0);
+            writer.raw(&logical);
+            frame(kind, ordinal, &writer.into_bytes())
+        })
+        .collect()
+}
+
+#[test]
+fn deferred_wrapper_probe_is_per_worksheet() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    for row in 0..12_000 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: None,
+                style: None,
+            },
+        );
+    }
+    model
+        .sheets
+        .extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    *xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:m="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test">
+        <sheetData><row r="1"><m:AlternateContent>
+        <m:Choice Requires="x"><c r="A1"><f>Sheet1!A2*2</f><v>2</v></c></m:Choice>
+        <m:Fallback><c r="A1"><f>Sheet1!A2*2</f><v>2</v></c></m:Fallback>
+        </m:AlternateContent><c r="B1"><v>1</v></c></row></sheetData></worksheet>"#
+        .to_vec();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let original = Workbook::open(&bytes).unwrap();
+    let budget = budgets()[2];
+    let cached = |workbook: &Workbook, sheet| {
+        workbook
+            .source_package
+            .as_ref()
+            .unwrap()
+            .sheet_alternates_cached(sheet)
+    };
+    let mut workbook = hydrate(&original, budget);
+    assert!(!cached(&workbook, 0));
+    assert!(!cached(&workbook, 1));
+    assert!(
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "5", context())
+            .unwrap()
+            .applied
+    );
+    assert!(cached(&workbook, 0));
+    assert!(!cached(&workbook, 1));
+
+    let wrapped_error = |error| {
+        matches!(
+            error,
+            crate::Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+                if message.contains("Sheet2") && message.contains("mc:AlternateContent")
+        )
+    };
+    assert!(wrapped_error(
+        workbook
+            .edit_cell(SheetId(1), CellRef::new(0, 0), "5", context())
+            .unwrap_err()
+    ));
+    assert!(cached(&workbook, 1));
+    assert!(workbook.source_package_is_unmaterialized_for_test());
+
+    let mut workbook = hydrate(&original, budget);
+    assert!(wrapped_error(
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(1, 0), "5", context())
+            .unwrap_err()
+    ));
+    assert!(cached(&workbook, 1));
+    assert_eq!(workbook.model(), original.model());
+    assert!(workbook.source_package_is_unmaterialized_for_test());
+}
+
+fn two_sheet_wrapper_source(choice: &str, fallback: &str) -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    for (row, value) in [(0, 1.0), (1, 2.0)] {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    model
+        .sheets
+        .extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    *xml = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test" mc:Ignorable="x">
+        <sheetData><row r="1"><mc:AlternateContent>
+        <mc:Choice Requires="x">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback>
+        </mc:AlternateContent></row></sheetData></worksheet>"#
+    )
+    .into_bytes();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+fn assert_wrapped_sheet_refusal(error: crate::Error) {
+    assert!(matches!(
+        error,
+        crate::Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+            if message.contains("Sheet2") && message.contains("mc:AlternateContent")
+    ));
+}
+
+#[test]
+fn deferred_edits_refuse_a_wrapped_cache_changed_by_earlier_recalculation() {
+    let cell = r#"<c r="A1"><f>Sheet1!A2*2</f><v>3</v></c>"#;
+    let bytes = two_sheet_wrapper_source(cell, cell);
+    let budget = budgets()[2];
+    let at = CellRef::new(0, 0);
+    let wrapped = SheetId(1);
+    let opened = Workbook::open(&bytes).unwrap();
+    let recalculated = worker(&bytes);
+    for (original, explicit) in [(&recalculated, false), (&opened, true)] {
+        let mut workbook = hydrate(original, budget);
+        if explicit {
+            assert_eq!(
+                workbook.recalculate_all(context()).changed,
+                vec![CellAddress {
+                    sheet: wrapped,
+                    cell: at,
+                }]
+            );
+            assert!(workbook.recalculate_all(context()).changed.is_empty());
+        }
+        assert_eq!(
+            workbook.model().value(wrapped, at),
+            CellValue::Number { value: 4.0 }
+        );
+        assert!(
+            !workbook
+                .source_package
+                .as_ref()
+                .unwrap()
+                .sheet_alternates_cached(1)
+        );
+        let model = workbook.model().clone();
+        let version = workbook.version();
+        assert_wrapped_sheet_refusal(
+            workbook
+                .edit_cell(SheetId(0), at, "5", context())
+                .unwrap_err(),
+        );
+        assert_eq!(workbook.model(), &model);
+        assert_eq!(workbook.version(), version);
+        assert!(!workbook.can_undo());
+        assert!(
+            workbook
+                .source_package
+                .as_ref()
+                .unwrap()
+                .sheet_alternates_cached(1)
+        );
+        assert!(workbook.source_package_is_unmaterialized_for_test());
+        if explicit {
+            assert_wrapped_sheet_refusal(workbook.save().unwrap_err());
+        }
+    }
+}
+
+#[test]
+fn deferred_style_edits_recheck_a_wrapped_sheet_with_an_edited_filter() {
+    let bytes = two_sheet_wrapper_source(r#"<c r="A1"><v>1</v></c>"#, r#"<c r="B1"><v>2</v></c>"#);
+    let original = Workbook::open(&bytes).unwrap();
+    let mut workbook = hydrate(&original, budgets()[2]);
+    let filter_range = CellRange::parse_a1("A1:B2").unwrap();
+    assert!(
+        workbook
+            .apply_ops(
+                vec![Op::SetAutoFilter {
+                    sheet: SheetId(1),
+                    range: Some(filter_range),
+                }],
+                context(),
+            )
+            .unwrap()
+            .applied
+    );
+    assert!(
+        !workbook
+            .source_package
+            .as_ref()
+            .unwrap()
+            .sheet_alternates_cached(0)
+    );
+    let model = workbook.model().clone();
+    let version = workbook.version();
+    let at = CellRef::new(0, 0);
+    assert_wrapped_sheet_refusal(
+        workbook
+            .edit_cell(SheetId(0), at, "50%", context())
+            .unwrap_err(),
+    );
+    assert_wrapped_sheet_refusal(
+        workbook
+            .patch_range_style(
+                SheetId(0),
+                CellRange::new(at, at),
+                crate::StylePatch {
+                    bold: Some(true),
+                    ..crate::StylePatch::default()
+                },
+                context(),
+            )
+            .unwrap_err(),
+    );
+    assert_eq!(workbook.model(), &model);
+    assert_eq!(workbook.version(), version);
+    assert!(workbook.source_package_is_unmaterialized_for_test());
+    let saved = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let filter = |model: &xlsx_model::Workbook| {
+        model.sheets[1]
+            .auto_filter
+            .as_ref()
+            .map(|filter| (filter.range, filter.filter_columns.clone()))
+    };
+    assert_eq!(filter(saved.model()), filter(&model));
+}
+
+#[test]
+fn deferred_sheet_add_and_move_only_probe_changed_worksheet_content() {
+    let at = CellRef::new(0, 0);
+    for value in [3.0, 4.0] {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        let mut sheet = xlsx_model::Sheet::new("Sheet2");
+        sheet.set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value },
+                formula: Some("2+2".into()),
+                style: None,
+            },
+        );
+        model.sheets.push(sheet);
+        model.defined_names.push(crate::DefinedName {
+            name: "Local".into(),
+            formula: "Sheet2!$A$1".into(),
+            local_sheet: Some(SheetId(1)),
+            hidden: false,
+        });
+        let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let original = Workbook::open(&bytes).unwrap();
+        for (op, new_index) in [
+            (
+                Op::AddSheet {
+                    index: 0,
+                    name: "New".into(),
+                },
+                SheetId(2),
+            ),
+            (Op::MoveSheet { from: 1, to: 0 }, SheetId(0)),
+        ] {
+            let mut workbook = hydrate(&original, budgets()[2]);
+            assert!(workbook.apply_ops(vec![op], context()).unwrap().applied);
+            assert_eq!(
+                workbook.model().defined_names[0].local_sheet,
+                Some(new_index)
+            );
+            assert_eq!(
+                workbook.model().value(new_index, at),
+                CellValue::Number { value: 4.0 }
+            );
+            let package = workbook.source_package.as_ref().unwrap();
+            assert!(!package.sheet_alternates_cached(0));
+            assert_eq!(package.sheet_alternates_cached(1), value != 4.0);
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn measure_first_edit_wrapper_probe() {
+    use std::time::Instant;
+
+    const ROWS: u32 = 200_000;
+    let mut model = WorkbookModel::default();
+    for (name, columns) in [("Sheet1", 5), ("Sheet2", 1)] {
+        let mut sheet = xlsx_model::Sheet::new(name);
+        for row in 0..ROWS {
+            for col in 0..columns {
+                sheet.set_cell(
+                    CellRef::new(row, col),
+                    Cell {
+                        value: CellValue::Number { value: 1.0 },
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        model.sheets.push(sheet);
+    }
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    drop(model);
+    let (_, xml) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    let closing_tag = b"</sheetData>";
+    let offset = xml
+        .windows(closing_tag.len())
+        .rposition(|bytes| bytes == closing_tag)
+        .unwrap();
+    let row = ROWS + 1;
+    let wrapped_row = format!(
+        concat!(
+            r#"<row r="{row}"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test">"#,
+            r#"<mc:Choice Requires="x"><c r="A{row}"><v>1</v></c></mc:Choice>"#,
+            r#"<mc:Fallback><c r="A{row}"><v>1</v></c></mc:Fallback>"#,
+            "</mc:AlternateContent></row>",
+        ),
+        row = row,
+    );
+    drop(xml.splice(offset..offset, wrapped_row.bytes()));
+    let sheet2_xml_bytes = xml.len();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    drop(parts);
+
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook.defer_source_package_for_test().unwrap();
+    let cached = |workbook: &Workbook, sheet| {
+        workbook
+            .source_package
+            .as_ref()
+            .unwrap()
+            .sheet_alternates_cached(sheet)
+    };
+    let measure = |workbook: &mut Workbook, sheet, input: &str| {
+        let start = Instant::now();
+        let result = workbook.edit_cell(sheet, CellRef::new(0, 0), input, context());
+        let elapsed = start.elapsed();
+        assert!(result.unwrap().applied);
+        elapsed.as_secs_f64() * 1_000.0
+    };
+    let first_sheet1_ms = measure(&mut workbook, SheetId(0), "2");
+    assert!(cached(&workbook, 0));
+    assert!(!cached(&workbook, 1));
+    let first_sheet2_ms = measure(&mut workbook, SheetId(1), "2");
+    assert!(cached(&workbook, 1));
+    let second_sheet2_ms = measure(&mut workbook, SheetId(1), "3");
+    assert!(workbook.source_package_is_unmaterialized_for_test());
+    println!(
+        "PROBE first_sheet1_ms={first_sheet1_ms:.3} first_sheet2_ms={first_sheet2_ms:.3} second_sheet2_ms={second_sheet2_ms:.3} sheet2_xml_bytes={sheet2_xml_bytes}"
+    );
+}
+
+#[test]
+fn legacy_package_facts_restore_the_deferred_alternate_content_guard() {
+    let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
+    let worksheet = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet3.xml")
+        .unwrap();
+    worksheet.1 = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test">
+        <sheetData><row r="1"><mc:AlternateContent>
+        <mc:Choice Requires="x"><c r="A1"><v>1</v></c></mc:Choice>
+        <mc:Fallback><c r="A1"><v>1</v></c></mc:Fallback>
+        </mc:AlternateContent><c r="B1"><v>2</v></c></row></sheetData></worksheet>"#
+        .to_vec();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let original = Workbook::open(&bytes).unwrap();
+    let budget = budgets()[2];
+    for facts_version in [1, 2] {
+        let chunks = with_legacy_facts(encode(&original, budget), facts_version);
+        let (legacy, _) = completed_builder(&chunks, budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        let resnapshotted = hydrate(&legacy, budget);
+        for mut workbook in [legacy, resnapshotted] {
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+            let model = workbook.model().clone();
+            let version = workbook.version();
+            let history = workbook.history_state();
+            let error = workbook
+                .edit_cell(SheetId(2), CellRef::new(0, 0), "5", context())
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message))
+                    if message.contains("Empty") && message.contains("mc:AlternateContent")
+            ));
+            assert_eq!(workbook.model(), &model);
+            assert_eq!(workbook.version(), version);
+            assert_eq!(workbook.history_state(), history);
+            assert!(workbook.source_package_is_unmaterialized_for_test());
+            assert_eq!(workbook.save().unwrap(), bytes);
+            assert!(
+                workbook
+                    .edit_cell(SheetId(2), CellRef::new(0, 1), "5", context())
+                    .unwrap()
+                    .applied
+            );
+            let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+            for (col, value) in [(0, 1.0), (1, 5.0)] {
+                assert_eq!(
+                    reopened.model().sheets[2]
+                        .cell(CellRef::new(0, col))
+                        .unwrap()
+                        .value,
+                    CellValue::Number { value }
+                );
+            }
+        }
     }
 }
 

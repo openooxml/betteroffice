@@ -79,7 +79,7 @@ impl SheetEdits {
     /// ones before it left, then the renames; plus which renames it wrote.
     /// `None` when a deletion would narrow a 3-D span after sheets moved,
     /// since the order that span narrows against is no longer known.
-    fn apply(&self, text: &str) -> Option<(String, Vec<usize>)> {
+    pub(super) fn apply(&self, text: &str) -> Option<(String, Vec<usize>)> {
         let mut order = self.source_order.clone();
         let mut current = text.to_owned();
         for removed in &self.removed {

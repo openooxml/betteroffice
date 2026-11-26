@@ -70,6 +70,14 @@ pub struct LegacySheetDimensions {
 pub(crate) fn parse_workbook_indexed(
     parts: &[(String, Vec<u8>)],
 ) -> Result<IndexedWorkbook, ParseError> {
+    parse_workbook_indexed_subset(parts, None, false)
+}
+
+pub(crate) fn parse_workbook_indexed_subset(
+    parts: &[(String, Vec<u8>)],
+    included: Option<&BTreeSet<usize>>,
+    implicit_default_style: bool,
+) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
     let meta = parse_workbook_xml(wb_xml)?;
@@ -77,13 +85,13 @@ pub(crate) fn parse_workbook_indexed(
     let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
     let rels = wb_rels.map(parse_rels).transpose()?.unwrap_or_default();
 
-    let (shared_strings, rich_shared_strings) =
-        match typed_part(parts, wb_rels, "sharedStrings", "xl/sharedStrings.xml")? {
-            Some(bytes) => parse_shared_strings(bytes)?,
-            None => Default::default(),
-        };
-    let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
-    let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
+    let [strings_path, styles_path, theme_path] = workbook_style_and_string_paths(wb_rels)?;
+    let (shared_strings, rich_shared_strings) = match find_part(parts, &strings_path) {
+        Some(bytes) => parse_shared_strings(bytes)?,
+        None => Default::default(),
+    };
+    let styles_bytes = find_part(parts, &styles_path);
+    let theme_bytes = find_part(parts, &theme_path);
     let (mut styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
@@ -95,6 +103,13 @@ pub(crate) fn parse_workbook_indexed(
     for (idx, entry) in meta.sheets.iter().enumerate() {
         xlsx_model::progress::pulse();
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
+        if included.is_some_and(|included| !included.contains(&idx)) {
+            sheets.push(Sheet::new(&entry.name));
+            shared_string_cells.push(SharedStringCells::new());
+            cell_facts.push(WorksheetCellFacts::default());
+            legacy_dimensions.push(LegacySheetDimensions::default());
+            continue;
+        }
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
             let mut sheet = Sheet::new(&entry.name);
             if let Some(path) = relationship
@@ -129,7 +144,9 @@ pub(crate) fn parse_workbook_indexed(
             &styles.dxfs,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
-        collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
+        if included.is_none() {
+            collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
+        }
         sheets.push(sheet);
         shared_string_cells.push(indices);
         cell_facts.push(facts);
@@ -137,7 +154,7 @@ pub(crate) fn parse_workbook_indexed(
     }
 
     let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
-    if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
+    if styles.cell_xfs.is_empty() && (implicit_default_style || references_zero_style(&sheets)) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
     }
     Ok(IndexedWorkbook {
@@ -182,6 +199,16 @@ fn references_zero_style(sheets: &[Sheet]) -> bool {
             || sheet.col_styles.iter().any(|run| run.xf == 0)
             || sheet.iter_cells().any(|(_, cell)| cell.style == Some(0))
     })
+}
+
+pub(crate) fn workbook_style_and_string_paths(
+    wb_rels: Option<&[u8]>,
+) -> Result<[String; 3], ParseError> {
+    Ok([
+        typed_part_name(wb_rels, "sharedStrings", "xl/sharedStrings.xml")?,
+        styles_part_name(wb_rels)?,
+        typed_part_name(wb_rels, "theme", "xl/theme/theme1.xml")?,
+    ])
 }
 
 /// resolve an optional part by relationship type suffix, falling back to
@@ -298,6 +325,10 @@ pub fn workbook_iterate(data: &[u8]) -> Result<bool, ParseError> {
 /// the workbook's full precision and iterate settings.
 pub fn workbook_calculation_settings(data: &[u8]) -> Result<(bool, bool), ParseError> {
     parse_workbook_xml(data).map(|meta| (meta.full_precision, meta.iterate))
+}
+
+pub(crate) fn workbook_defined_names(data: &[u8]) -> Result<Vec<DefinedName>, ParseError> {
+    parse_workbook_xml(data).map(|meta| meta.defined_names)
 }
 
 fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
@@ -692,9 +723,20 @@ pub struct SourceCellFacts {
     pub dropped_array_ranges: bool,
     /// Inline strings authored with formatted runs, with the text the model keeps.
     pub rich_inline: BTreeMap<(u32, u32), String>,
-    /// Whether a formula cell sits inside `mc:AlternateContent`, where another
-    /// branch's cell can stand in for it in the model.
+    /// A formula read from a wrapped cell whose address can recur in another branch.
     pub alternate_formulas: bool,
+    pub alternate_cells: BTreeSet<(u32, u32)>,
+    pub alternate_rows: BTreeSet<u32>,
+    pub(crate) alternate_spans: Vec<crate::patch::AlternateSpan>,
+    pub(crate) non_inert_alternate: bool,
+    pub(crate) sheet_data_alternate_formulas: bool,
+    pub(crate) alternate_formula_texts: Vec<String>,
+}
+
+impl SourceCellFacts {
+    pub fn has_sheet_data_alternates(&self) -> bool {
+        self.non_inert_alternate || !self.alternate_spans.is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -855,7 +897,9 @@ fn parse_worksheet(
                         ..CellBuild::default()
                     });
                 }
-                b"AlternateContent" => alternate_depth += 1,
+                b"AlternateContent" => {
+                    alternate_depth += 1;
+                }
                 b"mergeCell" => {
                     if let Some(r) = attr(&e, b"ref")? {
                         let range = CellRange::parse_a1(&r)
@@ -921,7 +965,9 @@ fn parse_worksheet(
                         col_cursor += 1;
                     }
                     b"row" => cur_row = None,
-                    b"AlternateContent" => alternate_depth = alternate_depth.saturating_sub(1),
+                    b"AlternateContent" => {
+                        alternate_depth = alternate_depth.saturating_sub(1);
+                    }
                     _ => {}
                 }
             }

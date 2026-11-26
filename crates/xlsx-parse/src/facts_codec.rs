@@ -752,6 +752,61 @@ mod tests {
     }
 
     #[test]
+    fn facts_match_main_encoding_with_and_without_grid_wrappers() {
+        let expected = concat!(
+            "\x06\x00\x02\x00\x02\x00\x00",
+            "\x1f\x01\x18xl/worksheets/sheet1.xml\x00\x00\x01\x00\x01",
+            "\x1f\x01\x18xl/worksheets/sheet2.xml\x00\x00\x01\x00\x01",
+        )
+        .as_bytes();
+        let mut model = xlsx_model::Workbook::default();
+        model.sheets.push(xlsx_model::Sheet::new("Sheet1"));
+        model.sheets.push(xlsx_model::Sheet::new("Sheet2"));
+        let mut parts = crate::serialize_workbook(&model).unwrap();
+        for wrapped in [false, true] {
+            let (_, xml) = parts
+                .iter_mut()
+                .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+                .unwrap();
+            let cell = r#"<c r="A1"><v>1</v></c>"#;
+            let contents = if wrapped {
+                format!(
+                    r#"<mc:AlternateContent><mc:Choice Requires="x">{cell}</mc:Choice><mc:Fallback>{cell}</mc:Fallback></mc:AlternateContent>"#
+                )
+            } else {
+                cell.to_owned()
+            };
+            *xml = format!(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:test"><sheetData><row r="1">{contents}</row></sheetData></worksheet>"#
+            )
+            .into_bytes();
+            let package = crate::parse_workbook_with_package(&parts).unwrap().package;
+            assert_eq!(
+                package
+                    .source_cell_facts(1)
+                    .unwrap()
+                    .has_sheet_data_alternates(),
+                wrapped
+            );
+            let facts = PackageFacts::from_package(&package);
+            for from_facts in [false, true] {
+                let mut encoder = PackageFactsEncoder::new();
+                let mut encoded = Vec::new();
+                while let Some(chunk) = if from_facts {
+                    encoder.next_from_facts(&facts, usize::MAX)
+                } else {
+                    encoder.next(&package, usize::MAX)
+                }
+                .unwrap()
+                {
+                    encoded.extend(chunk);
+                }
+                assert_eq!(encoded, expected);
+            }
+        }
+    }
+
+    #[test]
     fn facts_v1_sheet_records_have_unknown_header_footer() {
         let mut header = Writer::default();
         header.uint(0);

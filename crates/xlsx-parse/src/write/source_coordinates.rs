@@ -58,7 +58,7 @@ fn row_index(element: &BytesStart<'_>, current: Option<u32>) -> Result<Option<u3
     })
 }
 
-fn formula(
+pub(super) fn formula(
     value: &str,
     axes: Option<&SheetAxes>,
     sheet_axes: &[(&str, Option<&SheetAxes>)],

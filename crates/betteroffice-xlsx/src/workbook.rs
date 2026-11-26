@@ -30,6 +30,7 @@ pub(crate) mod target;
 mod update_tests;
 
 use self::proposals::proposal_edit_is_stale;
+use self::staging::PreparedCommit;
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -1335,13 +1336,10 @@ impl Workbook {
             WorkbookMode::Standalone => return Err(Error::NotCollaborative),
         };
         validate_collaboration_size(update)?;
-        if let Some(index) = self
+        let already_pending = self
             .pending_remote_updates
             .iter()
-            .position(|pending| pending == update)
-        {
-            self.pending_remote_updates.remove(index);
-        }
+            .position(|pending| pending == update);
         let before = self.model.clone();
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
@@ -1351,17 +1349,24 @@ impl Workbook {
         }
         let staged = self.stage_remote_updates(&[update], None, &structure)?;
         if staged.pending {
-            self.validate_pending_remote_update(update)?;
+            if already_pending.is_none() {
+                self.validate_pending_remote_update(update)?;
+            }
             let mut applied = if staged.effective {
                 self.apply_staged_remote_update(staged, options)?.applied
             } else {
                 false
             };
-            self.pending_remote_updates.push(update.to_vec());
+            if already_pending.is_none() {
+                self.pending_remote_updates.push(update.to_vec());
+            }
             applied |= self.resolve_pending_remote_updates(&structure, options)?;
             return Ok(self.remote_mutation_result(&before, applied));
         }
         let mut applied = self.apply_staged_remote_update(staged, options)?.applied;
+        if let Some(index) = already_pending {
+            self.pending_remote_updates.remove(index);
+        }
         applied |= self.resolve_pending_remote_updates(&structure, options)?;
         Ok(self.remote_mutation_result(&before, applied))
     }
@@ -1420,6 +1425,7 @@ impl Workbook {
             options.now_serial,
             self.rand_seed,
         );
+        self.validate_alternate_replay(&model, &frozen.sheet_keys, &structure.sheet_keys)?;
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = AuthoritySlot::built(candidate);
@@ -1622,25 +1628,28 @@ impl Workbook {
                 ),
                 structure,
             );
-            match staged {
-                Ok(staged) if staged.pending => {
-                    if staged.effective {
-                        applied |= self.apply_staged_remote_update(staged, options)?.applied;
+            let Ok(staged) = staged else {
+                self.pending_remote_updates.remove(index);
+                continue;
+            };
+            let pending = staged.pending;
+            match self.apply_staged_remote_update(staged, options) {
+                Ok(result) => {
+                    if !pending {
+                        self.pending_remote_updates.remove(index);
+                    }
+                    if result.applied {
+                        applied = true;
                         baseline = None;
                         index = 0;
-                    } else {
+                    } else if pending {
                         index += 1;
                     }
                 }
-                Ok(staged) => {
-                    self.pending_remote_updates.remove(index);
-                    applied |= self.apply_staged_remote_update(staged, options)?.applied;
-                    baseline = None;
-                    index = 0;
-                }
-                Err(_) => {
+                Err(Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(_))) => {
                     self.pending_remote_updates.remove(index);
                 }
+                Err(error) => return Err(error),
             }
         }
         Ok(applied)
@@ -1691,6 +1700,7 @@ impl Workbook {
             options.now_serial,
             self.rand_seed,
         );
+        self.validate_alternate_replay(&model, &previous_keys, &new_structure.sheet_keys)?;
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -1797,7 +1807,7 @@ impl Workbook {
         match &self.source_package {
             Some(package) => {
                 let package = package.materialize()?;
-                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                let parts = xlsx_parse::serialize_workbook_with_package_and_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
@@ -1808,6 +1818,7 @@ impl Workbook {
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
+                    self.is_collaborative(),
                 )?;
                 if parts
                     .iter()
@@ -1926,8 +1937,13 @@ impl Workbook {
             .source_package
             .as_ref()
             .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
-        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
-        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
+        let package = package.materialize()?;
+        let facts = xlsx_parse::PackageFacts::from_package(package);
+        let mut deferred =
+            PackageSlot::deferred(source.clone(), facts, &package.original_workbook().styles);
+        deferred
+            .record_unchecked_calculation(&self.preserved.origins, &self.last_calculation.changed);
+        self.source_package = Some(deferred);
         Ok(())
     }
 
@@ -2504,15 +2520,52 @@ impl Workbook {
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
-        self.ensure_graph();
         let formula = state.formula.clone();
-        let keeps_graph = self.keeps_graph_current(&[(sheet, cell, formula.clone())]);
         let mut ops = vec![Op::SetCell {
             sheet,
             at: cell,
             cell: state,
         }];
+        let styles_may_change = format.is_some();
         ops.extend(format);
+        let seeds = [(sheet, cell)];
+        if self.needs_cell_alternate_preview(std::iter::once(sheet), styles_may_change)? {
+            let mut preview = self.model.clone();
+            let inverse = xlsx_ops::apply_ops(&mut preview, &ops)?;
+            let touched = [(sheet, cell, formula)];
+            let (mutation, update) = if self.is_collaborative()
+                || self
+                    .source_package
+                    .as_ref()
+                    .and_then(PackageSlot::materialized)
+                    .is_some()
+            {
+                let prepared = self.prepare_commit(
+                    ops,
+                    StagedApply::new(preview, inverse),
+                    SyncOrigin::User,
+                    CommitHistory::Separate,
+                    None,
+                )?;
+                self.commit_precalculated_cells(prepared, &touched, options, true)?
+            } else {
+                let (graph, recalc) =
+                    self.calculate_standalone_cell_preview(&mut preview, &touched, &seeds, options);
+                self.validate_alternate_preview(&preview, &self.preserved)?;
+                let keeps_graph = self.edits_only_values(&touched);
+                let update = self.commit_user(&ops)?;
+                self.model = preview;
+                let mutation =
+                    self.adopt_cell_calculation(graph, recalc, &seeds, options, keeps_graph);
+                (mutation, update)
+            };
+            mark(EditStage::Applied);
+            mark(EditStage::Recalculated);
+            self.publish(update);
+            return Ok(mutation);
+        }
+        self.ensure_graph();
+        let keeps_graph = self.keeps_graph_current(&[(sheet, cell, formula.clone())]);
         let update = self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
@@ -2520,7 +2573,6 @@ impl Workbook {
             formula.as_deref(),
         );
         mark(EditStage::Applied);
-        let seeds = [(sheet, cell)];
         let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
@@ -2643,8 +2695,6 @@ impl Workbook {
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
         }
-        self.ensure_graph();
-        let keeps_graph = self.keeps_graph_current(&touched);
         let prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
@@ -2652,6 +2702,18 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let styles_changed = prepared.model.styles != self.model.styles;
+        if self.needs_cell_alternate_preview(
+            touched.iter().map(|(sheet, ..)| *sheet),
+            styles_changed,
+        )? {
+            let (mutation, update) =
+                self.commit_precalculated_cells(prepared, &touched, options, true)?;
+            self.publish(update);
+            return Ok(mutation);
+        }
+        self.ensure_graph();
+        let keeps_graph = self.keeps_graph_current(&touched);
         let update = self.commit_prepared_cell_inputs(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
@@ -2782,23 +2844,29 @@ impl Workbook {
             }
         }
         let ops = move_range_ops(&self.model, sheet, source, target)?;
-        self.carry_moved_answers(sheet, source, target, &ops);
-        self.apply_carried_ops(ops, options)
+        let moved_answers = self.moved_answers(sheet, source, target, &ops);
+        self.apply_ops_marked(
+            ops,
+            options,
+            FormulaEntry::Carried,
+            &moved_answers,
+            &mut |_| {},
+        )
     }
 
     /// a move writes the cells it changes as plain values and formulas, and
     /// none where a moved cell equals what it lands on, so what the graph holds
     /// as answers has to be told where every formula in `source` went.
-    fn carry_moved_answers(
+    fn moved_answers(
         &self,
         moved: SheetId,
         source: CellRange,
         target: CellRange,
         ops: &[Op],
-    ) {
-        let Some(graph) = &self.graph else {
-            return;
-        };
+    ) -> Vec<(SheetId, CellRef, CellRef, String)> {
+        if self.graph.is_none() {
+            return Vec::new();
+        }
         let written: HashMap<_, _> = ops
             .iter()
             .filter_map(|op| match op {
@@ -2825,7 +2893,7 @@ impl Workbook {
                     Some((moved, from, to, formula.to_owned()))
                 }),
         );
-        graph.carry_answers(&moves);
+        moves
     }
 
     /// Applies `ops` as one undoable edit. A `SetCell` whose formula text is
@@ -2838,7 +2906,7 @@ impl Workbook {
         ops: Vec<Op>,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.apply_ops_marked(ops, options, FormulaEntry::Introduced, &mut |_| {})
+        self.apply_ops_marked(ops, options, FormulaEntry::Introduced, &[], &mut |_| {})
     }
 
     /// [`Workbook::apply_ops`] with its stages timed by `now`.
@@ -2849,7 +2917,7 @@ impl Workbook {
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.apply_ops_marked(ops, options, FormulaEntry::Introduced, mark)
+            self.apply_ops_marked(ops, options, FormulaEntry::Introduced, &[], mark)
         })
     }
 
@@ -2860,7 +2928,7 @@ impl Workbook {
         ops: Vec<Op>,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.apply_ops_marked(ops, options, FormulaEntry::Carried, &mut |_| {})
+        self.apply_ops_marked(ops, options, FormulaEntry::Carried, &[], &mut |_| {})
     }
 
     fn apply_ops_marked(
@@ -2868,6 +2936,7 @@ impl Workbook {
         mut ops: Vec<Op>,
         options: CalculationOptions,
         entry: FormulaEntry,
+        moved_answers: &[(SheetId, CellRef, CellRef, String)],
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         if ops.is_empty() {
@@ -2940,6 +3009,26 @@ impl Workbook {
                         }
                     }
                 }
+                Op::MoveRows {
+                    sheet,
+                    row,
+                    count,
+                    before,
+                } => {
+                    if let Some(Some(axes)) = axes.get_mut(sheet.0 as usize) {
+                        axes.rows.move_block(row, count, before);
+                    }
+                }
+                Op::MoveCols {
+                    sheet,
+                    col,
+                    count,
+                    before,
+                } => {
+                    if let Some(Some(axes)) = axes.get_mut(sheet.0 as usize) {
+                        axes.cols.move_block(col, count, before);
+                    }
+                }
                 _ => {}
             }
             rename_sheet_view(&mut names, op);
@@ -2955,12 +3044,15 @@ impl Workbook {
         if preview.defined_names != self.model.defined_names
             && let Some(package) = &self.source_package
         {
-            xlsx_parse::validate_defined_name_edits(&preview, package.materialize()?, &origins)?;
+            package.validate_defined_name_edits(&preview, &origins)?;
         }
         let proposals_changed = self
             .rebased_proposals(&ops)
             .is_some_and(|proposals| proposals != self.proposals.list());
         if preview == self.model && !proposals_changed && !drawings_move {
+            if axes != self.preserved.axes || origins != self.preserved.origins {
+                self.validate_alternate_projection(&preview, &origins, &axes)?;
+            }
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
@@ -2974,7 +3066,7 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let active_sheet = self.active_sheet_after_ops(&ops);
         let rewritten = rewritten_formulas(&inverse);
-        let prepared = self.prepare_commit(
+        let mut prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::User,
@@ -2983,10 +3075,64 @@ impl Workbook {
         )?;
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
+        let staged_calculation =
+            if scope != CalculationScope::Kept && self.needs_alternate_preview() {
+                let previous = self.graph.as_ref().map(|previous| {
+                    let graph = DepGraph::build(&self.model);
+                    graph.adopt_unevaluated(previous);
+                    graph.carry_answers(moved_answers);
+                    Self::rebase_graph_answers(&graph, &self.sheet_names(), &prepared.ops);
+                    graph
+                });
+                match (scope, previous) {
+                    (CalculationScope::Renamed, Some(mut graph)) => {
+                        let seeds = graph.rename_sheets(&prepared.model, &rewritten);
+                        let (recalc, recomputed) = recalc_after_with_recomputed(
+                            &mut prepared.model,
+                            &mut graph,
+                            &seeds,
+                            options.now_serial,
+                            self.rand_seed,
+                        );
+                        let result = self.renamed_calculation_result(&recalc, recomputed);
+                        Some((graph, recalc, Some(result)))
+                    }
+                    (_, previous) => {
+                        let (graph, recalc) = rebuild_and_recalc_all_after(
+                            &mut prepared.model,
+                            previous.as_ref(),
+                            options.now_serial,
+                            self.rand_seed,
+                        );
+                        Some((graph, recalc, None))
+                    }
+                }
+            } else {
+                None
+            };
         let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_sheet);
         mark(EditStage::Applied);
-        let result = self.recalculate_scope(scope, &rewritten, options);
+        let result = match staged_calculation {
+            Some((graph, recalc, Some(result))) => {
+                self.bump_model_epoch_keeping_results();
+                self.dirty_geometry_cells(&recalc.changed);
+                self.graph = Some(graph);
+                self.mark_graph_current();
+                self.last_calculation = result.clone();
+                self.calculated_now = options.now_serial;
+                result
+            }
+            Some((graph, recalc, None)) => self.adopt_calculated_preview(graph, &recalc, options),
+            None => {
+                if !moved_answers.is_empty()
+                    && let Some(graph) = &self.graph
+                {
+                    graph.carry_answers(moved_answers);
+                }
+                self.recalculate_scope(scope, &rewritten, options)
+            }
+        };
         mark(EditStage::Recalculated);
         self.publish(update);
         Ok(MutationResult {
@@ -3017,6 +3163,9 @@ impl Workbook {
             && self.has_uncached_source_formulas();
         let before = calculation_status(&self.last_calculation);
         let result = self.rebuild_and_recalculate(options);
+        if let Some(package) = &mut self.source_package {
+            package.record_unchecked_calculation(&self.preserved.origins, &result.changed);
+        }
         if !result.changed.is_empty() || first || calculation_status(&result) != before {
             self.committed_changes += 1;
             self.emit_update(UpdateEvent {
@@ -3074,6 +3223,35 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
+        let preserved = self
+            .preserved_undo
+            .last()
+            .map_or(&self.preserved, |history| &history.before);
+        let staged_calculation = if self.needs_alternate_preview_in(&preserved.origins) {
+            let mut preview = self.model.clone();
+            xlsx_ops::apply_ops(&mut preview, &ops)?;
+            let scope = before
+                .as_ref()
+                .map_or(scope, |inputs| scope.confirmed(inputs, &preview));
+            let calculation = (scope != CalculationScope::Kept).then(|| {
+                let previous = self.graph.as_ref().map(|previous| {
+                    let graph = DepGraph::build(&self.model);
+                    graph.adopt_unevaluated(previous);
+                    Self::rebase_graph_answers(&graph, &names_before, &ops);
+                    graph
+                });
+                rebuild_and_recalc_all_after(
+                    &mut preview,
+                    previous.as_ref(),
+                    options.now_serial,
+                    self.rand_seed,
+                )
+            });
+            self.validate_alternate_preview(&preview, preserved)?;
+            calculation.map(|(graph, recalc)| (preview, graph, recalc))
+        } else {
+            None
+        };
         let update = if self.defers_staging() {
             self.defer_apply(&ops, SyncOrigin::Undo)?;
             None
@@ -3115,7 +3293,13 @@ impl Workbook {
             None => CalculationScope::Full,
         };
         let rewritten = rewritten_formulas(self.undo.next_redo().unwrap_or_default());
-        let result = self.recalculate_scope(scope, &rewritten, options);
+        let result = match staged_calculation {
+            Some((model, graph, recalc)) => {
+                self.model = model;
+                self.adopt_calculated_preview(graph, &recalc, options)
+            }
+            None => self.recalculate_scope(scope, &rewritten, options),
+        };
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -3138,6 +3322,35 @@ impl Workbook {
         let reached = reached_sheets(&ops);
         let before = (scope != CalculationScope::Full)
             .then(|| CalculationInputs::of(&self.model, &reached).into_owned());
+        let preserved = self
+            .preserved_redo
+            .last()
+            .map_or(&self.preserved, |history| &history.after);
+        let staged_calculation = if self.needs_alternate_preview_in(&preserved.origins) {
+            let mut preview = self.model.clone();
+            xlsx_ops::apply_ops(&mut preview, &ops)?;
+            let scope = before
+                .as_ref()
+                .map_or(scope, |inputs| scope.confirmed(inputs, &preview));
+            let calculation = (scope != CalculationScope::Kept).then(|| {
+                let previous = self.graph.as_ref().map(|previous| {
+                    let graph = DepGraph::build(&self.model);
+                    graph.adopt_unevaluated(previous);
+                    Self::rebase_graph_answers(&graph, &names_before, &ops);
+                    graph
+                });
+                rebuild_and_recalc_all_after(
+                    &mut preview,
+                    previous.as_ref(),
+                    options.now_serial,
+                    self.rand_seed,
+                )
+            });
+            self.validate_alternate_preview(&preview, preserved)?;
+            calculation.map(|(graph, recalc)| (preview, graph, recalc))
+        } else {
+            None
+        };
         let update = if self.defers_staging() {
             self.defer_apply(&ops, SyncOrigin::Redo)?;
             None
@@ -3179,7 +3392,13 @@ impl Workbook {
             None => CalculationScope::Full,
         };
         let rewritten = rewritten_formulas(self.undo.next_undo().unwrap_or_default());
-        let result = self.recalculate_scope(scope, &rewritten, options);
+        let result = match staged_calculation {
+            Some((model, graph, recalc)) => {
+                self.model = model;
+                self.adopt_calculated_preview(graph, &recalc, options)
+            }
+            None => self.recalculate_scope(scope, &rewritten, options),
+        };
         self.publish(update);
         Ok(MutationResult {
             applied: true,
@@ -3193,16 +3412,27 @@ impl Workbook {
     /// produced, so a rejected result has to put that document back. Leaving it
     /// advanced would publish a step the workbook itself refused: peers would
     /// stage later updates onto state this replica does not hold.
-    ///
-    /// Nothing reaches the refusal today — the checks left after a step are
-    /// ones the projection settles rather than fails — so this is defensive,
-    /// and it is the only thing standing between a future check here and a
-    /// replica that has published what it would not keep.
     fn collaborative_history_step(
         &mut self,
         options: CalculationOptions,
         redo: bool,
     ) -> Result<MutationResult> {
+        if self.needs_alternate_preview() {
+            let mut candidate = self.authority()?.fork_history().map_err(authority_error)?;
+            let history = match if redo {
+                candidate.redo()
+            } else {
+                candidate.undo()
+            } {
+                Ok(history) => history,
+                Err(AuthorityError::UndoRefused) => {
+                    self.authority = AuthoritySlot::built(candidate);
+                    return Err(Error::CollaborativeUndoRefused);
+                }
+                Err(error) => return Err(authority_error(error)),
+            };
+            return self.apply_collaborative_history(history, options, Some(candidate));
+        }
         let authority = self.authority.get_mut()?;
         let checkpoint = authority.checkpoint();
         let stepped = if redo {
@@ -3211,7 +3441,7 @@ impl Workbook {
             authority.undo()
         };
         let outcome = match stepped {
-            Ok(history) => self.apply_collaborative_history(history, options),
+            Ok(history) => self.apply_collaborative_history(history, options, None),
             Err(AuthorityError::UndoRefused) => return Err(Error::CollaborativeUndoRefused),
             Err(error) => Err(authority_error(error)),
         };
@@ -3231,8 +3461,12 @@ impl Workbook {
         &mut self,
         history: Option<HistoryUpdate>,
         options: CalculationOptions,
+        candidate: Option<WorkbookAuthority>,
     ) -> Result<MutationResult> {
         let Some(history) = history else {
+            if let Some(candidate) = candidate {
+                self.authority = AuthoritySlot::built(candidate);
+            }
             return Ok(MutationResult::default());
         };
         let structure = match &self.mode {
@@ -3247,6 +3481,19 @@ impl Workbook {
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
+        let staged_calculation = if let Some(candidate) = candidate {
+            let (graph, recalc) = rebuild_and_recalc_all_after(
+                &mut restored,
+                self.graph.as_ref(),
+                options.now_serial,
+                self.rand_seed,
+            );
+            self.validate_alternate_replay(&restored, &previous_keys, &new_structure.sheet_keys)?;
+            self.authority = AuthoritySlot::built(candidate);
+            Some((graph, recalc))
+        } else {
+            None
+        };
         self.install_model(restored)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -3256,7 +3503,10 @@ impl Workbook {
         self.edited_since_open = true;
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
-        let result = self.rebuild_and_recalculate(options);
+        let result = match staged_calculation {
+            Some((graph, recalc)) => self.adopt_calculated_preview(graph, &recalc, options),
+            None => self.rebuild_and_recalculate(options),
+        };
         let changed = changed_cells_between(&before, &self.model);
         self.publish(Some(history.update));
         Ok(MutationResult {
@@ -3309,6 +3559,7 @@ impl Workbook {
             }
         }
         rebuild_and_recalc_all_with_seed(&mut preview, options.now_serial, self.rand_seed);
+        self.validate_alternate_preview(&preview, &self.preserved)?;
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -3467,8 +3718,6 @@ impl Workbook {
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
         }
-        self.ensure_graph();
-        let keeps_graph = self.keeps_graph_current(&touched);
         let prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
@@ -3476,6 +3725,22 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
+        let styles_changed = prepared.model.styles != self.model.styles;
+        if self.needs_cell_alternate_preview(
+            touched.iter().map(|(sheet, ..)| *sheet),
+            styles_changed,
+        )? {
+            let (mutation, update) =
+                self.commit_precalculated_cells(prepared, &touched, options, false)?;
+            self.proposals.remove(id);
+            self.publish(update);
+            return Ok(ProposalAcceptance {
+                proposal_id: id.to_string(),
+                mutation,
+            });
+        }
+        self.ensure_graph();
+        let keeps_graph = self.keeps_graph_current(&touched);
         let update = self.commit_prepared(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
@@ -4352,6 +4617,216 @@ impl Workbook {
         Ok(())
     }
 
+    fn needs_cell_alternate_preview(
+        &mut self,
+        sheets: impl Iterator<Item = SheetId>,
+        styles_may_change: bool,
+    ) -> Result<bool> {
+        let Some(package) = &self.source_package else {
+            return Ok(false);
+        };
+        if package.materialized().is_some() {
+            return Ok(self.needs_alternate_preview());
+        }
+        for sheet in sheets {
+            if let Some(Some(origin)) = self.preserved.origins.get(sheet.0 as usize)
+                && package.sheet_has_alternate_content(*origin)?
+            {
+                return Ok(true);
+            }
+        }
+        if self.preserved.origins.iter().flatten().any(|&origin| {
+            package.sheet_may_have_alternate_content(origin)
+                && package.sheet_needs_alternate_validation(origin, styles_may_change)
+        }) {
+            return Ok(true);
+        }
+        if !self.needs_alternate_preview() {
+            return Ok(false);
+        }
+        self.ensure_graph();
+        let package = self.source_package.as_ref().expect("source package");
+        Ok(self
+            .graph
+            .as_ref()
+            .expect("graph initialized")
+            .formula_cells()
+            .any(|(sheet, _)| {
+                self.preserved
+                    .origins
+                    .get(sheet.0 as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|origin| package.sheet_may_have_alternate_content(origin))
+            }))
+    }
+
+    fn needs_alternate_preview(&self) -> bool {
+        self.needs_alternate_preview_in(&self.preserved.origins)
+    }
+
+    fn needs_alternate_preview_in(&self, origins: &[Option<usize>]) -> bool {
+        self.source_package.as_ref().is_some_and(|package| {
+            origins
+                .iter()
+                .flatten()
+                .any(|&origin| package.sheet_may_have_alternate_content(origin))
+        })
+    }
+
+    fn validate_alternate_preview(
+        &self,
+        model: &WorkbookModel,
+        preserved: &PreservedSheetState,
+    ) -> Result<()> {
+        self.validate_alternate_projection(model, &preserved.origins, &preserved.axes)
+    }
+
+    fn validate_alternate_projection(
+        &self,
+        model: &WorkbookModel,
+        origins: &[Option<usize>],
+        axes: &[Option<xlsx_parse::SheetAxes>],
+    ) -> Result<()> {
+        if let Some(package) = &self.source_package
+            && self.needs_alternate_preview_in(origins)
+        {
+            if package.materialized().is_some() {
+                return package.validate_alternate_content(
+                    model,
+                    origins,
+                    axes,
+                    self.is_collaborative(),
+                    std::iter::empty(),
+                );
+            }
+            let before_by_origin: HashMap<_, _> = self
+                .preserved
+                .origins
+                .iter()
+                .zip(&self.model.sheets)
+                .filter_map(|(&origin, sheet)| Some((origin?, sheet)))
+                .collect();
+            let source_sheets_changed = before_by_origin.len() != origins.iter().flatten().count()
+                || origins.iter().zip(&model.sheets).any(|(&origin, sheet)| {
+                    origin.is_some_and(|origin| {
+                        before_by_origin
+                            .get(&origin)
+                            .is_none_or(|before| before.name != sheet.name)
+                    })
+                });
+            let all_sheets_may_change = model.shared_strings != self.model.shared_strings
+                || source_sheets_changed
+                || ((axes != self.preserved.axes.as_slice()
+                    || origins != self.preserved.origins.as_slice())
+                    && axes
+                        .iter()
+                        .chain(&self.preserved.axes)
+                        .flatten()
+                        .any(|axes| !axes.is_identity()));
+            let styles_changed = model.styles != self.model.styles;
+            let changed_origins =
+                origins
+                    .iter()
+                    .zip(&model.sheets)
+                    .filter_map(|(&origin, sheet)| {
+                        let origin = origin?;
+                        (package.sheet_may_have_alternate_content(origin)
+                            && (all_sheets_may_change
+                                || package
+                                    .sheet_needs_alternate_validation(origin, styles_changed)
+                                || before_by_origin.get(&origin).copied() != Some(sheet)))
+                        .then_some(origin)
+                    });
+            package.validate_alternate_content(
+                model,
+                origins,
+                axes,
+                self.is_collaborative(),
+                changed_origins,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_alternate_replay(
+        &self,
+        model: &WorkbookModel,
+        before: &[String],
+        after: &[String],
+    ) -> Result<()> {
+        if self.needs_alternate_preview() {
+            let mut preserved = self.preserved.clone();
+            preserved.rekey(before, after);
+            preserved.forget_axes();
+            self.validate_alternate_preview(model, &preserved)?;
+        }
+        Ok(())
+    }
+
+    fn commit_precalculated_cells(
+        &mut self,
+        mut prepared: PreparedCommit,
+        touched: &[(SheetId, CellRef, Option<String>)],
+        options: CalculationOptions,
+        cell_inputs: bool,
+    ) -> Result<(MutationResult, Option<Vec<u8>>)> {
+        let seeds = touched
+            .iter()
+            .map(|(sheet, cell, _)| (*sheet, *cell))
+            .collect::<Vec<_>>();
+        let keeps_graph = self.is_collaborative() || self.edits_only_values(touched);
+        let (graph, result) = if self.is_collaborative() {
+            self.recalculate_edit_preview(&mut prepared.model, &seeds, options.now_serial)
+        } else {
+            self.calculate_standalone_cell_preview(&mut prepared.model, touched, &seeds, options)
+        };
+        let update = if cell_inputs {
+            self.commit_prepared_cell_inputs(prepared)?
+        } else {
+            self.commit_prepared(prepared)?
+        };
+        let mutation = self.adopt_cell_calculation(graph, result, &seeds, options, keeps_graph);
+        Ok((mutation, update))
+    }
+
+    fn calculate_standalone_cell_preview(
+        &self,
+        model: &mut WorkbookModel,
+        touched: &[(SheetId, CellRef, Option<String>)],
+        seeds: &[(SheetId, CellRef)],
+        options: CalculationOptions,
+    ) -> (DepGraph, RecalcResult) {
+        let mut graph = DepGraph::build(&self.model);
+        match &self.graph {
+            Some(previous) => graph.adopt_unevaluated(previous),
+            None => assume_unevaluated(&graph, &self.last_calculation),
+        }
+        for (sheet, cell, formula) in touched {
+            graph.set_formula(*sheet, *cell, formula.as_deref());
+        }
+        let recalc =
+            recalc_after_with_seed(model, &mut graph, seeds, options.now_serial, self.rand_seed);
+        (graph, recalc)
+    }
+
+    fn adopt_cell_calculation(
+        &mut self,
+        graph: DepGraph,
+        recalc: RecalcResult,
+        seeds: &[(SheetId, CellRef)],
+        options: CalculationOptions,
+        keeps_graph: bool,
+    ) -> MutationResult {
+        let mutation = self.mutation_result(true, recalc, seeds);
+        self.graph = Some(graph);
+        if keeps_graph {
+            self.mark_graph_current();
+        }
+        self.calculated_now = options.now_serial;
+        mutation
+    }
+
     /// Commits a single-cell edit without staging a copy of the authority. Returns the update
     /// to publish once the caller has recalculated.
     fn commit_user(&mut self, ops: &[Op]) -> Result<Option<Vec<u8>>> {
@@ -4643,6 +5118,17 @@ impl Workbook {
             self.rand_seed,
         );
         self.dirty_geometry_cells(&result.changed);
+        let result = self.renamed_calculation_result(&result, recomputed);
+        self.last_calculation = result.clone();
+        self.calculated_now = options.now_serial;
+        result
+    }
+
+    fn renamed_calculation_result(
+        &self,
+        recalc: &RecalcResult,
+        recomputed: Vec<(SheetId, CellRef)>,
+    ) -> CalculationResult {
         let recomputed: HashSet<_> = recomputed
             .into_iter()
             .map(|(sheet, cell)| (sheet.0, cell.row, cell.col))
@@ -4651,7 +5137,7 @@ impl Workbook {
             !recomputed.contains(&(address.sheet.0, address.cell.row, address.cell.col))
         };
         let previous = &self.last_calculation;
-        let mut result = calculation_result(&result);
+        let mut result = calculation_result(recalc);
         result.cycle_cells = previous
             .cycle_cells
             .iter()
@@ -4667,6 +5153,22 @@ impl Workbook {
             .collect();
         result.budget_exhausted |= previous.budget_exhausted && !kept.is_empty();
         result.limited_cells = kept.into_iter().chain(result.limited_cells).collect();
+        result
+    }
+
+    fn adopt_calculated_preview(
+        &mut self,
+        graph: DepGraph,
+        recalc: &RecalcResult,
+        options: CalculationOptions,
+    ) -> CalculationResult {
+        self.recalculated_since_open = true;
+        self.calculations_since_open = self.calculations_since_open.saturating_add(1);
+        self.count_graph_reuse(false);
+        self.dirty_geometry_cells(&recalc.changed);
+        self.graph = Some(graph);
+        self.mark_graph_current();
+        let result = calculation_result(recalc);
         self.last_calculation = result.clone();
         self.calculated_now = options.now_serial;
         result
@@ -4740,13 +5242,16 @@ impl Workbook {
 
     /// Whether the graph is current and stays so after `touched`, which set or clear no formula.
     fn keeps_graph_current(&self, touched: &[(SheetId, CellRef, Option<String>)]) -> bool {
-        let values_only = touched.iter().all(|(sheet, cell, formula)| {
+        self.graph_current() && !self.is_collaborative() && self.edits_only_values(touched)
+    }
+
+    fn edits_only_values(&self, touched: &[(SheetId, CellRef, Option<String>)]) -> bool {
+        touched.iter().all(|(sheet, cell, formula)| {
             formula.is_none()
                 && current_cell_state(&self.model, *sheet, *cell)
                     .formula
                     .is_none()
-        });
-        self.graph_current() && !self.is_collaborative() && values_only
+        })
     }
 
     /// Full recalculations that kept the dependency graph, and those that rebuilt it.
