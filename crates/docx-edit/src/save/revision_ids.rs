@@ -111,12 +111,23 @@ pub fn assign_session_revision_ids(
 }
 
 #[doc(hidden)]
+pub struct RevisionIdReservations {
+    pub used: BTreeSet<u32>,
+    pub max: u32,
+    pub sites: BTreeMap<(String, u32), usize>,
+}
+
+#[doc(hidden)]
 pub fn session_revision_id_reservations(
     request: &S13SaveRequest,
     session: &BTreeSet<u64>,
-) -> Result<(BTreeSet<u32>, u32), RevisionIdsError> {
-    let found = collect(request, session)?;
-    Ok((found.used, found.max))
+) -> Result<RevisionIdReservations, RevisionIdsError> {
+    let found = collect_at(request, session, Some(String::new()))?;
+    Ok(RevisionIdReservations {
+        used: found.used,
+        max: found.max,
+        sites: found.reservations,
+    })
 }
 
 fn next_id(next: &mut u32, max: u32, used: &BTreeSet<u32>) -> Result<u32, RevisionIdsError> {
@@ -140,16 +151,20 @@ struct Collected {
     max: u32,
     used: BTreeSet<u32>,
     sites: BTreeMap<u64, usize>,
+    reservations: BTreeMap<(String, u32), usize>,
 }
 
 impl Collected {
-    fn note(&mut self, id: Kind, raises_base: bool) {
+    fn note(&mut self, id: Kind, raises_base: bool, pointer: Option<&str>) {
         if let Kind::Number(id) = id
             && (0.0..f64::from(MAX_ID)).contains(&id)
             && id.fract() == 0.0
         {
             let id = id as u32;
             self.used.insert(id);
+            if let Some(pointer) = pointer {
+                *self.reservations.entry((pointer.to_owned(), id)).or_default() += 1;
+            }
             if raises_base {
                 self.max = self.max.max(id);
             }
@@ -166,9 +181,12 @@ impl Collected {
         for (id, count) in other.sites {
             self.site(id, count);
         }
+        for (site, count) in other.reservations {
+            *self.reservations.entry(site).or_default() += count;
+        }
     }
 
-    fn scan_xml(&mut self, text: &str) {
+    fn scan_xml(&mut self, text: &str, pointer: Option<&str>) {
         for (index, _) in text.match_indices("w:id") {
             if index > 0
                 && (text.as_bytes()[index - 1].is_ascii_alphanumeric()
@@ -187,7 +205,7 @@ impl Collected {
             if matches!(tail.as_bytes().get(digits), Some(b'\'' | b'"'))
                 && let Ok(id) = tail[..digits].parse::<u32>()
             {
-                self.note(Kind::Number(f64::from(id)), true);
+                self.note(Kind::Number(f64::from(id)), true, pointer);
             }
         }
     }
@@ -240,11 +258,12 @@ impl From<&str> for Symbol {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 enum Kind {
     #[default]
     Other,
     String(Symbol),
+    Key(String),
     Number(f64),
     Array,
 }
@@ -253,6 +272,14 @@ fn collect<T: Serialize>(
     value: &T,
     session: &BTreeSet<u64>,
 ) -> Result<Collected, RevisionIdsError> {
+    collect_at(value, session, None)
+}
+
+fn collect_at<T: Serialize>(
+    value: &T,
+    session: &BTreeSet<u64>,
+    pointer: Option<String>,
+) -> Result<Collected, RevisionIdsError> {
     let mut found = Collected::default();
     value.serialize(Visitor {
         session,
@@ -260,6 +287,7 @@ fn collect<T: Serialize>(
         model: false,
         info: false,
         scan_strings: true,
+        pointer,
     })?;
     Ok(found)
 }
@@ -270,12 +298,17 @@ struct Visitor<'a> {
     model: bool,
     info: bool,
     scan_strings: bool,
+    pointer: Option<String>,
+}
+
+fn child_pointer(pointer: Option<&str>, key: &str) -> Option<String> {
+    pointer.map(|pointer| format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")))
 }
 
 struct Record<'a> {
     visitor: Visitor<'a>,
     name: &'static str,
-    key: Symbol,
+    key: Kind,
     pending: Option<Collected>,
     author: Kind,
     id: Kind,
@@ -290,7 +323,7 @@ impl<'a> Record<'a> {
         Self {
             visitor,
             name,
-            key: Symbol::Other,
+            key: Kind::Other,
             pending: info.then(Collected::default),
             author: Kind::Other,
             id: Kind::Other,
@@ -304,6 +337,7 @@ impl<'a> Record<'a> {
         &mut self,
         key: Symbol,
         model: bool,
+        pointer: Option<String>,
         value: &T,
     ) -> Result<(), RevisionIdsError> {
         let kind = value.serialize(Visitor {
@@ -312,6 +346,7 @@ impl<'a> Record<'a> {
             model,
             info: model && matches!(key, Symbol::Info),
             scan_strings: self.visitor.scan_strings,
+            pointer,
         })?;
         match key {
             Symbol::Author => self.author = kind,
@@ -336,7 +371,8 @@ impl<'a> Record<'a> {
                     | ("Shape", "drawingModel")
                     | ("S13TablePatch", "before" | "after")
             );
-        self.field(Symbol::from(key), model, value)
+        let pointer = child_pointer(self.visitor.pointer.as_deref(), key);
+        self.field(Symbol::from(key), model, pointer, value)
     }
 
     fn finish(self) -> Kind {
@@ -352,14 +388,27 @@ impl<'a> Record<'a> {
             }
             found.merge(pending);
         }
+        let pointer = self.visitor.pointer.as_deref();
         if matches!(self.author, Kind::String(_)) {
             let raises_base = !matches!(self.content, Kind::Array);
-            found.note(self.id, raises_base);
-            found.note(self.revision_id, raises_base);
+            found.note(
+                self.id,
+                raises_base,
+                child_pointer(pointer, "id").as_deref(),
+            );
+            found.note(
+                self.revision_id,
+                raises_base,
+                child_pointer(pointer, "revisionId").as_deref(),
+            );
         } else if let Kind::String(symbol @ (Symbol::CommentMarker | Symbol::Annotation)) =
             self.node_type
         {
-            found.note(self.id, matches!(symbol, Symbol::Annotation));
+            found.note(
+                self.id,
+                matches!(symbol, Symbol::Annotation),
+                child_pointer(pointer, "id").as_deref(),
+            );
         }
         Kind::Other
     }
@@ -370,21 +419,27 @@ impl SerializeMap for Record<'_> {
     type Error = RevisionIdsError;
 
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Self::Error> {
-        self.key = match key.serialize(Visitor {
+        self.key = key.serialize(Visitor {
             session: self.visitor.session,
             found: self.pending.as_mut().unwrap_or(&mut *self.visitor.found),
             model: false,
             info: false,
             scan_strings: false,
-        })? {
-            Kind::String(symbol) => symbol,
-            _ => Symbol::Other,
-        };
+            pointer: self.visitor.pointer.as_ref().map(|_| String::new()),
+        })?;
         Ok(())
     }
 
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
-        self.field(self.key, self.visitor.model, value)
+        let (symbol, pointer) = match &self.key {
+            Kind::Key(key) => (
+                Symbol::from(key.as_str()),
+                child_pointer(self.visitor.pointer.as_deref(), key),
+            ),
+            Kind::String(symbol) => (*symbol, None),
+            _ => (Symbol::Other, None),
+        };
+        self.field(symbol, self.visitor.model, pointer, value)
     }
 
     fn end(self) -> Result<Kind, Self::Error> {
@@ -426,7 +481,10 @@ impl SerializeStructVariant for Record<'_> {
     }
 }
 
-struct Sequence<'a>(Visitor<'a>);
+struct Sequence<'a> {
+    visitor: Visitor<'a>,
+    index: usize,
+}
 
 macro_rules! sequence {
     ($trait:ident, $field:ident, $kind:expr) => {
@@ -435,12 +493,18 @@ macro_rules! sequence {
             type Error = RevisionIdsError;
 
             fn $field<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Self::Error> {
+                let pointer = self.visitor.pointer.as_ref().map(|pointer| {
+                    let index = self.index;
+                    self.index += 1;
+                    format!("{pointer}/{index}")
+                });
                 value.serialize(Visitor {
-                    session: self.0.session,
-                    found: self.0.found,
-                    model: self.0.model,
+                    session: self.visitor.session,
+                    found: self.visitor.found,
+                    model: self.visitor.model,
                     info: false,
-                    scan_strings: self.0.scan_strings,
+                    scan_strings: self.visitor.scan_strings,
+                    pointer,
                 })?;
                 Ok(())
             }
@@ -461,7 +525,11 @@ macro_rules! number {
     ($($method:ident: $type:ty),+ $(,)?) => {
         $(
             fn $method(self, value: $type) -> Result<Kind, Self::Error> {
-                Ok(Kind::Number(value as f64))
+                if !self.scan_strings && self.pointer.is_some() {
+                    Ok(Kind::Key(value.to_string()))
+                } else {
+                    Ok(Kind::Number(value as f64))
+                }
             }
         )+
     };
@@ -484,8 +552,12 @@ impl<'a> Serializer for Visitor<'a> {
         serialize_u64: u64, serialize_u128: u128, serialize_f32: f32, serialize_f64: f64,
     );
 
-    fn serialize_bool(self, _: bool) -> Result<Kind, Self::Error> {
-        Ok(Kind::Other)
+    fn serialize_bool(self, value: bool) -> Result<Kind, Self::Error> {
+        if !self.scan_strings && self.pointer.is_some() {
+            Ok(Kind::Key(value.to_string()))
+        } else {
+            Ok(Kind::Other)
+        }
     }
 
     fn serialize_char(self, value: char) -> Result<Kind, Self::Error> {
@@ -494,7 +566,9 @@ impl<'a> Serializer for Visitor<'a> {
 
     fn serialize_str(self, value: &str) -> Result<Kind, Self::Error> {
         if self.scan_strings {
-            self.found.scan_xml(value);
+            self.found.scan_xml(value, self.pointer.as_deref());
+        } else if self.pointer.is_some() {
+            return Ok(Kind::Key(value.to_owned()));
         }
         Ok(Kind::String(Symbol::from(value)))
     }
@@ -537,22 +611,26 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_newtype_variant<T: Serialize + ?Sized>(
-        self,
+        mut self,
         _: &'static str,
         _: u32,
-        _: &'static str,
+        variant: &'static str,
         value: &T,
     ) -> Result<Kind, Self::Error> {
+        self.pointer = child_pointer(self.pointer.as_deref(), variant);
         value.serialize(self)?;
         Ok(Kind::Other)
     }
 
     fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
-        Ok(Sequence(self))
+        Ok(Sequence {
+            visitor: self,
+            index: 0,
+        })
     }
 
     fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Self::Error> {
-        Ok(Sequence(self))
+        self.serialize_seq(None)
     }
 
     fn serialize_tuple_struct(
@@ -560,17 +638,18 @@ impl<'a> Serializer for Visitor<'a> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleStruct, Self::Error> {
-        Ok(Sequence(self))
+        self.serialize_seq(None)
     }
 
     fn serialize_tuple_variant(
-        self,
+        mut self,
         _: &'static str,
         _: u32,
-        _: &'static str,
+        variant: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
-        Ok(Sequence(self))
+        self.pointer = child_pointer(self.pointer.as_deref(), variant);
+        self.serialize_seq(None)
     }
 
     fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
@@ -586,12 +665,13 @@ impl<'a> Serializer for Visitor<'a> {
     }
 
     fn serialize_struct_variant(
-        self,
+        mut self,
         _: &'static str,
         _: u32,
-        _: &'static str,
+        variant: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.pointer = child_pointer(self.pointer.as_deref(), variant);
         Ok(Record::new(
             Visitor {
                 info: false,

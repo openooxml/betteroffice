@@ -124,11 +124,11 @@ function seedFixture(name: string): Uint8Array {
 const run = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
 const paragraph = (content: string) => `<w:p>${content}</w:p>`;
 
-function synthetic(rawId: number): Uint8Array {
+function synthetic(bookmarkId: number): Uint8Array {
   const plain = paragraph(run('Body text for revision edits.'));
   const retained = paragraph(
     `<w:ins w:id="7" w:author="Source">${run('Source revision')}</w:ins>` +
-    `<w:smartTag w:uri="urn:example" w:element="opaque" w:id="${rawId}">${run('Opaque text')}</w:smartTag>` +
+    `<w:bookmarkStart w:id="${bookmarkId}" w:name="SourceBookmark"/>${run('Bookmarked text')}<w:bookmarkEnd w:id="${bookmarkId}"/>` +
     '<w:commentRangeStart w:id="1"/>' + run('Commented') +
     '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>' +
     '<w:r><w:footnoteReference w:id="2"/></w:r>'

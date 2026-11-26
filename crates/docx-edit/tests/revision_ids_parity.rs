@@ -8,7 +8,7 @@ use docx_edit::save::revision_ids::{
 };
 use docx_parse::S13SaveRequest;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 struct Case {
@@ -17,6 +17,7 @@ struct Case {
     session: BTreeSet<u64>,
     wire: String,
     sites: Vec<Site>,
+    reservations: Vec<Reservation>,
     used: BTreeSet<u32>,
     max: u32,
     #[serde(rename = "outOfRange")]
@@ -27,6 +28,12 @@ struct Case {
 struct Site {
     path: String,
     placeholder: u64,
+    id: u32,
+}
+
+#[derive(Deserialize)]
+struct Reservation {
+    path: String,
     id: u32,
 }
 
@@ -55,11 +62,34 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
         .find(|site| typed_before.pointer(&site.path).is_none());
     census.dropped_site |= dropped.is_some();
 
-    let (used, max) = session_revision_id_reservations(&request, &case.session)?;
-    let reservation_mismatch = used != case.used || max != case.max;
-    census.reservation_mismatch |= reservation_mismatch;
+    let reservations = session_revision_id_reservations(&request, &case.session)?;
+    let mut ts_reservations = BTreeMap::new();
+    for reservation in &case.reservations {
+        let site = (reservation.path.clone(), reservation.id);
+        *ts_reservations.entry(site).or_insert(0) += 1;
+    }
+    let differing_reservation = ts_reservations
+        .keys()
+        .find(|&site| ts_reservations.get(site) != reservations.sites.get(site))
+        .or_else(|| {
+            reservations
+                .sites
+                .keys()
+                .find(|&site| !ts_reservations.contains_key(site))
+        });
+    let reservation_mismatch = reservations.used != case.used || reservations.max != case.max;
+    census.reservation_mismatch |= reservation_mismatch || differing_reservation.is_some();
     if let Some(site) = dropped {
         return Err(format!("site under a dropped field: {}", site.path).into());
+    }
+    if let Some(site) = differing_reservation {
+        let (path, id) = site;
+        let ts_count = ts_reservations.get(site).copied().unwrap_or_default();
+        let rust_count = reservations.sites.get(site).copied().unwrap_or_default();
+        return Err(format!(
+            "reservation at {path:?} for ID {id} differs: TypeScript {ts_count}, Rust {rust_count}"
+        )
+        .into());
     }
 
     let mut ts_ids = BTreeMap::new();
@@ -88,12 +118,12 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
     }
 
     if reservation_mismatch {
-        let only_ts = case.used.difference(&used).collect::<Vec<_>>();
-        let only_rust = used.difference(&case.used).collect::<Vec<_>>();
+        let only_ts = case.used.difference(&reservations.used).collect::<Vec<_>>();
+        let only_rust = reservations.used.difference(&case.used).collect::<Vec<_>>();
         return Err(format!(
             "reserved IDs differ: TypeScript-only {only_ts:?}, Rust-only {only_rust:?}, \
-             TypeScript max {}, Rust max {max}",
-            case.max
+             TypeScript max {}, Rust max {}",
+            case.max, reservations.max
         )
         .into());
     }
@@ -149,15 +179,77 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
 }
 
 #[test]
+fn detects_dropped_reservation_with_matching_used_ids_and_max() {
+    let placeholder = (1u64 << 53) - 1;
+    let path = "/document/content/1/content/0/propertyChanges/0";
+    let witness = format!("{path}/previousAttributes/witness");
+    let request = json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
+        "document": {"content": [
+            {"type": "rawXml", "xml": "<w:customXml w:id='40'/>"},
+            {"type": "paragraph", "content": [{
+                "type": "run",
+                "propertyChanges": [{
+                    "type": "runPropertyChange",
+                    "info": {"id": placeholder, "author": "Reviewer"},
+                    "previousAttributes": {"witness": "w:id='40'"}
+                }],
+                "content": [{"type": "text", "text": "Revised text"}]
+            }]}
+        ]}
+    });
+    let path = format!("{path}/info/id");
+    let mut wire = request.clone();
+    *wire.pointer_mut(&path).unwrap() = json!(41);
+    let case = Case {
+        document: "dropped-reservation".to_owned(),
+        request: request.to_string(),
+        session: BTreeSet::from([placeholder]),
+        wire: wire.to_string(),
+        sites: vec![Site {
+            path,
+            placeholder,
+            id: 41,
+        }],
+        reservations: vec![
+            Reservation {
+                path: "/document/content/0/xml".to_owned(),
+                id: 40,
+            },
+            Reservation {
+                path: witness.clone(),
+                id: 40,
+            },
+        ],
+        used: BTreeSet::from([40]),
+        max: 40,
+        out_of_range: BTreeSet::new(),
+    };
+    let mut census = DocumentCensus::default();
+    let error = check_case(&case, &mut census).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("reservation at {witness:?} for ID 40 differs: TypeScript 1, Rust 0")
+    );
+    assert!(census.reservation_mismatch);
+}
+
+#[test]
 #[ignore = "requires product save cases from DOCX_REVISION_IDS_DIR"]
 fn revision_ids_parity() {
-    let root = std::env::var_os("DOCX_REVISION_IDS_DIR").expect("DOCX_REVISION_IDS_DIR is not set");
     let census_only = std::env::var("DOCX_REVISION_IDS_CENSUS").is_ok_and(|mode| mode == "1");
-    let mut paths = fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    if let Some(root) = std::env::var_os("DOCX_REVISION_IDS_DIR").filter(|root| !root.is_empty()) {
+        match fs::read_dir(root) {
+            Ok(entries) => paths.extend(
+                entries
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|extension| extension == "json")),
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("reading DOCX_REVISION_IDS_DIR: {error}"),
+        }
+    }
     paths.sort();
     let count = paths.len();
     let mut docs: BTreeMap<String, DocumentCensus> = BTreeMap::new();
@@ -189,8 +281,8 @@ fn revision_ids_parity() {
         docs.len()
     )
     .unwrap();
+    assert!(count > 0, "no DOCX revision ID cases were recorded");
     if !census_only {
-        assert!(count > 0, "no DOCX revision ID cases were recorded");
         assert_eq!(failed, 0, "{failed} of {count} DOCX revision ID cases failed");
     }
 }

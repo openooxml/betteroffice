@@ -19,6 +19,10 @@ const ANNOTATIONS = new Set([
 ]);
 const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 
+function pointer(path: string[]): string {
+  return path.map((key) => '/' + key.replace(/~/g, '~0').replace(/\//g, '~1')).join('');
+}
+
 export async function recordRevisionIdCases(name: string, save: () => Promise<void>): Promise<number> {
   const current = { document: name, name: name.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 160), count: 0 };
   await recording.run(current, save);
@@ -31,18 +35,20 @@ if (out) {
 
   function inspect(tree: object) {
     const sites: Array<{ path: string[]; placeholder: number }> = [];
+    const reservations: Array<{ path: string; id: number }> = [];
     const used = new Set<number>();
     const outOfRange = new Set<string>();
     const path: string[] = [];
     let max = 0;
 
-    function note(id: unknown, raisesBase = true): void {
+    function note(id: unknown, raisesBase: boolean, site: string[]): void {
       if (typeof id !== 'number' || !Number.isInteger(id) || id < 0) return;
       if (id >= MAX_ID) {
         outOfRange.add(BigInt(id).toString());
         return;
       }
       used.add(id);
+      reservations.push({ path: pointer(site), id });
       if (raisesBase && id > max) max = id;
     }
 
@@ -60,7 +66,7 @@ if (out) {
             if (digits.length > 10 || (digits.length === 10 && digits >= '2147483648')) {
               outOfRange.add(digits);
             } else {
-              note(Number(digits));
+              note(Number(digits), true, path);
             }
           }
         }
@@ -78,16 +84,16 @@ if (out) {
       const record = value as Record<string, unknown>;
       if (typeof record.author === 'string') {
         const raisesBase = !Array.isArray(record.content);
-        note(record.id, raisesBase);
-        note(record.revisionId, raisesBase);
+        note(record.id, raisesBase, [...path, 'id']);
+        note(record.revisionId, raisesBase, [...path, 'revisionId']);
       } else if (typeof record.type === 'string' && ANNOTATIONS.has(record.type)) {
-        note(record.id, !COMMENT_MARKERS.has(record.type));
+        note(record.id, !COMMENT_MARKERS.has(record.type), [...path, 'id']);
       }
       for (const key of Object.keys(record)) child(record[key], key);
     }
 
     visit(tree);
-    return { sites, used: [...used], max, outOfRange: [...outOfRange] };
+    return { sites, reservations, used: [...used], max, outOfRange: [...outOfRange] };
   }
 
   mock.module('../../packages/docx/src/docx/sessionRevisionIds', () => ({
@@ -95,7 +101,7 @@ if (out) {
     markRevisionInfo,
     withSessionRevisionIds<T>(tree: object, write: () => T): T {
       if (!('determinism' in tree)) return withSessionRevisionIds(tree, write);
-      const { sites, used, max, outOfRange } = inspect(tree);
+      const { sites, reservations, used, max, outOfRange } = inspect(tree);
       if (!sites.length) return withSessionRevisionIds(tree, write);
 
       const request = JSON.stringify(tree);
@@ -103,13 +109,13 @@ if (out) {
       if (typeof wire !== 'string') throw new Error('S13 revision ID recording requires a JSON wire');
       const assigned: unknown = JSON.parse(wire);
       const assignedSites = sites.map(({ path, placeholder }) => {
-        const pointer = '/' + path.map((key) => key.replace(/~/g, '~0').replace(/\//g, '~1')).join('/');
+        const site = pointer(path);
         let id = assigned;
         for (const key of path) {
           id = id !== null && typeof id === 'object' ? (id as Record<string, unknown>)[key] : undefined;
         }
-        if (typeof id !== 'number') throw new Error(`missing assigned revision ID at ${pointer}`);
-        return { path: pointer, placeholder, id };
+        if (typeof id !== 'number') throw new Error(`missing assigned revision ID at ${site}`);
+        return { path: site, placeholder, id };
       });
       const session = [...new Set(sites.map(({ placeholder }) => placeholder))];
       const current = recording.getStore();
@@ -119,7 +125,7 @@ if (out) {
       mkdirSync(out, { recursive: true });
       writeFileSync(
         join(out, `${current?.name ?? 'save'}-${token}.json`),
-        JSON.stringify({ document, request, session, wire, sites: assignedSites, used, max, outOfRange })
+        JSON.stringify({ document, request, session, wire, sites: assignedSites, reservations, used, max, outOfRange })
       );
       if (current) current.count += 1;
       return wire;

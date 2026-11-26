@@ -730,8 +730,11 @@ jobs:
         env:
           DOCX_REVISION_IDS_DIR: ${{ runner.temp }}/docx-revision-ids
         run: |
-          bun test bindings/engine-parity/docx-revision-ids.test.ts
-          cargo test --locked -p betteroffice-docx-edit --test revision_ids_parity -- --ignored
+          bun_status=0
+          bun test bindings/engine-parity/docx-revision-ids.test.ts || bun_status=$?
+          cargo_status=0
+          cargo test --locked -p betteroffice-docx-edit --test revision_ids_parity -- --ignored || cargo_status=$?
+          exit $(( bun_status || cargo_status ))
 
       - name: Check generated declarations
         run: git diff --exit-code -- 'bindings/*-native/index.d.ts'
