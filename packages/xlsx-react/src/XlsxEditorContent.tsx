@@ -1284,7 +1284,7 @@ export function XlsxEditorContent({
       } catch {}
     }
     try {
-      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, (list) => paintDisplayList(ctx, list, dpr * zoom))
         ? 'settled' : 'pending';
     } catch (paintError) {
       failPaint(paintError);

@@ -41,17 +41,18 @@ export function useDefaultFonts(
       if (state.current === current) state.current = undefined;
     };
   }, [owner, decoder, defaultFonts, remote]);
-  const paintWithFonts = useCallback((displayList: DisplayList, paint: () => void): boolean => {
+  const paintWithFonts = useCallback((displayList: DisplayList, paint: (list: DisplayList) => void): boolean => {
     const current = state.current;
     if (current && current.owner == null) openingFrame.current = displayList;
     if (current?.painter) return current.painter.paint(displayList, paint);
-    paint();
+    paint(displayList);
     if (!current) return true;
     current.last = displayList;
     return false;
   }, []);
   return useMemo(() => Object.assign(paintWithFonts, {
     preload: (displayList: DisplayList, idle: () => boolean) => { state.current?.painter?.preload(displayList, idle); },
+    withScriptFonts: (displayList: DisplayList) => state.current?.painter?.withScriptFonts?.(displayList) ?? displayList,
   }), [paintWithFonts]);
 }
 
