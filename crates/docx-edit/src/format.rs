@@ -1,6 +1,7 @@
 //! Inline formatting operations.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -1124,17 +1125,29 @@ struct StoryChunk {
     attrs: Option<Box<Attrs>>,
 }
 
-fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T, merge_font: bool) -> Vec<StoryChunk> {
+fn story_chunks<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: Range<u32>,
+    merge_font: bool,
+) -> Vec<StoryChunk> {
     let mut chunks = Vec::new();
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
-        let end = offset + out_len(&diff.insert);
+        if offset >= range.end {
+            break;
+        }
+        let start = offset;
+        offset += out_len(&diff.insert);
+        if offset <= range.start {
+            continue;
+        }
         let block = matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
             .is_some_and(|kind| crate::segments::is_block_embed(&kind)));
         let pilcrow = matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn));
         chunks.push(StoryChunk {
-            start: offset,
-            end,
+            start,
+            end: offset,
             text: matches!(diff.insert, Out::Any(Any::String(_))),
             font_text: match diff.insert {
                 Out::Any(Any::String(text)) if merge_font => Some(text),
@@ -1144,7 +1157,6 @@ fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T, merge_font: bool) -> Vec<S
             pilcrow,
             attrs: diff.attributes,
         });
-        offset = end;
     }
     chunks
 }
@@ -1937,7 +1949,7 @@ impl EditingDoc {
         let mut revision_ids = Vec::new();
         let font_merge = delta.font_merge();
         if paragraphs.len() > 1 {
-            let chunks = story_chunks(story, txn, font_merge.is_some());
+            let chunks = story_chunks(story, txn, 0..story.len(txn), font_merge.is_some());
             let mut formatted = Vec::new();
             for paragraph in paragraphs {
                 let (from, to) = (
@@ -1985,7 +1997,7 @@ impl EditingDoc {
             )?;
             let unchanged = matches!(delta, RunDelta::Clear(_))
                 && !changes_units_in(
-                    &story_chunks(story, txn, false),
+                    &story_chunks(story, txn, 0..story.len(txn), false),
                     range.start,
                     range.end,
                     &attrs,
@@ -2035,7 +2047,7 @@ impl EditingDoc {
         self.prepare_table_styles(delta, child);
         let mut revision_ids = Vec::new();
         let font_merge = delta.font_merge();
-        let chunks = story_chunks(&text, txn, font_merge.is_some());
+        let chunks = story_chunks(&text, txn, 0..text.len(txn), font_merge.is_some());
         let mut formatted = Vec::new();
         for StoryParagraph {
             start,
@@ -2094,9 +2106,9 @@ impl EditingDoc {
         spans: Vec<(u32, u32, Attrs)>,
         (chunks, font_merge): (Option<&[StoryChunk]>, Option<FontMerge<'_>>),
     ) -> OpResult<Vec<String>> {
-        if spans.is_empty() {
+        let Some(&(last_at, last_len, _)) = spans.last() else {
             return Ok(Vec::new());
-        }
+        };
         if ctx.is_suggesting() {
             let mut revision_ids = Vec::new();
             for (at, len, attrs) in spans {
@@ -2113,7 +2125,12 @@ impl EditingDoc {
         };
         let owned_chunks;
         let chunks = if chunks.is_none() && spans.iter().any(|(_, _, attrs)| needs_chunks(attrs)) {
-            owned_chunks = story_chunks(story, txn, font_merge.is_some());
+            owned_chunks = story_chunks(
+                story,
+                txn,
+                spans[0].0..last_at + last_len,
+                font_merge.is_some(),
+            );
             Some(owned_chunks.as_slice())
         } else {
             chunks

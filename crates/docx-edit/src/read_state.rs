@@ -37,36 +37,41 @@ impl TriState {
 }
 
 /// Uniform-or-mixed aggregation of one attribute value across text units.
-enum ValueAgg {
+enum ValueAgg<'a> {
     /// No text unit seen yet.
     Empty,
     /// Every text unit so far agrees on this value (`None` = attribute absent).
-    Uniform(Option<Any>),
+    Uniform(Option<&'a Any>),
     Mixed,
 }
 
-impl ValueAgg {
-    fn fold(&mut self, value: Option<&Any>) {
+impl<'a> ValueAgg<'a> {
+    fn fold(&mut self, value: Option<&'a Any>) {
         // Explicit `Any::Null` is the schema's "attribute removed" marker —
         // normalize it to absent so `bold:null` text and untouched text agree.
         let value = value.filter(|value| **value != Any::Null);
         match self {
-            Self::Empty => *self = Self::Uniform(value.cloned()),
-            Self::Uniform(current) if current.as_ref() == value => {}
+            Self::Empty => *self = Self::Uniform(value),
+            Self::Uniform(current) if *current == value => {}
             Self::Uniform(_) => *self = Self::Mixed,
             Self::Mixed => {}
         }
     }
 
-    fn uniform(&self) -> Option<&Any> {
+    fn uniform(&self) -> Option<&'a Any> {
         match self {
-            Self::Uniform(value) => value.as_ref(),
+            Self::Uniform(value) => *value,
             _ => None,
         }
     }
 }
 
-fn fold_selection_font(family: &mut ValueAgg, chunk: &crate::ops::Chunk, from: u32, to: u32) {
+fn fold_selection_font<'a>(
+    family: &mut ValueAgg<'a>,
+    chunk: &'a crate::ops::Chunk,
+    from: u32,
+    to: u32,
+) {
     if matches!(family, ValueAgg::Mixed) {
         return;
     }
