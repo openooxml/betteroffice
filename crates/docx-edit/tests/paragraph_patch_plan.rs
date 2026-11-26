@@ -2054,9 +2054,8 @@ fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_ca
         r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
         r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
     );
-    let nested = |doc: &EditingDoc| {
-        let payload = doc
-            .story_segments("body")
+    let field_payload = |doc: &EditingDoc| {
+        doc.story_segments("body")
             .unwrap()
             .into_iter()
             .find_map(|segment| match segment.content {
@@ -2065,7 +2064,9 @@ fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_ca
                 }
                 _ => None,
             })
-            .unwrap();
+            .unwrap()
+    };
+    let nested = |payload: &BTreeMap<String, Any>| {
         let Any::String(data) = &payload["fieldData"] else {
             panic!("expected field data");
         };
@@ -2074,20 +2075,20 @@ fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_ca
     };
     let bytes = package(content);
     let doc = open(content);
-    let before = nested(&doc);
+    let before = nested(&field_payload(&doc));
     assert_eq!(before["instruction"], json!("REF Bookmark"));
     assert_eq!(before["fieldResult"].as_array().unwrap().len(), 2);
     doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
         .unwrap();
+    assert_insertion_patch(&doc, 1);
     let plan = doc.paragraph_save_plan();
     let part = plan
         .spliced_parts
         .iter()
         .find(|part| part.part == "word/document.xml")
         .unwrap();
-    let (saved, _) = save_planned_bytes(&plan, Some(part), &bytes, |paragraph| {
-        paragraph["content"][0]["content"][0]["text"] = json!("aXbc");
-    });
+    let (saved, warnings) = save_planned_bytes(&plan, Some(part), &bytes, |_| {});
+    assert!(warnings.is_empty(), "{warnings:?}");
     let reopened = EditingDoc::new(72);
     seed_from_docx(&reopened, &saved).unwrap();
     assert!(
@@ -2095,7 +2096,10 @@ fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_ca
             .text
             .contains("aXbc")
     );
-    let after = nested(&reopened);
+    let payload = field_payload(&reopened);
+    assert_eq!(payload["instruction"], Any::from("QUOTE"));
+    assert_eq!(payload["displayText"], Any::from("First Second"));
+    let after = nested(&payload);
     for key in ["instruction", "fieldResult", "structuredResult"] {
         assert_eq!(after[key], before[key]);
     }

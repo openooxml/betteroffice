@@ -285,7 +285,7 @@ describe('DOCX engine seeding', () => {
       quoteFieldXml(
         textRunXml('A ') +
         quoteFieldXml(textRunXml('B ') + quoteFieldXml(textRunXml('C ')) + textRunXml('D ')) +
-        quoteFieldXml(quoteFieldXml(textRunXml('Hidden ')), true) +
+        quoteFieldXml(quoteFieldXml(textRunXml('Hidden ', true))) +
         textRunXml('E')
       ),
       'A B C D E',
@@ -379,6 +379,82 @@ describe('DOCX engine seeding', () => {
         } finally {
           reopened.destroy();
         }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  const defaultCharacterVanish = '<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont"><w:rPr><w:vanish/></w:rPr></w:style>';
+
+  function fieldCachePackage(field: string, characterStyle?: string): Uint8Array<ArrayBuffer> {
+    const bytes = sequencePackage(`<w:p>${field}</w:p>`);
+    if (!characterStyle) return bytes;
+    const parts = new Map(Object.entries(unzipContainer(bytes)));
+    parts.set('word/styles.xml', toBytes(`<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${characterStyle}</w:styles>`));
+    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
+    const contentTypes = new TextDecoder().decode(parts.get('[Content_Types].xml'));
+    parts.set('[Content_Types].xml', toBytes(contentTypes.replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')));
+    return new Uint8Array(rezipPartsToArrayBuffer(parts));
+  }
+
+  it.each([
+    ['instruction', quoteFieldXml(textRunXml('Shown')).replace('<w:r><w:instrText>', '<w:r><w:rPr><w:vanish/></w:rPr><w:instrText>')],
+    ['begin', quoteFieldXml(textRunXml('Shown'), true)],
+  ])('does not hide a plain nested result run after a hidden %s run', async (_name, nested) => {
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(quoteFieldXml(nested)));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('respects the later run style when the hidden begin and first result match', async () => {
+    const nested = quoteFieldXml(textRunXml('First', true) + textRunXml('Plain'), true);
+    for (const [style, expected] of [['', 'Plain'], [defaultCharacterVanish, '']]) {
+      const bytes = fieldCachePackage(quoteFieldXml(nested), style);
+      const { engine, projected, sessions } = await seedSequenceSessions(bytes);
+      try {
+        for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual([expected]);
+      } finally {
+        for (const session of sessions) session.destroy();
+      }
+    }
+  });
+
+  it('omits hyperlink result runs owned by a simple field', async () => {
+    const link = `<w:hyperlink w:anchor="top">${textRunXml('Link', true)}</w:hyperlink>`;
+    const owner = `<w:fldSimple w:instr="QUOTE">${textRunXml('Before ')}${link}${quoteFieldXml(textRunXml('Nested'))}${textRunXml(' After')}</w:fldSimple>`;
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Before Nested After']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('inherits default character vanish for nested results and honors direct overrides', async () => {
+    const shown = '<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>';
+    const owner = quoteFieldXml(quoteFieldXml(textRunXml('Hidden') + shown));
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner, defaultCharacterVanish));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps the owner cache flag for a result made up of nested complex fields', async () => {
+    const owner = quoteFieldXml(quoteFieldXml(textRunXml('Nested')));
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner));
+    try {
+      for (const session of [engine, projected]) {
+        const fields = session.storySegments('body').filter((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field'
+        );
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({ payload: { displayText: 'Nested', hasCachedResult: false } });
       }
     } finally {
       for (const session of sessions) session.destroy();

@@ -9612,7 +9612,7 @@ mod tests {
             let inner = json!({"type":"complexField", "instruction":instruction,
                 "fieldCode":[run("HIDDEN CODE")], "fieldResult":[run("Sincerely,")]});
             let outer = json!({"type":"complexField", "instruction":instruction,
-                "fieldCode":[run("OUTER CODE")], "fieldResult":[],
+                "fieldCode":[run("OUTER CODE")], "fieldResult":[run("Before "),run(" After")],
                 "structuredResult":{"inline":[run("Before "),inner,run(" After")]}});
             let styles = StyleResolver::new(None);
             let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
@@ -9695,9 +9695,11 @@ mod tests {
     fn three_field_levels_keep_visible_result_text_in_order() {
         let deepest = quote_field(json!([run("C ")]));
         let middle = quote_field(json!([run("B "), deepest, run("D ")]));
-        let mut hidden = quote_field(json!([quote_field(json!([run("Hidden ")]))]));
+        let mut hidden = run("Hidden ");
         hidden["formatting"] = json!({"hidden":true});
-        let outer = quote_field(json!([run("A "), middle, hidden, run("E")]));
+        let hidden = quote_field(json!([quote_field(json!([hidden]))]));
+        let mut outer = quote_field(json!([run("A "), middle, hidden, run("E")]));
+        outer["fieldResult"] = json!([run("A "), run("E")]);
         let styles = StyleResolver::new(None);
         let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
         assert_eq!(payload["displayText"], json!("A B C D E"));
@@ -9766,6 +9768,102 @@ mod tests {
             panic!("expected field embed");
         };
         assert_eq!(payload["displayText"], json!("Shown"));
+    }
+
+    fn quote_field_xml(result: &str, begin_properties: &str, instruction_properties: &str) -> String {
+        format!(
+            concat!(
+                r#"<w:r>{}<w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r>{}<w:instrText> QUOTE </w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>{}"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            begin_properties, instruction_properties, result,
+        )
+    }
+
+    const VANISH: &str = "<w:rPr><w:vanish/></w:rPr>";
+    const DEFAULT_CHARACTER_VANISH: &str = concat!(
+        r#"<w:style w:type="character" w:default="1" w:styleId="DefaultParagraphFont">"#,
+        "<w:rPr><w:vanish/></w:rPr></w:style>",
+    );
+
+    fn seeded_field_payload(content: &str, character_style: &str) -> BTreeMap<String, Any> {
+        let bytes = fixture::Package::new(&fixture::para("00000001", content))
+            .styles(&format!(r#"<w:styles {}>{character_style}</w:styles>"#, fixture::NS))
+            .bytes();
+        let doc = EditingDoc::new(71);
+        seed_from_docx(&doc, &bytes).unwrap();
+        doc.story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn nested_field_instruction_formatting_does_not_hide_a_plain_result_run() {
+        let inner = quote_field_xml(&fixture::run("Shown"), "", VANISH);
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Shown"));
+    }
+
+    #[test]
+    fn nested_field_begin_formatting_does_not_hide_a_plain_result_run() {
+        let inner = quote_field_xml(&fixture::run("Shown"), VANISH, "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Shown"));
+    }
+
+    #[test]
+    fn a_matching_hidden_begin_and_first_result_respect_the_later_run_style() {
+        let result = format!("<w:r>{VANISH}<w:t>First</w:t></w:r>{}", fixture::run("Plain"));
+        let inner = quote_field_xml(&result, VANISH, "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Plain"));
+        let payload = seeded_field_payload(&owner, DEFAULT_CHARACTER_VANISH);
+        assert_eq!(payload["displayText"], Any::from(""));
+    }
+
+    #[test]
+    fn a_simple_owner_omits_its_hyperlink_result_runs() {
+        let inner = quote_field_xml(&fixture::run("Nested"), "", "");
+        let owner = format!(
+            r#"<w:fldSimple w:instr="QUOTE">{}<w:hyperlink w:anchor="top"><w:r>{VANISH}<w:t>Link</w:t></w:r></w:hyperlink>{inner}{}</w:fldSimple>"#,
+            fixture::run("Before "),
+            fixture::run(" After"),
+        );
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Before Nested After"));
+    }
+
+    #[test]
+    fn nested_results_inherit_default_character_vanish_with_direct_overrides() {
+        let result = format!(
+            r#"{}<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>"#,
+            fixture::run("Hidden"),
+        );
+        let inner = quote_field_xml(&result, "", "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, DEFAULT_CHARACTER_VANISH);
+        assert_eq!(payload["displayText"], Any::from("Shown"));
+    }
+
+    #[test]
+    fn nested_complex_results_do_not_set_the_owner_cache_flag() {
+        let inner = quote_field_xml(&fixture::run("Nested"), "", "");
+        let owner = quote_field_xml(&inner, "", "");
+        let payload = seeded_field_payload(&owner, "");
+        assert_eq!(payload["displayText"], Any::from("Nested"));
+        assert_eq!(payload["hasCachedResult"], Any::Bool(false));
     }
 
     #[test]
