@@ -18,6 +18,7 @@ const DEFAULT_FONT_MAX_ATTEMPTS = 3;
 /** @internal */
 const DEFAULT_FONT_RETRY_DELAYS_MS = [2000, 8000];
 const NASKH_FAMILIES = new Set(['simplified arabic', 'traditional arabic']);
+export const UNCOVERED_EDITOR_SCRIPTS = new Set(['arabic']);
 
 let decoderReady: Promise<unknown> = Promise.resolve();
 
@@ -364,11 +365,12 @@ export function createCommandDefaultFonts(
       const wanted = new Map<string, FontRequest>();
       for (const face of collect(slideId)) {
         const family = face.family.trim().toLowerCase();
+        const scripts = face.scripts?.filter((script) => !UNCOVERED_EDITOR_SCRIPTS.has(script));
         const naskh = NASKH_FAMILIES.has(family);
-        const preferArabic = naskh && face.scripts?.includes('arabic') === true && !families.has(family);
+        const preferArabic = naskh && scripts?.includes('arabic') === true && !families.has(family);
         const primary: FontRequest = { kind: 'primary', family: face.family, bold: face.bold, italic: face.italic, preferArabic };
         wanted.set(key(primary), primary);
-        for (const script of face.scripts ?? []) {
+        for (const script of scripts ?? []) {
           if (script === 'arabic' && preferArabic) {
             const fallback: FontRequest = { kind: 'last-resort', family: face.family, bold: face.bold, italic: face.italic };
             wanted.set(key(fallback), fallback);
