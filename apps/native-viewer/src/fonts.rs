@@ -174,10 +174,12 @@ mod docx {
                 for script in scripts.iter().filter_map(Value::as_str) {
                     match script {
                         "arabic" => {
-                            push_unique(
-                                &mut chain,
-                                pick_exact(&faces, "Noto Sans Arabic", bold, false),
-                            );
+                            if family.trim().eq_ignore_ascii_case("Noto Sans Arabic") {
+                                push_unique(
+                                    &mut chain,
+                                    pick_exact(&faces, "Noto Sans Arabic", bold, false),
+                                );
+                            }
                             push_unique(
                                 &mut chain,
                                 pick_exact(&faces, "Noto Naskh Arabic", false, false),
