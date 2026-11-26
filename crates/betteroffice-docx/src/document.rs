@@ -577,7 +577,7 @@ impl Document {
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
         if self.dirty == Dirty::ModelChanged {
-            return self.save_model_report(options, false).map(|(report, _)| report);
+            return self.save_model_report(options);
         }
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),

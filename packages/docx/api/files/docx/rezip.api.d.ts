@@ -33,8 +33,6 @@ export interface RepackResult {
 }
 /** [`repackDocx`], also returning the non-fatal save diagnostics. */
 export declare function repackDocxWithWarnings(doc: Document, options?: RepackOptions): Promise<RepackResult>;
-/** @internal */
-export declare function repackDocxModelWrite(doc: Document, options?: RepackOptions): Promise<RepackResult>;
 export declare function repackDocxFromRaw(doc: Document, rawContent: RawDocxContent, options?: RepackOptions): Promise<ArrayBuffer>;
 export declare function updateDocumentXml(originalBuffer: ArrayBuffer, newDocumentXml: string, options?: RepackOptions): Promise<ArrayBuffer>;
 export declare function updateXmlFile(originalBuffer: ArrayBuffer, path: string, content: string, options?: RepackOptions): Promise<ArrayBuffer>;

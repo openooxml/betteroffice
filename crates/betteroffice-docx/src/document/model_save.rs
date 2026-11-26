@@ -1,36 +1,13 @@
-use std::collections::HashMap;
-
 use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism, update_core_properties};
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report};
 
-use super::{Dirty, body_from_wire, save_report};
+use super::{body_from_wire, save_report};
 use crate::{Document, Result, SaveOptions, SaveReport};
 
 const CORE_PROPERTIES: &str = "docProps/core.xml";
-const MODEL_PARTS_REWRITTEN: &str = "DOCX_MODEL_PARTS_REWRITTEN";
 
 impl Document {
-    /// The save report and warnings from saving a mutably borrowed model.
-    pub fn save_report_with_warnings(&self) -> Result<(SaveReport, Vec<String>)> {
-        self.save_report_with_warnings_and_options(SaveOptions::default())
-    }
-
-    /// The save report and model-save warnings with the supplied options.
-    pub fn save_report_with_warnings_and_options(
-        &self,
-        options: SaveOptions,
-    ) -> Result<(SaveReport, Vec<String>)> {
-        if self.dirty == Dirty::ModelChanged {
-            return self.save_model_report(options, true);
-        }
-        Ok((self.save_report_with_options(options)?, Vec::new()))
-    }
-
-    pub(super) fn save_model_report(
-        &self,
-        options: SaveOptions,
-        include_warnings: bool,
-    ) -> Result<(SaveReport, Vec<String>)> {
+    pub(super) fn save_model_report(&self, options: SaveOptions) -> Result<SaveReport> {
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
@@ -44,22 +21,19 @@ impl Document {
         if self.model_matches_source(&request)
             && let Some(bytes) = self.save_unchanged_model(&request)
         {
-            return Ok((save_report(bytes, Default::default(), false), Vec::new()));
+            return Ok(SaveReport {
+                bytes,
+                kept_unchanged: None,
+                structure_dropped: None,
+                whole_model_write: false,
+            });
         }
 
         #[cfg(test)]
         super::session_save_tests::count_package_write();
-        let (bytes, mut report) =
+        let (bytes, report) =
             write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        let warnings = if include_warnings {
-            report
-                .warnings
-                .push(model_parts_rewritten_warning(&self.original_parts, &bytes));
-            std::mem::take(&mut report.warnings)
-        } else {
-            Vec::new()
-        };
-        Ok((save_report(bytes, report, true), warnings))
+        Ok(save_report(bytes, report, true))
     }
 
     fn model_matches_source(&self, request: &S13SaveRequest) -> bool {
@@ -130,27 +104,4 @@ impl Document {
         parts[index].1 = updated.as_bytes();
         ooxml_opc::rezip_parts_preserving(&parts, &self.source).ok()
     }
-}
-
-fn model_parts_rewritten_warning(original: &[(String, Vec<u8>)], output: &[u8]) -> String {
-    let parts = ooxml_opc::unzip_parts(output)
-        .ok()
-        .and_then(|written| {
-            let original: HashMap<_, _> =
-                original.iter().map(|(path, bytes)| (path, bytes)).collect();
-            let mut paths: Vec<_> = written
-                .iter()
-                .filter(|(path, bytes)| {
-                    path != CORE_PROPERTIES && original.get(path).copied() != Some(bytes)
-                })
-                .map(|(path, _)| path)
-                .collect();
-            paths.sort_unstable();
-            serde_json::to_string(&paths).ok()
-        })
-        .unwrap_or_else(|| "(part names unavailable)".to_owned());
-    format!(
-        "{MODEL_PARTS_REWRITTEN} {parts} Use createYrsSession/seedFromDocx/saveYrsDocx \
-         to keep unchanged content when editing."
-    )
 }

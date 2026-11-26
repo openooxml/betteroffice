@@ -94,26 +94,10 @@ fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOpt
         paragraph_ids: None,
     };
     let original = unzip_parts(source).unwrap();
-    let (expected, main_report) =
-        write_docx_s13_parts_with_report(request, &original, None).unwrap();
-    let (saved, warnings) = document.save_report_with_warnings_and_options(options).unwrap();
+    let (expected, _) = write_docx_s13_parts_with_report(request, &original, None).unwrap();
+    let saved = document.save_report_with_options(options).unwrap();
     assert!(saved.whole_model_write);
     assert!(saved.bytes == expected, "the save differs from the plan-less writer");
-    let before = parts(source);
-    let after = parts(&expected);
-    let rewritten: Vec<_> = after
-        .iter()
-        .filter(|(path, bytes)| path.as_str() != CORE && before.get(*path) != Some(*bytes))
-        .map(|(path, _)| path)
-        .collect();
-    assert!(!rewritten.is_empty());
-    let mut expected_warnings = main_report.warnings;
-    expected_warnings.push(format!(
-        "DOCX_MODEL_PARTS_REWRITTEN {} Use createYrsSession/seedFromDocx/saveYrsDocx \
-         to keep unchanged content when editing.",
-        serde_json::to_string(&rewritten).unwrap()
-    ));
-    assert_eq!(warnings, expected_warnings);
 }
 
 #[test]
@@ -121,10 +105,12 @@ fn a_mutably_borrowed_unchanged_model_saves_the_original_bytes() {
     let source = synthetic_package();
     let mut document = Document::open(&source).unwrap();
     document.model_mut();
-    let (saved, warnings) = document.save_report_with_warnings().unwrap();
+    assert_eq!(document.save().unwrap(), source);
+    let saved = document.save_report().unwrap();
     assert_eq!(saved.bytes, source);
     assert!(!saved.whole_model_write);
-    assert!(warnings.is_empty());
+    assert!(saved.kept_unchanged.is_none());
+    assert!(saved.structure_dropped.is_none());
 }
 
 #[test]
@@ -132,15 +118,15 @@ fn stamping_an_unchanged_model_only_updates_core_properties() {
     let source = synthetic_package();
     let mut document = Document::open(&source).unwrap();
     document.model_mut();
-    let (saved, warnings) = document
-        .save_report_with_warnings_and_options(SaveOptions {
-            now: NOW.to_owned(),
-            update_modified_date: true,
-            modified_by: Some("Fixture author".to_owned()),
-        })
-        .unwrap();
-    assert!(warnings.is_empty());
+    let options = SaveOptions {
+        now: NOW.to_owned(),
+        update_modified_date: true,
+        modified_by: Some("Fixture author".to_owned()),
+    };
+    let saved = document.save_report_with_options(options.clone()).unwrap();
     assert!(!saved.whole_model_write);
+    assert!(saved.kept_unchanged.is_none());
+    assert!(saved.structure_dropped.is_none());
     let mut expected = parts(&source);
     let updated = std::str::from_utf8(&expected[CORE])
         .unwrap()
@@ -152,10 +138,11 @@ fn stamping_an_unchanged_model_only_updates_core_properties() {
     assert_ne!(updated.as_bytes(), expected[CORE].as_slice());
     expected.insert(CORE.to_owned(), updated.into_bytes());
     assert_eq!(parts(&saved.bytes), expected);
+    assert_eq!(parts(&document.save_with_options(options).unwrap()), expected);
 }
 
 #[test]
-fn a_changed_model_uses_the_plan_less_writer_and_reports_the_rewritten_parts() {
+fn a_changed_model_reports_a_whole_model_write_matching_the_plain_writer() {
     let source = synthetic_package();
     let mut document = Document::open(&source).unwrap();
     let BlockContent::Paragraph(paragraph) = &mut document.model_mut().body.content[0] else {
@@ -231,10 +218,9 @@ fn repository_documents_save_as_source_bytes_or_write_readdressed_models() {
         .unwrap();
         let raw_content = parsed.document.package.document.content;
         if document.model_mut().body.content == raw_content {
-            let (saved, warnings) = document.save_report_with_warnings().unwrap();
+            let saved = document.save_report().unwrap();
             assert!(saved.bytes == source, "{}: bytes changed", path.display());
             assert!(!saved.whole_model_write, "{}", path.display());
-            assert!(warnings.is_empty(), "{}: {warnings:?}", path.display());
             unchanged += 1;
         } else {
             assert_whole_model_write(&source, &document, SaveOptions::default());

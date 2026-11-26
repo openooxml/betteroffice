@@ -84,8 +84,7 @@ async function repackModel(
   return result;
 }
 
-/** @internal */
-export async function repackDocxModelWrite(
+async function repackDocxModelWrite(
   doc: Document,
   options: RepackOptions = {}
 ): Promise<RepackResult> {

@@ -1,8 +1,9 @@
 /** The editor's save: the session projected with its host's metadata and comments. @internal */
 
 import { engineProgress } from '../utils/engineProgress';
-import { createDocx, repackDocxModelWrite } from '../docx/rezip';
+import { createDocx } from '../docx/rezip';
 import { injectReplyRangeMarkers, injectTCReplyRangeMarkers } from '../docx/injectReplyRangeMarkers';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Comment } from '../types/content';
 import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../types/document';
 import { editorSaveKeys } from './editorSaveKeys';
@@ -154,7 +155,7 @@ async function writeEditorDocument(
   if (session) refuseUnavailableTables(session, document);
   const original = document.originalBuffer;
   if (!original) return createDocx(document);
-  if (!session || !capture) return (await repackDocxModelWrite(document)).buffer;
+  if (!session || !capture) return (await writeDocumentWithRust(document, original)).buffer;
   const saves = record ?? sessionRecord(session);
   const source = sessionSourcePackage(session);
   const keys = editorSaveKeys(document, comments);
