@@ -10226,8 +10226,10 @@ mod tests {
             let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
                 panic!("expected paragraph");
             };
-            let [docx_layout::types::Run::Text(link), docx_layout::types::Run::Field(field)] =
-                paragraph.runs.as_slice()
+            let [
+                docx_layout::types::Run::Text(link),
+                docx_layout::types::Run::Field(field),
+            ] = paragraph.runs.as_slice()
             else {
                 panic!("expected projected link and owner field");
             };
