@@ -5,14 +5,16 @@ import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fon
 import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { paintSlide } from '../render/canvas';
 import { prepareTextFamilies } from '../render/textFamilies';
+import type { SlideDisplayList } from '../types';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';
 
 let added: string[];
 let removed: string[];
 const originals = new Map<string, PropertyDescriptor | undefined>();
 function set(key: string, value: unknown) {
-  originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+  if (!originals.has(key)) originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
   Object.defineProperty(globalThis, key, { configurable: true, value });
 }
 beforeEach(() => {
@@ -123,7 +125,7 @@ test('T12: a CDN chunk failure cools other chunks and whole-face export until th
   }
 }, 30_000);
 
-test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s keeps installed outlines and blocks whole-face fallback', async (failure) => {
+test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s draws missing glyphs in a fallback font', async (failure) => {
   const previous = getFontCdnConfiguration();
   const restore = withBrowserFontGlobals();
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
@@ -155,7 +157,8 @@ test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s keeps insta
     fail = true;
     const list = { primitives: [{ kind: 'textBox', lines: [{ runs: [{ text: first + next, fontFamily: family }] }] }] };
     const families = await prepareTextFamilies(list as never, sliced.coverage);
-    expect(families(family)).toBe(revision);
+    expect(families(family)).toBe(family);
+    expect(await sliced.coverage.prepare(family, first)).toBe(revision);
     const [chunk] = requests;
     expect(chunk).toMatch(/\/c\d+\.zst$/);
     expect(requests).toEqual([chunk!]);
@@ -191,6 +194,44 @@ test('a family that is not sliced draws under its own name without loading anyth
   const sliced = createSlicedFontFaces();
   expect(await sliced.coverage.prepare('Arial', 'text')).toBe('Arial');
   expect(added).toEqual([]);
+});
+
+test.each(['rejected', 'unavailable'] as const)('a worker with a %s FontFace still paints the text', async (failure) => {
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  set('FontFace', failure === 'unavailable' ? undefined : class {
+    async load() { throw new Error('Browser refused the face'); }
+  });
+  sliced.add(family, fakeFace(), async () => new ArrayBuffer(16));
+  await expect(sliced.coverage.prepare(family, '日')).resolves.toBe(family);
+  expect(added).toEqual([]);
+});
+
+test('a second slide paints a new glyph with the browser fallback after the slice CDN goes offline', async () => {
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  const face = fakeFace();
+  const ensure = face.ensureText.bind(face);
+  const offline = Object.assign(new Error('Offline'), { diagnostic: { reason: 'cdn-unavailable' } });
+  const whole = mock(async () => new ArrayBuffer(16));
+  sliced.add(family, face, whole);
+  const drawn: [string, string][] = [];
+  const state = { font: '', fillText: (text: string) => drawn.push([text, state.font]) };
+  const ctx = new Proxy(state, {
+    get(target, key) { return Reflect.get(target, key) ?? (() => {}); },
+  }) as unknown as CanvasRenderingContext2D;
+  const slide = (text: string): SlideDisplayList => ({
+    contractVersion: 1, width: 100, height: 50,
+    primitives: [{ kind: 'textBox', objectId: 1, x: 0, y: 0, w: 100, h: 50, anchor: 'top', paragraphs: [],
+      lines: [{ x: 0, y: 0, width: 20, height: 20, baseline: 20, start: 0, end: text.length, caretStops: [],
+        runs: [{ text, start: 0, end: text.length, fontId: 0, fontFamily: family, fontSizePx: 20,
+          x: 0, width: 20, bold: false, italic: false, underline: false, color: '#000', glyphs: [] }] }] }],
+  });
+  await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: sliced.coverage });
+  face.ensureText = async (text) => { if (text === '語') throw offline; return ensure(text); };
+  await paintSlide(ctx, slide('語'), 1, 1, { fontCoverage: sliced.coverage });
+  expect(drawn).toEqual([['日', '20px "Noto Sans JP r2"'], ['語', '20px "Noto Sans JP"']]);
+  expect(whole).not.toHaveBeenCalled();
 });
 
 test('each revision installs under its own family, only when the text needed new outlines, and old ones are removed', async () => {
@@ -535,4 +576,21 @@ test('completeExport rejects a sliced face whose strict whole-face load fails', 
     name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('Implicit CDN offline'),
   });
   expect(replaceExportFace).not.toHaveBeenCalled();
+});
+
+test('a sliced face reports whole-face CDN failures through its session', async () => {
+  const sliced = createSlicedFontFaces();
+  const failure = Object.assign(new Error('Offline'), {
+    diagnostic: { pack: 'cjk', reason: 'cdn-unavailable', detail: 'Offline' },
+  });
+  const reportCdnFailure = mock((_error: unknown) => {});
+  const whole = Object.assign(async () => new ArrayBuffer(4), {
+    slices: { loadWholeForExport: async () => { throw failure; } },
+    reportCdnFailure,
+  });
+  try {
+    sliced.add('Noto Sans JP', fakeFace(), whole);
+    await expect(sliced.whole('Noto Sans JP')).rejects.toBe(failure);
+    expect(reportCdnFailure).toHaveBeenCalledWith(failure);
+  } finally { sliced.dispose(); }
 });

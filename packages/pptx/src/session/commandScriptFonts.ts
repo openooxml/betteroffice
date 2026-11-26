@@ -36,11 +36,11 @@ function hasFamily(bytes: ArrayBuffer, family: string): boolean {
 }
 
 export async function scriptFontFace(
-  script: string, bold: boolean, italic: boolean, bytes: ArrayBuffer,
+  script: string, bold: boolean, italic: boolean, bytes: ArrayBuffer, requestedFamily?: string,
 ): Promise<DefaultFontFace | undefined> {
   const { resolveScriptFallbackFace } = await importFonts();
-  const face = resolveScriptFallbackFace(script as BundledFontScript, bold, italic)
-    ?? resolveScriptFallbackFace(script as BundledFontScript, false, false);
+  const face = resolveScriptFallbackFace(script as BundledFontScript, bold, italic, requestedFamily)
+    ?? resolveScriptFallbackFace(script as BundledFontScript, false, false, requestedFamily);
   if (!face || face.script !== script || !hasFamily(bytes, face.family)) return undefined;
   return { family: face.family, bold: face.weight === 700, italic: face.style === 'italic', bytes, kind: 'coverage' };
 }

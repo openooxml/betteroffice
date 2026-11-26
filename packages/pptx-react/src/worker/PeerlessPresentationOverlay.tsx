@@ -1,10 +1,11 @@
 import { paintSlide, sizeCanvasForSlide } from '@betteroffice/pptx';
-import type { CanvasImageResolver, SlideDisplayList } from '@betteroffice/pptx';
+import type { CanvasImageResolver, PaintFontCoverage, SlideDisplayList } from '@betteroffice/pptx';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
 
 export function PeerlessPresentationOverlay({
   frameSource,
+  fontCoverage,
   subscribeRevision = idle,
   revision = none,
   slideCount,
@@ -18,6 +19,7 @@ export function PeerlessPresentationOverlay({
   onError,
 }: {
   frameSource: (index: number) => Promise<{ frame: SlideDisplayList; resolveImage: CanvasImageResolver; release(): void }>;
+  fontCoverage?: PaintFontCoverage;
   subscribeRevision?: (listener: () => void) => () => void;
   revision?: (index: number) => string | null;
   slideCount: number;
@@ -106,7 +108,7 @@ export function PeerlessPresentationOverlay({
         );
         const dpr = window.devicePixelRatio || 1;
         sizeCanvasForSlide(buffer, frame, dpr, scale);
-        await paintSlide(context, frame, dpr, scale, { resolveImage: supplied.resolveImage });
+        await paintSlide(context, frame, dpr, scale, { resolveImage: supplied.resolveImage, fontCoverage });
         if (cancelled) return;
         sizeCanvasForSlide(canvas, frame, dpr, scale);
         canvas.getContext('2d')?.drawImage(buffer, 0, 0);
@@ -121,7 +123,7 @@ export function PeerlessPresentationOverlay({
     return () => {
       cancelled = true;
     };
-  }, [frameSource, index, slideCount, viewport, slideRevision]);
+  }, [frameSource, fontCoverage, index, slideCount, viewport, slideRevision]);
 
   return (
     <div ref={containerRef}>
