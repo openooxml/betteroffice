@@ -395,8 +395,12 @@ fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
         json!({"type": "move", "x": -4_000_000, "y": 2}),
         json!({"type": "line", "x": 8, "y": 2}),
     ];
-    render_png(&scene(geometry_path.clone()), 0, &resources)
-        .expect("the mostly off-page dash fits after clipping");
+    let accepted = render_png(&scene(geometry_path.clone()), 0, &resources);
+    assert_eq!(
+        accepted.err().as_deref(),
+        None,
+        "the mostly off-page dash fits after clipping"
+    );
 
     geometry_path.extend((1..=512).map(|step| {
         let x = if step % 2 == 0 { 8 } else { 8_184 };
