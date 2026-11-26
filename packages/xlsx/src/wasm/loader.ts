@@ -24,6 +24,7 @@ import type { InitInput } from './generated/xlsx_wasm.js';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { warnSaveWarnings, type SaveResult, type SaveWarning } from '../../../../shared/office-session/saveWarnings';
+import { cellScriptFontRequests } from '../../../../shared/office-session/xlsxScriptFonts';
 
 export const decodeFontFace: FontDecoder = async (bytes, { codec, dict, maxOutput }) => {
   await initWasm();
@@ -1574,8 +1575,12 @@ function wrapWorkbookDocument(
     }
     return json;
   });
-  pngFontReaders.set(handle, (target, options) => sheetFonts(pngDisplayList(pngEngine(),
-    resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames), options).list));
+  pngFontReaders.set(handle, (target, options) => {
+    const resolved = resolvePngTarget(target, options, parseJson<SheetInfo>(() => doc.sheetInfoJson()).sheetNames);
+    const { list } = pngDisplayList(pngEngine(), resolved, options);
+    const useBundledScriptFonts = engineKind === 'wasm' && cellScriptFontRequests(list, 'png').length > 0;
+    return useBundledScriptFonts ? [] : sheetFonts(list);
+  });
   recoveryReaders.set(handle, (throughSeq, preserveHistory) => wasmCall(() => doc.recoveryCheckpoint(throughSeq, preserveHistory)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));

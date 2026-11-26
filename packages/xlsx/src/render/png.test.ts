@@ -3,7 +3,7 @@ import * as bundled from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
 import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
-import { displayListToPng, sheetFonts } from './png';
+import { displayListToPng, sheetFontRequests, sheetFonts } from './png';
 
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
 const list = (commands: DisplayList['commands'] = [text]): DisplayList => ({ width: 120.5, height: 40, commands });
@@ -160,6 +160,14 @@ describe('text runs', () => {
       { family: 'Cambria', bold: false, italic: true },
       { family: 'Brand Sans', bold: true, italic: false },
     ]);
+  });
+
+  test('PNG font requests include the script of a number format fill character', () => {
+    expect(sheetFontRequests(list([{
+      ...text,
+      text: '42',
+      numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'ก' }] },
+    }]))).toEqual([{ font: { family: 'Brand Sans', bold: false, italic: false }, scripts: ['thai'] }]);
   });
 
   test('the export waits for the faces of text runs before painting', async () => {

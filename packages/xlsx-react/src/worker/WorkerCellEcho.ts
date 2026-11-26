@@ -22,6 +22,7 @@ export interface WorkerCellEchoRange {
 export interface WorkerCellEchoOptions {
   source: WorkerPaintSource;
   context(): CanvasRenderingContext2D | null;
+  withScriptFonts?(displayList: DisplayList): DisplayList;
   maxPatches?: number;
   maxTextLength?: number;
 }
@@ -321,7 +322,7 @@ export class WorkerCellEcho {
       context.beginPath();
       for (const rect of damaged) context.rect(rect.x, rect.y, rect.w, rect.h);
       context.clip();
-      paintDisplayList(context, displayList, scale);
+      paintDisplayList(context, this.options.withScriptFonts?.(displayList) ?? displayList, scale);
     } finally { context.restore(); }
   }
 }
