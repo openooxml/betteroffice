@@ -3866,7 +3866,12 @@ fn bootstrap_body_plan(
     let peer = EditSessionCore::new(72, host);
     peer.bootstrap_peer_with_provenance(state, metadata, Some(source.to_vec()), sidecar)
         .unwrap();
-    let plan: serde_json::Value = serde_json::from_str(&peer.paragraph_save_plan().unwrap()).unwrap();
+    session_body_plan(&peer)
+}
+
+fn session_body_plan(session: &EditSessionCore) -> serde_json::Value {
+    let plan: serde_json::Value =
+        serde_json::from_str(&session.paragraph_save_plan().unwrap()).unwrap();
     plan["splicedParts"]
         .as_array()
         .unwrap()
@@ -3874,6 +3879,93 @@ fn bootstrap_body_plan(
         .find(|part| part["part"] == "word/document.xml")
         .unwrap()
         .clone()
+}
+
+#[test]
+fn run_rewrite_batches_transfer_records_with_matching_deletion_retention() {
+    let bytes = package(&format!(
+        r#"{ADJACENT_SOURCE}</w:p><w:p w14:paraId="00000003">{ADJACENT_SOURCE}"#
+    ));
+    let seed = EditingDoc::new(71);
+    seed_from_docx_with_generation(&seed, &bytes, "run-rewrites").unwrap();
+    let paragraphs = seed.paragraphs("body").unwrap();
+    let state = seed.encode_state_as_update_v1();
+    let metadata = seed.encode_peer_metadata().unwrap();
+    let sidecar = seed.encode_edit_provenance_for_transfer(&state, None);
+    let bootstrap = |client, state: &[u8], sidecar: &[u8]| {
+        let host = Host::new(Arc::new(|| 0), Arc::new(|| 0), Arc::new(|| 0.0));
+        let session = EditSessionCore::new(client, host);
+        session
+            .bootstrap_peer_with_provenance(state, &metadata, Some(bytes.clone()), sidecar)
+            .unwrap();
+        session
+    };
+    let expected = owned_splices(&[(0, 3, 0, "ABC"), (3, 6, 3, "DEF")]);
+    let assert_patches = |part: &serde_json::Value, count| {
+        let patches: Vec<ParagraphPatchV1> =
+            serde_json::from_value(part["paragraphPatches"].clone()).unwrap();
+        assert_eq!(patches.len(), count);
+        for (ordinal, patch) in patches.iter().enumerate() {
+            assert_eq!(patch.ordinal as usize, ordinal);
+            assert_eq!(splice_summary(patch), expected);
+        }
+    };
+
+    for retain_deleted in [false, true] {
+        let owner = bootstrap(72, &state, &sidecar);
+        owner.track_undo();
+        for (index, paragraph) in paragraphs.iter().enumerate() {
+            let state = owner.encode_state();
+            let sidecar = owner.encode_edit_provenance_for_transfer(&state, None);
+            let draft = bootstrap(73 + index as u64, &state, &sidecar);
+            if retain_deleted {
+                draft.track_undo();
+            }
+            let base = draft.encode_state_vector();
+            for (from, to, old, new) in [(3, 6, "def", "DEF"), (0, 3, "abc", "ABC")] {
+                let position = |offset| json!({"paraId": paragraph.para_id, "offset": offset});
+                let request = json!({
+                    "expectVersion": draft.version(),
+                    "source": "agent",
+                    "history": "none",
+                    "steps": [{
+                        "op": "replaceText",
+                        "target": {
+                            "kind": "range", "story": "body", "view": "accepted",
+                            "start": position(from), "end": position(to),
+                        },
+                        "expect": {"text": old},
+                        "text": new,
+                    }],
+                });
+                let result: serde_json::Value =
+                    serde_json::from_str(&draft.apply_edits_json(&request.to_string()).unwrap())
+                        .unwrap();
+                assert_eq!(result["applied"], json!(true));
+            }
+            assert_patches(&session_body_plan(&draft), index + 1);
+            let update = draft.encode_diff(&base).unwrap();
+            let sidecar = draft.encode_edit_provenance_for_transfer(&update, Some(&base));
+            assert!(!sidecar.is_empty());
+            owner
+                .apply_local_update_with_provenance(&update, &sidecar)
+                .unwrap();
+            assert_eq!(owner.encode_state() == draft.encode_state(), retain_deleted);
+        }
+        let state = owner.encode_state();
+        let sidecar = owner.encode_edit_provenance_for_transfer(&state, None);
+        let part = session_body_plan(&bootstrap(75, &state, &sidecar));
+        assert_patches(&part, if retain_deleted { 2 } else { 1 });
+        if retain_deleted {
+            assert_eq!(part["legacyParagraphs"], json!([]));
+        } else {
+            assert_eq!(part["legacyParagraphs"][0]["ordinal"], json!(1));
+            assert_eq!(
+                part["legacyParagraphs"][0]["detail"],
+                json!("ambiguous: unproven edit provenance")
+            );
+        }
+    }
 }
 
 #[test]

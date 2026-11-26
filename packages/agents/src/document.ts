@@ -1430,6 +1430,8 @@ export class DocxAgentDocument {
       const release = cleanupGuard(() => draft.destroy());
       try {
         if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the batch started. Read the version again.');
+        const carryProvenance = edits.some(edit => edit.op === 'set_runs');
+        if (carryProvenance) draft.beginUndoCapture();
         const vector = draft.encodeStateVector();
         const outcomes: Array<ReturnType<EditStep>> = [];
         let resolved: Map<string, boolean> | undefined;
@@ -1488,7 +1490,7 @@ export class DocxAgentDocument {
           if (this.epoch !== version) throw new DocumentToolError('STALE_VERSION', 'The document changed while the comment export was verified. Read the version again.');
         }
         failed = undefined;
-        this.adoptDraft(draft, vector, edits.some(edit => edit.op === 'set_runs'));
+        this.adoptDraft(draft, vector, carryProvenance);
         if (resolved) this.resolvedComments = resolved;
         for (const edit of edits) if (edit.op === 'replace_comment_text') this.textEditedComments.add(edit.comment);
         if (deleted) this.deletedComments = deleted;
