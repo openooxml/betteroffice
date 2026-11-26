@@ -310,15 +310,18 @@ fn number_mutation() -> S<NumberFormatMutation> {
 }
 
 fn style_patch() -> S<StylePatch> {
-    record!(StylePatch {
-        bold: opt(any::<bool>()),
-        italic: opt(any::<bool>()),
-        strikethrough: opt(any::<bool>()),
-        font_family: opt(text()),
-        font_size: opt(finite()),
-        text_color: opt(text()),
-        fill_color: opt(text()),
-        border: opt(record!(BorderPatch {
+    (
+        (
+            opt(any::<bool>()),
+            opt(any::<bool>()),
+            opt(any::<bool>()),
+            opt(any::<bool>()),
+        ),
+        opt(text()),
+        opt(finite()),
+        opt(text()),
+        opt(text()),
+        opt(record!(BorderPatch {
             preset: opt(select(vec![
                 BorderPreset::All,
                 BorderPreset::Inner,
@@ -339,25 +342,26 @@ fn style_patch() -> S<StylePatch> {
             ])),
             color: opt(text()),
         })),
-        horizontal_alignment: opt(select(vec![
+        opt(select(vec![
             HorizontalAlignment::Left,
             HorizontalAlignment::Center,
-            HorizontalAlignment::Right
+            HorizontalAlignment::Right,
         ])),
-        vertical_alignment: opt(select(vec![
+        opt(select(vec![
             VerticalAlignment::Top,
             VerticalAlignment::Middle,
-            VerticalAlignment::Bottom
+            VerticalAlignment::Bottom,
         ])),
-        text_wrapping: opt(select(vec![
+        opt(select(vec![
             TextWrapping::Overflow,
             TextWrapping::Wrap,
-            TextWrapping::Clip
+            TextWrapping::Clip,
         ])),
-        clear: prop::collection::vec(
+        prop::collection::vec(
             select(vec![
                 StyleProperty::Bold,
                 StyleProperty::Italic,
+                StyleProperty::Underline,
                 StyleProperty::Strikethrough,
                 StyleProperty::FontFamily,
                 StyleProperty::FontSize,
@@ -366,11 +370,40 @@ fn style_patch() -> S<StylePatch> {
                 StyleProperty::Borders,
                 StyleProperty::HorizontalAlignment,
                 StyleProperty::VerticalAlignment,
-                StyleProperty::TextWrapping
+                StyleProperty::TextWrapping,
             ]),
-            0..12
+            0..12,
         ),
-    })
+    )
+        .prop_map(
+            |(
+                (bold, italic, underline, strikethrough),
+                font_family,
+                font_size,
+                text_color,
+                fill_color,
+                border,
+                horizontal_alignment,
+                vertical_alignment,
+                text_wrapping,
+                clear,
+            )| StylePatch {
+                bold,
+                italic,
+                underline,
+                strikethrough,
+                font_family,
+                font_size,
+                text_color,
+                fill_color,
+                border,
+                horizontal_alignment,
+                vertical_alignment,
+                text_wrapping,
+                clear,
+            },
+        )
+        .boxed()
 }
 
 fn anchor_cell() -> S<AnchorCell> {

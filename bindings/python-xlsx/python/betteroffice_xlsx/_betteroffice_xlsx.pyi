@@ -249,6 +249,7 @@ class Workbook:
         *,
         bold: bool | None = ...,
         italic: bool | None = ...,
+        underline: bool | None = ...,
         strikethrough: bool | None = ...,
         font_family: str | None = ...,
         font_size: float | None = ...,

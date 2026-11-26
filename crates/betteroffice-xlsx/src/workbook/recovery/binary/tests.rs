@@ -249,6 +249,7 @@ fn all_ops() -> Vec<Op> {
             patch: StylePatch {
                 bold: Some(true),
                 italic: Some(false),
+                underline: Some(true),
                 strikethrough: Some(true),
                 font_family: Some("Example".into()),
                 font_size: Some(13.5),

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use xlsx_model::{
     Alignment, Border, BorderEdge, BorderStyle, CellFormat, CellRange, Color, Fill, Font, HAlign,
-    NumberFormat, Protection, VAlign,
+    NumberFormat, Protection, RunUnderline, VAlign,
 };
 
 use crate::apply::OpError;
@@ -11,6 +11,7 @@ use crate::apply::OpError;
 pub enum StyleProperty {
     Bold,
     Italic,
+    Underline,
     Strikethrough,
     FontFamily,
     FontSize,
@@ -71,7 +72,7 @@ pub enum BorderLineStyle {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BorderPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<BorderPreset>,
@@ -82,12 +83,14 @@ pub struct BorderPatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StylePatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strikethrough: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -473,6 +476,7 @@ pub(crate) fn patch_cell_format(
         match property {
             StyleProperty::Bold => format.font.bold = false,
             StyleProperty::Italic => format.font.italic = false,
+            StyleProperty::Underline => format.font.underline = RunUnderline::None,
             StyleProperty::Strikethrough => format.font.strike = false,
             StyleProperty::FontFamily => format.font.name = None,
             StyleProperty::FontSize => format.font.size_pt = None,
@@ -492,6 +496,13 @@ pub(crate) fn patch_cell_format(
     }
     if let Some(value) = patch.italic {
         format.font.italic = value;
+    }
+    if let Some(value) = patch.underline {
+        format.font.underline = if value {
+            RunUnderline::Single
+        } else {
+            RunUnderline::None
+        };
     }
     if let Some(value) = patch.strikethrough {
         format.font.strike = value;
@@ -716,4 +727,46 @@ fn adjust_pattern_decimals(code: &str, delta: i8) -> String {
         }
     }
     chars.into_iter().collect()
+}
+
+#[cfg(test)]
+mod style_patch_tests {
+    use super::*;
+    use xlsx_model::CellRef;
+
+    #[test]
+    fn style_patch_and_border_patch_reject_unknown_fields() {
+        let err = serde_json::from_str::<StylePatch>(r#"{"bold":false,"fontSizePt":20}"#)
+            .expect_err("StylePatch must reject unknown field fontSizePt");
+        assert!(err.to_string().contains("unknown field `fontSizePt`"));
+
+        let err = serde_json::from_str::<BorderPatch>(r#"{"preset":"all","thickness":2}"#)
+            .expect_err("BorderPatch must reject unknown field thickness");
+        assert!(err.to_string().contains("unknown field `thickness`"));
+    }
+
+    #[test]
+    fn style_patch_sets_and_clears_underline() {
+        let mut format = CellFormat::default();
+        let range = CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0));
+
+        let set_patch: StylePatch =
+            serde_json::from_str(r#"{"bold":false,"fontSize":20,"underline":true}"#)
+                .expect("valid StylePatch with underline");
+        patch_cell_format(&mut format, &set_patch, range, 0, 0).expect("apply set_patch");
+        assert!(!format.font.bold);
+        assert_eq!(format.font.size_pt, Some(20.0));
+        assert_eq!(format.font.underline, RunUnderline::Single);
+
+        let clear_via_bool: StylePatch =
+            serde_json::from_str(r#"{"underline":false}"#).expect("valid underline:false");
+        patch_cell_format(&mut format, &clear_via_bool, range, 0, 0).expect("apply false");
+        assert_eq!(format.font.underline, RunUnderline::None);
+
+        format.font.underline = RunUnderline::Double;
+        let clear_via_list: StylePatch =
+            serde_json::from_str(r#"{"clear":["underline"]}"#).expect("valid clear underline");
+        patch_cell_format(&mut format, &clear_via_list, range, 0, 0).expect("apply clear");
+        assert_eq!(format.font.underline, RunUnderline::None);
+    }
 }

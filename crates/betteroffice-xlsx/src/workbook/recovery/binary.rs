@@ -150,10 +150,48 @@ impl Codec for ProposedEdit {
     }
 }
 record_codec!(ProposalGhost = 0 { sheet, row, col, old_text, new_text, alignment_value });
-record_codec!(StylePatch = 0 {
-    bold, italic, strikethrough, font_family, font_size, text_color, fill_color, border,
-    horizontal_alignment, vertical_alignment, text_wrapping, clear
-} => validate_style_patch);
+impl Codec for StylePatch {
+    fn write(&self, w: &mut Writer) {
+        w.u8(1);
+        self.bold.write(w);
+        self.italic.write(w);
+        self.strikethrough.write(w);
+        self.font_family.write(w);
+        self.font_size.write(w);
+        self.text_color.write(w);
+        self.fill_color.write(w);
+        self.border.write(w);
+        self.horizontal_alignment.write(w);
+        self.vertical_alignment.write(w);
+        self.text_wrapping.write(w);
+        self.clear.write(w);
+        self.underline.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        let tag = r.u8()?;
+        if tag > 1 {
+            return Err(SnapshotError::new("invalid recovery StylePatch"));
+        }
+        let value = Self {
+            bold: Codec::read(r)?,
+            italic: Codec::read(r)?,
+            strikethrough: Codec::read(r)?,
+            font_family: Codec::read(r)?,
+            font_size: Codec::read(r)?,
+            text_color: Codec::read(r)?,
+            fill_color: Codec::read(r)?,
+            border: Codec::read(r)?,
+            horizontal_alignment: Codec::read(r)?,
+            vertical_alignment: Codec::read(r)?,
+            text_wrapping: Codec::read(r)?,
+            clear: Codec::read(r)?,
+            underline: if tag == 1 { Codec::read(r)? } else { None },
+        };
+        validate_style_patch(&value)?;
+        Ok(value)
+    }
+}
 record_codec!(BorderPatch = 0 { preset, style, color });
 record_codec!(CapturedFormat = 0 {
     rows, columns, formats, kept, source_styles, source_formats
@@ -170,6 +208,7 @@ record_codec!(CellFormat = 0 {
 enum_codec!(StyleProperty {
     Bold = 0, Italic = 1, Strikethrough = 2, FontFamily = 3, FontSize = 4, TextColor = 5,
     FillColor = 6, Borders = 7, HorizontalAlignment = 8, VerticalAlignment = 9, TextWrapping = 10,
+    Underline = 11,
 });
 enum_codec!(HorizontalAlignment { Left = 0, Center = 1, Right = 2 });
 enum_codec!(VerticalAlignment { Top = 0, Middle = 1, Bottom = 2 });

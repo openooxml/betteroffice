@@ -200,6 +200,7 @@ export type TextWrapping = 'overflow' | 'wrap' | 'clip';
 export type StyleProperty =
   | 'bold'
   | 'italic'
+  | 'underline'
   | 'strikethrough'
   | 'fontFamily'
   | 'fontSize'
@@ -219,6 +220,7 @@ export interface BorderPatch {
 export interface RangeStylePatch {
   bold?: boolean;
   italic?: boolean;
+  underline?: boolean;
   strikethrough?: boolean;
   fontFamily?: string;
   fontSize?: number;

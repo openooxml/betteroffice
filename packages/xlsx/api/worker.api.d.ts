@@ -3660,7 +3660,7 @@ export type BorderStyle = 'solid' | 'dashed' | 'dotted' | 'double';
 export type HorizontalAlignment = 'left' | 'center' | 'right';
 export type VerticalAlignment = 'top' | 'middle' | 'bottom';
 export type TextWrapping = 'overflow' | 'wrap' | 'clip';
-export type StyleProperty = 'bold' | 'italic' | 'strikethrough' | 'fontFamily' | 'fontSize' | 'textColor' | 'fillColor' | 'borders' | 'horizontalAlignment' | 'verticalAlignment' | 'textWrapping';
+export type StyleProperty = 'bold' | 'italic' | 'underline' | 'strikethrough' | 'fontFamily' | 'fontSize' | 'textColor' | 'fillColor' | 'borders' | 'horizontalAlignment' | 'verticalAlignment' | 'textWrapping';
 export interface BorderPatch {
     preset?: BorderPreset;
     style?: BorderStyle;
@@ -3669,6 +3669,7 @@ export interface BorderPatch {
 export interface RangeStylePatch {
     bold?: boolean;
     italic?: boolean;
+    underline?: boolean;
     strikethrough?: boolean;
     fontFamily?: string;
     fontSize?: number;

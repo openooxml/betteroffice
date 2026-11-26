@@ -1401,7 +1401,7 @@ impl PyWorkbook {
     /// left as they are.
     #[pyo3(signature = (
         sheet, range, *,
-        bold = None, italic = None, strikethrough = None,
+        bold = None, italic = None, underline = None, strikethrough = None,
         font_family = None, font_size = None,
         text_color = None, fill_color = None,
         horizontal_alignment = None, vertical_alignment = None, text_wrapping = None,
@@ -1414,6 +1414,7 @@ impl PyWorkbook {
         range: &str,
         bold: Option<bool>,
         italic: Option<bool>,
+        underline: Option<bool>,
         strikethrough: Option<bool>,
         font_family: Option<String>,
         font_size: Option<f64>,
@@ -1466,6 +1467,7 @@ impl PyWorkbook {
         let patch = StylePatch {
             bold,
             italic,
+            underline,
             strikethrough,
             font_family,
             font_size,

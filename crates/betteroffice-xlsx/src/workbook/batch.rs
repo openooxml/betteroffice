@@ -497,6 +497,7 @@ fn style_claims(patch: &StylePatch) -> Vec<StyleProperty> {
     for (written, property) in [
         (patch.bold.is_some(), StyleProperty::Bold),
         (patch.italic.is_some(), StyleProperty::Italic),
+        (patch.underline.is_some(), StyleProperty::Underline),
         (patch.strikethrough.is_some(), StyleProperty::Strikethrough),
         (patch.font_family.is_some(), StyleProperty::FontFamily),
         (patch.font_size.is_some(), StyleProperty::FontSize),
