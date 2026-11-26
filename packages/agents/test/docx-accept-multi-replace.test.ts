@@ -211,6 +211,15 @@ test('export keeps a source run inside a replaced word when base preserves more'
     { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
 }, 30_000);
 
+test('export preserves a permission range inside a recorded replacement', async () => {
+  const permission = `<w:permStart w:edGrp="everyone" w:id="7"/>${run(2, 'EE')}<w:permEnd w:id="7"/>`;
+  await checkProposal([run(1, 'aK'), permission, run(3, 'Pz')], [{ query: 'aKEEPz', newText: 'bKEEPy' }],
+    paragraph => {
+      expect(paragraph).toContain(permission);
+      expect(runsOf(paragraph).map(xml => runText(xml)[0]).join('')).toBe('bKEEPy');
+    }, { tracked: false }, [['DOCX_MINIMAL_PATCH replace counts {"provenanceNet":1}']]);
+}, 30_000);
+
 test('accepts a lone recorded insertion and keeps the untouched run byte-identical', async () => {
   const untouched = run(2, ' ti').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
   await checkProposal([run(1, 'fi'), untouched], [{ query: 'fi', newText: 'fii' }],

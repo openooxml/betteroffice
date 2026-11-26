@@ -35,6 +35,7 @@ mod work {
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -184,13 +185,24 @@ pub(crate) fn patch_paragraph_v1(
 #[doc(hidden)]
 pub struct ParagraphPatchSource {
     xml: String,
-    scopes: NamespaceScopes,
+    scopes: OnceLock<NamespaceScopes>,
 }
 
 impl ParagraphPatchSource {
     pub fn new(xml: String) -> Self {
-        let scopes = NamespaceScopes::new(&xml);
-        Self { xml, scopes }
+        Self {
+            xml,
+            scopes: OnceLock::new(),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.xml
+    }
+
+    pub fn paragraph_xml(&self, start: usize) -> Option<&str> {
+        let paragraph = self.xml.get(start..)?;
+        Some(&paragraph[super::s13::element_span(paragraph, &[])?])
     }
 
     pub fn base_preserving_more_runs(
@@ -202,11 +214,15 @@ impl ParagraphPatchSource {
         if base.result_sha256 != recorded.result_sha256 {
             return None;
         }
-        let context = self.scopes.context("", start);
-        let paragraph = self.xml.get(start..)?;
-        let source = &paragraph[super::s13::element_span(paragraph, &[])?];
+        let source = self.paragraph_xml(start)?;
+        let context = self
+            .scopes
+            .get_or_init(|| NamespaceScopes::new(&self.xml))
+            .context("", start);
         let (base_xml, base) = preview(source, base, &context)?;
-        let (_, recorded) = preview(source, recorded, &context)?;
+        let Some((_, recorded)) = preview(source, recorded, &context) else {
+            return Some(base_xml);
+        };
         if base.kept.len() <= recorded.kept.len()
             || !recorded.kept.keys().all(|run| base.kept.contains_key(run))
             || base.cell_runs.len() != recorded.cell_runs.len()

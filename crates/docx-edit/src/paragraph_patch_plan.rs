@@ -21,7 +21,7 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
-    pub source_paragraph: Option<&'a dyn Fn() -> Option<String>>,
+    pub source_paragraph: Option<&'a dyn Fn() -> Option<&'a str>>,
     pub source: Option<&'a crate::identity::SourceIndex>,
     pub stale_inheritance: bool,
     pub seeded_markers: &'a [(u32, String, bool)],
@@ -629,7 +629,7 @@ fn alignment(
                 .source_paragraph
                 .and_then(|load| load())
                 .is_some_and(|source| {
-                    homogeneous_source_replacement(&source, before, shared_prefix..old_end)
+                    homogeneous_source_replacement(source, before, shared_prefix..old_end)
                 })
             {
                 return Err("ambiguous: nonunique content alignment");
@@ -2220,16 +2220,15 @@ mod tests {
             }
             let mut after = before.clone();
             after[0].content = SegmentContent::Text("Title ".to_owned());
-            let source = || {
-                let drawing = if drawing {
-                    "<w:r><w:drawing/></w:r>"
-                } else {
-                    ""
-                };
-                Some(format!(
-                    "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
-                ))
+            let drawing = if drawing {
+                "<w:r><w:drawing/></w:r>"
+            } else {
+                ""
             };
+            let xml = format!(
+                "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
+            );
+            let source = || Some(xml.as_str());
             let patch = diff_paragraph_v1(
                 &before,
                 &after,
@@ -2272,11 +2271,8 @@ mod tests {
         ] })
     }
 
-    #[test]
-    fn base_replaces_a_recorded_whole_word_only_if_the_extra_run_keeps_its_formatting() {
-        let seeded = paragraph("aKEEPz", json!({}));
-        let live = paragraph("bKEEPy", json!({}));
-        let proof = Proof {
+    fn whole_word_replacement() -> Proof {
+        Proof {
             seed_width: 6,
             live_width: 6,
             edits: vec![crate::provenance::ProvenEdit {
@@ -2286,7 +2282,14 @@ mod tests {
                 live_to: 6,
                 donor: DonorV1::At { at: 0 },
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn base_replaces_a_recorded_whole_word_only_if_the_extra_run_keeps_its_formatting() {
+        let seeded = paragraph("aKEEPz", json!({}));
+        let live = paragraph("bKEEPy", json!({}));
+        let proof = whole_word_replacement();
         let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
         let (recorded, _) =
             diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap();
@@ -2316,6 +2319,32 @@ mod tests {
                 assert_eq!(patch, recorded);
             }
         }
+    }
+
+    #[test]
+    fn base_replaces_a_recorded_edit_that_crosses_a_permission_range() {
+        let seeded = paragraph("aKEEPz", json!({}));
+        let live = paragraph("bKEEPy", json!({}));
+        let proof = whole_word_replacement();
+        let range = concat!(
+            r#"<w:permStart w:edGrp="everyone" w:id="7"/>"#,
+            "<w:r><w:t>EE</w:t></w:r>",
+            r#"<w:permEnd w:id="7"/>"#,
+        );
+        let source = ParagraphPatchSource::new(format!(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>aK</w:t></w:r>{range}<w:r><w:t>Pz</w:t></w:r></w:p>"#
+        ));
+        let (recorded, _) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap();
+        let (patch, used_base) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || Some((&source, 0)))
+                .unwrap();
+        assert!(used_base);
+        assert_eq!(patch, diff_paragraph_v1(&seeded, &live, context()).unwrap());
+        let xml = source
+            .base_preserving_more_runs(0, &patch, &recorded)
+            .unwrap();
+        assert!(xml.contains(range));
     }
 
     #[test]
