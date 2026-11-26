@@ -10,12 +10,14 @@ use xlsx_calc::lexer::{
     lex_with_range_names,
 };
 use xlsx_calc::parser::Expr;
-use xlsx_calc::{ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite, parse_formula};
+use xlsx_calc::{
+    ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite, parse_formula,
+};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
     Qualifier, is_function_call, narrowed_span, next_char_len, parse_sheet_token, qualified_target,
-    qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal, sheet_qualifiers_with_sheets,
-    skip_string,
+    qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal,
+    sheet_qualifiers_with_sheets, skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
@@ -3231,7 +3233,9 @@ mod tests {
         assert_sheet_edit_refuses(
             &workbook,
             &insert_rows(1, 0, 1),
-            &OpError::DefinedNameNotRewritable { name: "Input".into() },
+            &OpError::DefinedNameNotRewritable {
+                name: "Input".into(),
+            },
             source,
         );
     }
@@ -3947,7 +3951,10 @@ mod tests {
         let names = ["Jan", "Feb", "Mar", "Report"].map(str::to_owned);
         let op = insert_rows(1, 0, 1);
         for source in ["SUM(Jan:Mar!$A$1:$A$5)", "Feb!A1+'[1]Jan:Mar'!B1"] {
-            assert_eq!(remap_proposal_formula(source, SheetId(3), &names, &op), None);
+            assert_eq!(
+                remap_proposal_formula(source, SheetId(3), &names, &op),
+                None
+            );
         }
     }
 

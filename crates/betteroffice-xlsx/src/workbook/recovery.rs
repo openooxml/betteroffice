@@ -75,11 +75,13 @@ fn capture_history_stack(model: &WorkbookModel, stack: &[Vec<Op>]) -> Result<Vec
                 let mut cells = vec![(*sheet, *at)];
                 let mut names_changed = false;
                 batch.apply_with_inverse(op, |inverse| {
-                    if let [Op::RestoreTableColumn {
-                        formulas,
-                        defined_names,
-                        ..
-                    }] = inverse
+                    if let [
+                        Op::RestoreTableColumn {
+                            formulas,
+                            defined_names,
+                            ..
+                        },
+                    ] = inverse
                     {
                         cells.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
                         names_changed = !defined_names.is_empty();

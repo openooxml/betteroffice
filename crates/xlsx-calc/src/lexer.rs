@@ -915,7 +915,10 @@ impl Lexer<'_> {
         {
             let first = workbook_scope(first).unwrap_or(first);
             if (quoted || quoted_last)
-                && (first.is_empty() || last.is_empty() || first.contains(':') || last.contains(':'))
+                && (first.is_empty()
+                    || last.is_empty()
+                    || first.contains(':')
+                    || last.contains(':'))
             {
                 return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
             }

@@ -85,7 +85,8 @@ fn mixed_quoted_whole_row_spans_keep_excel_caches() {
         "SUM(Q1_Sales:'Q2 Sales'!$1:$5)",
         "Sheet1:'Sheet 3'!1:1",
     ] {
-        let mut workbook = Workbook::from_model(model_with_cached_formula(&sheets, source)).unwrap();
+        let mut workbook =
+            Workbook::from_model(model_with_cached_formula(&sheets, source)).unwrap();
         workbook.recalculate_all(CalculationOptions::default());
         assert_formula_and_cache(&workbook, source);
     }
@@ -138,7 +139,9 @@ fn row_edits_refuse_span_formulas_before_mutating_the_workbook() {
         ("SUM(Sheet1:Sheet3!1:2)", insert_row(5)),
     ] {
         let model = model_with_cached_formula(
-            &["Jan", "Feb", "Mar", "Data", "Sheet1", "Sheet2", "Sheet3", "Report"],
+            &[
+                "Jan", "Feb", "Mar", "Data", "Sheet1", "Sheet2", "Sheet3", "Report",
+            ],
             source,
         );
         let mut workbook = Workbook::from_model(model).unwrap();
@@ -148,7 +151,9 @@ fn row_edits_refuse_span_formulas_before_mutating_the_workbook() {
 
 #[test]
 fn all_span_quoting_and_target_combinations_keep_caches_and_refuse_inserts() {
-    let sheets = ["Sheet1", "Q1 Sales", "Sheet2", "Sheet3", "Q3 Sales", "Report"];
+    let sheets = [
+        "Sheet1", "Q1 Sales", "Sheet2", "Sheet3", "Q3 Sales", "Report",
+    ];
     for qualifier in [
         "Sheet1:Sheet3",
         "'Sheet1:Sheet3'",
