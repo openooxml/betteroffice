@@ -1206,11 +1206,9 @@ fn validate_name_formula(
     {
         return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
     }
-    parse(source)
-        .map(|_| ())
-        .map_err(|error| {
-            OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
-        })
+    parse(source).map(|_| ()).map_err(|error| {
+        OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
+    })
 }
 
 fn replace_defined_names(wb: &mut Workbook, defined_names: Vec<DefinedName>) -> Op {

@@ -1542,7 +1542,11 @@ impl Workbook {
                 .iter()
                 .all(|original| original.formula != name.formula)
             {
-                xlsx_ops::validate_defined_name_formula_in(staged, name.local_sheet, &name.formula)?;
+                xlsx_ops::validate_defined_name_formula_in(
+                    staged,
+                    name.local_sheet,
+                    &name.formula,
+                )?;
             }
         }
         if let Some(package) = &self.source_package {

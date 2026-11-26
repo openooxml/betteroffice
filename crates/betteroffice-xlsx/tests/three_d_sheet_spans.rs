@@ -230,7 +230,10 @@ fn a_scoped_name_takes_precedence_over_a_sheet_span_only_on_its_sheet() {
     let mut workbook = Workbook::from_model(model).unwrap();
     workbook.recalculate_all(CalculationOptions::default());
     assert_eq!(
-        workbook.model().sheets[1].cell(other_formula).unwrap().value,
+        workbook.model().sheets[1]
+            .cell(other_formula)
+            .unwrap()
+            .value,
         CACHE
     );
     assert_eq!(

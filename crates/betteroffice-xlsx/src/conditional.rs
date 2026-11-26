@@ -1016,7 +1016,9 @@ fn rules(model: &Workbook, sheet: SheetId, dated: bool) -> Vec<Rule> {
                 let formulas: Vec<Formula> = sources
                     .iter()
                     .map(|source| {
-                        compile(source, anchor, |text| parse_formula_for_cell(text, model, sheet))
+                        compile(source, anchor, |text| {
+                            parse_formula_for_cell(text, model, sheet)
+                        })
                     })
                     .collect();
                 let reads_volatile = formulas.iter().any(|formula| {
@@ -1633,7 +1635,10 @@ mod tests {
             "COUNTIF($A$1:$A$50000,$A$1)>1",
             "COUNTIF($A$1:$A$50000,A1&\"*\")>1",
         ] {
-            assert!(compile(source, anchor, parse_formula).counts.is_empty(), "{source}");
+            assert!(
+                compile(source, anchor, parse_formula).counts.is_empty(),
+                "{source}"
+            );
         }
     }
 
@@ -1782,14 +1787,21 @@ mod tests {
             "LARGE($B$1:$B$2,$C$1:$C$2)>0",
             "COUNTIFS($B$1:$B$2,$C$1:$C$2)>0",
         ] {
-            assert!(compile(source, anchor, parse_formula).constants.is_empty(), "{source}");
+            assert!(
+                compile(source, anchor, parse_formula).constants.is_empty(),
+                "{source}"
+            );
         }
         for source in [
             "COUNTIF($B$1:$B$2,$C$1)>0",
             "SUMIF($B$1:$B$2,\">0\",$C$1:$C$2)>0",
             "SUM($B$1:$B$2,$C$1:$C$2)>0",
         ] {
-            assert_eq!(compile(source, anchor, parse_formula).constants, [vec![0]], "{source}");
+            assert_eq!(
+                compile(source, anchor, parse_formula).constants,
+                [vec![0]],
+                "{source}"
+            );
         }
         let rule = expression_rule("A1:A2", "COUNTIF($B$1:$B$2,$C$1:$C$2)>0");
         let mismatches = disagreements(&mut Cache::default(), &model, &rule);

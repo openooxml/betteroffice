@@ -13,9 +13,9 @@ use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
 use xlsx_calc::{ColumnRange, ParseError, RowRange, TokKind, Token, lex_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::sheet_qualifier::{
-    Qualifier, is_function_call, is_path_qualifier, narrowed_span, next_char_len, parse_sheet_token,
-    qualified_target, qualifier_token, quoted_endpoints, rename_sheets, sheet_names_equal,
-    sheet_qualifiers_with_sheets, skip_string,
+    Qualifier, is_function_call, is_path_qualifier, narrowed_span, next_char_len,
+    parse_sheet_token, qualified_target, qualifier_token, quoted_endpoints, rename_sheets,
+    sheet_names_equal, sheet_qualifiers_with_sheets, skip_string,
 };
 use xlsx_model::workbook::{MAX_DEFINED_NAME_BYTES, defined_names_bytes};
 use xlsx_model::{
@@ -4013,7 +4013,10 @@ mod tests {
         }
         remap_formulas(&mut workbook, &insert_rows(0, 0, 1)).unwrap();
         for (address, _, expected) in cases {
-            assert_eq!(formula(&workbook, owner, address).as_deref(), Some(expected));
+            assert_eq!(
+                formula(&workbook, owner, address).as_deref(),
+                Some(expected)
+            );
         }
     }
 
@@ -4036,19 +4039,21 @@ mod tests {
     #[test]
     fn conditional_format_guard_reads_spaced_references_before_refusing_an_edit() {
         let mut workbook = wb(&["Data", "Report"]);
-        workbook.sheets[1].conditional_formats.push(ConditionalFormatting {
-            sqref: "B1".into(),
-            rules: vec![ConditionalFormatRule {
-                id: "rule".into(),
-                rule_type: "expression".into(),
-                operator: None,
-                formulas: vec!["Report !A1".into()],
-                priority: 1,
-                dxf_id: None,
-                format: Default::default(),
-                raw_xml: None,
-            }],
-        });
+        workbook.sheets[1]
+            .conditional_formats
+            .push(ConditionalFormatting {
+                sqref: "B1".into(),
+                rules: vec![ConditionalFormatRule {
+                    id: "rule".into(),
+                    rule_type: "expression".into(),
+                    operator: None,
+                    formulas: vec!["Report !A1".into()],
+                    priority: 1,
+                    dxf_id: None,
+                    format: Default::default(),
+                    raw_xml: None,
+                }],
+            });
         let op = insert_rows(0, 0, 1);
         assert!(crate::ensure_conditional_formats_allow_edit(&workbook, &op).is_ok());
         workbook.sheets[1].conditional_formats[0].rules[0].formulas = vec!["Data !A1".into()];

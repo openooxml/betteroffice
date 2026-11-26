@@ -787,7 +787,9 @@ impl<'a> EvalContext<'a> {
         };
         match self.parse_cache {
             Some(cache) => parse_cached(cache, formula, &is_span),
-            None => parse_with_sheet_span(formula, Some(&is_span)).ok().map(Arc::new),
+            None => parse_with_sheet_span(formula, Some(&is_span))
+                .ok()
+                .map(Arc::new),
         }
     }
 }
@@ -813,10 +815,13 @@ pub(crate) fn parse_cached(
         return Some(Arc::clone(expr));
     }
     let contextual = Cell::new(false);
-    let parsed = parse_with_sheet_span(src, Some(&|first, last| {
-        contextual.set(true);
-        is_span(first, last)
-    }));
+    let parsed = parse_with_sheet_span(
+        src,
+        Some(&|first, last| {
+            contextual.set(true);
+            is_span(first, last)
+        }),
+    );
     let expr = Arc::new(parsed.ok()?);
     if !contextual.get() {
         cache
@@ -2372,7 +2377,10 @@ mod tests {
         assert_eq!(evaluate(&parse_formula("A1").unwrap(), &context), num(7.0));
         for (source, expected) in [
             (format!(r#"INDIRECT("'{scope}'!A1")"#), ErrorValue::Ref),
-            (format!(r#"INDIRECT("'{scope}'!R1C1",FALSE)"#), ErrorValue::Ref),
+            (
+                format!(r#"INDIRECT("'{scope}'!R1C1",FALSE)"#),
+                ErrorValue::Ref,
+            ),
             ("PathTarget".into(), ErrorValue::Name),
         ] {
             assert_eq!(

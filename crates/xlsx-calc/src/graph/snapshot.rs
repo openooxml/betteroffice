@@ -443,7 +443,8 @@ impl SnapshotGraphBuilder {
                     self.last_cell = Some((at.row, at.col));
                     let key = NodeKey::new(SheetId(self.index as u32), at);
                     if let Some(source) = &cell.formula
-                        && let Some(ast) = self.graph.parse_formula(key.sheet, formula_source(source))
+                        && let Some(ast) =
+                            self.graph.parse_formula(key.sheet, formula_source(source))
                     {
                         let mut formula = Formula {
                             key,

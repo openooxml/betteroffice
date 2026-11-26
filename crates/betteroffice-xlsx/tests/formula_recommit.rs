@@ -532,7 +532,10 @@ fn defined_name_range_joins_recalculate_to_the_release_value() {
         );
         let source = package_on_sheet(sheet, &sheet_data, &workbook_tail);
         let mut workbook = Workbook::open_recalculating_stale(&source, options(), None).unwrap();
-        assert_eq!(stored(&workbook, "C1"), (Some(formula.clone()), number(30.0)));
+        assert_eq!(
+            stored(&workbook, "C1"),
+            (Some(formula.clone()), number(30.0))
+        );
         for (row, (formula, expected)) in (4..).zip(shapes) {
             assert_eq!(
                 stored(&workbook, &format!("D{row}")),
@@ -640,12 +643,19 @@ fn proposals_and_collaboration_recalculate_without_overwriting_unreadable_caches
     let baseline = right.encode_state_vector_v1();
     let proposal = propose(&mut left, &[("A1", "8"), ("B1", "=Sheet1 !A1")]);
     assert!(
-        proposal.edits.iter().any(|edit| edit.a1 == "B1" && edit.new_text == "42")
+        proposal
+            .edits
+            .iter()
+            .any(|edit| edit.a1 == "B1" && edit.new_text == "42")
     );
     assert!(
-        proposal.ghosts.iter().any(|ghost| ghost.col == 2 && ghost.new_text == "16")
+        proposal
+            .ghosts
+            .iter()
+            .any(|ghost| ghost.col == 2 && ghost.new_text == "16")
     );
-    left.accept_proposal(&proposal.id, false, options()).unwrap();
+    left.accept_proposal(&proposal.id, false, options())
+        .unwrap();
     right
         .apply_update_v1(&left.encode_diff_v1(&baseline).unwrap(), options())
         .unwrap();

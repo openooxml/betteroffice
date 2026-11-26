@@ -953,7 +953,9 @@ impl Lexer<'_> {
                     || &self.input[start..save] != first
                     || last.contains([':', '['])
                     || is_path_qualifier(&last)
-                    || self.is_sheet_span.is_none_or(|is_span| is_span(first, &last)))
+                    || self
+                        .is_sheet_span
+                        .is_none_or(|is_span| is_span(first, &last)))
             {
                 return Ok(Some(kind));
             }

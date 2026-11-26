@@ -2149,10 +2149,8 @@ mod tests {
                     ReferenceShape::OneDimensional,
                     |_, _| panic!("read a local cell for {formula}"),
                 );
-                assert!(
-                    matches!(result, Err(ParseError::UnsupportedEdit(message))
-                        if message.ends_with("is not a single same-workbook area"))
-                );
+                assert!(matches!(result, Err(ParseError::UnsupportedEdit(message))
+                        if message.ends_with("is not a single same-workbook area")));
             }
         }
     }
