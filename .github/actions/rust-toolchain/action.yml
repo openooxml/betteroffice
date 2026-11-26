@@ -10,6 +10,10 @@ inputs:
     description: Additional Rust components to install.
     required: false
     default: ''
+  override:
+    description: Use the pinned toolchain for the rest of the job, regardless of the checked-out source pin.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -18,6 +22,7 @@ runs:
       shell: bash
       env:
         RUST_TOOLCHAIN_FILE: ${{ github.action_path }}/../../../rust-toolchain.toml
+        RUST_TOOLCHAIN_OVERRIDE: ${{ inputs.override }}
       run: |
         if ! toolchain=$(sed -n \
           "s/^[[:blank:]]*channel[[:blank:]]*=[[:blank:]]*\(['\"]\)\([^'\"]*\)\1[[:space:]]*\(#.*\)\{0,1\}$/\2/p" \
@@ -26,6 +31,9 @@ runs:
           exit 1
         fi
         echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+        if [[ "$RUST_TOOLCHAIN_OVERRIDE" == 'true' ]]; then
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+        fi
 
     - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
       with:
