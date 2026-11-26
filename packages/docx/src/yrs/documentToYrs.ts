@@ -701,7 +701,7 @@ function cachedResultFragments(
           const styleId = node.formatting?.styleId;
           const style = styleResolver?.getRunStyleOwnProperties(styleId);
           const inherited = styleResolver && defaultCharacter
-            && typeof style?.hidden === 'boolean'
+            && style?.hidden === true
             && styleChainContains(styleResolver, styleId, defaultCharacter.styleId)
             ? styleFormatting
             : defaultRun;

@@ -3002,7 +3002,8 @@ fn cached_result_text(
                         let style_id = string(field(direct, "styleId"));
                         let inherited = if let (Some(styles), Some(default_id)) =
                             (styles, default_character_id)
-                            && boolean(field(styles.run_style_own(style_id), "hidden")).is_some()
+                            && boolean(field(styles.run_style_own(style_id), "hidden"))
+                                == Some(true)
                             && styles.style_chain_contains(style_id, default_id)
                         {
                             style_formatting
