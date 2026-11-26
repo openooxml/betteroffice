@@ -614,50 +614,92 @@ function chartPayload(chart: Chart): Attrs {
   }) as Attrs;
 }
 
+function flatFieldResult(field: SimpleField | ComplexField): readonly (Run | Hyperlink)[] {
+  return field.type === 'simpleField' ? field.content : field.fieldResult;
+}
+
+function fieldResultFormatting(
+  field: SimpleField | ComplexField,
+  runs: readonly ParagraphContent[] = flatFieldResult(field)
+): TextFormatting | undefined {
+  for (const child of runs) {
+    if (child?.type === 'run' && child.formatting) return child.formatting;
+  }
+  return field.type === 'complexField' ? field.formatting : undefined;
+}
+
+interface CachedResultFragment {
+  text: string;
+  hidden: boolean;
+  sourceIndex: number;
+}
+
+function cachedResultFragments(field: SimpleField | ComplexField): CachedResultFragment[] {
+  const fragments: CachedResultFragment[] = [];
+  const pending: { node: ParagraphContent; hidden: boolean; sourceIndex: number }[] = [];
+  const push = (
+    children: readonly ParagraphContent[],
+    hidden: boolean,
+    sourceIndex?: number,
+    runsOnly = false
+  ) => {
+    if (!Array.isArray(children)) return;
+    for (let index = children.length - 1; index >= 0; index--) {
+      const node = children[index];
+      if (node && (!runsOnly || node.type === 'run')) {
+        pending.push({ node, hidden, sourceIndex: sourceIndex ?? index });
+      }
+    }
+  };
+  const pushResult = (value: SimpleField | ComplexField, hidden: boolean, sourceIndex?: number) => {
+    const inline = value.structuredResult?.inline;
+    if (Array.isArray(inline)) push(inline, hidden, sourceIndex);
+    else push(flatFieldResult(value), hidden, sourceIndex, true);
+  };
+  pushResult(field, false);
+  while (pending.length > 0) {
+    const { node, hidden, sourceIndex } = pending.pop()!;
+    switch (node.type) {
+      case 'run': {
+        if (!Array.isArray(node.content)) break;
+        const runHidden = hidden || node.formatting?.hidden === true;
+        for (const content of node.content) {
+          if (content?.type === 'text' && typeof content.text === 'string') {
+            fragments.push({ text: content.text, hidden: runHidden, sourceIndex });
+          }
+        }
+        break;
+      }
+      case 'complexField':
+      case 'simpleField':
+        pushResult(node, hidden || fieldResultFormatting(node)?.hidden === true, sourceIndex);
+        break;
+      case 'inlineSdt':
+        push(node.content, hidden, sourceIndex);
+        break;
+      case 'hyperlink':
+        push(node.structuredChildren ?? node.children, hidden, sourceIndex);
+        break;
+    }
+  }
+  return fragments;
+}
+
 function fieldPayload(
   field: SimpleField | ComplexField,
-  styleFormatting?: TextFormatting
+  styleFormatting?: TextFormatting,
+  projectedResultIndexes?: ReadonlySet<number>
 ): {
   payload: Attrs;
   marks: MarkDescriptor[];
 } {
-  let displayText = '';
-  let fieldFormatting: TextFormatting | undefined;
-  const runs = field.type === 'simpleField' ? field.content : field.fieldResult;
-  for (const child of runs) {
-    if (child.type !== 'run') continue;
-    if (!fieldFormatting && child.formatting) fieldFormatting = child.formatting;
-  }
-  const pending: ParagraphContent[] = [field];
-  while (pending.length > 0) {
-    const node = pending.pop()!;
-    if (!node) continue;
-    let children: readonly ParagraphContent[] = [];
-    switch (node.type) {
-      case 'run':
-        if (!Array.isArray(node.content)) break;
-        for (const content of node.content) {
-          if (content?.type === 'text') displayText += content.text;
-        }
-        break;
-      case 'complexField':
-        children = node.structuredResult?.inline ?? node.fieldResult;
-        break;
-      case 'simpleField':
-        children = node.structuredResult?.inline ?? node.content;
-        break;
-      case 'inlineSdt':
-        children = node.content;
-        break;
-      case 'hyperlink':
-        children = node.structuredChildren ?? node.children;
-        break;
-    }
-    if (!Array.isArray(children)) continue;
-    for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
-  }
-  const formatting =
-    fieldFormatting ?? (field.type === 'complexField' ? field.formatting : undefined);
+  const displayText = cachedResultFragments(field)
+    .filter(({ hidden, sourceIndex }) => !hidden && !projectedResultIndexes?.has(sourceIndex))
+    .map(({ text }) => text)
+    .join('');
+  const formatting = projectedResultIndexes
+    ? fieldResultFormatting(field, field.structuredResult?.inline ?? [])
+    : fieldResultFormatting(field);
   const displayMode = field.fieldTree?.displayMode ?? 'result';
   return {
     payload: {
@@ -806,19 +848,20 @@ function fieldToUnits(
   projectionId: number,
   opaqueSequences: string[]
 ): InlineUnit[] {
-  const result = value.structuredResult?.inline ?? [];
-  const code = value.type === 'complexField' ? value.structuredCode?.inline ?? [] : [];
-  const projectedChildren = [
-    ...code.map((child, index) => ({ child, index: -index - 1 })),
-    ...result.map((child, index) => ({ child, index })),
-  ];
-  if (value.type !== 'complexField' || !projectedChildren.some(({ child }) => child.type === 'hyperlink' || child.type === 'simpleField')) {
+  if (value.type !== 'complexField') {
     opaqueSequences.push(...nestedSequenceNames(value));
     const field = fieldPayload(value, styleFormatting);
     return [embedUnit('field', field.payload, field.marks)];
   }
+  const result = value.structuredResult?.inline ?? [];
+  const code = value.structuredCode?.inline ?? [];
+  const projectedChildren = [
+    ...code.map((child, index) => ({ child, index: -index - 1 })),
+    ...result.map((child, index) => ({ child, index })),
+  ];
   const units: InlineUnit[] = [];
   const children: Attrs[] = [];
+  const projectedResultIndexes = new Set<number>();
   projectedChildren.forEach(({ child, index }) => {
     if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
     opaqueSequences.push(
@@ -828,25 +871,20 @@ function fieldToUnits(
     const projected = child.type === 'hyperlink'
       ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
       : [embedUnit('field', nested!.payload, nested!.marks)];
+    if (index >= 0) projectedResultIndexes.add(index);
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
       : { kind: 'embed', embedKind: unit.embedKind, payload: unit.payload, attributes: unit.attrs }) });
     for (const unit of projected) unit.attrs = { ...unit.attrs, fieldResult: { id: projectionId, index } };
     units.push(...projected);
   });
-  const visible = {
-    ...value,
-    fieldResult: result.filter((child): child is Run => child.type === 'run'),
-    structuredResult: {
-      inline: result.filter((child) => child.type !== 'hyperlink' && child.type !== 'simpleField'),
-    },
-  };
-  const field = fieldPayload(visible, styleFormatting);
-  opaqueSequences.push(
-    ...nestedSequenceNames(sequenceName(value.instruction ?? '') === undefined ? visible : value)
+  opaqueSequences.push(...nestedSequenceNames(value));
+  const field = fieldPayload(
+    value,
+    styleFormatting,
+    children.length > 0 ? projectedResultIndexes : undefined
   );
-  field.payload.fieldData = JSON.stringify(value);
-  field.payload.resultProjection = { id: projectionId, children };
+  if (children.length > 0) field.payload.resultProjection = { id: projectionId, children };
   units.push(embedUnit('field', field.payload, field.marks));
   return units;
 }

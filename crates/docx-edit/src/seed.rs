@@ -2869,22 +2869,101 @@ pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
     !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
-    let kind = string(field(Some(field_value), "type"));
-    let key = if kind == Some("simpleField") {
+fn flat_field_result(field_value: &Value) -> &[Value] {
+    let key = if string(field(Some(field_value), "type")) == Some("simpleField") {
         "content"
     } else {
         "fieldResult"
     };
     array(field(Some(field_value), key))
-        .iter()
+}
+
+fn structured_field_result(field_value: &Value) -> Option<&[Value]> {
+    field(field(Some(field_value), "structuredResult"), "inline")?
+        .as_array()
+        .map(Vec::as_slice)
+}
+
+pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
+    field_formatting_from_runs(field_value, flat_field_result(field_value))
+}
+
+fn field_formatting_from_runs<'a>(field_value: &'a Value, runs: &'a [Value]) -> Option<&'a Value> {
+    runs.iter()
         .filter(|child| string(field(Some(child), "type")) == Some("run"))
-        .find_map(|child| field(Some(child), "formatting"))
+        .find_map(|child| field(Some(child), "formatting").filter(|value| !value.is_null()))
         .or_else(|| {
-            (kind == Some("complexField"))
+            (string(field(Some(field_value), "type")) == Some("complexField"))
                 .then(|| field(Some(field_value), "formatting"))
                 .flatten()
         })
+}
+
+struct CachedResultFragment<'a> {
+    text: &'a str,
+    hidden: bool,
+    source_index: usize,
+}
+
+fn cached_result_children(field_value: &Value) -> impl DoubleEndedIterator<Item = (usize, &Value)> {
+    let structured = structured_field_result(field_value);
+    structured
+        .unwrap_or_else(|| flat_field_result(field_value))
+        .iter()
+        .enumerate()
+        .filter(move |(_, child)| {
+            structured.is_some() || string(field(Some(child), "type")) == Some("run")
+        })
+}
+
+fn cached_result_fragments(field_value: &Value) -> Vec<CachedResultFragment<'_>> {
+    let mut fragments = Vec::new();
+    let mut pending: Vec<_> = cached_result_children(field_value)
+        .rev()
+        .map(|(index, child)| (child, false, index))
+        .collect();
+    while let Some((node, hidden, source_index)) = pending.pop() {
+        let children = match string(field(Some(node), "type")) {
+            Some("run") => {
+                let hidden =
+                    hidden || boolean(field(field(Some(node), "formatting"), "hidden")) == Some(true);
+                for content in array(field(Some(node), "content")) {
+                    if string(field(Some(content), "type")) == Some("text")
+                        && let Some(text) = string(field(Some(content), "text"))
+                    {
+                        fragments.push(CachedResultFragment {
+                            text,
+                            hidden,
+                            source_index,
+                        });
+                    }
+                }
+                continue;
+            }
+            Some("complexField" | "simpleField") => {
+                let hidden =
+                    hidden || boolean(field(field_result_formatting(node), "hidden")) == Some(true);
+                pending.extend(
+                    cached_result_children(node)
+                        .rev()
+                        .map(|(_, child)| (child, hidden, source_index)),
+                );
+                continue;
+            }
+            Some("inlineSdt") => field(Some(node), "content"),
+            Some("hyperlink") => field(Some(node), "structuredChildren")
+                .filter(|value| !value.is_null())
+                .or_else(|| field(Some(node), "children")),
+            _ => None,
+        };
+        pending.extend(
+            array(children)
+                .iter()
+                .rev()
+                .map(|child| (child, hidden, source_index)),
+        );
+    }
+    fragments
 }
 
 fn field_payload(
@@ -2892,33 +2971,30 @@ fn field_payload(
     style_formatting: Option<&Value>,
     source: &BTreeMap<String, String>,
 ) -> (JsonObject, Vec<Mark>) {
+    field_payload_with_projection(field_value, style_formatting, source, None)
+}
+
+fn field_payload_with_projection(
+    field_value: &Value,
+    style_formatting: Option<&Value>,
+    source: &BTreeMap<String, String>,
+    projected_result_indexes: Option<&HashSet<usize>>,
+) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
-    let mut display_text = String::new();
-    let mut pending = vec![field_value];
-    while let Some(node) = pending.pop() {
-        let children = match string(field(Some(node), "type")) {
-            Some("run") => {
-                for content in array(field(Some(node), "content")) {
-                    if string(field(Some(content), "type")) == Some("text") {
-                        display_text
-                            .push_str(string(field(Some(content), "text")).unwrap_or_default());
-                    }
-                }
-                None
-            }
-            Some("complexField") => field(field(Some(node), "structuredResult"), "inline")
-                .or_else(|| field(Some(node), "fieldResult")),
-            Some("simpleField") => field(field(Some(node), "structuredResult"), "inline")
-                .or_else(|| field(Some(node), "content")),
-            Some("inlineSdt") => field(Some(node), "content"),
-            Some("hyperlink") => {
-                field(Some(node), "structuredChildren").or_else(|| field(Some(node), "children"))
-            }
-            _ => None,
-        };
-        pending.extend(array(children).iter().rev());
-    }
-    let formatting = field_result_formatting(field_value);
+    let display_text: String = cached_result_fragments(field_value)
+        .into_iter()
+        .filter(|fragment| {
+            !fragment.hidden
+                && projected_result_indexes
+                    .is_none_or(|indexes| !indexes.contains(&fragment.source_index))
+        })
+        .map(|fragment| fragment.text)
+        .collect();
+    let formatting = if projected_result_indexes.is_some() {
+        field_formatting_from_runs(field_value, structured_field_result(field_value).unwrap_or(&[]))
+    } else {
+        field_result_formatting(field_value)
+    };
     let merged = merge_text_formatting(style_formatting, formatting);
     (
         map_from_value(json!({
@@ -3480,9 +3556,16 @@ fn field_to_units(
     projection_id: usize,
     opaque_sequences: &mut Vec<String>,
 ) -> Vec<InlineUnit> {
-    let result = array(field(field(Some(value), "structuredResult"), "inline"));
+    if numeric_field_instruction(string(field(Some(value), "instruction")).unwrap_or_default())
+        || string(field(Some(value), "type")) != Some("complexField")
+    {
+        opaque_sequences.extend(nested_sequence_names(value));
+        let (payload, marks) = field_payload(value, style_formatting, source);
+        return vec![embed_unit("field", payload, &marks, 1)];
+    }
+    let result = structured_field_result(value).unwrap_or(&[]);
     let code = array(field(field(Some(value), "structuredCode"), "inline"));
-    let projected_children: Vec<_> = code
+    let projected_children = code
         .iter()
         .enumerate()
         .map(|(index, child)| (-(index as isize) - 1, child))
@@ -3491,23 +3574,10 @@ fn field_to_units(
                 .iter()
                 .enumerate()
                 .map(|(index, child)| (index as isize, child)),
-        )
-        .collect();
-    if numeric_field_instruction(string(field(Some(value), "instruction")).unwrap_or_default())
-        || string(field(Some(value), "type")) != Some("complexField")
-        || !projected_children.iter().any(|(_, child)| {
-            matches!(
-                string(field(Some(child), "type")),
-                Some("hyperlink" | "simpleField")
-            )
-        })
-    {
-        opaque_sequences.extend(nested_sequence_names(value));
-        let (payload, marks) = field_payload(value, style_formatting, source);
-        return vec![embed_unit("field", payload, &marks, 1)];
-    }
+        );
     let mut units = Vec::new();
     let mut children = Vec::new();
+    let mut projected_result_indexes = HashSet::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
             Some("hyperlink") => {
@@ -3528,6 +3598,9 @@ fn field_to_units(
             }
             _ => continue,
         };
+        if let Ok(index) = usize::try_from(index) {
+            projected_result_indexes.insert(index);
+        }
         let items: Vec<Value> = projected.iter().map(|unit| match &unit.content {
             UnitContent::Text(text) => json!({"kind":"text", "text":text, "attributes":unit.attrs}),
             UnitContent::Embed {kind, payload} => json!({"kind":"embed", "embedKind":kind, "payload":payload, "attributes":unit.attrs}),
@@ -3541,37 +3614,19 @@ fn field_to_units(
         }
         units.extend(projected);
     }
-    let mut visible = value.clone();
-    visible["fieldResult"] = Value::Array(
-        result
-            .iter()
-            .filter(|child| {
-                !matches!(
-                    string(field(Some(child), "type")),
-                    Some("hyperlink" | "simpleField")
-                )
-            })
-            .cloned()
-            .collect(),
+    opaque_sequences.extend(nested_sequence_names(value));
+    let (mut payload, marks) = field_payload_with_projection(
+        value,
+        style_formatting,
+        source,
+        (!children.is_empty()).then_some(&projected_result_indexes),
     );
-    visible["structuredResult"] = json!({"inline": visible["fieldResult"]});
-    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
-    let sequence_owner = string(field(Some(value), "instruction"))
-        .and_then(docx_layout::sequence_fields::sequence_name)
-        .is_some();
-    opaque_sequences.extend(nested_sequence_names(if sequence_owner {
-        value
-    } else {
-        &visible
-    }));
-    payload.insert(
-        "fieldData".to_owned(),
-        Value::String(source_json(value, source)),
-    );
-    payload.insert(
-        "resultProjection".to_owned(),
-        json!({"id":projection_id, "children":children}),
-    );
+    if !children.is_empty() {
+        payload.insert(
+            "resultProjection".to_owned(),
+            json!({"id":projection_id, "children":children}),
+        );
+    }
     units.push(embed_unit("field", payload, &marks, 1));
     units
 }
