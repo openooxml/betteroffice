@@ -503,7 +503,6 @@ pub(crate) fn patch_cell_format(
             ));
         }
         format.font.name = Some(value.clone());
-        format.font.scheme = None;
     }
     if let Some(value) = patch.font_size {
         if !value.is_finite() || !(1.0..=400.0).contains(&value) {

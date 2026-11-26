@@ -254,6 +254,7 @@ fn xml_key(bytes: &[u8]) -> Vec<u8> {
 fn patch_font(source: &[u8], base: &Font, font: &Font) -> Result<Vec<u8>, ParseError> {
     let template = XmlTemplate::capture(source)?;
     let generated = XmlTemplate::capture(&fragment(|writer| write_font(writer, font))?)?;
+    let name_changed = base.name != font.name;
     let changes = [
         ("b", base.bold != font.bold),
         ("i", base.italic != font.italic),
@@ -261,8 +262,8 @@ fn patch_font(source: &[u8], base: &Font, font: &Font) -> Result<Vec<u8>, ParseE
         ("strike", base.strike != font.strike),
         ("sz", base.size_pt != font.size_pt),
         ("color", base.color != font.color),
-        ("name", base.name != font.name),
-        ("scheme", base.scheme != font.scheme),
+        ("name", name_changed),
+        ("scheme", name_changed),
     ];
     template.render(
         changes

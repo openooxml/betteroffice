@@ -4426,15 +4426,6 @@ fn write_font(w: &mut Writer<Vec<u8>>, font: &Font) -> io::Result<()> {
                 .with_attribute(crate::xml::xstring_attribute("val", name))
                 .write_empty()?;
         }
-        if let Some(scheme) = font.scheme {
-            let val = match scheme {
-                xlsx_model::styles::FontScheme::Major => "major",
-                xlsx_model::styles::FontScheme::Minor => "minor",
-            };
-            w.create_element("scheme")
-                .with_attribute(("val", val))
-                .write_empty()?;
-        }
         Ok(())
     })?;
     Ok(())

@@ -435,10 +435,6 @@ impl JsonWindow<'_> {
             .unwrap_or(&default.border);
         self.raw(b"{\"font\":{\"name\":")?;
         self.optional_string(font.name.as_deref())?;
-        if let Some(scheme) = font.scheme {
-            self.raw(b",\"scheme\":")?;
-            self.small(&scheme)?;
-        }
         self.raw(b",\"size_pt\":")?;
         self.small(&font.size_pt)?;
         for (key, value) in [
