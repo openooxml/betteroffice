@@ -312,6 +312,21 @@ fn save_planned(
     bytes: &[u8],
     edit_model: impl FnOnce(&mut serde_json::Value),
 ) -> (String, Vec<String>) {
+    let (saved, warnings) = save_planned_bytes(plan, part, bytes, edit_model);
+    let (_, xml) = ooxml_opc::unzip_parts(&saved)
+        .unwrap()
+        .into_iter()
+        .find(|(path, _)| path == "word/document.xml")
+        .unwrap();
+    (String::from_utf8(xml).unwrap(), warnings)
+}
+
+fn save_planned_bytes(
+    plan: &docx_edit::ParagraphSavePlan,
+    part: Option<&docx_edit::SplicedPart>,
+    bytes: &[u8],
+    edit_model: impl FnOnce(&mut serde_json::Value),
+) -> (Vec<u8>, Vec<String>) {
     let package = docx_parse::parse_docx_s9_wire(
         bytes,
         docx_parse::S9ParseOptions {
@@ -353,12 +368,7 @@ fn save_planned(
             .1
     };
     assert_eq!(styles(&saved), styles(bytes));
-    let (_, xml) = ooxml_opc::unzip_parts(&saved)
-        .unwrap()
-        .into_iter()
-        .find(|(path, _)| path == "word/document.xml")
-        .unwrap();
-    (String::from_utf8(xml).unwrap(), warnings)
+    (saved, warnings)
 }
 
 fn replace(doc: &EditingDoc, from: u32, to: u32, value: &str) {
@@ -2028,6 +2038,63 @@ fn typing_outside_a_nested_field_keeps_both_fields() {
         );
     }
     assert_field_result_kept(&saved, "7", 2);
+}
+
+#[test]
+fn reopening_after_typing_beside_a_nested_field_preserves_its_instruction_and_cached_runs() {
+    let content = concat!(
+        r#"<w:r><w:t>abc</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> REF Bookmark </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:t xml:space="preserve">First </w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+    );
+    let nested = |doc: &EditingDoc| {
+        let payload = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                docx_edit::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let Any::String(data) = &payload["fieldData"] else {
+            panic!("expected field data");
+        };
+        let field: serde_json::Value = serde_json::from_str(data).unwrap();
+        field["structuredResult"]["inline"][0].clone()
+    };
+    let bytes = package(content);
+    let doc = open(content);
+    let before = nested(&doc);
+    assert_eq!(before["instruction"], json!("REF Bookmark"));
+    assert_eq!(before["fieldResult"].as_array().unwrap().len(), 2);
+    doc.insert_text(&ctx(), Position::new("body", 1), "X", FormatPolicy::Inherit)
+        .unwrap();
+    let plan = doc.paragraph_save_plan();
+    let part = plan
+        .spliced_parts
+        .iter()
+        .find(|part| part.part == "word/document.xml")
+        .unwrap();
+    let (saved, _) = save_planned_bytes(&plan, Some(part), &bytes, |paragraph| {
+        paragraph["content"][0]["content"][0]["text"] = json!("aXbc");
+    });
+    let reopened = EditingDoc::new(72);
+    seed_from_docx(&reopened, &saved).unwrap();
+    assert!(reopened.paragraphs("body").unwrap()[0].text.contains("aXbc"));
+    let after = nested(&reopened);
+    for key in ["instruction", "fieldResult", "structuredResult"] {
+        assert_eq!(after[key], before[key]);
+    }
 }
 
 #[test]

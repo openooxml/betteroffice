@@ -300,6 +300,91 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it('retains hidden cached text and its mark on a top-level field', async () => {
+    const bytes = sequencePackage(`<w:p>${quoteFieldXml(textRunXml('Hidden', true))}</w:p>`);
+    const { engine, projected, sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of [engine, projected]) {
+        const fields = session.storySegments('body').filter((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field'
+        );
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({ attributes: { hidden: true } });
+        expect(fields[0]).toMatchObject({ payload: { displayText: 'Hidden', hasCachedResult: true } });
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps a visible nested run after a hidden first run', async () => {
+    const nested = quoteFieldXml(textRunXml('x', true) + textRunXml('Shown'));
+    const bytes = sequencePackage(`<w:p>${quoteFieldXml(nested)}</w:p>`);
+    const { engine, projected, sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('honors nested character style vanish and direct overrides', async () => {
+    const style = '<w:rStyle w:val="Concealed"/>';
+    const hidden = `<w:r><w:rPr>${style}</w:rPr><w:t>Hidden</w:t></w:r>`;
+    const shown = `<w:r><w:rPr>${style}<w:vanish w:val="0"/></w:rPr><w:t>Shown</w:t></w:r>`;
+    const body = `<w:p>${quoteFieldXml(quoteFieldXml(hidden + shown))}</w:p>`;
+    const parts = new Map(Object.entries(unzipContainer(sequencePackage(body))));
+    parts.set('word/styles.xml', toBytes('<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="character" w:styleId="Concealed"><w:rPr><w:vanish/></w:rPr></w:style></w:styles>'));
+    parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
+    const contentTypes = new TextDecoder().decode(parts.get('[Content_Types].xml'));
+    parts.set('[Content_Types].xml', toBytes(contentTypes.replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')));
+    const { engine, projected, sessions } = await seedSequenceSessions(new Uint8Array(rezipPartsToArrayBuffer(parts)));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual(['Shown']);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('preserves nested complex field instructions and cached run order after saving beside the field', async () => {
+    const cached = textRunXml('First ') + '<w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r>';
+    const nested = quoteFieldXml(cached).replace(' QUOTE ', ' REF Bookmark ');
+    const bytes = sequencePackage(`<w:p>${textRunXml('abc')}${quoteFieldXml(nested)}</w:p>`);
+    const nestedField = (document: Document) => {
+      const paragraph = document.package.document.content[0] as { content: ParagraphContent[] };
+      const owner = paragraph.content.find((child) => child.type === 'complexField');
+      return owner?.structuredResult?.inline?.find((child) => child.type === 'complexField');
+    };
+    const before = nestedField(await parseDocx(bytes.buffer, { preloadFonts: false }));
+    expect(before?.instruction).toBe('REF Bookmark');
+    expect(before?.fieldResult).toHaveLength(2);
+    const { engine, hydrated, sessions } = await seedSequenceSessions(bytes, (session) => {
+      const { paraId } = session.paragraphs('body')[0]!;
+      session.insertText({ story: 'body', paraId, offset: 1 }, 'X');
+    });
+    try {
+      for (const session of [engine, hydrated]) {
+        const saved = await saveYrsDocx(session);
+        const savedBytes = Uint8Array.from(saved.bytes);
+        const document = await parseDocx(savedBytes.buffer, { preloadFonts: false });
+        const after = nestedField(document);
+        expect(after?.instruction).toBe(before?.instruction);
+        expect(after?.fieldResult).toEqual(before?.fieldResult);
+        expect(after?.structuredResult?.inline).toEqual(before?.structuredResult?.inline);
+        const reopened = await createYrsSession({ clientId: 47036 });
+        try {
+          reopened.seedFromDocx(savedBytes);
+          expect(reopened.paragraphs('body')[0]?.text).toContain('aXbc');
+          expect(fieldDisplayTexts(reopened)).toEqual(['First Second']);
+        } finally {
+          reopened.destroy();
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
   it('seeds nested SEQ names without adding them to plain fields', async () => {
     const sequence = (cached: string): ComplexField => ({
       type: 'complexField',

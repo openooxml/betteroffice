@@ -9672,6 +9672,63 @@ mod tests {
     }
 
     #[test]
+    fn a_top_level_field_retains_its_hidden_cached_text_and_mark() {
+        let mut hidden = run("Hidden");
+        hidden["formatting"] = json!({"hidden":true});
+        let mut owner = quote_field(json!([hidden]));
+        owner["fieldResult"] = json!([hidden]);
+        let styles = StyleResolver::new(None);
+        let units =
+            paragraph_units(&json!({"content":[owner]}), &styles, None, &BTreeMap::new()).units;
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("expected field embed");
+        };
+        assert_eq!(units[0].attrs["hidden"], json!(true));
+        assert_eq!(payload["displayText"], json!("Hidden"));
+        assert_eq!(payload["hasCachedResult"], json!(true));
+    }
+
+    #[test]
+    fn a_hidden_first_nested_run_does_not_hide_the_next_run() {
+        let mut hidden = run("x");
+        hidden["formatting"] = json!({"hidden":true});
+        let result = json!([hidden, run("Shown")]);
+        let mut inner = quote_field(result.clone());
+        inner["fieldResult"] = result;
+        inner["formatting"] = hidden["formatting"].clone();
+        let styles = StyleResolver::new(None);
+        let owner = quote_field(json!([inner]));
+        let units =
+            paragraph_units(&json!({"content":[owner]}), &styles, None, &BTreeMap::new()).units;
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("expected field embed");
+        };
+        assert_eq!(payload["displayText"], json!("Shown"));
+    }
+
+    #[test]
+    fn a_nested_run_respects_character_style_vanish_and_direct_overrides() {
+        let mut hidden = run("Hidden");
+        hidden["formatting"] = json!({"styleId":"Concealed"});
+        let mut shown = run("Shown");
+        shown["formatting"] = json!({"styleId":"Concealed", "hidden":false});
+        let result = json!([hidden, shown]);
+        let mut inner = quote_field(result.clone());
+        inner["fieldResult"] = result;
+        inner["formatting"] = hidden["formatting"].clone();
+        let owner = quote_field(json!([inner]));
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"type":"character", "styleId":"Concealed", "rPr":{"hidden":true}}]}),
+        ));
+        let units =
+            paragraph_units(&json!({"content":[owner]}), &styles, None, &BTreeMap::new()).units;
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("expected field embed");
+        };
+        assert_eq!(payload["displayText"], json!("Shown"));
+    }
+
+    #[test]
     fn next_paragraph_style_follows_w_next_to_another_paragraph_style() {
         let styles = StyleResolver::new(Some(&json!({"styles":[
             {"type":"paragraph","styleId":"Normal","default":true,"next":"Normal"},
