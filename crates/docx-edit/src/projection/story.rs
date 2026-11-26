@@ -144,7 +144,9 @@ pub(super) fn project(
                     && let Ok(offset) = u32::try_from(offset)
                     && let Some(&owner) = relocated_breaks.get(&offset)
                 {
-                    story.result.defer(ProjectionFamily::Fields, kind, id, Some(owner));
+                    story
+                        .result
+                        .defer(ProjectionFamily::Fields, kind, id, Some(owner));
                     continue;
                 }
                 items.push(PlacedSegment {

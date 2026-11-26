@@ -86,7 +86,10 @@ impl<'a> AuthoredRuns<'a> {
                 .as_ref(),
         )?;
         let mark = if source.is_none() && boundaries.is_none() {
-            let original = attrs.get("_originalFormatting").map(json_value).transpose()?;
+            let original = attrs
+                .get("_originalFormatting")
+                .map(json_value)
+                .transpose()?;
             let mark = original
                 .as_ref()
                 .and_then(|value| value.get("runProperties"))
