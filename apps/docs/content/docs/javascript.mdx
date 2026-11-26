@@ -89,7 +89,8 @@ parts outside the editor inside `<DocxCommandProvider commands={commands}>`, wit
 `commands` captured from the ref (it may be `null` until the editor mounts).
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
 viewing and suggesting restrictions. `EditorToolbar.Review` also includes comments
-and tracked-change controls.
+and tracked-change controls, and `EditorToolbar.InsertMenu` the menu bar's Insert
+menu.
 A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
 availability again after preceding input, resolving to `{ ok: true, status }`

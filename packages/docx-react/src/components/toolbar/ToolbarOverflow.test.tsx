@@ -812,4 +812,23 @@ describe('overflow coverage', () => {
       ordered: true,
     });
   });
+
+  test('the Insert menu moves into More with its submenus', async () => {
+    const harness = mountDefault(<EditorToolbar.InsertMenu />);
+    const tree = menuTree(openWithKeyboard());
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    expect(labels(find(tree, ['Insert']))).toEqual(['Image', 'Table', 'Break', 'Watermark']);
+    expect(labels(find(tree, ['Insert', 'Break']))).toEqual([
+      'Page break',
+      'Section break (next page)',
+      'Section break (continuous)',
+    ]);
+    choose(['Insert', 'Table', 'Rows: 2', '3 x 2 Table']);
+    await act(async () => {});
+    expect(harness.calls.at(-1)).toEqual({
+      id: 'insertTable',
+      args: { rows: 2, columns: 3 },
+      ordered: true,
+    });
+  });
 });
