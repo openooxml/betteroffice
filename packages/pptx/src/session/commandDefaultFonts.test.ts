@@ -141,6 +141,41 @@ test('coverage prefetch without scripts loads nothing', async () => {
   expect(imported).not.toHaveBeenCalled();
 });
 
+test('coverage prefetch for disabled Arabic loads nothing', async () => {
+  const load = mock(async () => bytes);
+  const { imported, resolveScriptFallback } = provider(() => undefined, (script) => script === 'arabic' ? load : undefined);
+  prefetchCoverageFaces(['arabic'], Promise.resolve(), () => commandFontProvider.load());
+  await sleep(0);
+  expect(imported).not.toHaveBeenCalled();
+  expect(resolveScriptFallback).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
+});
+
+test('disabled Arabic coverage emits no CDN diagnostics or retries', async () => {
+  const advance = retryClock();
+  const diagnostics = packDiagnostics();
+  const loadArabic = mock(async () => { throw implicitFontFailure('latin', new Error('Offline')); });
+  const loadJapanese = mock(async () => bytes);
+  const { resolveScriptFallback } = provider(() => undefined, (script) =>
+    script === 'arabic' ? loadArabic : script === 'cjk-jp' ? loadJapanese : undefined);
+  let source: ReturnType<typeof commandFontProvider.load> | undefined;
+  const shared = () => (source ??= commandFontProvider.load());
+  const manager = createCommandDefaultFonts([regular], () => [{ ...regular, scripts: ['arabic'] }],
+    () => {}, () => {}, undefined, undefined, shared);
+  try {
+    prefetchCoverageFaces(['arabic', 'cjk-jp'], Promise.resolve(), shared);
+    await sleep(0);
+    expect(await manager.load()).toEqual([]);
+    advance(60_001);
+    expect(manager.hasPending('next')).toBe(false);
+    expect(await manager.load('next')).toEqual([]);
+    expect(diagnostics).toEqual([]);
+    expect(resolveScriptFallback.mock.calls).toEqual([['cjk-jp', false, false]]);
+    expect(loadJapanese).toHaveBeenCalledTimes(1);
+    expect(loadArabic).not.toHaveBeenCalled();
+  } finally { manager.dispose(); }
+});
+
 test('app families exclude all styles without importing the manager', async () => {
   const source = provider(() => async () => bytes);
   const register = mock(() => {});

@@ -728,33 +728,44 @@ test('inserting script text loads coverage after the family attempt and repaints
   expect(runs.some((run) => /[\u3040-\u309f]/.test(run.text) && run.fontFamily === 'Noto Sans JP')).toBe(true);
 });
 
-test.each(['Arial', 'Simplified Arabic'])('%s keeps Arabic in the browser while requesting Hebrew and Thai faces', async (family) => {
+test.each(['Arial', 'Simplified Arabic', 'Traditional Arabic'])('%s keeps Arabic in the browser while shaping Hebrew, Thai and Devanagari', async (family) => {
   const arial = family === 'Arial';
-  const primary = arial ? font
-    : new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
+  const primary = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
   const arabicFace = arial ? 'NotoSansArabic' : 'NotoNaskhArabic';
   const arabic = new Uint8Array(await readFile(new URL(`../../../fonts/assets/${arabicFace}-Regular.ttf`, import.meta.url))).buffer;
   const hebrew = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansHebrew-Regular.ttf', import.meta.url))).buffer;
   const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
     { codec: 'zstd' })).font;
-  const loaders = new Map([['arabic', async () => arabic], ['hebrew', async () => hebrew], ['thai', async () => thai]]);
+  const devanagari = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansDevanagari-Regular.ttf.zst', import.meta.url)),
+    { codec: 'zstd' })).font;
+  const loaders = new Map([['arabic', async () => arabic], ['hebrew', async () => hebrew],
+    ['thai', async () => thai], ['devanagari', async () => devanagari]]);
   const manager = source(arial ? { [family]: async () => primary } : {}, (script) => loaders.get(script));
   manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
     resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => primary });
+  commandDefaultFonts.prefetchCoverageFaces(['arabic'], Promise.resolve(), () => commandFontProvider.load());
   const installed: DefaultFontFace[] = [];
-  const client = await createPresentationCommandClient(await deck([family], ['وتين', ' שלום', ' ภาษาไทย']), Object.assign({ ...options }, {
+  const client = await createPresentationCommandClient(await deck([family], ['وتين', ' שלום', ' ภาษาไทย', ' नमस्ते']), Object.assign({ ...options }, {
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), connection().transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback.mock.calls.map(([script]) => script).sort()).toEqual(['hebrew', 'thai']);
+  expect(manager.resolveScriptFallback.mock.calls.map(([script]) => script).sort()).toEqual(['devanagari', 'hebrew', 'thai']);
   expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
-    .toEqual(['Noto Sans Hebrew', 'Noto Sans Thai']);
+    .toEqual(['Noto Sans Devanagari', 'Noto Sans Hebrew', 'Noto Sans Thai']);
   expect(installed.filter((face) => face.kind !== 'coverage')).toEqual([{ family, bold: false, italic: false, bytes: primary }]);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
-    .flatMap((box) => box.lines.flatMap((line) => line.runs)).filter((run) => /[\u0600-\u06ff]/.test(run.text));
-  expect(runs.length).toBeGreaterThan(0);
-  expect(runs.every((run) => run.fontFamily === family && run.fontId === 0xffffffff)).toBe(true);
+    .flatMap((box) => box.lines.flatMap((line) => line.runs));
+  const arabicRuns = runs.filter((run) => /[\u0600-\u06ff]/.test(run.text));
+  expect(arabicRuns.length).toBeGreaterThan(0);
+  expect(arabicRuns.every((run) => run.fontFamily === family && run.fontId === 0xffffffff)).toBe(true);
+  for (const [script, fallback] of [
+    [/[\u0590-\u05ff]/, 'Noto Sans Hebrew'], [/[\u0e00-\u0e7f]/, 'Noto Sans Thai'], [/[\u0900-\u097f]/, 'Noto Sans Devanagari'],
+  ] as const) {
+    const covered = runs.filter((run) => script.test(run.text));
+    expect(covered.length).toBeGreaterThan(0);
+    expect(covered.every((run) => run.fontFamily === fallback && run.fontId !== 0xffffffff)).toBe(true);
+  }
 });
 
 test('Arabic and Thai runs in Arial load and use their script defaults', async () => {
