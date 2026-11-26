@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
 use crate::inline::{
-    ComplexField, DirectionScope, FieldSpanEnd, InlineNode, MathEquation, MathType, Run, RunContent,
+    ComplexField, DirectionScope, InlineNode, MathEquation, MathType, Run, RunContent,
     SdtProperties, StructuredFieldContent, inline_holds_field, parse_sdt_properties,
 };
 use crate::media::MediaMap;
@@ -89,8 +89,6 @@ struct FieldEvents {
     external_separates: usize,
     external_ends: usize,
     unmatched_modes: Vec<FieldMode>,
-    direct_open: bool,
-    direct_end: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -99,8 +97,6 @@ struct FieldRecord {
     owner_content: usize,
     code_end: Option<usize>,
     result_end: Option<usize>,
-    can_pair_end: bool,
-    span_end: Option<FieldSpanEnd>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -384,15 +380,6 @@ impl StoryParser<'_, '_> {
                 _ => unreachable!(),
             };
 
-            if events.external_ends == 1
-                && events.direct_end
-                && !parent.matches_name("w", "comment")
-                && let Some(open) = open_fields.last()
-                && records[open.record].can_pair_end
-                && let Some(ordinal) = child.paragraph_ordinal
-            {
-                records[open.record].span_end = mark_field_end(&mut parsed, ordinal);
-            }
             remove_external_field_end_runs(&mut parsed, events.external_ends);
             let parsed_index = content.len();
             extend_open_fields(&mut records, &open_fields, parsed_index);
@@ -410,9 +397,6 @@ impl StoryParser<'_, '_> {
             );
 
             if !events.unmatched_modes.is_empty() {
-                for open in &open_fields {
-                    records[open.record].can_pair_end = false;
-                }
                 let candidates = top_level_complex_field_indices(&content[parsed_index]);
                 let start = candidates
                     .len()
@@ -428,11 +412,6 @@ impl StoryParser<'_, '_> {
                         owner_content: content_index,
                         code_end: None,
                         result_end: None,
-                        can_pair_end: events.unmatched_modes.len() == 1
-                            && events.direct_open
-                            && open_fields.is_empty()
-                            && mode == FieldMode::Result,
-                        span_end: None,
                     });
                     open_fields.push(OpenField { record, mode });
                 }
@@ -1047,67 +1026,29 @@ pub fn table_part_elements<'a>(
 }
 
 fn scan_field_block_events(root: &XmlElement) -> FieldEvents {
-    #[derive(Clone, Copy)]
-    enum Scope {
-        Other,
-        Paragraph,
-        Revision,
-        Run { tracked: bool },
-        Character { tracked: bool },
-    }
-
     let mut events = FieldEvents::default();
     let mut modes = Vec::new();
-    let root_scope = if root.matches_name("w", "p") {
-        Scope::Paragraph
-    } else {
-        Scope::Other
-    };
-    let mut stack = vec![(root, root_scope)];
-    while let Some((element, scope)) = stack.pop() {
+    let mut stack = vec![root];
+    while let Some(element) = stack.pop() {
         if element.local_name() == "fldChar" {
-            let direct = matches!(scope, Scope::Character { tracked: false });
             match element.attribute(Some("w"), "fldCharType") {
-                Some("begin") => modes.push((FieldMode::Code, direct, false)),
+                Some("begin") => modes.push(FieldMode::Code),
                 Some("separate") => match modes.last_mut() {
-                    Some((mode, _, separated)) => {
-                        *mode = FieldMode::Result;
-                        *separated |= direct;
-                    }
+                    Some(mode) => *mode = FieldMode::Result,
                     None => events.external_separates += 1,
                 },
                 Some("end") => {
                     if modes.pop().is_none() {
                         events.external_ends += 1;
-                        events.direct_end |= matches!(scope, Scope::Character { .. });
                     }
                 }
                 _ => {}
             }
         }
-        let children: Vec<_> = element
-            .child_elements()
-            .map(|child| {
-                let child_scope = match scope {
-                    Scope::Paragraph if child.matches_name("w", "r") => Scope::Run { tracked: false },
-                    Scope::Paragraph
-                        if matches!(child.name.as_str(), "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo") =>
-                    {
-                        Scope::Revision
-                    }
-                    Scope::Revision if child.matches_name("w", "r") => Scope::Run { tracked: true },
-                    Scope::Run { tracked } if child.matches_name("w", "fldChar") => {
-                        Scope::Character { tracked }
-                    }
-                    _ => Scope::Other,
-                };
-                (child, child_scope)
-            })
-            .collect();
+        let children: Vec<_> = element.child_elements().collect();
         stack.extend(children.into_iter().rev());
     }
-    events.direct_open = matches!(&modes[..], [(_, true, true)]);
-    events.unmatched_modes = modes.into_iter().map(|(mode, _, _)| mode).collect();
+    events.unmatched_modes = modes;
     events
 }
 
@@ -1158,7 +1099,6 @@ fn attach_recorded_field_blocks(content: &mut [BlockContent], records: Vec<Field
             let result = structured_or_runs(&mut field.structured_result, &field.field_result);
             result.block_count = Some(result_end - record.code_end.unwrap_or(owner));
         }
-        field.span_end = record.span_end;
         field.project_leaf_tree(&later[..end - owner]);
     }
 }
@@ -1209,60 +1149,7 @@ fn complex_field_mut(
     Some(field)
 }
 
-fn end_run(run: &Run) -> bool {
-    let mut ends = false;
-    for item in &run.content {
-        match item {
-            RunContent::InstrText { .. } => {}
-            RunContent::FieldChar { char_type, .. } if char_type == "end" => ends = true,
-            _ => return false,
-        }
-    }
-    ends
-}
-
-fn mark_field_end(block: &mut BlockContent, ordinal: u32) -> Option<FieldSpanEnd> {
-    fn candidate(node: &InlineNode) -> bool {
-        matches!(node, InlineNode::Run(run)
-            if matches!(&run.content[..], [RunContent::FieldChar { char_type, .. }] if char_type == "end"))
-    }
-    let BlockContent::Paragraph(paragraph) = block else {
-        return None;
-    };
-    let mut matches = paragraph.content.iter().enumerate().filter(|(_, item)| match item {
-        ParagraphContent::Inline(node) => candidate(node),
-        ParagraphContent::Tracked(change) => {
-            matches!(&change.content[..], [node] if candidate(node))
-        }
-        _ => false,
-    });
-    let (index, _) = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-    let marker = &mut Arc::make_mut(paragraph).content[index];
-    let node = match marker {
-        ParagraphContent::Inline(node) => node,
-        ParagraphContent::Tracked(change) => &mut change.content[0],
-        _ => return None,
-    };
-    let InlineNode::Run(run) = node else {
-        return None;
-    };
-    let RunContent::FieldChar { span_end, .. } = &mut run.content[0] else {
-        return None;
-    };
-    *span_end = Some(ordinal);
-    Some(FieldSpanEnd {
-        paragraph: ordinal,
-        marker: Box::new(marker.clone()),
-    })
-}
-
 fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
-    if count == 0 {
-        return;
-    }
     let BlockContent::Paragraph(paragraph) = block else {
         return;
     };
@@ -1274,11 +1161,24 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
         let ParagraphContent::Inline(InlineNode::Run(run)) = content else {
             return true;
         };
-        if !end_run(run) {
-            return true;
+        let non_instruction: Vec<_> = run
+            .content
+            .iter()
+            .filter(|content| !matches!(content, RunContent::InstrText { .. }))
+            .collect();
+        let end_only = !non_instruction.is_empty()
+            && non_instruction.iter().all(|content| {
+                matches!(
+                    content,
+                    RunContent::FieldChar { char_type, .. } if char_type == "end"
+                )
+            });
+        if end_only {
+            remaining -= 1;
+            false
+        } else {
+            true
         }
-        remaining -= 1;
-        run.content.iter().any(|item| matches!(item, RunContent::FieldChar { span_end: Some(_), .. }))
     });
 }
 
@@ -1543,9 +1443,10 @@ mod tests {
         let BlockContent::Paragraph(closing) = &blocks[3] else {
             panic!("closing")
         };
+        assert_eq!(closing.content.len(), 1);
         assert!(matches!(
-            closing.content.as_slice(),
-            [ParagraphContent::Inline(InlineNode::BookmarkEnd(_))]
+            closing.content[0],
+            ParagraphContent::Inline(InlineNode::BookmarkEnd(_))
         ));
     }
 

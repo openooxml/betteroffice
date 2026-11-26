@@ -32,10 +32,9 @@ use crate::xml::ParseError;
 
 use super::comment_references::{ParagraphLocation, normalize_comment_references};
 use super::context::{S13SaveReport, SerializerContext};
+use super::field_spans::FieldSpans;
 use super::numbering::serialize_numbering_xml;
-use super::paragraph::{
-    field_result_nodes, field_result_nodes_mut, serialize_paragraph, serialize_story_paragraph,
-};
+use super::paragraph::serialize_paragraph;
 use super::paragraph_ids::{
     COMMENTS_PART, S13ParagraphIds, S13SplicedPart, S13TouchedPart, S13WholePart,
     apply_assignments, comment_companions, model_paragraph_ids, patch_comment_parts, patch_part,
@@ -473,7 +472,6 @@ pub fn write_docx_s13_parts_with_report(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    context.carry_removed_field_ends = request.selective.is_none();
     context.set_document_source(
         package
             .original_bytes(&package.document_path)
@@ -499,6 +497,15 @@ pub fn write_docx_s13_parts_with_report(
         )? {
             Some(patched) => patched,
             None => {
+                context.field_spans = FieldSpans::from_document(
+                    &original,
+                    &request.document.content,
+                    &[],
+                    |_, paragraph| {
+                        emitted_paragraph_id(paragraph)
+                            .is_some_and(|id| selective.changed_para_ids.iter().any(|changed| changed == id))
+                    },
+                );
                 context.begin_form_data_tokens(&original);
                 let serialized = serialize_document_part(&request.document, &mut context);
                 let deferred = context.end_form_data_tokens();
@@ -514,10 +521,20 @@ pub fn write_docx_s13_parts_with_report(
         }
     } else {
         let path = package.document_path.clone();
+        if let Some(source) = package
+            .original_bytes(&path)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        {
+            let removed = stories.spliced.get(&path).map_or(&[][..], |part| part.removed.as_slice());
+            context.field_spans = FieldSpans::from_document(
+                source, &request.document.content, removed, |_, _| true,
+            );
+        }
         stories.write(&package, &path, &mut context, |context| {
             serialize_document_part(&request.document, context)
         })?
     };
+    context.field_spans = FieldSpans::default();
     let document_xml = if let Some(sections) = &paragraph_ids.section_edits {
         let original = package
             .original_bytes(&package.document_path)
@@ -1733,7 +1750,19 @@ impl StoryParts<'_> {
         context: &mut SerializerContext,
         serialize: impl FnOnce(&mut SerializerContext) -> Result<String, ParseError>,
     ) -> Result<StoryWrite, ParseError> {
-        let patched = patched_paragraphs(source, part, context)?;
+        let mut patched = patched_paragraphs(source, part, context)?;
+        let carried = &context.field_spans.carried;
+        let extended = (!carried.is_empty()).then(|| {
+            let mut part = part.clone();
+            part.changed.extend(carried.iter().copied());
+            part.changed.sort_unstable();
+            part.changed.dedup();
+            part.paragraph_patches.retain(|patch| !carried.contains(&patch.ordinal));
+            part.format_only.retain(|ordinal| !carried.contains(ordinal));
+            patched.retain(|ordinal, _| !carried.contains(ordinal));
+            part
+        });
+        let part = extended.as_ref().unwrap_or(part);
         let model_only = part.table_patches.is_empty()
             && part.legacy_paragraphs.iter().any(|legacy| {
                 legacy.detail.starts_with("marker:")
@@ -1744,9 +1773,7 @@ impl StoryParts<'_> {
             .filter(|source| super::permissions::has_markers(source))
             .map(super::permissions::token_prefix);
         context.begin_splice(part.paragraphs.iter().copied(), token_prefix);
-        let removed = std::mem::replace(&mut context.removed_paragraphs, part.removed.clone());
         let serialized = serialize(context);
-        context.removed_paragraphs = removed;
         let written = context.end_splice();
         let mut serialized = serialized?;
         let (Some(source), Some(mut written)) = (source, written) else {
@@ -2853,7 +2880,11 @@ fn inline_has_drawing_image(node: &InlineNode, control: bool, revision: bool) ->
         }
         InlineNode::ComplexField(field) => {
             control && revision && field.field_code.iter().any(run_has_drawing_image)
-                || field_result_nodes(field)
+                || field
+                    .structured_result
+                    .as_ref()
+                    .filter(|result| !result.spans_paragraphs())
+                    .and_then(|result| result.inline.as_ref())
                     .map_or_else(
                         || {
                             control
@@ -2968,7 +2999,12 @@ fn visit_inline_images(
                     visit_run_images(run, visit)?;
                 }
             }
-            if let Some(nodes) = field_result_nodes_mut(field) {
+            if let Some(nodes) = field
+                .structured_result
+                .as_mut()
+                .filter(|result| !result.spans_paragraphs())
+                .and_then(|result| result.inline.as_mut())
+            {
                 for node in nodes {
                     visit_inline_images(node, visit, control, revision)?;
                 }
@@ -3405,7 +3441,11 @@ fn inline_has_hyperlink(node: &InlineNode, control: bool, revision: bool) -> boo
             .content
             .iter()
             .any(|child| inline_has_hyperlink(child, control, true)),
-        InlineNode::ComplexField(field) => field_result_nodes(field)
+        InlineNode::ComplexField(field) => field
+            .structured_result
+            .as_ref()
+            .filter(|result| !result.spans_paragraphs())
+            .and_then(|result| result.inline.as_ref())
             .is_some_and(|nodes| {
                 nodes
                     .iter()
@@ -3439,7 +3479,12 @@ fn visit_inline_hyperlinks(
             &mut change.content
         }
         InlineNode::ComplexField(field) => {
-            let Some(nodes) = field_result_nodes_mut(field) else {
+            let Some(nodes) = field
+                .structured_result
+                .as_mut()
+                .filter(|result| !result.spans_paragraphs())
+                .and_then(|result| result.inline.as_mut())
+            else {
                 return;
             };
             nodes
@@ -3585,7 +3630,7 @@ struct SelectiveParagraphIndex<'a> {
     count: usize,
     in_control: bool,
     in_revision: bool,
-    by_id: HashMap<String, Vec<Paragraph>>,
+    by_id: HashMap<String, Vec<Arc<Paragraph>>>,
     changed: HashSet<&'a str>,
     allocates_ids: bool,
 }
@@ -3632,7 +3677,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
         Some(())
     }
 
-    fn paragraph(&mut self, paragraph: &Paragraph) -> Option<()> {
+    fn paragraph(&mut self, paragraph: &Arc<Paragraph>) -> Option<()> {
         self.count += 1;
         if let Some(id) = emitted_paragraph_id(paragraph)
             && self.changed.contains(id)
@@ -3640,7 +3685,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
             self.by_id
                 .entry(id.to_owned())
                 .or_default()
-                .push(paragraph.clone());
+                .push(Arc::clone(paragraph));
         }
         for content in &paragraph.content {
             match content {
@@ -3689,13 +3734,15 @@ impl<'a> SelectiveParagraphIndex<'a> {
                 Some(())
             }
             InlineNode::ComplexField(field) => {
-                if field.span_end.is_some() {
-                    return None;
-                }
                 for run in &field.field_code {
                     self.run(run)?;
                 }
-                match field_result_nodes(field) {
+                match field
+                    .structured_result
+                    .as_ref()
+                    .filter(|result| !result.spans_paragraphs())
+                    .and_then(|result| result.inline.as_ref())
+                {
                     Some(nodes) => {
                         for node in nodes {
                             self.inline(node)?;
@@ -3873,7 +3920,7 @@ fn build_selective_document_xml(
         return Ok(None);
     }
 
-    let mut replacements = Vec::with_capacity(changed_ids.len());
+    let mut targets = Vec::with_capacity(changed_ids.len());
     for id in changed_ids {
         let Some(&span) = original
             .by_id
@@ -3886,8 +3933,19 @@ fn build_selective_document_xml(
         let Some([paragraph]) = index.by_id.get(id).map(Vec::as_slice) else {
             return Ok(None);
         };
-        replacements.push((span, serialize_paragraph(paragraph, context)?));
+        targets.push((span, paragraph.as_ref()));
     }
+    if targets.iter().any(|(span, _)| original_xml[span.start..span.end].contains("fldChar")) {
+        context.field_spans = FieldSpans::from_document(
+            original_xml, &document.content, &[], |_, paragraph| {
+                emitted_paragraph_id(paragraph).is_some_and(|id| index.changed.contains(id))
+            },
+        );
+    }
+    let mut replacements = targets
+        .into_iter()
+        .map(|(span, paragraph)| Ok((span, serialize_paragraph(paragraph, context)?)))
+        .collect::<Result<Vec<_>, ParseError>>()?;
     replacements.sort_unstable_by(|(left, _), (right, _)| right.start.cmp(&left.start));
 
     let mut patched = original_xml.to_owned();
@@ -3935,6 +3993,12 @@ fn build_source_patched_document_xml(
         .find(|(_, element)| element.matches_name("w", "body"))
         .ok_or_else(|| save_error("the main document part has no body"))?;
     let blocks = crate::block::story_block_elements(body);
+    if original_xml.contains("fldChar") {
+        let selected: HashSet<_> = sources.paragraphs.iter().map(|target| target.block).collect();
+        context.field_spans = FieldSpans::from_body(body, &document.content, &[], |block, _| {
+            selected.contains(&block)
+        });
+    }
     let mut replacements = Vec::with_capacity(sources.paragraphs.len());
     for target in &sources.paragraphs {
         let Some((relative, element)) = blocks.get(target.block) else {
@@ -3960,12 +4024,7 @@ fn build_source_patched_document_xml(
         };
         let span = element_span(original_xml, &target.path)
             .ok_or_else(|| save_error("an addressed paragraph has no lexical span"))?;
-        let serialized = serialize_story_paragraph(
-            paragraph,
-            &document.content[target.block + 1..],
-            &mut super::field_spans::PendingFieldEnds::default(),
-            context,
-        )?;
+        let serialized = serialize_paragraph(paragraph, context)?;
         let replacement = replace_paragraph_content(&original_xml[span.clone()], &serialized)
             .ok_or_else(|| save_error("an addressed paragraph cannot be patched"))?;
         replacements.push((span, replacement));

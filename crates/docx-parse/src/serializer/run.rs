@@ -900,20 +900,17 @@ pub fn serialize_shape_content(
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
-            let blocks = text_body
-                .content
-                .iter()
-                .map(|value| {
-                    serde_json::from_value::<BlockContent>(value.clone()).map_err(|error| {
+            for value in &text_body.content {
+                let block: BlockContent = serde_json::to_string(&(value.clone()))
+                    .and_then(|s| serde_json::from_str(&s))
+                    .map_err(|error| {
                         ParseError::Canonical(format!(
                             "shape text body contains an invalid block: {error}"
                         ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            super::sdt::serialize_story_blocks(&blocks, context, |xml| {
-                append_generated(&mut graphic, xml);
-            })?;
+                    })?;
+                let block = super::sdt::serialize_block_content(&block, context)?;
+                append_generated(&mut graphic, &block);
+            }
             graphic.end_element().end_element();
         }
         append_generated(&mut graphic, &body_properties.finish());

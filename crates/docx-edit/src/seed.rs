@@ -4964,29 +4964,6 @@ fn raw_mark_assoc(xml: &str) -> Option<yrs::Assoc> {
     })
 }
 
-fn field_end_id(value: &Value) -> Option<u32> {
-    let content = array(field(Some(value), "content"));
-    let [marker] = (match string(field(Some(value), "type"))? {
-        "run" => content,
-        "insertion" | "deletion" | "moveFrom" | "moveTo" => {
-            let [run] = content else { return None };
-            if string(field(Some(run), "type")) != Some("run") {
-                return None;
-            }
-            array(field(Some(run), "content"))
-        }
-        _ => return None,
-    }) else {
-        return None;
-    };
-    if string(field(Some(marker), "type")) != Some("fieldChar")
-        || string(field(Some(marker), "charType")) != Some("end")
-    {
-        return None;
-    }
-    u32::try_from(field(Some(marker), "spanEnd")?.as_u64()?).ok()
-}
-
 fn paragraph_units(
     paragraph: &Value,
     styles: &StyleResolver,
@@ -5001,21 +4978,10 @@ fn paragraph_units(
     let mut raw_marks = Vec::new();
     let mut boundaries = Some(Vec::new());
     let mut unit_counts = Vec::new();
-    let mut field_ends = 0;
     let style_formatting = paragraph_style_formatting(paragraph, styles, extra_run_formatting);
     for content in array(field(Some(paragraph), "content")) {
         let start = units.len();
         let mut seeded_raw = false;
-        if let Some(id) = field_end_id(content) {
-            field_ends += 1;
-            raw_marks.push(RawMark {
-                unit: start,
-                assoc: yrs::Assoc::After,
-                xml: format!("fieldEnd:{id}"),
-            });
-            unit_counts.push(0);
-            continue;
-        }
         match string(field(Some(content), "type")).unwrap_or_default() {
             "commentRangeStart" | "commentRangeEnd" => {
                 if let Some(id) = field(Some(content), "id") {
@@ -5058,7 +5024,7 @@ fn paragraph_units(
                     style_formatting.as_deref(),
                     styles,
                     source,
-                    unit_counts.len() - field_ends,
+                    unit_counts.len(),
                     &mut opaque_sequences,
                 ));
             }
@@ -6330,10 +6296,8 @@ fn cached_result_blocks(data: &Value, blocks: &[Value], owner: usize) -> Option<
     let (code, count) = field_spans(data, blocks, owner)?;
     let start = owner + 1 + code;
     let last = blocks.get(start + count.checked_sub(1)?)?;
-    let end = data.get("spanEnd").and_then(|end| end.get("paragraph")).and_then(Value::as_u64);
     let empty_paragraph = string(field(Some(last), "type")) == Some("paragraph")
-        && array(field(Some(last), "content")).iter()
-            .all(|item| end.is_some() && field_end_id(item).map(u64::from) == end);
+        && array(field(Some(last), "content")).is_empty();
     empty_paragraph.then_some((start, count))
 }
 

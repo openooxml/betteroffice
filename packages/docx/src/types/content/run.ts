@@ -128,8 +128,6 @@ export interface FieldCharContent {
   type: 'fieldChar';
   /** Field character type */
   charType: 'begin' | 'separate' | 'end';
-  /** Source paragraph ordinal of a paired spanning end. @internal */
-  spanEnd?: number;
   /** Field is locked */
   fldLock?: boolean;
   /** Field is dirty (needs update) */

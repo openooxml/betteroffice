@@ -174,13 +174,16 @@ fn splice_paragraphs(
     paragraphs: &mut Vec<Value>,
     edit: ParagraphEdit,
     digest: &str,
+    addressed: bool,
 ) -> Result<Value, Box<dyn Error>> {
     let (ParagraphEdit::InsertAfter(index) | ParagraphEdit::Delete(index)) = edit;
     if index >= paragraphs.len() {
         return Err("missing paragraph for structural edit".into());
     }
-    for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
-        paragraph["sourceOrdinal"] = json!(ordinal);
+    if addressed {
+        for (ordinal, paragraph) in paragraphs.iter_mut().enumerate() {
+            paragraph["sourceOrdinal"] = json!(ordinal);
+        }
     }
     let (inserted, removed) = match edit {
         ParagraphEdit::InsertAfter(index) => {
@@ -215,10 +218,7 @@ fn splice_paragraphs(
 }
 
 fn save(source: &[u8], edit: Edit, route: WriteRoute) -> Result<Vec<u8>, Box<dyn Error>> {
-    let parsed = parse_docx_s9_wire(source, S9ParseOptions {
-        source_ordinals: true,
-        ..S9ParseOptions::default()
-    })?;
+    let parsed = parse_docx_s9_wire(source, S9ParseOptions::default())?;
     let mut package = serde_json::to_value(parsed.document.package)?;
     package["document"]
         .as_object_mut()
@@ -234,7 +234,7 @@ fn save(source: &[u8], edit: Edit, route: WriteRoute) -> Result<Vec<u8>, Box<dyn
         .as_array_mut()
         .ok_or("missing body blocks")?;
     if let Edit::Paragraph(edit) = edit {
-        let plan = splice_paragraphs(paragraphs, edit, &digest)?;
+        let plan = splice_paragraphs(paragraphs, edit, &digest, matches!(route, WriteRoute::Splice))?;
         if matches!(route, WriteRoute::Splice) {
             request["paragraphIds"] = plan;
         }
@@ -505,8 +505,15 @@ fn a_removed_toc_closing_paragraph_carries_the_end_to_the_last_surviving_entry()
                 .replace(&third, &format!("{third}{end}")),
         ),
     ] {
-        let source = package(xml)?;
         for route in [WriteRoute::Splice, WriteRoute::Whole] {
+            let source_xml = if matches!(route, WriteRoute::Whole) {
+                (1..=5).fold(xml.to_string(), |xml, id| {
+                    xml.replace(&format!(r#" w14:paraId="{id:08X}""#), "")
+                })
+            } else {
+                xml.to_string()
+            };
+            let source = package(&source_xml)?;
             let saved = save(&source, Edit::Paragraph(ParagraphEdit::Delete(removed)), route)?;
             assert_eq!(inspect(&document_xml(&saved)?), inspect(&expected), "{route:?}");
         }
@@ -535,21 +542,66 @@ fn marker_only_revisions_survive_on_both_selective_routes() -> Result<(), Box<dy
 }
 
 #[test]
-fn consecutive_spans_keep_the_mixed_run_in_source_order() -> Result<(), Box<dyn Error>> {
+fn consecutive_spans_keep_separate_runs_in_source_order() -> Result<(), Box<dyn Error>> {
     let end = field_char("end");
     let first = field_start("QUOTE FIRST") + &text_run("FIRST");
-    let shared = concat!(
-        r#"<w:r><w:fldChar w:fldCharType="end"/><w:t>BETWEEN</w:t><w:fldChar w:fldCharType="begin"/>"#,
-        r#"<w:instrText xml:space="preserve"> QUOTE SECOND </w:instrText><w:fldChar w:fldCharType="separate"/></w:r>"#,
-    );
+    let second = field_start("QUOTE SECOND") + &text_run("SECOND");
     let source = [
         paragraph(0, &first),
-        paragraph(1, &format!("{}{shared}{}", text_run("FIRSTEND"), text_run("SECOND"))),
+        paragraph(1, &format!("{}{end}{}{second}", text_run("FIRSTEND"), text_run("BETWEEN"))),
         paragraph(2, &format!("{}{end}{}", text_run("SECONDEND"), text_run("OUTSIDE"))),
     ].concat();
-    for route in [WriteRoute::SourceParagraphs, WriteRoute::ChangedParaIds] {
+    for route in [WriteRoute::SourceParagraphs, WriteRoute::ChangedParaIds, WriteRoute::Whole] {
         let saved = save(&package(&source)?, Edit::Text("BETWEEN"), route)?;
         assert_eq!(inspect(&document_xml(&saved)?), inspect(&source.replace("BETWEEN", "BETWEEN edited")));
+    }
+    Ok(())
+}
+
+#[test]
+fn shared_ends_keep_their_run_or_revision() -> Result<(), Box<dyn Error>> {
+    let original = body("S1");
+    let plain_end = field_char("end");
+    let following = text_run("AFTERSPAN");
+    let original_boundary = format!("{plain_end}{following}");
+    for boundary in [
+        r#"<w:r><w:fldChar w:fldCharType="end"/><w:t>AFTERSPAN</w:t></w:r>"#.to_owned(),
+        format!(r#"<w:ins w:id="17" w:author="Reviewer" w:date="2000-01-01T00:00:00Z">{plain_end}{following}</w:ins>"#),
+    ] {
+        let xml = original.replace(&original_boundary, &boundary);
+        let source = package(&xml)?;
+        for route in [WriteRoute::Whole, WriteRoute::SourceParagraphs, WriteRoute::ChangedParaIds] {
+            for marker in ["SPANSTART", "SPANEND"] {
+                let saved = save(&source, Edit::Text(marker), route)?;
+                let saved_xml = document_xml(&saved)?;
+                assert_eq!(inspect(&saved_xml), inspect(&xml.replace(marker, &format!("{marker} edited"))), "{route:?}");
+                assert!(saved_xml.contains(&boundary), "{saved_xml}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn tracked_opener_keeps_the_main_save_behavior() -> Result<(), Box<dyn Error>> {
+    let empty = r#"<w:ins w:id="17" w:author="Reviewer" w:date="2000-01-01T00:00:00Z">"#;
+    let revision = format!("{empty}{}{}</w:ins>", field_start("QUOTE"), text_run("TRACKED"));
+    let source = [
+        paragraph(0, &revision),
+        paragraph(1, &format!("{}{}", text_run("CLOSING"), field_char("end"))),
+        paragraph(2, &text_run(BODY_NEXT)),
+    ].concat();
+    for route in [WriteRoute::Whole, WriteRoute::SourceParagraphs] {
+        let saved = save(&package(&source)?, Edit::Text(BODY_NEXT), route)?;
+        let xml = document_xml(&saved)?;
+        assert!(xml.contains(">BODYNEXT edited<"), "{xml}");
+        if matches!(route, WriteRoute::Whole) {
+            assert!(xml.contains(&format!("{empty}</w:ins>")), "{xml}");
+            assert!(!xml.contains("w:fldChar"), "{xml}");
+        } else {
+            assert!(xml.contains(&revision), "{xml}");
+            assert_eq!(inspect(&xml), inspect(&source.replace(BODY_NEXT, "BODYNEXT edited")));
+        }
     }
     Ok(())
 }
@@ -606,6 +658,15 @@ fn selective_writes_without_a_span_keep_the_other_paragraph_verbatim() -> Result
         assert!(xml.contains(">TARGET edited<"));
         assert!(xml.contains(kept));
     }
+    Ok(())
+}
+
+#[test]
+fn changed_ids_keep_untouched_spanning_paragraphs_verbatim() -> Result<(), Box<dyn Error>> {
+    let source = body("S1").replace(">SPANEND<", "><![CDATA[SPANEND]]><");
+    let source = package(&source)?;
+    let saved = save(&source, Edit::Text(BODY_NEXT), WriteRoute::ChangedParaIds)?;
+    assert_eq!(document_xml(&saved)?, document_xml(&source)?.replace(BODY_NEXT, "BODYNEXT edited"));
     Ok(())
 }
 

@@ -1,20 +1,306 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap};
 
-use crate::block::BlockContent;
-use crate::inline::{FieldSpanEnd, InlineNode, RunContent};
-use crate::paragraph::{Paragraph, ParagraphContent};
+use crate::block::{BlockContent, story_block_elements};
+use crate::inline::{InlineNode, RunContent, parse_run};
+use crate::paragraph::{Paragraph, ParagraphContent, TrackedInline, parse_tracked_change_info};
+use crate::paragraph_identity::parse_paragraph_id;
+use crate::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 
-fn is_end(content: &ParagraphContent, paragraph: u32) -> bool {
-    let node = match content {
-        ParagraphContent::Inline(node) => node,
-        ParagraphContent::Tracked(change) if change.content.len() == 1 => &change.content[0],
-        _ => return false,
-    };
-    matches!(node, InlineNode::Run(run) if matches!(
-        run.content.as_slice(),
-        [RunContent::FieldChar { char_type, span_end: Some(id), .. }]
-            if char_type == "end" && *id == paragraph
-    ))
+#[derive(Clone, Debug, Default)]
+pub(super) struct FieldSpans {
+    pub(super) paragraphs: HashMap<usize, FieldParagraph>,
+    pub(super) carried: BTreeSet<u32>,
+    pub(super) paired: BTreeSet<u32>,
+    pub(super) moved: BTreeSet<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct FieldParagraph {
+    pub(super) opening: Option<usize>,
+    pub(super) closing: Option<Vec<ParagraphContent>>,
+}
+
+pub(super) fn paragraph_key(paragraph: &Paragraph) -> usize {
+    std::ptr::from_ref(paragraph) as usize
+}
+
+struct Opening {
+    block: usize,
+    instruction: String,
+    direct: bool,
+    separated: bool,
+}
+
+struct Closing<'a> {
+    run: &'a XmlElement,
+    revision: Option<&'a XmlElement>,
+    revision_offset: usize,
+    offset: usize,
+}
+
+impl Closing<'_> {
+    fn separate_run(&self) -> bool {
+        self.run
+            .child_elements()
+            .all(|child| matches!(child.name.as_str(), "w:rPr" | "w:fldChar"))
+    }
+
+    fn separate_revision(&self) -> bool {
+        self.revision.is_none_or(|revision| revision.child_elements().count() == 1)
+    }
+
+    fn standalone(&self) -> bool {
+        self.separate_run() && self.separate_revision()
+    }
+
+    fn marker(&self) -> ParagraphContent {
+        let mut run = parse_run(self.run, None, None, None).run;
+        run.content.retain(is_end);
+        let run = InlineNode::Run(run);
+        match self.revision {
+            None => ParagraphContent::Inline(run),
+            Some(revision) => ParagraphContent::Tracked(TrackedInline {
+                node_type: match revision.name.as_str() {
+                    "w:ins" => "insertion",
+                    "w:del" => "deletion",
+                    "w:moveFrom" => "moveFrom",
+                    _ => "moveTo",
+                }.to_owned(),
+                info: parse_tracked_change_info(revision),
+                content: vec![run],
+            }),
+        }
+    }
+}
+
+fn is_end(content: &RunContent) -> bool {
+    matches!(content, RunContent::FieldChar { char_type, .. } if char_type == "end")
+}
+
+fn has_end(paragraph: &Paragraph) -> bool {
+    fn run_has_end(node: &InlineNode) -> bool {
+        matches!(node, InlineNode::Run(run) if run.content.iter().any(is_end))
+    }
+    paragraph.content.iter().any(|child| match child {
+        ParagraphContent::Inline(node) => run_has_end(node),
+        ParagraphContent::Tracked(change) => change.content.iter().any(run_has_end),
+        _ => false,
+    })
+}
+
+#[derive(Default)]
+struct SourceParagraph<'a> {
+    text: String,
+    openings: Vec<Opening>,
+    closings: Vec<Option<Closing<'a>>>,
+}
+
+impl<'a> SourceParagraph<'a> {
+    fn read(block: usize, paragraph: &'a XmlElement) -> Self {
+        let mut source = Self::default();
+        for child in paragraph.child_elements() {
+            match child.name.as_str() {
+                "w:r" => source.run(block, child, None, 0),
+                "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => {
+                    let offset = source.text.len();
+                    for item in child.child_elements() {
+                        if item.name == "w:r" {
+                            source.run(block, item, Some(child), offset);
+                        } else {
+                            source.nested(item);
+                        }
+                    }
+                }
+                _ => source.nested(child),
+            }
+        }
+        source
+    }
+
+    fn run(
+        &mut self,
+        block: usize,
+        run: &'a XmlElement,
+        revision: Option<&'a XmlElement>,
+        revision_offset: usize,
+    ) {
+        let own_run = run.child_elements().filter(|child| child.name != "w:rPr").nth(1).is_none();
+        if !own_run && run.child_elements().filter(|item| item.name == "w:fldChar").count() > 1
+        {
+            self.openings.clear();
+            self.closings.push(None);
+            return;
+        }
+        for item in run.child_elements() {
+            match item.name.as_str() {
+                "w:fldChar" => match item.attribute(Some("w"), "fldCharType") {
+                    Some("begin") => self.openings.push(Opening {
+                        block,
+                        instruction: String::new(),
+                        direct: revision.is_none() && own_run,
+                        separated: false,
+                    }),
+                    Some("separate") => {
+                        if let Some(opening) = self.openings.last_mut() {
+                            opening.separated = revision.is_none() && own_run;
+                        } else {
+                            self.closings.push(None);
+                        }
+                    }
+                    Some("end") if self.openings.pop().is_none() => {
+                        self.closings.push(Some(Closing {
+                            run,
+                            revision,
+                            revision_offset,
+                            offset: self.text.len(),
+                        }));
+                    }
+                    _ => {}
+                },
+                "w:instrText" => {
+                    if let Some(opening) = self.openings.last_mut() {
+                        opening.instruction.push_str(&item.text_content());
+                    }
+                }
+                _ => self.nested(item),
+            }
+        }
+    }
+
+    fn nested(&mut self, node: &XmlElement) {
+        match node.name.as_str() {
+            "w:p" | "w:pPr" | "w:rPr" => {}
+            "w:t" | "w:delText" => self.text.push_str(&node.text_content()),
+            "w:tab" => self.text.push('\t'),
+            _ => {
+                for child in node.child_elements() {
+                    self.nested(child);
+                }
+            }
+        }
+    }
+}
+
+fn append_text(node: &InlineNode, text: &mut String) {
+        match node {
+            InlineNode::Run(run) => {
+                for item in &run.content {
+                    match item {
+                        RunContent::Text { text: value, .. } => text.push_str(value),
+                        RunContent::Tab => text.push('\t'),
+                        _ => {}
+                    }
+                }
+            }
+            InlineNode::Hyperlink(link) => {
+                for child in link.structured_children.as_ref().unwrap_or(&link.children) {
+                    append_text(child, text);
+                }
+            }
+            InlineNode::ComplexField(field) => {
+                if let Some(nodes) = field.structured_result.as_ref().and_then(|part| part.inline.as_ref()) {
+                    for child in nodes {
+                        append_text(child, text);
+                    }
+                }
+            }
+            _ => {}
+        }
+}
+
+fn append_content_text(content: &ParagraphContent, text: &mut String) {
+    match content {
+        ParagraphContent::Inline(node) => append_text(node, text),
+        ParagraphContent::Tracked(change) => {
+            for node in &change.content {
+                append_text(node, text);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn visible_text(paragraph: &Paragraph) -> String {
+    let mut text = String::new();
+    for child in &paragraph.content {
+        append_content_text(child, &mut text);
+    }
+    text
+}
+
+fn unique<K: std::hash::Hash + Eq>(keys: impl Iterator<Item = Option<K>>) -> HashMap<K, Option<usize>> {
+    let mut indices = HashMap::new();
+    for (index, key) in keys.enumerate().filter_map(|(index, key)| Some((index, key?))) {
+        indices.entry(key).and_modify(|entry| *entry = None).or_insert(Some(index));
+    }
+    indices
+}
+
+fn project_paragraphs(
+    source: &[(Vec<u32>, &XmlElement)],
+    model: &[BlockContent],
+    paragraphs: &[Option<SourceParagraph<'_>>],
+    removed: &[u32],
+) -> Vec<Option<usize>> {
+    let ordinal = unique(model.iter().map(|block| paragraph(block)?.source_ordinal));
+    let ids = unique(
+        model.iter().map(|block| parse_paragraph_id(paragraph(block)?.para_id.as_deref()?)),
+    );
+    let source_ids = unique(source.iter().map(|(_, element)| source_id(element)));
+    let mut matches: Vec<_> = source.iter().enumerate().map(|(index, (_, element))| {
+        if removed.contains(&element.paragraph_ordinal?) {
+            return None;
+        }
+        ordinal.get(&element.paragraph_ordinal?).copied().flatten().or_else(|| {
+            let id = source_id(element)?;
+            if source_ids.get(&id) == Some(&Some(index)) {
+                ids.get(&id).copied().flatten()
+            } else {
+                None
+            }
+        })
+    }).collect();
+    let mut used: BTreeSet<_> = matches.iter().flatten().copied().collect();
+    if source.len() != model.len() {
+        let source_text = unique(paragraphs.iter().map(|p| p.as_ref().map(|p| &p.text).filter(|text| !text.is_empty())));
+        let texts: Vec<_> = model.iter().map(|block| paragraph(block).map(visible_text)).collect();
+        let live_text = unique(texts.iter().map(Option::as_ref));
+        for (text, index) in source_text {
+            let (Some(index), Some(live)) = (index, live_text.get(text).copied().flatten()) else {
+                continue;
+            };
+            if matches[index].is_none()
+                && !source[index].1.paragraph_ordinal.is_some_and(|ordinal| removed.contains(&ordinal))
+                && used.insert(live)
+            {
+                matches[index] = Some(live);
+            }
+        }
+    }
+    let mut prior = (0, 0);
+    for (next_source, next_model) in matches.clone().into_iter().enumerate()
+        .filter_map(|(index, projected)| Some((index, projected?)))
+        .chain(std::iter::once((source.len(), model.len())))
+    {
+        if next_source >= prior.0 && next_model >= prior.1
+            && next_source - prior.0 == next_model - prior.1
+        {
+            for (index, live) in (prior.0..next_source).zip(prior.1..next_model) {
+                if paragraphs[index].is_some() && paragraph(&model[live]).is_some()
+                    && !source[index].1.paragraph_ordinal.is_some_and(|ordinal| removed.contains(&ordinal))
+                    && used.insert(live)
+                {
+                    matches[index] = Some(live);
+                }
+            }
+        }
+        prior = (next_source + 1, next_model + 1);
+    }
+    matches
+}
+
+fn source_id(element: &XmlElement) -> Option<u32> {
+    parse_paragraph_id(element.attributes.get(element.para_id_attribute.as_ref()?)?)
 }
 
 fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
@@ -24,55 +310,282 @@ fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
     }
 }
 
-pub(super) fn has_end(
-    id: u32,
-    remaining: &[ParagraphContent],
-    following: &[BlockContent],
-) -> bool {
-    remaining.iter().any(|content| is_end(content, id))
-        || following
-            .iter()
-            .filter_map(paragraph)
-            .any(|p| p.content.iter().any(|content| is_end(content, id)))
+fn anchored_offset(before: &str, after: &str, current: &str) -> Option<usize> {
+    if before.is_empty() {
+        return Some(0);
+    }
+    if after.is_empty() {
+        return Some(current.len());
+    }
+    if before.len() + after.len() == current.len() && current.starts_with(before) && current.ends_with(after) {
+        return Some(before.len());
+    }
+    let unique_offset = |needle: &str| {
+        let mut matches = current.match_indices(needle);
+        let (offset, _) = matches.next()?;
+        matches.next().is_none().then_some(offset)
+    };
+    let left = before.char_indices().rev().take(64)
+        .filter_map(|(index, _)| unique_offset(&before[index..]).map(|at| at + before.len() - index))
+        .last();
+    let right = after.char_indices().skip(1).take(63).map(|(index, _)| index)
+        .chain(std::iter::once(after.len()))
+        .filter_map(|end| unique_offset(&after[..end]))
+        .last();
+    match (left, right) {
+        (Some(left), Some(right)) if left <= right => Some(right),
+        (Some(left), None) => Some(left),
+        (None, right) => right,
+        _ => None,
+    }
 }
 
-pub(super) fn has_source_paragraph(id: u32, following: &[BlockContent]) -> bool {
-    following
-        .iter()
-        .filter_map(paragraph)
-        .any(|p| p.source_ordinal == Some(id))
-}
-
-#[derive(Default)]
-pub(super) struct PendingFieldEnds {
-    pub(super) block: usize,
-    markers: BTreeMap<usize, Vec<ParagraphContent>>,
-}
-
-impl PendingFieldEnds {
-    pub(super) fn carry(&mut self, end: &FieldSpanEnd, following: &[BlockContent]) -> bool {
-        if !is_end(&end.marker, end.paragraph) {
-            return false;
+fn place(
+    mut content: Vec<ParagraphContent>,
+    mut offset: usize,
+    marker: ParagraphContent,
+    shared_run_end: Option<(RunContent, bool)>,
+) -> Option<Vec<ParagraphContent>> {
+    for index in 0..content.len() {
+        if offset == 0 && shared_run_end.is_none() {
+            content.insert(index, marker);
+            return Some(content);
         }
-        let target = following
-            .iter()
-            .enumerate()
-            .take_while(|(_, block)| {
-                paragraph(block)
-                    .and_then(|p| p.source_ordinal)
-                    .is_none_or(|ordinal| ordinal < end.paragraph)
-            })
-            .filter_map(|(index, block)| paragraph(block).map(|_| self.block + index + 1))
-            .last()
-            .unwrap_or(self.block);
-        self.markers
-            .entry(target)
-            .or_default()
-            .push((*end.marker).clone());
-        true
+        let child = &mut content[index];
+        let ParagraphContent::Inline(InlineNode::Run(run)) = child else {
+            let mut text = String::new();
+            append_content_text(child, &mut text);
+            offset = offset.checked_sub(text.len())?;
+            continue;
+        };
+        for at in 0..run.content.len() {
+            let width = match &run.content[at] {
+                RunContent::Text { text, .. } => text.len(),
+                RunContent::Tab => 1,
+                _ => 0,
+            };
+            if let Some((end, prefer_previous)) = &shared_run_end
+                && width > 0 && (offset < width || (offset == width && *prefer_previous))
+            {
+                if offset == 0 || offset == width {
+                    run.content.insert(at + usize::from(offset != 0), end.clone());
+                } else {
+                    let RunContent::Text { text, preserve_space } = &mut run.content[at] else { return None };
+                    if !text.is_char_boundary(offset) {
+                        return None;
+                    }
+                    let tail = RunContent::Text { text: text.split_off(offset), preserve_space: *preserve_space };
+                    run.content.splice(at + 1..at + 1, [end.clone(), tail]);
+                }
+                return Some(content);
+            }
+            if offset < width {
+                let RunContent::Text { text, preserve_space } = &mut run.content[at] else {
+                    return None;
+                };
+                if !text.is_char_boundary(offset) {
+                    return None;
+                }
+                let suffix = text.split_off(offset);
+                let preserve_space = *preserve_space;
+                let mut tail = run.clone();
+                tail.content.drain(..at);
+                tail.content[0] = RunContent::Text { text: suffix, preserve_space };
+                let prefix_len = at + usize::from(offset != 0);
+                run.content.truncate(prefix_len);
+                let tail = ParagraphContent::Inline(InlineNode::Run(tail));
+                content.splice(index + usize::from(prefix_len != 0)..index + 1, [marker, tail]);
+                return Some(content);
+            }
+            offset -= width;
+        }
+    }
+    if shared_run_end.is_some() || offset != 0 {
+        return None;
+    }
+    content.push(marker);
+    Some(content)
+}
+
+fn place_closing(
+    paragraph: &Paragraph,
+    closing: &Closing<'_>,
+    text: &str,
+    removed: bool,
+) -> Option<Vec<ParagraphContent>> {
+    let mut marker = closing.marker();
+    let shared_run_end = if closing.separate_run() {
+        None
+    } else {
+        let node = match &mut marker {
+            ParagraphContent::Inline(node) => node,
+            ParagraphContent::Tracked(revision) => revision.content.first_mut()?,
+            _ => return None,
+        };
+        let InlineNode::Run(run) = node else { return None };
+        let prefer_previous = closing.run.child_elements()
+            .take_while(|child| child.name != "w:fldChar")
+            .any(|child| matches!(child.name.as_str(), "w:t" | "w:delText" | "w:tab"));
+        Some((run.content.pop()?, prefer_previous))
+    };
+    if closing.revision.is_some() && !closing.standalone() {
+        let ParagraphContent::Tracked(marker) = marker else { return None };
+        let mut content = paragraph.content.clone();
+        let revision = content.iter_mut().find_map(|child| match child {
+            ParagraphContent::Tracked(change) if change.node_type == marker.node_type && change.info == marker.info => Some(change),
+            _ => None,
+        })?;
+        let mut live = String::new();
+        for node in &revision.content {
+            append_text(node, &mut live);
+        }
+        let revision_source = SourceParagraph::read(0, closing.revision?);
+        let (before, after) = revision_source.text.split_at_checked(closing.offset - closing.revision_offset)?;
+        let offset = anchored_offset(before, after, &live)?;
+        let marker = ParagraphContent::Inline(marker.content.into_iter().next()?);
+        let nodes = std::mem::take(&mut revision.content);
+        revision.content = place(nodes.into_iter().map(ParagraphContent::Inline).collect(), offset, marker, shared_run_end)?
+            .into_iter().filter_map(|child| match child {
+                ParagraphContent::Inline(node) => Some(node),
+                _ => None,
+            }).collect();
+        return Some(content);
+    }
+    let live = visible_text(paragraph);
+    let offset = if removed {
+        live.len()
+    } else {
+        let (before, after) = text.split_at(closing.offset);
+        anchored_offset(before, after, &live)?
+    };
+    place(paragraph.content.clone(), offset, marker, shared_run_end)
+}
+
+impl FieldSpans {
+    pub(super) fn from_document(
+        source: &str,
+        model: &[BlockContent],
+        removed: &[u32],
+        selected: impl Fn(usize, &Paragraph) -> bool,
+    ) -> Self {
+        if !source.contains("fldChar") {
+            return Self::default();
+        }
+        let limits = ParseLimits::default();
+        let Ok(xml) = parse_xml(source.as_bytes(), "word/document.xml", &mut ParseBudget::new(&limits)) else {
+            return Self::default();
+        };
+        xml.root().and_then(|root| root.child("w", "body"))
+            .map_or_else(Self::default, |body| Self::from_body(body, model, removed, selected))
     }
 
-    pub(super) fn take(&mut self) -> Vec<ParagraphContent> {
-        self.markers.remove(&self.block).unwrap_or_default()
+    pub(super) fn from_body(
+        body: &XmlElement,
+        model: &[BlockContent],
+        removed: &[u32],
+        selected: impl Fn(usize, &Paragraph) -> bool,
+    ) -> Self {
+        let source = story_block_elements(body);
+        let mut paragraphs: Vec<_> = source.iter().enumerate().map(|(index, (_, element))| {
+            (element.name == "w:p").then(|| SourceParagraph::read(index, element))
+        }).collect();
+        let matches = project_paragraphs(&source, model, &paragraphs, removed);
+        let mut plan = Self::default();
+        let mut pending = None;
+        for (end, entry) in paragraphs.iter_mut().enumerate() {
+            let Some(entry) = entry else {
+                if !matches!(source[end].1.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
+                    pending = None;
+                }
+                continue;
+            };
+            if !entry.closings.is_empty() {
+                if let (Some(opening), [Some(closing)]) = (pending.take(), entry.closings.as_slice()) {
+                    let deleted = source[end].1.paragraph_ordinal.is_some_and(|id| removed.contains(&id));
+                    plan.pair(opening, closing, end, &entry.text, model, &matches, &source, deleted, &selected);
+                }
+            }
+            if !entry.openings.is_empty() {
+                pending = match entry.openings.as_mut_slice() {
+                    [opening] if pending.is_none() && opening.direct && opening.separated => Some(Opening {
+                        instruction: std::mem::take(&mut opening.instruction),
+                        ..*opening
+                    }),
+                    _ => None,
+                };
+            }
+        }
+        plan
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pair(
+        &mut self,
+        opening: Opening,
+        closing: &Closing<'_>,
+        end: usize,
+        text: &str,
+        model: &[BlockContent],
+        matches: &[Option<usize>],
+        source: &[(Vec<u32>, &XmlElement)],
+        deleted: bool,
+        selected: &impl Fn(usize, &Paragraph) -> bool,
+    ) {
+        let Some(owner) = matches[opening.block] else { return };
+        let Some(opener) = paragraph(&model[owner]) else { return };
+        let Some(field) = opener.content.iter().rposition(|child| matches!(child,
+            ParagraphContent::Inline(InlineNode::ComplexField(field))
+                if field.instruction.trim() == opening.instruction.trim()
+                    && [field.structured_code.as_ref(), field.structured_result.as_ref()]
+                        .into_iter().flatten().any(|part| part.spans_paragraphs())))
+        else { return };
+        let (target, removed) = match matches[end] {
+            Some(target) if target > owner => (target, false),
+            Some(_) => return,
+            None if closing.standalone() => {
+                let Some(next) = matches[end + 1..].iter().flatten().next().copied()
+                    .or_else(|| (end + 1 == matches.len()).then_some(model.len()))
+                else { return };
+                let Some(target) = matches[opening.block..end].iter().flatten().copied().last()
+                    .filter(|&block| block >= owner && block < next)
+                else { return };
+                if (!deleted && target + 1 != next)
+                    || matches[opening.block..end].iter().flatten().any(|&block| block > target)
+                {
+                    return;
+                }
+                (target, true)
+            }
+            None => return,
+        };
+        let Some(closer) = paragraph(&model[target]) else { return };
+        let writes_opener = selected(opening.block, opener);
+        let writes_closer = selected(end, closer);
+        if !removed && !writes_opener && !writes_closer {
+            return;
+        }
+        if removed || (writes_closer && !has_end(closer)) {
+            let Some(content) = place_closing(closer, closing, text, removed) else { return };
+            let entry = self.paragraphs.entry(paragraph_key(closer)).or_default();
+            if entry.closing.is_some() {
+                return;
+            }
+            entry.closing = Some(content);
+            if removed && let Some(ordinal) = closer.source_ordinal.or_else(|| {
+                matches.iter().position(|&block| block == Some(target)).and_then(|index| source[index].1.paragraph_ordinal)
+            }) {
+                self.carried.insert(ordinal);
+            }
+        }
+        self.paired.extend([source[opening.block].1.paragraph_ordinal, source[end].1.paragraph_ordinal].into_iter().flatten());
+        if removed && let Some(ordinal) = source[end].1.paragraph_ordinal {
+            self.moved.insert(ordinal);
+        }
+        if writes_opener {
+            let field = opener.content[..field].iter().filter(|child| {
+                matches!(child, ParagraphContent::Inline(InlineNode::ComplexField(_)))
+            }).count();
+            self.paragraphs.entry(paragraph_key(opener)).or_default().opening = Some(field);
+        }
     }
 }

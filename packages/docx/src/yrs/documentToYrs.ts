@@ -47,7 +47,7 @@ import {
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
-import { FIELD_END_ANCHOR, RAW_INLINE_KIND, fieldEndId, noteYrsStoriesDirty } from './yrsToDocument';
+import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
@@ -1567,17 +1567,12 @@ function paragraphUnits(
   const commentMarks: CommentMark[] = [];
   const rawMarks: RawMark[] = [];
   let boundaries: Attrs[] | undefined = [];
-  let fieldEnds = 0;
   const styleFormatting = paragraphStyleFormatting(paragraph, styleResolver, extraRunFormatting);
 
   for (const [contentIndex, content] of paragraph.content.entries()) {
     const start = units.length;
-    const fieldEnd = fieldEndId(content);
     if (content.type === 'commentRangeStart' || content.type === 'commentRangeEnd') {
       commentMarks.push({ unit: start, start: content.type === 'commentRangeStart', id: content.id });
-    } else if (fieldEnd !== undefined) {
-      fieldEnds += 1;
-      rawMarks.push({ unit: start, assoc: 'after', xml: FIELD_END_ANCHOR + fieldEnd });
     } else if (content.type === 'run') {
       const boundary = runBoundary(content, styleFormatting, styleResolver);
       if (boundary && boundaries) boundaries.push(boundary);
@@ -1590,7 +1585,7 @@ function paragraphUnits(
       units.push(...linked);
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
-      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex - fieldEnds, opaqueSequences));
+      units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex, opaqueSequences));
     } else if (content.type === 'inlineSdt') {
       boundaries = undefined;
       units.push(
@@ -2143,9 +2138,7 @@ function cachedResultBlocks(
   if (span === null || span.result === 0) return null;
   const start = owner + 1 + span.code;
   const last = blocks[start + span.result - 1];
-  if (!last || isRawXml(last) || last.type !== 'paragraph' ||
-      last.content?.some(child => field.type !== 'complexField' ||
-        field.spanEnd === undefined || fieldEndId(child) !== field.spanEnd.paragraph)) return null;
+  if (!last || isRawXml(last) || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
   return { start, count: span.result };
 }
 

@@ -868,34 +868,6 @@ fn process_field_run(
     output: &mut Vec<ParagraphContent>,
     part: &str,
 ) -> Result<(), ParseError> {
-    let mut characters = run.content.iter().filter_map(|item| match item {
-        RunContent::FieldChar { char_type, .. } => Some(char_type.as_str()),
-        _ => None,
-    });
-    if *beyond_nesting == 0
-        && characters.next() == Some("end")
-        && characters.any(|kind| kind == "begin")
-    {
-        let mut start = 0;
-        for (index, item) in run.content.iter().enumerate() {
-            if matches!(item, RunContent::FieldChar { .. }) {
-                for range in [start..index, index..index + 1] {
-                    if !range.is_empty() {
-                        let mut fragment = run.clone();
-                        fragment.content = run.content[range].to_vec();
-                        process_field_run(fragment, fields, beyond_nesting, output, part)?;
-                    }
-                }
-                start = index + 1;
-            }
-        }
-        if start < run.content.len() {
-            let mut tail = run;
-            tail.content.drain(..start);
-            process_field_run(tail, fields, beyond_nesting, output, part)?;
-        }
-        return Ok(());
-    }
     let mut has_begin = false;
     let mut has_separate = false;
     let mut has_end = false;

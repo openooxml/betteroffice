@@ -835,7 +835,6 @@ function fieldFromPayload(
 
 /** `_kind` of the embed a kept inline element holding content seeds as. @internal */
 export const RAW_INLINE_KIND = 'rawInline';
-export const FIELD_END_ANCHOR = 'fieldEnd:';
 
 /** Kept inline elements written back from their embed, one story unit each. */
 const rawInlineEmbeds = new WeakSet<RawXml>();
@@ -1500,7 +1499,8 @@ function restoreProjectedFieldResults(
       const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
-        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+        const link = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+        rebuilt[0] = spansParagraphs(stored) ? restorePageReference(link, original) : link;
       }
       replacements.set(index, rebuilt);
     }
@@ -1534,13 +1534,6 @@ function isTrackedWrapper(content: ParagraphContent | undefined): content is Tra
     content?.type === 'moveFrom' ||
     content?.type === 'moveTo'
   );
-}
-
-export function fieldEndId(content: ParagraphContent): number | undefined {
-  const run = isTrackedWrapper(content) && content.content.length === 1 ? content.content[0] : content;
-  const marker = run?.type === 'run' && run.content.length === 1 ? run.content[0] : undefined;
-  const id = marker?.type === 'fieldChar' && marker.charType === 'end' ? marker.spanEnd : undefined;
-  return id !== undefined && Number.isInteger(id) && id >= 0 && id <= 0xffffffff ? id : undefined;
 }
 
 function buildParagraphContent(
@@ -3661,248 +3654,6 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
-function isFieldRunContent(entry: RunContent): boolean {
-  return entry.type === 'fieldChar' || entry.type === 'instrText';
-}
-
-function fieldProjectionText(child: ParagraphContent): string {
-  switch (child.type) {
-    case 'run':
-      return child.content.map((entry) => entry.type === 'text' ? entry.text
-        : entry.type === 'tab' ? '\t'
-        : isFieldRunContent(entry) ? '' : '\ufffc'.repeat(runContentLength(entry))).join('');
-    case 'hyperlink':
-      return (child.structuredChildren ?? child.children).map(fieldProjectionText).join('');
-    case 'complexField':
-      return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
-        .filter((item) => item.type === 'hyperlink' || item.type === 'simpleField')
-        .map(fieldProjectionText).join('') + '\ufffc';
-    case 'insertion':
-    case 'deletion':
-    case 'moveFrom':
-    case 'moveTo':
-      return child.content.map(fieldProjectionText).join('');
-    default:
-      return '\ufffc'.repeat(paragraphContentLength(child));
-  }
-}
-
-function fieldContainerKey(child: ParagraphContent): string | undefined {
-  if (child.type === 'hyperlink') return `link:${child.anchor || child.href?.replace(/^#/, '') || child.rId || ''}`;
-  if (child.type === 'complexField') return `field:${child.instruction}`;
-  if (child.type === 'inlineSdt') return `sdt:${child.properties.id ?? ''}`;
-  if (isTrackedWrapper(child)) return `${child.type}:${child.info.id}`;
-  return undefined;
-}
-
-function restoreFieldRuns(
-  content: ParagraphContent[], source: readonly ParagraphContent[], keepRuns = true
-): ParagraphContent[] {
-  const runs: Run[] = [];
-  const offsets: CommentBoundary[] = [];
-  const containers = new Map<string, ParagraphContent[]>();
-  let offset = 0;
-  for (const child of source) {
-    if (keepRuns && child.type === 'run') {
-      for (const entry of child.content) {
-        if (isFieldRunContent(entry)) {
-          offsets.push({ id: runs.length, kind: 'start', offset });
-          runs.push({ ...child, content: [entry] });
-        } else {
-          offset += runContentLength(entry);
-        }
-      }
-    } else {
-      offset += fieldProjectionText(child).length;
-    }
-    const key = fieldContainerKey(child);
-    if (key !== undefined) {
-      const matches = containers.get(key) ?? [];
-      matches.push(child);
-      containers.set(key, matches);
-    }
-  }
-  if (runs.length && !content.some(child => child.type === 'run' && child.content.some(isFieldRunContent))) {
-    const recorded = source.map(fieldProjectionText).join('');
-    const live = content.map(fieldProjectionText).join('');
-    const alignment = textAlignment(recorded, live, false);
-    for (const boundary of offsets) {
-      boundary.offset = boundary.offset >= recorded.length - alignment.suffix
-        ? boundary.offset + live.length - recorded.length
-        : mapRecordedOffset(boundary.offset, recorded, live, alignment);
-    }
-    content = insertBoundaries(content, offsets, boundary => runs[boundary.id]!);
-  }
-  if (containers.size === 0) return content;
-  let changed = false;
-  const restored = content.map((child): ParagraphContent => {
-    const key = fieldContainerKey(child);
-    const original = key === undefined ? undefined : containers.get(key)?.shift();
-    if (child.type === 'hyperlink' && original?.type === 'hyperlink') {
-      const children = child.structuredChildren ?? child.children;
-      const restored = restoreFieldRuns(children, original.structuredChildren ?? original.children);
-      if (restored !== children) {
-        changed = true;
-        return linkPart(child, restored as HyperlinkContent[])!;
-      }
-    } else if (child.type === 'complexField' && original?.type === 'complexField') {
-      const restorePart = (
-        current: StructuredFieldContent | undefined, base: StructuredFieldContent | undefined,
-      ): StructuredFieldContent | undefined => {
-        if (!current?.inline || !base?.inline) return current;
-        const inline = restoreFieldRuns(current.inline, base.inline);
-        return inline === current.inline ? current : { ...current, inline: inline as FieldInlineContent[] };
-      };
-      const code = restorePart(child.structuredCode, original.structuredCode);
-      const result = restorePart(child.structuredResult, original.structuredResult);
-      if (code !== child.structuredCode || result !== child.structuredResult) {
-        const flattened = (part: StructuredFieldContent | undefined): Run[] => (part?.inline ?? []).flatMap(node => {
-          if (node.type === 'run') return [node];
-          if (node.type === 'hyperlink') return node.children.filter((run): run is Run => run.type === 'run');
-          return node.type === 'simpleField' ? node.content : [];
-        });
-        const field: ComplexField = { ...child };
-        if (code !== child.structuredCode) {
-          field.structuredCode = code;
-          field.fieldCode = flattened(code);
-        }
-        if (result !== child.structuredResult) {
-          field.structuredResult = result;
-          field.fieldResult = flattened(result);
-        }
-        if (field.fieldTree) {
-          field.fieldTree = { ...field.fieldTree };
-          if (field.fieldTree.code) field.fieldTree.code = code;
-          if (field.fieldTree.result) field.fieldTree.result = result;
-        }
-        changed = true;
-        return field;
-      }
-    } else if (child.type === 'inlineSdt' && original?.type === 'inlineSdt') {
-      const inner = restoreFieldRuns(child.content, original.content, keepRuns);
-      if (inner !== child.content) {
-        changed = true;
-        return { ...child, content: inner as InlineSdt['content'] };
-      }
-    } else if (isTrackedWrapper(child) && isTrackedWrapper(original)) {
-      const inner = restoreFieldRuns(child.content, original.content, keepRuns);
-      if (inner !== child.content) {
-        changed = true;
-        return { ...child, content: inner } as ParagraphContent;
-      }
-    }
-    return child;
-  });
-  return changed ? restored : content;
-}
-
-function restoreSpanningFieldRuns(
-  blocks: BlockContent[], base: readonly BlockContent[], storyId: string,
-): BlockContent[] {
-  const live = new Map(storyBlockKeys(blocks, storyId).map((key, index) => [key, blocks[index]!]));
-  const keys = storyBlockKeys(base, storyId);
-  const sources = new Map<string, Paragraph>();
-  let last = -1;
-  for (const [index, block] of base.entries()) {
-    const key = keys[index];
-    if (block.type !== 'paragraph' || key === undefined) continue;
-    const current = live.get(key);
-    for (const field of spanningFields(block.content)) {
-      const closing = field.spanEnd?.paragraph;
-      if (closing === undefined) continue;
-      const end = index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult);
-      if (current?.type === 'paragraph' && spanningFields(current.content)
-        .some(candidate => candidate.spanEnd?.paragraph === closing)) {
-        last = Math.max(last, end);
-      }
-    }
-    if (index <= last) sources.set(key, block);
-  }
-  if (sources.size === 0) return blocks;
-  return blocks.map((block) => {
-    if (block.type !== 'paragraph') return block;
-    const key = projectedSessionKey(block);
-    const source = key === undefined ? undefined : sources.get(`P${key}`);
-    if (!source) return block;
-    const content = restoreFieldRuns(block.content, source.content, false);
-    return content === block.content ? block : cloneProjectedParagraph(block, { content });
-  });
-}
-
-function restoreFieldEnds(
-  blocks: BlockContent[],
-  base: readonly BlockContent[],
-  storyId: string,
-  anchors: ReadonlyMap<number, { key: string; offset: number }>,
-): BlockContent[] {
-  const keys = storyBlockKeys(blocks, storyId);
-  const live = new Map(keys.map((key, index) => [key, index]));
-  const sourceKeys = storyBlockKeys(base, storyId);
-  const sources = new Map<number, number>();
-  base.forEach((block, index) => {
-    if (block.type !== 'paragraph') return;
-    for (const child of block.content) {
-      const id = fieldEndId(child);
-      if (id !== undefined) sources.set(id, index);
-    }
-  });
-  const placements = new Map<number, Array<{ offset: number; marker: ParagraphContent }>>();
-  const kept = new Map<number, number>();
-  const used = new Set<number>();
-  blocks.forEach((block, owner) => {
-    if (block.type !== 'paragraph') return;
-    for (const field of spanningFields(block.content)) {
-      const end = field.spanEnd;
-      if (!end || used.has(end.paragraph) || fieldEndId(end.marker) !== end.paragraph) continue;
-      const anchor = anchors.get(end.paragraph);
-      const source = sources.get(end.paragraph);
-      const sourceIndex = source === undefined ? undefined : live.get(sourceKeys[source]);
-      if (!anchor && (source === undefined || sourceIndex !== undefined)) {
-        if (sourceIndex !== undefined) kept.set(end.paragraph, sourceIndex);
-        continue;
-      }
-      used.add(end.paragraph);
-      let index = anchor && live.get(anchor.key);
-      let offset = anchor?.offset ?? Number.MAX_SAFE_INTEGER;
-      if (source !== undefined && sourceIndex === undefined) {
-        const nextKey = sourceKeys.slice(source + 1).find(key => key !== undefined && live.has(key));
-        const outside = nextKey === undefined ? blocks.length : live.get(nextKey)!;
-        if (index === undefined || index >= outside) {
-          index = outside - 1;
-          while (index > owner && blocks[index]?.type !== 'paragraph') index -= 1;
-          offset = Number.MAX_SAFE_INTEGER;
-        }
-      }
-      if (index === undefined || index < owner || blocks[index]?.type !== 'paragraph') {
-        index = owner;
-        offset = Number.MAX_SAFE_INTEGER;
-      }
-      const target = blocks[index] as Paragraph;
-      if (target === base[source ?? -1] && target.content.some(child => fieldEndId(child) === end.paragraph)) {
-        kept.set(end.paragraph, index);
-        continue;
-      }
-      const bucket = placements.get(index) ?? [];
-      bucket.push({ offset, marker: end.marker });
-      placements.set(index, bucket);
-    }
-  });
-  return blocks.map((block, index) => {
-    if (block.type !== 'paragraph') return block;
-    const content = block.content.filter(child => {
-      const id = fieldEndId(child);
-      return id === undefined || kept.get(id) === index;
-    });
-    const markers = placements.get(index);
-    if (!markers) return content.length === block.content.length ? block : cloneProjectedParagraph(block, { content });
-    const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
-    const restored = insertBoundaries(content, markers.map((marker, id) => ({
-      id, kind: 'start', offset: Math.min(marker.offset, length),
-    })), boundary => markers[boundary.id]!.marker);
-    return cloneProjectedParagraph(block, { content: restored });
-  });
-}
-
 /** Story blocks a complex field's code and result span after its paragraph. */
 interface FieldBlockSpan {
   code: number;
@@ -3932,20 +3683,22 @@ function parsedBlockCount(content: StructuredFieldContent | undefined): number {
   return content?.blockCount ?? content?.blocks?.length ?? 0;
 }
 
+/**
+ * The story blocks a spanning field's code and result span in `blocks`, the projected story its
+ * paragraph sits at `owner` in, with `keys` its block ids. While the blocks its embed recorded
+ * at seed time (`fieldSpanBlocks`) still follow its paragraph in order with nothing between
+ * them, or it recorded none, this is the parsed span. Otherwise it is the blocks up to the last
+ * of the leading recorded blocks that still do. Raw blocks count as they did when parsed.
+ */
 function keptSpan(
   field: ComplexField,
   payload: Attrs | undefined,
   owner: number,
   blocks: readonly BlockContent[],
-  keys: ReadonlyArray<string | undefined>,
-  closingBlocks: ReadonlyMap<number, number>,
+  keys: ReadonlyArray<string | undefined>
 ): FieldBlockSpan {
   const code = parsedBlockCount(field.structuredCode);
   const result = parsedBlockCount(field.structuredResult);
-  if (field.spanEnd) {
-    const closing = closingBlocks.get(field.spanEnd.paragraph);
-    if (closing !== undefined && closing >= owner) return { code: 0, result: closing - owner };
-  }
   const recorded = payload?.fieldSpanBlocks;
   if (!Array.isArray(recorded)) return { code, result };
   let index = owner + 1;
@@ -4025,6 +3778,95 @@ function replaceFields(
   return changed ? next : content;
 }
 
+function pageReferenceTab(children: readonly HyperlinkContent[]): number | undefined {
+  let offset = 0;
+  let tab: number | undefined;
+  for (const child of children) {
+    if (child.type !== 'run') return undefined;
+    for (const item of child.content) {
+      if (item.type === 'fieldChar' || item.type === 'instrText') return undefined;
+      offset += runContentLength(item);
+      if (item.type === 'tab') {
+        if (tab !== undefined) return undefined;
+        tab = offset;
+      }
+    }
+  }
+  return tab;
+}
+
+function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
+  const live = (link.structuredChildren ?? link.children).map((child): HyperlinkContent => {
+    if (child.type !== 'run' || !child.content.some(item => item.type === 'text' && item.text.includes('\t'))) return child;
+    return { ...child, content: child.content.flatMap((item): RunContent[] => {
+      if (item.type !== 'text' || !item.text.includes('\t')) return [item];
+      return item.text.split(/(\t)/).filter(Boolean).map(text =>
+        text === '\t' ? { type: 'tab' } : { ...item, text }
+      );
+    }) };
+  });
+  const tab = pageReferenceTab(live);
+  if (tab === undefined) return link;
+  const children = source.structuredChildren ?? source.children;
+  const start = children.findIndex(child => child.type === 'run' &&
+    child.content.some(item => item.type === 'fieldChar'));
+  const markers = children.slice(start).filter((child): child is Run => child.type === 'run' &&
+    child.content.length > 0 && child.content.every(item => item.type === 'fieldChar' || item.type === 'instrText'));
+  const types = markers.flatMap(run => run.content.flatMap(item => item.type === 'fieldChar' ? [item.charType] : []));
+  const instruction = markers.flatMap(run => run.content.flatMap(item => item.type === 'instrText' ? [item.text] : [])).join('');
+  const label = children.slice(0, start);
+  const labelEnd = pageReferenceTab(label);
+  if (
+    start < 1 || labelEnd === undefined || labelEnd !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
+    types.join(',') !== 'begin,separate,end' || !/^\s*PAGEREF\b/i.test(instruction) ||
+    children[start] !== markers[0] || children.at(-1) !== markers.at(-1) ||
+    !markers.at(-1)!.content.every(item => item.type === 'fieldChar' && item.charType === 'end')
+  ) return link;
+  const length = live.reduce((sum, child) => sum + linkChildLength(child), 0);
+  const restored = insertBoundaries(live, markers.map((_, id) => ({
+    id, kind: 'start', offset: id === markers.length - 1 ? length : tab,
+  })), boundary => markers[boundary.id]!);
+  return linkPart(link, restored as HyperlinkContent[])!;
+}
+
+function restoreSpanningPageReferences(
+  blocks: BlockContent[], base: readonly BlockContent[], storyId: string,
+): BlockContent[] {
+  const liveKeys = storyBlockKeys(blocks, storyId);
+  const live = new Map(liveKeys.map((key, index) => [key, blocks[index]!]));
+  const keys = storyBlockKeys(base, storyId);
+  const sources = new Map<string, Paragraph>();
+  let end = -1;
+  for (const [index, block] of base.entries()) {
+    const key = keys[index];
+    if (key === undefined || block.type !== 'paragraph') continue;
+    const current = live.get(key);
+    if (current?.type !== 'paragraph') continue;
+    for (const field of spanningFields(block.content)) {
+      if (current.content.some(child => child.type === 'complexField' && child.instruction === field.instruction)) {
+        end = Math.max(end, index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult));
+      }
+    }
+    if (index <= end && current !== block) sources.set(key, block);
+  }
+  if (sources.size === 0) return blocks;
+  return blocks.map((block, index) => {
+    const source = sources.get(liveKeys[index] ?? '');
+    if (!source || block.type !== 'paragraph') return block;
+    const links = source.content.filter((child): child is Hyperlink => child.type === 'hyperlink');
+    const content = block.content.map(child => {
+      if (child.type !== 'hyperlink') return child;
+      const index = links.findIndex(link => link.anchor
+        ? link.anchor === child.anchor
+        : link.href === child.href && link.rId === child.rId);
+      const source = index < 0 ? undefined : links.splice(index, 1)[0];
+      return source ? restorePageReference(child, source) : child;
+    });
+    return content.some((child, index) => child !== block.content[index])
+      ? cloneProjectedParagraph(block, { content }) : block;
+  });
+}
+
 /**
  * `blocks` with each complex field spanning paragraphs counting the story blocks it still spans
  * in this projection, read from `payloads`, each paragraph's spanning field embeds by session
@@ -4037,14 +3879,6 @@ function withKeptBlockCounts(
 ): BlockContent[] {
   if (payloads.size === 0) return blocks;
   const keys = storyBlockKeys(blocks, storyId).map((key) => key?.slice(1));
-  const closingBlocks = new Map<number, number>();
-  blocks.forEach((block, index) => {
-    if (block.type !== 'paragraph') return;
-    for (const child of block.content) {
-      const id = fieldEndId(child);
-      if (id !== undefined) closingBlocks.set(id, index);
-    }
-  });
   let changed = false;
   const next = blocks.map((block, owner) => {
     const key = keys[owner];
@@ -4054,7 +3888,7 @@ function withKeptBlockCounts(
     const replacements = new Map(
       fields.map((field, index) => {
         const payload = fields.length === embeds.length ? embeds[index] : undefined;
-        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys, closingBlocks))] as const;
+        return [field, withBlockCounts(field, keptSpan(field, payload, owner, blocks, keys))] as const;
       })
     );
     const content = replaceFields(block.content, replacements);
@@ -4932,7 +4766,6 @@ class SaveContext {
     };
 
     const storyRawMarks = this.storyRawMarks(storyId);
-    const fieldEndAnchors = new Map<number, { key: string; offset: number }>();
     const rawMarksInOrder = storyRawMarks.every(
       (mark, index) => index === 0 || storyRawMarks[index - 1]!.offset <= mark.offset
     );
@@ -4987,14 +4820,7 @@ class SaveContext {
         const baseParagraph = this.baseParagraphs.get(segment.paraId);
         if (baseParagraph) precedingBaseParagraphs.push(baseParagraph);
         const boundaries = paragraphCommentBoundaries(storyOffset);
-        const rawMarks = paragraphRawMarks(storyOffset).filter(mark => {
-          if (!mark.xml.startsWith(FIELD_END_ANCHOR)) return true;
-          const id = Number(mark.xml.slice(FIELD_END_ANCHOR.length));
-          if (Number.isSafeInteger(id) && id >= 0) {
-            fieldEndAnchors.set(id, { key: `P${segment.paraId}`, offset: mark.offset });
-          }
-          return false;
-        });
+        const rawMarks = paragraphRawMarks(storyOffset);
         const source = sourceBreakBoundaries(baseParagraph);
         const sourceRuns = source.some(boundary => boundary.breaks?.length) ? source : undefined;
         const inputs = [
@@ -5187,12 +5013,9 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
-    const rawRestored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
-    const restored = fieldEndAnchors.size || spanningEmbeds.size
-      ? restoreFieldEnds(rawRestored, baseBlocks ?? [], storyId, fieldEndAnchors)
-      : rawRestored;
+    const restored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
     const projected = withKeptBlockCounts(
-      baseBlocks && spanningEmbeds.size ? restoreSpanningFieldRuns(restored, baseBlocks, storyId) : restored,
+      baseBlocks && spanningEmbeds.size ? restoreSpanningPageReferences(restored, baseBlocks, storyId) : restored,
       storyId,
       spanningEmbeds
     );

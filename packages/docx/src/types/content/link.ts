@@ -8,7 +8,6 @@ import type { TextFormatting } from '../formatting';
 import type { InlineSdt } from './sdt';
 import type { MathEquation } from './math';
 import type { BlockContent } from './section';
-import type { TrackedRunChange } from './trackedChange';
 
 /** Stable document position used by bookmark and field range contracts. */
 export interface ContentPosition {
@@ -238,8 +237,6 @@ export interface ComplexField {
   fieldCode: Run[];
   /** Display result runs */
   fieldResult: Run[];
-  /** Source boundary of a spanning field. @internal */
-  spanEnd?: { paragraph: number; marker: Run | TrackedRunChange };
   /**
    * Run formatting carried by the field's structural runs (the runs holding
    * the `w:fldChar` begin/separate/end). Word styles the field result with

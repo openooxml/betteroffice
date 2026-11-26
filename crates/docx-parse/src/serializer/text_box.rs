@@ -6,7 +6,7 @@ use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, XmlNode, pars
 use super::context::SerializerContext;
 use super::raw::validate_replayed_fragment;
 use super::s13::element_span;
-use super::sdt::{serialize_block_content, serialize_story_blocks};
+use super::sdt::serialize_block_content;
 
 fn drawing_path(element: &XmlElement) -> Option<Vec<u32>> {
     if element.name == "w:drawing" {
@@ -135,16 +135,14 @@ fn same_text(
 ) -> bool {
     let mut scratch = context.clone();
     let mut model = String::new();
-    let Ok(blocks) = content
-        .iter()
-        .cloned()
-        .map(serde_json::from_value::<BlockContent>)
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return false;
-    };
-    if serialize_story_blocks(&blocks, &mut scratch, |xml| model.push_str(xml)).is_err() {
-        return false;
+    for value in content {
+        let Ok(block) = serde_json::from_value::<BlockContent>(value.clone()) else {
+            return false;
+        };
+        let Ok(xml) = serialize_block_content(&block, &mut scratch) else {
+            return false;
+        };
+        model.push_str(&xml);
     }
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
@@ -314,14 +312,11 @@ pub(super) fn replay(
             } else {
                 fragment[..tag.range.end].to_owned()
             };
-            let blocks = body
-                .content
-                .iter()
-                .cloned()
-                .map(serde_json::from_value::<BlockContent>)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| ParseError::Canonical(error.to_string()))?;
-            serialize_story_blocks(&blocks, context, |block| xml.push_str(block))?;
+            for value in &body.content {
+                let block: BlockContent = serde_json::from_value(value.clone())
+                    .map_err(|error| ParseError::Canonical(error.to_string()))?;
+                xml.push_str(&serialize_block_content(&block, context)?);
+            }
             xml.push_str(&format!("</{}>", tag.name));
             output.replace_range(span, &xml);
         }

@@ -280,13 +280,15 @@ for (const wrapper of ['ins', 'del']) {
   test(`preserves the boundary and metadata of a marker-only ${wrapper} after an edit`, async () => {
     const boundary = `<w:${wrapper} w:id="17" w:author="Reviewer" w:date="2000-01-01T00:00:00Z">${fieldChar('end')}</w:${wrapper}>`;
     const source = body('S1').replace(fieldChar('end'), boundary);
-    const xml = await editAndSave(source, session => insertInText(session, 'SPANEND', 1, ' INSIDE '), true);
-    expect(inspect(xml)).toEqual(inspect(source.replace('SPANEND', 'S INSIDE PANEND')));
-    const revision = xml.match(new RegExp(`<w:${wrapper}\\b([^>]*)>([\\s\\S]*?)</w:${wrapper}>`));
-    expect(revision?.[1]).toContain('w:id="17"');
-    expect(revision?.[1]).toContain('w:author="Reviewer"');
-    expect(revision?.[1]).toContain('w:date="2000-01-01T00:00:00Z"');
-    expect(revision?.[2]).toContain('w:fldCharType="end"');
+    for (const fullWrite of [false, true]) {
+      const xml = await editAndSave(source, session => insertInText(session, 'SPANEND', 1, ' INSIDE '), fullWrite);
+      expect(inspect(xml)).toEqual(inspect(source.replace('SPANEND', 'S INSIDE PANEND')));
+      const revision = xml.match(new RegExp(`<w:${wrapper}\\b([^>]*)>([\\s\\S]*?)</w:${wrapper}>`));
+      expect(revision?.[1]).toContain('w:id="17"');
+      expect(revision?.[1]).toContain('w:author="Reviewer"');
+      expect(revision?.[1]).toContain('w:date="2000-01-01T00:00:00Z"');
+      expect(revision?.[2]).toContain('w:fldCharType="end"');
+    }
   }, 30_000);
 }
 
@@ -299,16 +301,31 @@ test('edits on both sides of a spanning end keep the end between the edited text
   expect(inspect(xml)).toEqual(inspect(source.replace('SPANEND', 'S INSIDE PANEND').replace('AFTERSPAN', 'A OUTSIDE FTERSPAN')));
 }, 30_000);
 
-test('a run ending one span and beginning another keeps intervening text outside both', async () => {
-  const shared = '<w:r><w:fldChar w:fldCharType="end"/><w:t>BETWEEN</w:t><w:fldChar w:fldCharType="begin"/>' +
-    '<w:instrText xml:space="preserve"> QUOTE SECOND </w:instrText><w:fldChar w:fldCharType="separate"/></w:r>';
+test('consecutive spans keep intervening text outside both fields', async () => {
   const source = [
     fieldStart('QUOTE FIRST') + textRun('FIRST'),
-    textRun('FIRSTEND') + shared + textRun('SECOND'),
+    textRun('FIRSTEND') + fieldChar('end') + textRun('BETWEEN') + fieldStart('QUOTE SECOND') + textRun('SECOND'),
     textRun('SECONDEND') + fieldChar('end') + textRun('OUTSIDE'),
   ].map(paragraph).join('');
-  const xml = await editAndSave(source, session => insertInText(session, 'BETWEEN', 1, ' EDIT '));
-  expect(inspect(xml)).toEqual(inspect(source.replace('BETWEEN', 'B EDIT ETWEEN')));
+  for (const fullWrite of [false, true]) {
+    const xml = await editAndSave(source, session => insertInText(session, 'BETWEEN', 1, ' EDIT '), fullWrite);
+    expect(inspect(xml)).toEqual(inspect(source.replace('BETWEEN', 'B EDIT ETWEEN')));
+  }
+}, 30_000);
+
+test('editing both sides of a TOC entry keeps the PAGEREF result after the label', async () => {
+  const source = body('TA');
+  for (const fullWrite of [false, true]) {
+    for (const [label, page] of [['ENTRYONE', 'PAGEONE'], ['ENTRYTWO', 'PAGETWO']] as const) {
+      const xml = await editAndSave(source, session => {
+        insertInText(session, label, 1, ' LONGER LABEL ');
+        insertInText(session, page, 1, ' NEW PAGE ');
+      }, fullWrite);
+      const expected = source.replace(label, label[0] + ' LONGER LABEL ' + label.slice(1))
+        .replace(page, page[0] + ' NEW PAGE ' + page.slice(1));
+      expect(inspect(xml)).toEqual(inspect(expected));
+    }
+  }
 }, 30_000);
 
 test('nested spanning opens keep the legacy full write', async () => {

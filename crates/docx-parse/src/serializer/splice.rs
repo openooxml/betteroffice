@@ -1481,33 +1481,36 @@ fn keeps_ranges(source: &str, written: &str) -> Option<bool> {
     Some(unwrapped(source)? && unwrapped(written)? && crossing(source)? == crossing(written)?)
 }
 
-fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
-    fn without_local_fields(xml: &str) -> Option<String> {
-        let mut depth = 0usize;
-        let mut cursor = 0;
-        let mut output = String::new();
-        for tag in tags(xml)? {
-            if tag.name != "w:fldChar" {
-                continue;
-            }
-            if !tag.empty || tag.end {
-                return None;
-            }
+fn without_field_characters(xml: &str, local_only: bool) -> Option<String> {
+    let mut depth = 0usize;
+    let mut cursor = 0;
+    let mut output = String::new();
+    for tag in tags(xml)? {
+        if tag.name != "w:fldChar" {
+            continue;
+        }
+        if !tag.empty || tag.end {
+            return None;
+        }
+        if local_only {
             match unescaped(xml, attribute(&tag, "w:fldCharType")?)?.as_str() {
                 "begin" => depth += 1,
                 "end" => depth = depth.checked_sub(1)?,
                 "separate" if depth > 0 => {}
                 _ => return None,
             }
-            output.push_str(&xml[cursor..tag.range.start]);
-            cursor = tag.range.end;
         }
-        output.push_str(&xml[cursor..]);
-        (depth == 0).then_some(output)
+        output.push_str(&xml[cursor..tag.range.start]);
+        cursor = tag.range.end;
     }
+    output.push_str(&xml[cursor..]);
+    (depth == 0).then_some(output)
+}
+
+fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
     keeps_ranges(
-        &without_local_fields(source)?,
-        &without_local_fields(written)?,
+        &without_field_characters(source, true)?,
+        &without_field_characters(written, true)?,
     )
 }
 
@@ -2986,11 +2989,21 @@ fn splice_story_part_inner(
                             .paragraph_patches
                             .iter()
                             .any(|entry| entry.ordinal == *ordinal));
-                if legacy {
+                if recorded.carried_field_ends.contains(ordinal)
+                    || (recorded.paired_fields.contains(ordinal) && keeps_field_characters(paragraph, xml))
+                {
+                    keeps_ranges(
+                        &without_field_characters(paragraph, false)?,
+                        &without_field_characters(xml, false)?,
+                    )?
+                } else if legacy {
                     keeps_local_field_ranges(paragraph, xml)?
                 } else {
                     keeps_ranges(paragraph, xml)?
                 }
+            }
+            None if recorded.moved_field_ends.contains(ordinal) => {
+                simple(&without_field_characters(paragraph, false)?)?
             }
             None => simple(paragraph)?,
         };
@@ -3177,8 +3190,12 @@ fn splice_story_part_inner(
     if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
+    let output = fragments.concat();
+    if !recorded.moved_field_ends.is_empty() && !keeps_field_characters(&source, &output) {
+        return None;
+    }
     options.replace_reasons.extend(tables.reasons);
-    Some(fragments.concat())
+    Some(output)
 }
 
 fn admit_fragment_namespaces(

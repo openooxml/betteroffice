@@ -7,8 +7,6 @@ use crate::block::BlockContent;
 use crate::inline::{InlineNode, Run, RunContent};
 use crate::paragraph::{Paragraph, ParagraphContent};
 
-use super::paragraph::{field_result_nodes, field_result_nodes_mut};
-
 /// Where a paragraph sits in the stories given to [`normalize_comment_references`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParagraphLocation {
@@ -214,7 +212,7 @@ fn each_reference(paragraph: &Paragraph, found: &mut impl FnMut(f64)) {
             }
             InlineNode::ComplexField(field) => {
                 field.field_code.iter().for_each(|child| run(child, found));
-                match field_result_nodes(field) {
+                match written_result(field) {
                     Some(nodes) => nodes.iter().for_each(|child| node(child, found)),
                     None => field
                         .field_result
@@ -238,6 +236,15 @@ fn each_reference(paragraph: &Paragraph, found: &mut impl FnMut(f64)) {
             _ => {}
         }
     }
+}
+
+/// The inline nodes the serializer writes as a complex field's result, when not its runs.
+fn written_result(field: &crate::inline::ComplexField) -> Option<&Vec<InlineNode>> {
+    field
+        .structured_result
+        .as_ref()
+        .filter(|content| !content.spans_paragraphs())
+        .and_then(|content| content.inline.as_ref())
 }
 
 /// Removes the references `drops` flags, visiting them in [`each_reference`] order, and the runs
@@ -275,7 +282,11 @@ impl Remover<'_> {
             InlineNode::SimpleField(field) => self.runs(&mut field.content),
             InlineNode::ComplexField(field) => {
                 self.runs(&mut field.field_code);
-                let written = field_result_nodes_mut(field);
+                let written = field
+                    .structured_result
+                    .as_mut()
+                    .filter(|content| !content.spans_paragraphs())
+                    .and_then(|content| content.inline.as_mut());
                 match written {
                     Some(nodes) => self.nodes(nodes),
                     None => self.runs(&mut field.field_result),
@@ -340,23 +351,6 @@ mod tests {
 
     fn holds_reference(value: &Value) -> bool {
         value.to_string().contains("commentReference")
-    }
-
-    #[test]
-    fn removes_an_emptied_run_from_a_structured_field_result() {
-        let text = json!({"type": "run", "content": [{"type": "text", "text": "Result"}]});
-        let mut node: InlineNode = serde_json::from_value(json!({
-            "type": "complexField",
-            "instruction": "QUOTE",
-            "fieldType": "QUOTE",
-            "fieldCode": [],
-            "fieldResult": [],
-            "structuredResult": {"inline": [reference(), text.clone()]}
-        })).unwrap();
-        let mut remover = Remover { drops: &[true], next: 0 };
-        assert!(!remover.node(&mut node));
-        let result = serde_json::to_value(node).unwrap();
-        assert_eq!(result["structuredResult"]["inline"], json!([text]));
     }
 
     #[test]

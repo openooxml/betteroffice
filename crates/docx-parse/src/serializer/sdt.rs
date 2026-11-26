@@ -4,8 +4,7 @@ use crate::block::{BlockContent, BlockSdt};
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
-use super::field_spans::PendingFieldEnds;
-use super::paragraph::{serialize_paragraph, serialize_story_paragraph, synthesize_sdt_properties};
+use super::paragraph::{serialize_paragraph, synthesize_sdt_properties};
 use super::raw::validate_raw_subtree;
 use super::run::append_generated;
 use super::table::serialize_table;
@@ -25,25 +24,6 @@ pub fn serialize_block_content(
             Ok(raw.xml.clone())
         }
     }
-}
-
-pub(super) fn serialize_story_blocks(
-    blocks: &[BlockContent],
-    context: &mut SerializerContext,
-    mut append: impl FnMut(&str),
-) -> Result<(), ParseError> {
-    let mut pending = PendingFieldEnds::default();
-    for (index, block) in blocks.iter().enumerate() {
-        let xml = if let BlockContent::Paragraph(paragraph) = block {
-            ooxml_opc::progress::tick();
-            pending.block = index;
-            serialize_story_paragraph(paragraph, &blocks[index + 1..], &mut pending, context)?
-        } else {
-            serialize_block_content(block, context)?
-        };
-        append(&xml);
-    }
-    Ok(())
 }
 
 pub fn serialize_block_sdt(
@@ -80,7 +60,9 @@ pub fn serialize_block_sdt(
     append_generated(&mut writer, &properties);
     append_generated(&mut writer, &end_properties);
     writer.start_element("w:sdtContent");
-    serialize_story_blocks(&sdt.content, context, |xml| append_generated(&mut writer, xml))?;
+    for block in &sdt.content {
+        append_generated(&mut writer, &serialize_block_content(block, context)?);
+    }
     writer.end_element().end_element();
     Ok(writer.finish())
 }
