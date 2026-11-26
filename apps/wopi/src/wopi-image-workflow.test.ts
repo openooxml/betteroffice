@@ -61,6 +61,7 @@ const EXPECTED_PATHS = [
   "Cargo.lock",
   "package.json",
   "Cargo.toml",
+  "rust-toolchain.toml",
   ".dockerignore",
   ".github/workflows/wopi-image.yml",
 ];

@@ -6,8 +6,12 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends build-essential ca-certificates curl pkg-config python3 \
   && rm -rf /var/lib/apt/lists/*
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --target wasm32-unknown-unknown
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+COPY rust-toolchain.toml ./
+RUN rustup toolchain install
 
 RUN case "$BUILDARCH" in \
       amd64) wasm_pack_arch=x86_64; wasm_pack_sha256=c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a ;; \
@@ -34,7 +38,6 @@ RUN case "$BUILDARCH" in \
   && rm -f /tmp/binaryen.tar.gz
 ENV PATH="/opt/binaryen/bin:${PATH}"
 
-WORKDIR /app
 COPY . .
 RUN bun install --frozen-lockfile
 RUN bun run build:xlsx-wasm && bun run build:docx-wasm && bun run build:pptx-wasm

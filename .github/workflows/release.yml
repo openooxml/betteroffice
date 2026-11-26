@@ -123,7 +123,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -250,7 +250,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 

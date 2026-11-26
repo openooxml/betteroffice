@@ -259,7 +259,14 @@ describe("apps/wopi/Dockerfile", () => {
     expect(source).toContain("build:web");
     expect(source.indexOf("build:pptx-wasm")).toBeLessThan(source.indexOf("build:packages"));
     expect(source.indexOf("build:packages")).toBeLessThan(source.indexOf("build:web"));
-    expect(source).toContain("wasm32-unknown-unknown");
+    const build = stages(source)[0]!;
+    const copyPin = build.indexOf("COPY rust-toolchain.toml ./");
+    const installRust = build.indexOf("RUN rustup toolchain install");
+    expect(build).toContain("WORKDIR /app");
+    expect(copyPin).toBeGreaterThan(build.indexOf("WORKDIR /app"));
+    expect(installRust).toBeGreaterThan(copyPin);
+    expect(build.indexOf("COPY . .")).toBeGreaterThan(installRust);
+    expect(source).not.toContain("--default-toolchain stable");
   });
 
   test("build tools select pinned downloads for each build architecture", () => {

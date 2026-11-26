@@ -75,7 +75,7 @@ jobs:
         with:
           bun-version: '1.4.3'
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -151,7 +151,7 @@ jobs:
         with:
           bun-version: '1.4.3'
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 

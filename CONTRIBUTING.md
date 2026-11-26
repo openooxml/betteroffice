@@ -5,8 +5,7 @@ Thanks for your interest in contributing! This guide will help you get started.
 ## Prerequisites
 
 - [Bun](https://bun.sh/) (v1.0+)
-- [Rust](https://rustup.rs/) (stable, with `rustfmt` and `clippy`)
-- `wasm32-unknown-unknown` (`rustup target add wasm32-unknown-unknown`)
+- [rustup](https://rustup.rs/) installs the Rust version, `rustfmt`, `clippy`, and the `wasm32-unknown-unknown` target selected by `rust-toolchain.toml` on first use.
 - [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) 0.15.0
   (`cargo install wasm-pack --version 0.15.0 --locked`)
 - [`binaryen`](https://github.com/WebAssembly/binaryen) for `wasm-opt`

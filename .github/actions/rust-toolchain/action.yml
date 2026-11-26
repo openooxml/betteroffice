@@ -1,0 +1,34 @@
+name: Rust toolchain
+description: Installs the Rust version pinned in rust-toolchain.toml.
+
+inputs:
+  targets:
+    description: Additional Rust targets to install.
+    required: false
+    default: ''
+  components:
+    description: Additional Rust components to install.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      env:
+        RUST_TOOLCHAIN_FILE: ${{ github.action_path }}/../../../rust-toolchain.toml
+      run: |
+        if ! toolchain=$(sed -n \
+          "s/^[[:blank:]]*channel[[:blank:]]*=[[:blank:]]*\(['\"]\)\([^'\"]*\)\1[[:space:]]*\(#.*\)\{0,1\}$/\2/p" \
+          "$RUST_TOOLCHAIN_FILE") || [[ ! "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::rust-toolchain.toml must pin channel to an exact MAJOR.MINOR.PATCH version"
+          exit 1
+        fi
+        echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+    - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      with:
+        toolchain: ${{ steps.pin.outputs.toolchain }}
+        targets: ${{ inputs.targets }}
+        components: ${{ inputs.components }}

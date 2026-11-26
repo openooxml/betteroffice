@@ -68,8 +68,24 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - id: rust-pin
+        shell: bash
+        run: |
+          if [[ -e rust-toolchain.toml || -L rust-toolchain.toml ]]; then
+            if ! toolchain=$(sed -n \
+              "s/^[[:blank:]]*channel[[:blank:]]*=[[:blank:]]*\(['\"]\)\([^'\"]*\)\1[[:space:]]*\(#.*\)\{0,1\}$/\2/p" \
+              rust-toolchain.toml) || [[ ! "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::rust-toolchain.toml must pin channel to an exact MAJOR.MINOR.PATCH version"
+              exit 1
+            fi
+          else
+            toolchain=stable
+          fi
+          echo "toolchain=$toolchain" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: ${{ steps.rust-pin.outputs.toolchain }}
           targets: ${{ matrix.platform.target }}
 
       - uses: Swatinem/rust-cache@v2

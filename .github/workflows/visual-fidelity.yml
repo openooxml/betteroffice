@@ -345,7 +345,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -491,7 +491,7 @@ jobs:
         with:
           node-version: "24"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -543,7 +543,7 @@ jobs:
           ref: ${{ inputs.branch }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -699,7 +699,7 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
         with:
           targets: wasm32-unknown-unknown
 
@@ -843,7 +843,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: xlsx-native-${{ matrix.channel }}
@@ -1001,7 +1001,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: pptx-native-${{ matrix.channel }}
@@ -1280,7 +1280,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: "24"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: roundtrip-${{ matrix.format }}-${{ matrix.channel }}
