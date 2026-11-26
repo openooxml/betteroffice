@@ -227,24 +227,24 @@ export function projectionRootOrder(storyIds: Iterable<string>): string[] {
   return [...storyIds].sort();
 }
 
-function normalizeProjection(value: unknown, semantic: boolean): unknown {
+function normalizeProjection(value: unknown, semantic: boolean, keepSourceOrdinals = false): unknown {
   if (value instanceof ArrayBuffer) return { base64: Buffer.from(value).toString('base64') };
   if (ArrayBuffer.isView(value)) {
     return { base64: Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('base64') };
   }
   if (value instanceof Date) return value.toISOString();
   if (value instanceof Map) {
-    return Object.fromEntries([...value].map(([key, entry]) => [key, normalizeProjection(entry, semantic)]));
+    return Object.fromEntries([...value].map(([key, entry]) => [key, normalizeProjection(entry, semantic, keepSourceOrdinals)]));
   }
-  if (Array.isArray(value)) return value.map((entry) => normalizeProjection(entry, semantic));
+  if (Array.isArray(value)) return value.map((entry) => normalizeProjection(entry, semantic, keepSourceOrdinals));
   const object = record(value);
   if (!object) return value;
   const result = Object.fromEntries(Object.entries(object).filter(([, entry]) => entry !== undefined)
-    .map(([key, entry]) => [key, normalizeProjection(entry, semantic)]));
+    .map(([key, entry]) => [key, normalizeProjection(entry, semantic, keepSourceOrdinals)]));
   if (!semantic) return result;
 
   // A paragraph has the same semantic value with or without its independently checked source ordinal.
-  if (result.type === 'paragraph' && Array.isArray(result.content)) delete result.sourceOrdinal;
+  if (!keepSourceOrdinals && result.type === 'paragraph' && Array.isArray(result.content)) delete result.sourceOrdinal;
 
   // An absent whitespace hint and true are equivalent when the text itself forces preservation.
   if (result.type === 'text' && typeof result.text === 'string' && result.preserveSpace === true &&
@@ -316,10 +316,6 @@ interface ProjectionSideTables {
   deferred: Deferral[];
 }
 
-interface ProjectionWire extends ProjectionSideTables {
-  document: unknown;
-}
-
 export interface NativeProjection extends ProjectionSideTables {
   document: Document;
 }
@@ -354,6 +350,9 @@ export function projectionExport<K extends ProjectionExport>(session: EditSessio
 }
 
 function validateSideTables(wire: ProjectionSideTables): void {
+  for (const name of ['paragraphSessionKeys', 'sessionRevisionPlaceholders', 'createdListSites', 'deferred'] as const) {
+    if (!Array.isArray(wire[name])) throw new TypeError(`wire.${name} must be an array`);
+  }
   expect(wire.paragraphSessionKeys.every((key) => typeof key === 'string')).toBe(true);
   expect(wire.sessionRevisionPlaceholders.every(Number.isFinite)).toBe(true);
   expect(wire.createdListSites.every(({ paragraph, slot, key }) =>
@@ -372,14 +371,15 @@ export function nativeProjection(
   roots?: ReadonlySet<string>
 ): NativeProjection {
   const input = JSON.stringify(roots ? { rootStories: projectionRootOrder(roots) } : {});
-  const wire = JSON.parse(projectionExport(raw, 'project_document_json').call(raw, input)) as ProjectionWire;
-  validateSideTables(wire);
-  const { document } = decodeS9EnvelopeValue({
-    wireVersion: 1,
-    document: wire.document,
-    embeddedFontParts: [],
-  }, buffer);
-  return { ...wire, document };
+  const wire = JSON.parse(projectionExport(raw, 'project_document_json').call(raw, input));
+  assertSafeTree(wire, 'wire');
+  if (!record(wire)) throw new TypeError('wire must be an object');
+  const { paragraphSessionKeys, sessionRevisionPlaceholders, createdListSites, deferred, ...envelope } =
+    wire as ProjectionSideTables & Record<string, unknown>;
+  const sideTables = { paragraphSessionKeys, sessionRevisionPlaceholders, createdListSites, deferred };
+  validateSideTables(sideTables);
+  const { document } = decodeS9EnvelopeValue(envelope, buffer);
+  return { ...sideTables, document };
 }
 
 export function nativeStoryProjection(raw: EditSession, storyId: string): NativeStoryProjection {
@@ -415,7 +415,8 @@ function collectStory(
   stories: Map<string, Story>,
   storyId: string,
   blocks: readonly BlockContent[],
-  owner?: Story['owner']
+  owner?: Story['owner'],
+  keepSourceOrdinals = false
 ): void {
   if (stories.has(storyId)) return;
   const keys: Story['keys'][number][] = [];
@@ -428,8 +429,8 @@ function collectStory(
     if (block.type === 'paragraph') keys.push(projectedSessionKey(block));
     if (block.type === 'blockSdt') {
       const child = blockSdtStoryId(storyId, sdtIndex++);
-      collectStory(stories, child, block.content, { ...site, family: 'storiesAux' });
-      skeleton.push(canonicalProjection({ ...block, content: { storyId: child } }));
+      collectStory(stories, child, block.content, { ...site, family: 'storiesAux' }, keepSourceOrdinals);
+      skeleton.push(normalizeProjection({ ...block, content: { storyId: child } }, true, keepSourceOrdinals));
     } else if (block.type === 'table') {
       const table = tableIndex++;
       const cells = seededCellIndices(block);
@@ -439,37 +440,41 @@ function collectStory(
           const ordinal = cells[rowIndex]!.indexOf(cellIndex);
           if (ordinal < 0) return cell;
           const child = tableCellStoryId(storyId, table, rowIndex, ordinal);
-          collectStory(stories, child, cell.content, { ...site, family: 'tables' });
+          collectStory(stories, child, cell.content, { ...site, family: 'tables' }, keepSourceOrdinals);
           return { ...cell, content: { storyId: child } };
         }),
       }));
-      skeleton.push(canonicalProjection({ ...block, rows }));
+      skeleton.push(normalizeProjection({ ...block, rows }, true, keepSourceOrdinals));
     } else {
-      skeleton.push(canonicalProjection(block));
+      skeleton.push(normalizeProjection(block, true, keepSourceOrdinals));
     }
   }
 }
 
-export function canonicalStories(session: YrsSession, document: Document): Map<string, Story> {
+export function canonicalStories(session: YrsSession, document: Document, keepSourceOrdinals = false): Map<string, Story> {
   const stories = new Map<string, Story>();
   const pkg = document.package;
-  collectStory(stories, 'body', pkg.document.content);
+  collectStory(stories, 'body', pkg.document.content, undefined, keepSourceOrdinals);
   const furniture = [...(pkg.headers ?? []), ...(pkg.footers ?? [])];
   for (const [id, part] of furniture) {
     const canonical = headerFooterStory(session, id);
     const canonicalPart = furniture.find(([relId]) => canonical === `hf:${relId}`)?.[1] ?? part;
-    collectStory(stories, canonical, canonicalPart.content, { storyId: canonical, paragraph: null, family: 'storiesAux', kind: 'headerFooterStory' });
+    collectStory(stories, canonical, canonicalPart.content, {
+      storyId: canonical, paragraph: null, family: 'storiesAux', kind: 'headerFooterStory',
+    }, keepSourceOrdinals);
   }
   for (const [prefix, notes] of [['fn', pkg.footnotes], ['en', pkg.endnotes]] as const) {
     for (const note of notes ?? []) {
       const storyId = `${prefix}:${note.id}`;
-      collectStory(stories, storyId, note.content, { storyId, paragraph: null, family: 'storiesAux', kind: 'noteStory' });
+      collectStory(stories, storyId, note.content, {
+        storyId, paragraph: null, family: 'storiesAux', kind: 'noteStory',
+      }, keepSourceOrdinals);
     }
   }
   return stories;
 }
 
-function packageFields(session: YrsSession, document: Document): unknown {
+function packageFields(session: YrsSession, document: Document, keepSourceOrdinals = false): unknown {
   const { package: pkg, ...envelope } = document;
   const { document: body, headers, footers, footnotes, endnotes, ...fields } = pkg;
   const parts = (values: typeof headers) => values && new Map(
@@ -477,14 +482,17 @@ function packageFields(session: YrsSession, document: Document): unknown {
       const canonical = headerFooterStory(session, id).slice(3);
       if (canonical === id) return [id, part];
       const owner = values.get(canonical);
-      const sameStory = owner && equal(canonicalProjection(content), canonicalProjection(owner.content));
+      const sameStory = owner && equal(
+        normalizeProjection(content, true, keepSourceOrdinals),
+        normalizeProjection(owner.content, true, keepSourceOrdinals)
+      );
       return [id, sameStory ? part : { ...part, content }];
     })
   );
   let nextSectionStart = 0;
   const notes = (values: typeof footnotes | typeof endnotes) =>
     values?.map(({ content: _, ...note }) => note);
-  return canonicalProjection({
+  return normalizeProjection({
     ...envelope,
     package: {
       ...fields,
@@ -505,7 +513,7 @@ function packageFields(session: YrsSession, document: Document): unknown {
         }),
       },
     },
-  });
+  }, true, keepSourceOrdinals);
 }
 
 const DEFERRED_NODE_KINDS: Readonly<Record<string, string>> = {
@@ -831,6 +839,44 @@ function compareStoryKeys(
   }
 }
 
+interface NestedParagraph {
+  paragraph: Record<string, unknown>;
+  path: string;
+  position: string;
+}
+
+function nestedParagraphs(
+  blocks: readonly BlockContent[],
+  paragraphKeys: readonly (string | undefined)[] = []
+): NestedParagraph[] {
+  const paragraphs: NestedParagraph[] = [];
+  const walk = (value: unknown, path: string, position: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => walk(entry, `${path}[${index}]`, `${position}[${index}]`));
+      return;
+    }
+    const node = record(value);
+    if (!node) return;
+    if (node.type === 'paragraph' && Array.isArray(node.content)) {
+      paragraphs.push({ paragraph: node, path, position });
+    }
+    for (const [name, child] of Object.entries(node)) {
+      if (typeof child === 'object') walk(child, `${path}.${name}`, `${position}.${name}`);
+    }
+  };
+  let paragraph = 0;
+  blocks.forEach((block, index) => {
+    const path = `blocks[${index}]`;
+    if (block.type === 'paragraph') {
+      const key = paragraphKeys[paragraph++];
+      walk(block.content, `${path}.content`, `${key === undefined ? path : JSON.stringify(key)}.content`);
+    } else {
+      walk(block, path, path);
+    }
+  });
+  return paragraphs;
+}
+
 export function checkSourceOrdinals(
   storyId: string,
   blocks: readonly BlockContent[],
@@ -840,9 +886,10 @@ export function checkSourceOrdinals(
   const comparison = new Comparison([], true);
   const paragraphs = (content: readonly BlockContent[]) => content.filter((block) => block.type === 'paragraph');
   const originals = paragraphs(source);
-  const byKey = new Map(originals.map((paragraph, index) => [
-    (!paragraph.repeatedParaId && paragraph.paraId) || `${storyId}:p${index}`, paragraph,
-  ]));
+  const sourceKeys = originals.map((paragraph, index) =>
+    (!paragraph.repeatedParaId && paragraph.paraId) || `${storyId}:p${index}`
+  );
+  const byKey = new Map(originals.map((paragraph, index) => [sourceKeys[index]!, paragraph]));
   paragraphs(blocks).forEach((paragraph, index) => {
     const key = keys[index];
     const original = key === undefined ? originals[index] : byKey.get(key);
@@ -851,40 +898,39 @@ export function checkSourceOrdinals(
     );
   });
 
-  const nested = (content: readonly BlockContent[], visit: (paragraph: Record<string, unknown>, path: string) => void) => {
-    const walk = (value: unknown, path: string): void => {
-      if (Array.isArray(value)) {
-        value.forEach((entry, index) => walk(entry, `${path}[${index}]`));
-        return;
-      }
-      const node = record(value);
-      if (!node) return;
-      if (node.type === 'paragraph' && Array.isArray(node.content)) visit(node, path);
-      for (const [name, child] of Object.entries(node)) {
-        if (typeof child === 'object') walk(child, `${path}.${name}`);
-      }
-    };
-    content.forEach((block, index) => {
-      const path = `blocks[${index}]`;
-      if (block.type === 'paragraph') walk(block.content, `${path}.content`);
-      else walk(block, path);
-    });
-  };
-  const nestedSources = new Map<string, unknown[]>();
-  nested(source, (paragraph) => {
+  const nestedSources = new Map<string, NestedParagraph[]>();
+  const byPosition = new Map<string, NestedParagraph>();
+  const byId = new Map<unknown, NestedParagraph | undefined>();
+  for (const entry of nestedParagraphs(source, sourceKeys)) {
+    const { paragraph, position } = entry;
+    byPosition.set(position, entry);
+    if (paragraph.paraId && !paragraph.repeatedParaId) {
+      byId.set(paragraph.paraId, byId.has(paragraph.paraId) ? undefined : entry);
+    }
     const key = stableStringify(canonicalProjection(paragraph));
-    const ordinals = nestedSources.get(key) ?? [];
-    ordinals.push(paragraph.sourceOrdinal);
-    nestedSources.set(key, ordinals);
-  });
-  nested(blocks, (paragraph, path) => {
+    const entries = nestedSources.get(key) ?? [];
+    entries.push(entry);
+    nestedSources.set(key, entries);
+  }
+  const positions = paragraphs(blocks).map((_, index) => keys[index] ?? sourceKeys[index]);
+  for (const { paragraph, path, position } of nestedParagraphs(blocks, positions)) {
     const key = stableStringify(canonicalProjection(paragraph));
     const candidates = nestedSources.get(key);
-    const match = candidates?.indexOf(paragraph.sourceOrdinal) ?? -1;
+    const match = candidates?.findIndex((entry) => entry.paragraph.sourceOrdinal === paragraph.sourceOrdinal) ?? -1;
+    const identified = paragraph.repeatedParaId ? undefined : byId.get(paragraph.paraId);
+    const positioned = byPosition.get(position);
+    const aligned = positioned && (!candidates?.length || candidates.includes(positioned))
+      ? positioned : undefined;
+    const original = identified ?? aligned ?? (match >= 0 ? candidates![match] : candidates?.[0]);
     if (match >= 0) candidates!.splice(0, match + 1);
-    else comparison.compare(candidates?.[0], paragraph.sourceOrdinal, { storyId, paragraph: null }, `${path}.sourceOrdinal`);
-  });
+    comparison.compare(original?.paragraph.sourceOrdinal, paragraph.sourceOrdinal, { storyId, paragraph: null }, `${path}.sourceOrdinal`);
+  }
   return comparison.differences;
+}
+
+function rootDefersKeys(storyId: string, deferred: readonly Deferral[]): boolean {
+  return deferred.some((entry) => entry.storyId === storyId && entry.paragraph === null &&
+    entry.family === 'storiesAux' && (entry.kind === 'headerFooterStory' || entry.kind === 'noteStory'));
 }
 
 export function check(
@@ -892,26 +938,37 @@ export function check(
   ts: Document,
   native: NativeProjection,
   source: Map<string, Story>,
-  roots?: ReadonlySet<string>,
+  _roots?: ReadonlySet<string>,
   used?: AllowanceUsage
 ): string[] {
   const comparison = new Comparison(native.deferred, false, used);
   const expected = canonicalStories(session, ts);
   const actual = canonicalStories(session, native.document);
   compareStories(comparison, expected, actual, source);
-  if (!roots || roots.has('body')) {
-    compareStoryKeys(comparison, 'body', expected.get('body'), native.paragraphSessionKeys);
+  const roots = projectionRootOrder([...expected.keys()].filter((id) => dirtyProjectionStory(id) === id));
+  const keysByRoot = new Map<string, string[]>();
+  let offset = 0;
+  for (const id of roots) {
+    const story = expected.get(id);
+    const keyedStory = rootDefersKeys(id, native.deferred) ? undefined : story;
+    const count = keyedStory?.keys.filter((key) => key !== undefined).length ?? 0;
+    const keys = native.paragraphSessionKeys.slice(offset, offset + count);
+    compareStoryKeys(comparison, id, keyedStory, keys);
+    keysByRoot.set(id, keys);
+    offset += count;
   }
+  const packageSite = { storyId: '<package>', paragraph: null };
+  comparison.compare([], native.paragraphSessionKeys.slice(offset), packageSite, 'paragraphSessionKeys');
+  comparison.compare([], native.sessionRevisionPlaceholders, packageSite, 'sessionRevisionPlaceholders');
+  comparison.compare([], native.createdListSites, packageSite, 'createdListSites');
   for (const [storyId, story] of actual) {
     if (dirtyProjectionStory(storyId) !== storyId) continue;
     comparison.differences.push(...checkSourceOrdinals(
       storyId, story.content, source.get(storyId)?.content ?? [],
-      storyId === 'body' ? native.paragraphSessionKeys : []
+      keysByRoot.get(storyId)
     ));
   }
-  comparison.compare(packageFields(session, ts), packageFields(session, native.document), {
-    storyId: '<package>', paragraph: null,
-  }, '');
+  comparison.compare(packageFields(session, ts), packageFields(session, native.document), packageSite, '');
   return comparison.differences;
 }
 
@@ -926,9 +983,7 @@ export function checkStory(
   const actual = new Map<string, Story>();
   collectStory(actual, storyId, blocks);
   compareStories(comparison, expected, actual, source, new Set([storyId]));
-  const rootDeferred = deferred.some((entry) => entry.storyId === storyId && entry.paragraph === null &&
-    entry.family === 'storiesAux' && (entry.kind === 'headerFooterStory' || entry.kind === 'noteStory'));
-  if (!rootDeferred) compareStoryKeys(comparison, storyId, expected.get(storyId), paragraphSessionKeys);
+  if (!rootDefersKeys(storyId, deferred)) compareStoryKeys(comparison, storyId, expected.get(storyId), paragraphSessionKeys);
   comparison.differences.push(...checkSourceOrdinals(storyId, blocks, source.get(storyId)?.content ?? [], paragraphSessionKeys));
   return comparison.differences;
 }
@@ -973,9 +1028,13 @@ export function compareSnapshots(
   roots: ReadonlySet<string> | undefined
 ): string[] {
   const comparison = new Comparison([], true);
-  compareStories(comparison, canonicalStories(session, expected), canonicalStories(session, actual), new Map(), roots);
+  compareStories(
+    comparison, canonicalStories(session, expected, true), canonicalStories(session, actual, true), new Map(), roots
+  );
   if (!roots) {
-    comparison.compare(packageFields(session, expected), packageFields(session, actual), { storyId: '<package>', paragraph: null }, '');
+    comparison.compare(packageFields(session, expected, true), packageFields(session, actual, true), {
+      storyId: '<package>', paragraph: null,
+    }, '');
   }
   return comparison.differences;
 }

@@ -164,6 +164,7 @@ pub(super) fn formatting(
             non_null(&attrs, key).map(|value| ((*key).to_owned(), value.clone()))
         }))
         .collect();
+    paragraph_mark(&mut result, &properties.values, None)?;
     if result.is_empty() && numbering.is_none() {
         return Ok(None);
     }
@@ -193,6 +194,7 @@ pub(super) fn formatting(
                 key.as_str(),
                 "styleId"
                     | "numPr"
+                    | "runProperties"
                     | "lineSpacing"
                     | "lineSpacingRule"
                     | "indentFirstLine"

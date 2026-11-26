@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde_json::{Number, Value};
 
 const MAX_JSON_NESTING: usize = 1024;
@@ -11,8 +13,29 @@ pub(crate) enum OrderedValue {
     Object(Vec<(String, Self)>),
 }
 
+impl Drop for OrderedValue {
+    fn drop(&mut self) {
+        if !matches!(self, Self::Array(_) | Self::Object(_)) {
+            return;
+        }
+        let mut pending = Vec::new();
+        self.drain_children(&mut pending);
+        while let Some(mut child) = pending.pop() {
+            child.drain_children(&mut pending);
+        }
+    }
+}
+
 impl OrderedValue {
-    pub(crate) fn into_value(self) -> Result<Value, String> {
+    fn drain_children(&mut self, pending: &mut Vec<Self>) {
+        match self {
+            Self::Array(children) => pending.append(children),
+            Self::Object(entries) => pending.extend(entries.drain(..).map(|(_, child)| child)),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn into_value(self) -> Value {
         enum Step {
             Visit(OrderedValue),
             Array(usize),
@@ -23,26 +46,25 @@ impl OrderedValue {
         let mut values = Vec::new();
         while let Some(step) = pending.pop() {
             let value = match step {
-                Step::Visit(Self::Array(children)) => {
-                    pending.push(Step::Array(children.len()));
-                    pending.extend(children.into_iter().rev().map(Step::Visit));
-                    continue;
-                }
-                Step::Visit(Self::Object(entries)) => {
-                    let (keys, children): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-                    pending.push(Step::Object(keys));
-                    pending.extend(children.into_iter().rev().map(Step::Visit));
-                    continue;
-                }
-                Step::Visit(scalar) => scalar.value(),
+                Step::Visit(mut node) => match &mut node {
+                    Self::Array(children) => {
+                        pending.push(Step::Array(children.len()));
+                        pending.extend(children.drain(..).rev().map(Step::Visit));
+                        continue;
+                    }
+                    Self::Object(entries) => {
+                        let (keys, children): (Vec<_>, Vec<_>) = entries.drain(..).unzip();
+                        pending.push(Step::Object(keys));
+                        pending.extend(children.into_iter().rev().map(Step::Visit));
+                        continue;
+                    }
+                    scalar => scalar.value(),
+                },
                 Step::Array(count) => Value::Array(values.split_off(values.len() - count)),
                 Step::Object(keys) => {
                     let children = values.split_off(values.len() - keys.len());
                     let mut entries = serde_json::Map::new();
                     for (key, child) in keys.into_iter().zip(children) {
-                        if entries.contains_key(&key) {
-                            return Err(format!("duplicate JSON object key {key:?}"));
-                        }
                         entries.insert(key, child);
                     }
                     Value::Object(entries)
@@ -50,7 +72,7 @@ impl OrderedValue {
             };
             values.push(value);
         }
-        Ok(values.pop().expect("one parsed JSON value"))
+        values.pop().expect("one parsed JSON value")
     }
 
     pub(crate) fn value(&self) -> Value {
@@ -83,11 +105,19 @@ impl Frame {
         }
     }
 
-    fn finish(self) -> OrderedValue {
-        match self {
+    fn finish(self) -> Result<OrderedValue, String> {
+        Ok(match self {
             Self::Array(values) => OrderedValue::Array(values),
-            Self::Object(entries, _) => OrderedValue::Object(entries),
-        }
+            Self::Object(entries, _) => {
+                let mut keys = HashSet::new();
+                for (key, _) in &entries {
+                    if !keys.insert(key) {
+                        return Err(format!("duplicate JSON object key {key:?}"));
+                    }
+                }
+                OrderedValue::Object(entries)
+            }
+        })
     }
 }
 
@@ -146,13 +176,14 @@ fn scalar(input: &mut &str) -> Result<OrderedValue, String> {
 }
 
 fn object_key(input: &mut &str) -> Result<String, String> {
-    let OrderedValue::String(key) = scalar(input)? else {
+    let mut value = scalar(input)?;
+    let OrderedValue::String(key) = &mut value else {
         return Err("expected a JSON object key".to_owned());
     };
     if !take(input, ':') {
         return Err("expected ':' after a JSON object key".to_owned());
     }
-    Ok(key)
+    Ok(std::mem::take(key))
 }
 
 /// Parses JSON containers on a heap stack and preserves object member order.
@@ -197,7 +228,7 @@ pub(crate) fn parse_prefix(mut input: &str) -> Result<(OrderedValue, &str), Stri
             if !take(&mut input, frame.end()) {
                 return Err(format!("expected ',' or '{}' in JSON", frame.end()));
             }
-            value = stack.pop().expect("open JSON container").finish();
+            value = stack.pop().expect("open JSON container").finish()?;
         }
     }
 }

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
-use docx_parse::s9::{S9SectionWire, S9WireEnvelope};
+use docx_parse::s9::{S9PackageWire, S9SectionWire, S9WireEnvelope};
 use docx_parse::{BlockContent, S9DocumentWire};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -219,46 +219,46 @@ enum SourceRoot {
 
 struct SourceCache {
     envelope: Arc<S9WireEnvelope>,
-    roots: BTreeMap<String, SourceRoot>,
+    roots: OnceLock<BTreeMap<String, SourceRoot>>,
     stories: BTreeMap<String, Arc<SourceStory>>,
     materialize_media: bool,
+    media: Option<Arc<docx_parse::media::MediaTable>>,
     materialized_document: Option<Arc<S9DocumentWire>>,
 }
 
 impl SourceCache {
-    fn new(envelope: Arc<S9WireEnvelope>, materialize_media: bool) -> Self {
-        let package = &envelope.document.package;
-        let mut roots = BTreeMap::new();
-        for (header, entries) in [
-            (true, &package.header_entries),
-            (false, &package.footer_entries),
-        ] {
-            for (index, (id, _)) in entries.iter().flatten().enumerate() {
-                let part = if header {
-                    SourceRoot::Header(index)
-                } else {
-                    SourceRoot::Footer(index)
-                };
-                roots.entry(format!("hf:{id}")).or_insert(part);
-            }
-        }
-        for (footnote, entries) in [(true, &package.footnotes), (false, &package.endnotes)] {
-            for (index, note) in entries.iter().flatten().enumerate() {
-                let (prefix, part) = if footnote {
-                    ("fn", SourceRoot::Footnote(index))
-                } else {
-                    ("en", SourceRoot::Endnote(index))
-                };
-                roots.entry(format!("{prefix}:{}", note.id)).or_insert(part);
-            }
-        }
+    fn new(
+        envelope: Arc<S9WireEnvelope>,
+        materialize_media: bool,
+        media: Option<docx_parse::media::MediaTable>,
+    ) -> Self {
         Self {
             envelope,
-            roots,
+            roots: OnceLock::new(),
             stories: BTreeMap::new(),
             materialize_media,
+            media: media.map(Arc::new),
             materialized_document: None,
         }
+    }
+
+    fn roots(&self) -> &BTreeMap<String, SourceRoot> {
+        self.roots.get_or_init(|| {
+            let mut roots = BTreeMap::new();
+            for (id, part, _) in auxiliary_roots(&self.envelope.document.package) {
+                roots.entry(id).or_insert(part);
+            }
+            roots
+        })
+    }
+
+    fn media(&self, doc: &EditingDoc) -> Option<Arc<docx_parse::media::MediaTable>> {
+        if !self.materialize_media {
+            return None;
+        }
+        doc.media_table()
+            .or_else(|| self.media.clone())
+            .filter(|table| !table.is_empty())
     }
 
     fn document(&mut self, doc: &EditingDoc) -> Result<S9DocumentWire, ProjectionError> {
@@ -266,10 +266,7 @@ impl SourceCache {
             return Ok((**document).clone());
         }
         let mut document = self.envelope.document.clone();
-        if self.materialize_media
-            && let Some(table) = doc.media_table()
-            && !table.is_empty()
-        {
+        if let Some(table) = self.media(doc) {
             materialize_package(&mut document, &table)?;
             self.materialized_document = Some(Arc::new(document.clone()));
         }
@@ -281,7 +278,7 @@ impl SourceCache {
         if id == "body" {
             return &package.document.content;
         }
-        match self.roots.get(id) {
+        match self.roots().get(id) {
             Some(SourceRoot::Header(index)) => {
                 &package.header_entries.as_ref().unwrap()[*index].1.content
             }
@@ -300,11 +297,11 @@ impl SourceCache {
         if let Some(story) = self.stories.get(id) {
             return Ok(Arc::clone(story));
         }
+        if id != "body" && !self.roots().contains_key(id) {
+            return Ok(Arc::new(SourceStory::default()));
+        }
         let blocks = self.blocks(id);
-        let blocks = if self.materialize_media
-            && let Some(table) = doc.media_table()
-            && !table.is_empty()
-        {
+        let blocks = if let Some(table) = self.media(doc) {
             materialize(&blocks.to_vec(), &table)?
         } else {
             blocks.to_vec()
@@ -427,8 +424,9 @@ pub(crate) struct ProjectionCache {
         RunInheritance,
     )>,
     theme: Option<Override<docx_parse::theme::Theme>>,
+    sections: Option<bool>,
+    body_source_index: Option<Arc<SourceIndex>>,
     stories: BTreeMap<String, CachedStory>,
-    assembled: BTreeMap<String, StoryProjection>,
 }
 
 struct CachedStory {
@@ -438,29 +436,31 @@ struct CachedStory {
 }
 
 impl ProjectionCache {
-    pub(crate) fn for_source(source: &SourcePackage) -> Self {
+    fn resolve_source(source: &SourcePackage) -> Result<SourceCache, String> {
         let (bytes, digest) = match source {
             SourcePackage::Ready(index) => {
                 if let Some(envelope) = &index.projection_envelope {
-                    return Self {
-                        source: Some(Ok(SourceCache::new(Arc::clone(envelope), true))),
-                        ..Self::default()
-                    };
+                    return Ok(SourceCache::new(
+                        Arc::clone(envelope),
+                        true,
+                        index.projection_media.clone(),
+                    ));
                 }
                 (index.bytes(), Some(index.package_digest().to_owned()))
             }
             SourcePackage::Pending(bytes, digest) => (bytes.clone(), digest.clone()),
         };
         let digest = digest.unwrap_or_else(|| crate::seed::package_digest(&bytes));
-        let source = crate::seed::parse_docx_package_with_digest(&bytes, digest)
-            .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false));
-        Self {
-            source: Some(source),
-            ..Self::default()
-        }
+        crate::seed::parse_docx_package_with_digest(&bytes, digest)
+            .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false, None))
     }
 
-    fn source(&mut self) -> Result<&mut SourceCache, ProjectionError> {
+    fn source(&mut self, doc: &EditingDoc) -> Result<&mut SourceCache, ProjectionError> {
+        if self.source.is_none() {
+            let retained = doc.source.lock().unwrap();
+            let source = retained.as_ref().ok_or(ProjectionError::MissingSource)?;
+            self.source = Some(Self::resolve_source(source));
+        }
         self.source
             .as_mut()
             .ok_or(ProjectionError::MissingSource)?
@@ -482,15 +482,15 @@ impl ProjectionCache {
 
     pub(crate) fn invalidate_stories(&mut self) {
         self.stories.clear();
+        self.styles = None;
+        self.theme = None;
+        self.sections = None;
     }
 
     fn begin_generation(&mut self, generation: Option<String>) {
         if self.generation != generation {
             self.generation = generation;
-            self.stories.clear();
-            self.assembled.clear();
-            self.styles = None;
-            self.theme = None;
+            self.invalidate_stories();
             if let Some(Ok(source)) = &mut self.source {
                 source.stories.clear();
                 source.materialized_document = None;
@@ -542,17 +542,6 @@ impl ProjectionContext<'_, '_> {
         self.visiting = child.visiting;
         self.visiting.remove(id);
         result.map(Arc::new)
-    }
-
-    #[allow(dead_code)]
-    fn media_url(&self, token: &str) -> Option<String> {
-        self.input
-            .host
-            .media_urls
-            .as_ref()
-            .and_then(|urls| urls.get(token))
-            .cloned()
-            .or_else(|| self.doc.media_table()?.resolve(token))
     }
 }
 
@@ -620,7 +609,7 @@ impl LoweringInput<'_> {
                     )));
                 };
                 crate::json_tree::parse(json)
-                    .and_then(crate::json_tree::OrderedValue::into_value)
+                    .map(crate::json_tree::OrderedValue::into_value)
                     .map_err(ProjectionError::InvalidInput)
             })
             .transpose()
@@ -709,6 +698,13 @@ pub(crate) fn projection_root(id: &str) -> Option<&str> {
 
 fn root_id(id: &str) -> bool {
     projection_root(id) == Some(id)
+}
+
+fn validate_root(id: &str) -> Result<(), ProjectionError> {
+    if !root_id(id) {
+        return Err(ProjectionError::InvalidInput(format!("{id} is not a root story")));
+    }
+    Ok(())
 }
 
 fn attr_string<'a>(attrs: &'a Attrs, key: &str) -> Option<&'a str> {
@@ -821,6 +817,11 @@ fn materialize_package(
 }
 
 fn validate_input(input: &ProjectionInput) -> Result<(), ProjectionError> {
+    if input.host.media_urls.is_some() {
+        return Err(ProjectionError::InvalidInput(
+            "host.mediaUrls is not supported by projection".to_owned(),
+        ));
+    }
     let numbers = input
         .comment_ids
         .iter()
@@ -847,62 +848,74 @@ impl EditingDoc {
         &self,
         input: &ProjectionInput,
     ) -> Result<ProjectionOutput, ProjectionError> {
-        validate_input(input)?;
-        let (mut document, requested, aliases, mut assembled) = {
-            let mut cache = self.projection.lock().unwrap();
-            let txn = self.doc.transact();
-            cache.begin_generation(projection_generation(&txn));
-            let source = cache.source()?;
-            let aliases: BTreeMap<_, _> = self.header_footer_aliases_in(&txn).into_iter().collect();
-            let requested: BTreeSet<_> = input
-                .root_stories
-                .clone()
-                .unwrap_or_else(|| {
-                    let mut roots: BTreeSet<_> = source.roots.keys().cloned().collect();
-                    if let Some(stories) = txn.get_map(crate::STORIES) {
-                        roots.extend(
-                            crate::live_stories(&stories, &txn)
-                                .map(|(id, _)| id)
-                                .filter(|id| root_id(id))
-                                .map(str::to_owned),
-                        );
-                    }
-                    roots
-                })
-                .into_iter()
-                .map(|id| {
-                    id.strip_prefix("hf:")
-                        .and_then(|id| aliases.get(id))
-                        .map_or(id, |canonical| format!("hf:{canonical}"))
-                })
-                .collect();
-            let document = source.document(self)?;
-            let assembled = if input.root_stories.is_some() {
-                cache.assembled.clone()
-            } else {
-                BTreeMap::new()
-            };
-            (document, requested, aliases, assembled)
-        };
-        for story_id in requested {
-            let projection = self.project_story(&story_id, input)?;
-            assembled.insert(projection.story_id.clone(), projection);
-        }
+        self.project_package(input).map(|(output, _)| output)
+    }
 
+    fn project_package(
+        &self,
+        input: &ProjectionInput,
+    ) -> Result<(ProjectionOutput, Arc<S9WireEnvelope>), ProjectionError> {
+        validate_input(input)?;
+        for id in input.root_stories.iter().flatten() {
+            validate_root(id)?;
+        }
+        let mut cache = self.projection.lock().unwrap();
+        let txn = self.doc.transact();
+        cache.begin_generation(projection_generation(&txn));
+        let aliases = cache.aliases.active_aliases(self, &txn);
+        let (mut document, envelope) = {
+            let source = cache.source(self)?;
+            (source.document(self)?, Arc::clone(&source.envelope))
+        };
         apply_host_metadata(&mut document, &input.host);
-        assemble_stories(&mut document, &assembled, &aliases);
+        let mut projections = BTreeMap::new();
+        {
+            let mut roots = BTreeMap::new();
+            for (id, kind, blocks) in auxiliary_roots(&document.package) {
+                let canonical = aliases.get(&id).unwrap_or(&id);
+                let overridden = input.host.replaces_auxiliary(Some(kind), &id);
+                let source = (overridden || canonical != &id).then_some(blocks);
+                let entry = roots
+                    .entry(canonical.clone())
+                    .or_insert_with(|| (id.clone(), source));
+                if &entry.0 != canonical && (canonical == &id || id < entry.0) {
+                    *entry = (id, source);
+                }
+            }
+            let source = cache.source(self)?;
+            for (id, members) in &self.story_revisions.lock().unwrap().live_projection_roots {
+                if members.contains(id.as_str())
+                    && !input.host.replaces_auxiliary(source.roots().get(id).copied(), id)
+                {
+                    roots
+                        .entry(id.clone())
+                        .or_insert_with(|| (id.clone(), None));
+                }
+            }
+            cache.stories.retain(|id, _| roots.contains_key(id));
+            for id in input.root_stories.iter().flatten() {
+                cache.stories.remove(aliases.get(id).unwrap_or(id));
+            }
+            for (id, (_, blocks)) in roots {
+                let projection = self.project_root(&mut cache, &txn, &id, input, blocks)?;
+                projections.insert(id, projection);
+            }
+        }
+        assemble_stories(&mut document, &projections, &aliases, input.host.sections.is_some())?;
         let mut side_tables = StoryProjection::default();
-        for projection in assembled.values() {
+        for projection in projections.values() {
             side_tables.append_side_tables(projection);
         }
-        self.projection.lock().unwrap().assembled = assembled;
-        Ok(ProjectionOutput {
-            document,
-            paragraph_session_keys: side_tables.paragraph_session_keys,
-            session_revision_placeholders: side_tables.session_revision_placeholders,
-            created_list_sites: side_tables.created_list_sites,
-            deferred: side_tables.deferred,
-        })
+        Ok((
+            ProjectionOutput {
+                document,
+                paragraph_session_keys: side_tables.paragraph_session_keys,
+                session_revision_placeholders: side_tables.session_revision_placeholders,
+                created_list_sites: side_tables.created_list_sites,
+                deferred: side_tables.deferred,
+            },
+            envelope,
+        ))
     }
 
     #[doc(hidden)]
@@ -911,24 +924,87 @@ impl EditingDoc {
         story_id: &str,
         input: &ProjectionInput,
     ) -> Result<StoryProjection, ProjectionError> {
-        if !root_id(story_id) {
-            return Err(ProjectionError::InvalidInput(format!(
-                "{story_id} is not a root story"
-            )));
-        }
+        validate_input(input)?;
+        validate_root(story_id)?;
         let mut cache = self.projection.lock().unwrap();
-        cache.source()?;
         let txn = self.doc.transact();
         cache.begin_generation(projection_generation(&txn));
-        let canonical = cache.aliases.canonical(self, &txn, story_id);
-        let id = canonical.as_deref().unwrap_or(story_id);
-        if crate::story_text(&txn, id).is_none()
-            && (id == "body" || !cache.source()?.roots.contains_key(id))
+        let group = cache.aliases.group(self, &txn, story_id);
+        let id = group.as_ref().map_or(story_id, |group| group[0].as_str());
+        let source = cache.source(self)?;
+        let mut alternate = None;
+        let mut override_blocks = None;
+        let mut retained = false;
+        if id != "body" {
+            let candidates = std::iter::once(id)
+                .chain(group.iter().flat_map(|ids| ids[1..].iter().map(String::as_str)));
+            for candidate in candidates {
+                let root = source.roots().get(candidate).copied();
+                override_blocks = input.host.auxiliary_blocks(candidate, root);
+                retained = root.is_some() && !input.host.replaces_auxiliary(root, candidate);
+                if override_blocks.is_some() || retained {
+                    if override_blocks.is_none() && candidate != id {
+                        alternate = Some(source.story(self, candidate)?);
+                    }
+                    break;
+                }
+            }
+        }
+        if !retained
+            && override_blocks.is_none()
+            && (crate::story_text(&txn, id).is_none()
+                || (id != "body"
+                    && input.host.replaces_auxiliary(source.roots().get(id).copied(), id)))
         {
             return Err(ProjectionError::StoryRead {
                 story_id: story_id.to_owned(),
                 error: EditError::StoryNotFound(id.to_owned()),
             });
+        }
+        let override_blocks =
+            override_blocks.or_else(|| alternate.as_ref().map(|story| story.blocks.as_slice()));
+        let mut projection = self.project_root(&mut cache, &txn, id, input, override_blocks)?;
+        projection.story_id = story_id.to_owned();
+        Ok(projection)
+    }
+
+    fn project_root(
+        &self,
+        cache: &mut ProjectionCache,
+        txn: &Transaction<'_>,
+        id: &str,
+        input: &ProjectionInput,
+        override_blocks: Option<&[BlockContent]>,
+    ) -> Result<StoryProjection, ProjectionError> {
+        if let Some(blocks) = override_blocks {
+            return Ok(stories_aux_dispatch::project_root(id, blocks));
+        }
+        let envelope = Arc::clone(&cache.source(self)?.envelope);
+        let package = &envelope.document.package;
+        let has_sections = input
+            .host
+            .sections
+            .as_ref()
+            .map_or(package.document.sections.is_some(), Option::is_some)
+            || input.host.final_section_properties.as_ref().map_or(
+                package.document.final_section_properties.is_some(),
+                Option::is_some,
+            );
+        if id == "body" {
+            let source = self.source.lock().unwrap();
+            let source_index = match source.as_ref() {
+                Some(SourcePackage::Ready(index)) => Some(index),
+                _ => None,
+            };
+            let same = match (&cache.body_source_index, source_index) {
+                (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                cache.stories.remove(id);
+                cache.body_source_index = source_index.cloned();
+            }
         }
         let revision = self
             .story_revisions
@@ -940,27 +1016,23 @@ impl EditingDoc {
             .unwrap_or_default();
         let markers = self.projection_markers.lock().unwrap();
         let markers_revision = markers.revision(id);
-        let same_styles = cache
-            .styles
-            .as_ref()
-            .is_some_and(|(styles, _)| *styles == input.host.styles);
-        let same_theme = cache.theme.as_ref() == Some(&input.host.theme);
-        if (id != "body" || (same_styles && same_theme))
+        let same_styles = id == "body"
+            && cache
+                .styles
+                .as_ref()
+                .is_some_and(|(styles, _)| *styles == input.host.styles);
+        let same_theme = id == "body" && cache.theme.as_ref() == Some(&input.host.theme);
+        if (id != "body" || (same_styles && same_theme && cache.sections == Some(has_sections)))
             && let Some(cached) = cache.stories.get(id)
             && cached.revision == revision
             && cached.markers_revision == markers_revision
         {
-            let mut projection = cached.projection.clone();
-            projection.story_id = story_id.to_owned();
-            return Ok(projection);
+            return Ok(cached.projection.clone());
         }
 
-        let (source, envelope) = {
-            let cache = cache.source()?;
-            (cache.story(self, id)?, Arc::clone(&cache.envelope))
-        };
-        let package = &envelope.document.package;
-        let mut projection = if id == "body" {
+        let source = cache.source(self)?.story(self, id)?;
+        let projection = if id == "body" {
+            cache.stories.remove(id);
             let source_metadata = self.source_metadata();
             if !same_styles {
                 let inheritance = if input.host.styles.is_none()
@@ -981,6 +1053,7 @@ impl EditingDoc {
                 cache.styles = Some((input.host.styles.clone(), inheritance));
             }
             cache.theme = Some(input.host.theme.clone());
+            cache.sections = Some(has_sections);
             let default_theme = docx_parse::theme::Theme::default();
             let theme = input
                 .host
@@ -988,18 +1061,13 @@ impl EditingDoc {
                 .as_ref()
                 .map_or(Some(&package.theme), Option::as_ref)
                 .unwrap_or(&default_theme);
-            let source_index = match self.source.lock().unwrap().as_ref() {
-                Some(SourcePackage::Ready(index)) => Some(Arc::clone(index)),
-                _ => None,
-            };
             let mut context = ProjectionContext {
                 doc: self,
-                txn: &txn,
+                txn,
                 input,
                 source: &source,
-                package_body_has_sections: package.document.sections.is_some()
-                    || package.document.final_section_properties.is_some(),
-                source_index: source_index.as_deref(),
+                package_body_has_sections: has_sections,
+                source_index: cache.body_source_index.as_deref(),
                 source_provenance: source_metadata
                     .as_ref()
                     .map(|metadata| &metadata.read().provenance),
@@ -1020,7 +1088,6 @@ impl EditingDoc {
                 projection: projection.clone(),
             },
         );
-        projection.story_id = story_id.to_owned();
         Ok(projection)
     }
 
@@ -1030,8 +1097,13 @@ impl EditingDoc {
         self.projection
             .lock()
             .unwrap()
-            .source()
-            .is_ok_and(|source| source.stories.contains_key(story_id))
+            .source
+            .as_ref()
+            .is_some_and(|source| {
+                source
+                    .as_ref()
+                    .is_ok_and(|source| source.stories.contains_key(story_id))
+            })
     }
 
     #[doc(hidden)]
@@ -1048,8 +1120,7 @@ impl EditingDoc {
         }
 
         let input = projection_input_json(input_json)?;
-        let output = self.project_document(&input)?;
-        let source = Arc::clone(&self.projection.lock().unwrap().source()?.envelope);
+        let (output, source) = self.project_package(&input)?;
         Ok(serde_json::to_string(&WireOutput {
             envelope: S9WireEnvelope {
                 wire_version: source.wire_version,
@@ -1079,10 +1150,38 @@ impl EditingDoc {
 }
 
 fn projection_input_json(input_json: &str) -> Result<ProjectionInput, ProjectionError> {
-    let input = crate::json_tree::parse(input_json)
-        .and_then(crate::json_tree::OrderedValue::into_value)
-        .map_err(ProjectionError::InvalidInput)?;
-    serde_json::from_value(input).map_err(|error| ProjectionError::InvalidInput(error.to_string()))
+    use crate::json_tree::OrderedValue;
+
+    const MAX_MODELED_JSON_DEPTH: usize = 2 * docx_parse::MAX_NESTING_DEPTH;
+    let mut input = crate::json_tree::parse(input_json).map_err(ProjectionError::InvalidInput)?;
+    let mut pending = vec![(&mut input, 0)];
+    while let Some((node, depth)) = pending.pop() {
+        if depth >= MAX_MODELED_JSON_DEPTH
+            && matches!(node, OrderedValue::Array(_) | OrderedValue::Object(_))
+        {
+            return Err(ProjectionError::InvalidInput(format!(
+                "modeled content nesting exceeds {MAX_MODELED_JSON_DEPTH} JSON containers"
+            )));
+        }
+        match node {
+            OrderedValue::Array(children) => {
+                pending.extend(children.iter_mut().map(|child| (child, depth + 1)));
+            }
+            OrderedValue::Object(entries) => {
+                let raw_xml = entries.iter().any(|(key, value)| {
+                    key == "type" && matches!(value, OrderedValue::String(kind) if kind == "rawXml")
+                });
+                if raw_xml {
+                    entries
+                        .retain(|(key, _)| matches!(key.as_str(), "type" | "xml" | "sourceOrdinal"));
+                }
+                pending.extend(entries.iter_mut().map(|(_, child)| (child, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    serde_json::from_value(input.into_value())
+        .map_err(|error| ProjectionError::InvalidInput(error.to_string()))
 }
 
 fn projection_generation(txn: &Transaction<'_>) -> Option<String> {
@@ -1094,10 +1193,22 @@ fn assemble_stories(
     document: &mut S9DocumentWire,
     stories: &BTreeMap<String, StoryProjection>,
     aliases: &BTreeMap<String, String>,
-) {
+    override_sections: bool,
+) -> Result<(), ProjectionError> {
     let package = &mut document.package;
     if let Some(body) = stories.get("body") {
         package.document.content.clone_from(&body.blocks);
+    }
+    if override_sections {
+        let len = package.document.content.len();
+        if package.document.sections.iter().flatten().any(|section| {
+            section.content_start > section.content_end || section.content_end > len
+        }) {
+            return Err(ProjectionError::InvalidInput(
+                "host.sections has an invalid content range".to_owned(),
+            ));
+        }
+    } else if stories.contains_key("body") {
         story::clamp_sections(&mut package.document);
     }
     for (id, part) in package
@@ -1106,8 +1217,8 @@ fn assemble_stories(
         .chain(&mut package.footer_entries)
         .flatten()
     {
-        let id = aliases.get(id).unwrap_or(id);
-        if let Some(story) = stories.get(&format!("hf:{id}")) {
+        let id = format!("hf:{id}");
+        if let Some(story) = stories.get(aliases.get(&id).unwrap_or(&id)) {
             part.content.clone_from(&story.blocks);
         }
     }
@@ -1119,6 +1230,87 @@ fn assemble_stories(
             if let Some(story) = stories.get(&format!("{prefix}:{}", note.id)) {
                 note.content.clone_from(&story.blocks);
             }
+        }
+    }
+    Ok(())
+}
+
+fn auxiliary_roots(
+    package: &S9PackageWire,
+) -> impl Iterator<Item = (String, SourceRoot, &[BlockContent])> {
+    let furniture = [
+        (&package.header_entries, SourceRoot::Header as fn(usize) -> SourceRoot),
+        (&package.footer_entries, SourceRoot::Footer as fn(usize) -> SourceRoot),
+    ]
+    .into_iter()
+    .flat_map(|(entries, kind)| {
+        entries.iter().flatten().enumerate().map(move |(index, (id, part))| {
+            (format!("hf:{id}"), kind(index), part.content.as_slice())
+        })
+    });
+    let notes = [
+        ("fn", &package.footnotes, SourceRoot::Footnote as fn(usize) -> SourceRoot),
+        ("en", &package.endnotes, SourceRoot::Endnote as fn(usize) -> SourceRoot),
+    ]
+    .into_iter()
+    .flat_map(|(prefix, entries, kind)| {
+        entries.iter().flatten().enumerate().map(move |(index, note)| {
+            (format!("{prefix}:{}", note.id), kind(index), note.content.as_slice())
+        })
+    });
+    furniture.chain(notes)
+}
+
+impl ProjectionHostMetadata {
+    fn replaces_auxiliary(&self, root: Option<SourceRoot>, id: &str) -> bool {
+        match root {
+            Some(SourceRoot::Header(_)) => self.headers.is_some(),
+            Some(SourceRoot::Footer(_)) => self.footers.is_some(),
+            Some(SourceRoot::Footnote(_)) => self.footnotes.is_some(),
+            Some(SourceRoot::Endnote(_)) => self.endnotes.is_some(),
+            None if id.starts_with("fn:") => self.footnotes.is_some(),
+            None if id.starts_with("en:") => self.endnotes.is_some(),
+            None => false,
+        }
+    }
+
+    fn auxiliary_blocks(&self, id: &str, root: Option<SourceRoot>) -> Option<&[BlockContent]> {
+        let (prefix, id) = id.split_once(':')?;
+        match prefix {
+            "hf" => {
+                let header = self
+                    .headers
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .find(|(key, _)| key == id);
+                if header.is_some()
+                    || (self.headers.is_none() && matches!(root, Some(SourceRoot::Header(_))))
+                {
+                    return header.map(|(_, part)| part.content.as_slice());
+                }
+                self.footers
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .find(|(key, _)| key == id)
+                    .map(|(_, part)| part.content.as_slice())
+            }
+            "fn" | "en" => {
+                let entries = if prefix == "fn" {
+                    &self.footnotes
+                } else {
+                    &self.endnotes
+                };
+                let id = id.parse::<f64>().ok()?;
+                entries
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .find(|note| note.id == id)
+                    .map(|note| note.content.as_slice())
+            }
+            _ => None,
         }
     }
 }
@@ -1145,6 +1337,30 @@ fn apply_host_metadata(document: &mut S9DocumentWire, host: &ProjectionHostMetad
     }
     if let Some(comments) = &host.comments {
         package.document.comments.clone_from(comments);
+    }
+    if let Some(headers) = &host.headers {
+        package.header_entries.clone_from(headers);
+    }
+    if let Some(footers) = &host.footers {
+        package.footer_entries.clone_from(footers);
+    }
+    if let Some(footnotes) = &host.footnotes {
+        package.footnotes.clone_from(footnotes);
+    }
+    if let Some(endnotes) = &host.endnotes {
+        package.endnotes.clone_from(endnotes);
+    }
+    if let Some(separators) = &host.footnote_separators {
+        package.footnote_separators.clone_from(separators);
+    }
+    if let Some(separators) = &host.endnote_separators {
+        package.endnote_separators.clone_from(separators);
+    }
+    if let Some(sections) = &host.sections {
+        package.document.sections.clone_from(sections);
+    }
+    if let Some(properties) = &host.final_section_properties {
+        package.document.final_section_properties.clone_from(properties);
     }
 }
 

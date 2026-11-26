@@ -654,6 +654,7 @@ struct StoryRevisions {
     stamped: HashMap<Arc<str>, u64>,
     projection_roots: HashMap<String, u64>,
     live_projection_roots: HashMap<String, HashSet<Arc<str>>>,
+    projection_membership: u64,
     /// The revision that last changed each story by more than inserting plain
     /// text: deleting, formatting, embedding, a tracked change or its entry.
     /// Text inserted without revision marks leaves the story's paragraphs,
@@ -761,14 +762,21 @@ impl StoryRevisions {
                                         && !story_is_removed(txn, story)
                                 });
                                 if live {
-                                    self.live_projection_roots
+                                    let members = self.live_projection_roots
                                         .entry(root.to_owned())
-                                        .or_default()
-                                        .insert(Arc::clone(story));
+                                        .or_default();
+                                    if members.is_empty() {
+                                        self.projection_membership += 1;
+                                    }
+                                    members.insert(Arc::clone(story));
                                 } else if let Some(members) =
                                     self.live_projection_roots.get_mut(root)
                                 {
                                     members.remove(story);
+                                    if members.is_empty() {
+                                        self.live_projection_roots.remove(root);
+                                        self.projection_membership += 1;
+                                    }
                                 }
                             }
                             self.marked.insert(Arc::clone(story), self.current);
@@ -1106,7 +1114,9 @@ impl EditingDoc {
 
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
+        let mut projection = self.projection.lock().unwrap();
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        projection.invalidate_stories();
         // Story projections read the source, so none built before it is served again.
         self.epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
@@ -1409,7 +1419,8 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
-        **self.projection.lock().unwrap() = projection::ProjectionCache::for_source(&source);
+        let mut projection = self.projection.lock().unwrap();
+        **projection = projection::ProjectionCache::default();
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
@@ -1446,8 +1457,10 @@ impl EditingDoc {
     /// Keeps `media`, read from the retained package, as the table the
     /// stories' `media:{n}` image sources name.
     pub(crate) fn install_media(&self, media: docx_parse::media::MediaTable) {
+        let mut projection = self.projection.lock().unwrap();
         self.save_story_states.lock().unwrap().clear();
         *self.media.lock().unwrap() = Some(Arc::new(media));
+        projection.reset_opening();
     }
 
     /// The fingerprints of the `data:` image sources seeding wrote in place

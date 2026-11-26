@@ -42,6 +42,7 @@ const expectedTypeScriptDisagreement = {
 
 function checkDisagreementFixture(fixtures: readonly string[]): void {
   expect(fixtures.length).toBeGreaterThan(0);
+  expect(fixtures).toContain(expectedTypeScriptDisagreement.fixture);
 }
 
 it('rejects discovery that omits the expected TypeScript disagreement fixture', () => {
@@ -74,6 +75,7 @@ function editParagraphProperties(session: YrsSession, recordEdit: (outcome: Proj
 describe('Native DOCX projection parity', () => {
   const fixtures = seedParityFixtures();
   const used: AllowanceUsage = new Map();
+  let checkedDisagreement = false;
 
   beforeAll(async () => {
     checkDisagreementFixture(fixtures);
@@ -149,6 +151,7 @@ describe('Native DOCX projection parity', () => {
             if (trial + 1 === knownDisagreement?.batch) {
               expect(disagreement, knownDisagreement.reason).toEqual(knownDisagreement.differences);
               sawDisagreement = true;
+              checkedDisagreement = true;
             } else {
               checkState(`${label}, full TypeScript projection`, disagreement);
             }
@@ -183,5 +186,6 @@ describe('Native DOCX projection parity', () => {
     const unused = projectionAllowlist.filter((entry) => !used.has(entry));
     const details = unused.map(({ family, kind, path, reason }) => `${family}/${kind} ${path}: ${reason}`);
     expect(unused, details.join('\n')).toEqual([]);
+    expect(checkedDisagreement, expectedTypeScriptDisagreement.reason).toBe(true);
   });
 });

@@ -77,12 +77,13 @@ impl MarkerIndex {
                                 Some(Out::Any(Any::Array(anchors))) => Some(anchors),
                                 _ => None,
                             })
-                            .and_then(|anchors| {
+                            .map(|anchors| {
                                 anchors
                                     .iter()
-                                    .map(|anchor| decode_anchor(anchor).map(|anchor| anchor.story))
-                                    .collect::<Result<BTreeSet<_>, _>>()
-                                    .ok()
+                                    .filter_map(|anchor| {
+                                        decode_anchor(anchor).ok().map(|anchor| anchor.story)
+                                    })
+                                    .collect()
                             })
                             .unwrap_or_default();
                         index.comments.replace(&id, stories)

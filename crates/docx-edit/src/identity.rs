@@ -465,6 +465,8 @@ pub(crate) struct SourceIndex {
     bytes: PackageBytes,
     #[serde(skip)]
     pub(crate) projection_envelope: Option<Arc<docx_parse::S9WireEnvelope>>,
+    #[serde(skip)]
+    pub(crate) projection_media: Option<docx_parse::media::MediaTable>,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
@@ -774,6 +776,7 @@ impl SourceIndex {
             package_sha256,
             bytes,
             projection_envelope: None,
+            projection_media: None,
             occupied,
             parts,
             roots,

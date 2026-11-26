@@ -8176,7 +8176,7 @@ pub(crate) fn source_index(
     digest: Option<String>,
 ) -> Result<SourceIndex, String> {
     let digest = digest.unwrap_or_else(|| package_digest(&bytes));
-    let (envelope, parts, _) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
+    let (envelope, parts, media) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let projection_envelope = Arc::new(envelope.clone());
@@ -8191,6 +8191,7 @@ pub(crate) fn source_index(
         lowered.context.paragraphs,
     );
     index.projection_envelope = Some(projection_envelope);
+    index.projection_media = Some(media);
     Ok(index)
 }
 

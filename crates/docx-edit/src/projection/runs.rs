@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use docx_parse::formatting::TextFormatting;
-use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
+use docx_parse::inline::{Hyperlink, InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::theme::{Theme, resolve_theme_font_ref};
 use ooxml_diff::{DiffKind, DiffLimits, LimitFallback, diff_tokens};
@@ -588,6 +588,62 @@ fn is_plain(content: &RunContent) -> bool {
     matches!(content, RunContent::Text { .. })
 }
 
+fn hyperlink_children(link: &Hyperlink) -> &[InlineNode] {
+    link.structured_children.as_deref().unwrap_or(&link.children)
+}
+
+fn has_tracked_content(content: &[InlineNode]) -> bool {
+    let mut pending: Vec<_> = content.iter().collect();
+    while let Some(child) = pending.pop() {
+        match child {
+            InlineNode::Tracked(_) => return true,
+            InlineNode::Hyperlink(link) => pending.extend(hyperlink_children(link)),
+            InlineNode::InlineSdt(control) => pending.extend(&control.content),
+            _ => {}
+        }
+    }
+    false
+}
+
+fn field_hyperlink_width(link: &Hyperlink) -> usize {
+    hyperlink_children(link)
+        .iter()
+        .map(|child| match child {
+            InlineNode::Run(run) => run
+                .content
+                .iter()
+                .map(|content| match content {
+                    RunContent::Text { text, .. } => text.chars().count(),
+                    RunContent::Symbol { char: hex, .. } => usize::from(
+                        u32::from_str_radix(hex, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .is_some(),
+                    ),
+                    RunContent::Break { break_type, .. } => {
+                        usize::from(matches!(break_type.as_deref(), None | Some("textWrapping")))
+                    }
+                    RunContent::Tab
+                    | RunContent::SoftHyphen
+                    | RunContent::NoBreakHyphen
+                    | RunContent::FootnoteRef { .. }
+                    | RunContent::EndnoteRef { .. }
+                    | RunContent::CommentReference { .. }
+                    | RunContent::Drawing { .. }
+                    | RunContent::Shape { .. }
+                    | RunContent::HorizontalRule { .. }
+                    | RunContent::Chart { .. }
+                    | RunContent::OpaqueDrawing { .. } => 1,
+                    _ => 0,
+                })
+                .sum::<usize>(),
+            InlineNode::SimpleField(_) | InlineNode::ComplexField(_) | InlineNode::Math(_) => 1,
+            InlineNode::InlineSdt(control) => usize::from(has_tracked_content(&control.content)),
+            _ => 0,
+        })
+        .sum()
+}
+
 fn source_runs(paragraph: &Paragraph) -> Vec<SourceRun<'_>> {
     fn inline_run<'a>(node: &'a InlineNode, runs: &mut Vec<SourceRun<'a>>) {
         let units = match node {
@@ -640,17 +696,21 @@ fn source_runs(paragraph: &Paragraph) -> Vec<SourceRun<'_>> {
                 }
                 return;
             }
-            InlineNode::ComplexField(field) => {
+            InlineNode::ComplexField(field)
+                if !crate::seed::numeric_field_instruction(&field.instruction) =>
+            {
                 1 + [&field.structured_code, &field.structured_result]
                     .into_iter()
                     .flatten()
                     .flat_map(|content| content.inline.iter().flatten())
-                    .filter(|node| {
-                        matches!(node, InlineNode::Hyperlink(_) | InlineNode::SimpleField(_))
+                    .map(|node| match node {
+                        InlineNode::Hyperlink(link) => field_hyperlink_width(link),
+                        InlineNode::SimpleField(_) => 1,
+                        _ => 0,
                     })
-                    .count()
+                    .sum::<usize>()
             }
-            InlineNode::SimpleField(_) | InlineNode::Math(_) => 1,
+            InlineNode::SimpleField(_) | InlineNode::ComplexField(_) | InlineNode::Math(_) => 1,
             InlineNode::RawXml(raw)
                 if raw.xml.trim_start().starts_with("<w:")
                     && !raw.xml.trim_end().ends_with("/>") =>
@@ -727,8 +787,7 @@ fn marks_key(key: Option<&str>) -> Result<Properties, ProjectionError> {
             .ok_or_else(|| ProjectionError::InvalidInput("invalid original run mark".to_owned()))?;
         let (value, rest) =
             crate::json_tree::parse_prefix(json).map_err(ProjectionError::InvalidInput)?;
-        let Value::Object(value) = value.into_value().map_err(ProjectionError::InvalidInput)?
-        else {
+        let Value::Object(value) = value.into_value() else {
             return Err(ProjectionError::InvalidInput(
                 "original run mark must be an object".to_owned(),
             ));
@@ -754,11 +813,19 @@ fn marks_key(key: Option<&str>) -> Result<Properties, ProjectionError> {
             "directionScopes" => set(&mut attrs, name, value.get("scopes")),
             "insertion" | "deletion" => continue,
             _ => {
-                let value = value
-                    .into_iter()
-                    .filter(|(_, value)| !value.is_null())
-                    .collect();
-                attrs.insert(name.to_owned(), Value::Object(value));
+                let mut value = Value::Object(value);
+                let mut pending = vec![&mut value];
+                while let Some(value) = pending.pop() {
+                    match value {
+                        Value::Object(fields) => {
+                            fields.retain(|_, value| !value.is_null());
+                            pending.extend(fields.values_mut());
+                        }
+                        Value::Array(entries) => pending.extend(entries),
+                        _ => {}
+                    }
+                }
+                attrs.insert(name.to_owned(), value);
             }
         }
     }

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use docx_parse::HeaderFooterAliasGroup;
@@ -43,17 +43,33 @@ fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
 #[derive(Default)]
 pub(crate) struct ProjectionAliases {
     declaration: Option<Arc<str>>,
-    by_alias: HashMap<String, Arc<[String]>>,
+    groups: Vec<ProjectionAliasGroup>,
+    by_root: HashMap<String, usize>,
+}
+
+struct ProjectionAliasGroup {
+    roots: Arc<[String]>,
+    activity: Option<(u64, bool)>,
+}
+
+impl ProjectionAliasGroup {
+    fn active(&mut self, revisions: &crate::StoryRevisions) -> bool {
+        let revision = revisions.projection_membership;
+        if let Some((previous, active)) = self.activity
+            && previous == revision
+        {
+            return active;
+        }
+        let active = self.roots[1..]
+            .iter()
+            .all(|alias| !revisions.live_projection_roots.contains_key(alias));
+        self.activity = Some((revision, active));
+        active
+    }
 }
 
 impl ProjectionAliases {
-    pub(crate) fn canonical<T: ReadTxn>(
-        &mut self,
-        doc: &EditingDoc,
-        txn: &T,
-        root: &str,
-    ) -> Option<String> {
-        let relationship = root.strip_prefix("hf:")?;
+    fn refresh<T: ReadTxn>(&mut self, txn: &T) {
         let declaration = txn.get_map(crate::identity::SESSION).and_then(|session| {
             match session.get(txn, HF_ALIASES) {
                 Some(Out::Any(Any::String(value))) => Some(value),
@@ -66,36 +82,64 @@ impl ProjectionAliases {
             _ => false,
         };
         if !same {
-            self.by_alias.clear();
+            self.by_root.clear();
+            self.groups.clear();
             if let Some(groups) = declaration
                 .as_deref()
                 .and_then(|json| parse_groups(json).ok())
             {
                 for group in groups {
-                    let roots: Arc<[String]> = group
+                    let mut roots: Vec<_> = group
                         .relationship_ids
                         .iter()
                         .map(|relationship| story_id(relationship))
-                        .collect::<Vec<_>>()
-                        .into();
-                    for alias in &group.relationship_ids[1..] {
-                        self.by_alias.insert(alias.clone(), Arc::clone(&roots));
+                        .collect();
+                    roots[1..].sort();
+                    for root in &roots {
+                        self.by_root.insert(root.clone(), self.groups.len());
                     }
+                    self.groups.push(ProjectionAliasGroup {
+                        roots: roots.into(),
+                        activity: None,
+                    });
                 }
             }
             self.declaration = declaration;
         }
-        let group = self.by_alias.get(relationship)?;
+    }
+
+    pub(crate) fn group<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        root: &str,
+    ) -> Option<Arc<[String]>> {
+        root.strip_prefix("hf:")?;
+        self.refresh(txn);
+        let group = &mut self.groups[*self.by_root.get(root)?];
         let revisions = doc.story_revisions.lock().unwrap();
-        group[1..]
-            .iter()
-            .all(|alias| {
-                revisions
-                    .live_projection_roots
-                    .get(alias)
-                    .is_none_or(HashSet::is_empty)
-            })
-            .then(|| group[0].clone())
+        group.active(&revisions).then(|| Arc::clone(&group.roots))
+    }
+
+    pub(crate) fn active_aliases<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+    ) -> BTreeMap<String, String> {
+        self.refresh(txn);
+        let revisions = doc.story_revisions.lock().unwrap();
+        let mut aliases = BTreeMap::new();
+        for group in &mut self.groups {
+            if group.active(&revisions) {
+                aliases.extend(
+                    group.roots[1..]
+                        .iter()
+                        .cloned()
+                        .map(|alias| (alias, group.roots[0].clone())),
+                );
+            }
+        }
+        aliases
     }
 }
 
