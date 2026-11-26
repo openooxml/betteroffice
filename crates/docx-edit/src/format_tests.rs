@@ -968,6 +968,7 @@ fn every_character_format_can_be_suggested_and_rejected() {
         font_family: Patch::Set(FontFamilyPatch {
             ascii: "Serif".to_owned(),
             h_ansi: None,
+            east_asia: None,
         }),
         ..Default::default()
     };

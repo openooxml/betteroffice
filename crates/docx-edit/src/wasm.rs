@@ -1867,7 +1867,7 @@ impl EditSession {
     ///   "color": {"rgb": string} | {"themeColor": string},
     ///   "highlight": string,
     ///   "fontSize": 12,
-    ///   "fontFamily": {"ascii": string, "hAnsi"?: string},
+    ///   "fontFamily": {"ascii": string, "hAnsi"?: string, "eastAsia"?: string},
     ///   "other": {"anyAttr": value}
     /// }
     /// ```

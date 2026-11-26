@@ -65,6 +65,64 @@ impl ValueAgg {
     }
 }
 
+fn fold_selection_font(
+    family: &mut ValueAgg,
+    chunk: &crate::ops::Chunk,
+    from: u32,
+    to: u32,
+) {
+    if matches!(family, ValueAgg::Mixed) {
+        return;
+    }
+    let ChunkKind::Text(text) = &chunk.kind else {
+        return;
+    };
+    let fonts = match chunk.attrs.get("fontFamily") {
+        Some(Any::Map(fonts)) => Some(fonts),
+        _ => None,
+    };
+    let slot = |key: &str| {
+        fonts
+            .and_then(|fonts| fonts.get(key))
+            .filter(|value| matches!(value, Any::String(_)))
+    };
+    let latin = slot("ascii").or_else(|| slot("hAnsi"));
+    // A theme reference wins over the literal; this read has no resolved layout theme.
+    let east_asia = if slot("eastAsiaTheme").is_some() {
+        None
+    } else {
+        slot("eastAsia").or(latin)
+    };
+    if latin == east_asia {
+        family.fold(latin);
+        return;
+    }
+    let complex_script = match chunk.attrs.get("complexScript") {
+        Some(Any::Map(value)) => value.get("enabled") != Some(&Any::Bool(false)),
+        Some(value) => *value != Any::Null && *value != Any::Bool(false),
+        None => false,
+    };
+    let hint = matches!(slot("hint"), Some(Any::String(hint)) if hint.as_ref() == "eastAsia");
+    let mut used = [false; 2];
+    let mut offset = chunk.start;
+    for (character, slot) in ooxml_text::font_slot_characters(text, complex_script, hint) {
+        let end = offset + character.len_utf16() as u32;
+        if offset >= to {
+            break;
+        }
+        if end > from {
+            used[usize::from(slot == 2)] = true;
+        }
+        offset = end;
+    }
+    if used[0] {
+        family.fold(latin);
+    }
+    if used[1] {
+        family.fold(east_asia);
+    }
+}
+
 /// Aggregated selection state over one story range.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionContextInfo {
@@ -76,7 +134,7 @@ pub struct SelectionContextInfo {
     pub superscript: TriState,
     pub subscript: TriState,
     // -- uniform-or-null value marks --
-    /// The uniform `fontFamily.ascii`, or `None` when mixed/absent.
+    /// The uniform effective Latin/East Asian family, or `None` when mixed/absent.
     pub font_family: Option<String>,
     /// Uniform font size in half-points, or `None` when mixed or absent.
     pub font_size: Option<f64>,
@@ -343,7 +401,7 @@ impl EditingDoc {
             subscript = TriState::fold(subscript, chunk.attr_active("subscript"));
             ins = TriState::fold(ins, chunk.attr_active(crate::INS));
             del = TriState::fold(del, chunk.attr_active(crate::DEL));
-            font_family.fold(chunk.attrs.get("fontFamily"));
+            fold_selection_font(&mut font_family, chunk, mark_from, mark_to);
             font_size.fold(chunk.attrs.get("fontSize"));
             color.fold(chunk.attrs.get("textColor"));
             highlight.fold(chunk.attrs.get("highlight"));
@@ -353,12 +411,8 @@ impl EditingDoc {
             Some(Any::Map(map)) => map.get(key).cloned(),
             _ => None,
         };
-        let font_family = match (
-            map_field(font_family.uniform(), "ascii"),
-            map_field(font_family.uniform(), "hAnsi"),
-        ) {
-            (Some(Any::String(ascii)), _) => Some(ascii.to_string()),
-            (_, Some(Any::String(h_ansi))) => Some(h_ansi.to_string()),
+        let font_family = match font_family.uniform() {
+            Some(Any::String(family)) => Some(family.to_string()),
             _ => None,
         };
         let font_size = match (
@@ -653,6 +707,7 @@ mod tests {
             font_family: Patch::Set(FontFamilyPatch {
                 ascii: "Georgia".into(),
                 h_ansi: None,
+                east_asia: None,
             }),
             font_size: Patch::Set(14.0),
             color: Patch::Set(ColorPatch::Rgb("336699".into())),

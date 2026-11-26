@@ -273,6 +273,7 @@ pub(crate) fn apply_mark(
                 font_family: Patch::Set(FontFamilyPatch {
                     ascii: family.to_owned(),
                     h_ansi: None,
+                    east_asia: None,
                 }),
                 ..Default::default()
             }

@@ -101,6 +101,8 @@ pub struct FontFamilyPatch {
     pub ascii: String,
     /// Defaults to `ascii` when omitted (Word writes both `w:ascii` and `w:hAnsi`).
     pub h_ansi: Option<String>,
+    /// Explicit East Asian family, only written when requested by the caller.
+    pub east_asia: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -310,14 +312,17 @@ impl InlineFormatDelta {
             Patch::Keep => {}
             Patch::Clear => put("fontFamily", Any::Null),
             Patch::Set(patch) => {
-                let h_ansi = patch.h_ansi.clone().unwrap_or_else(|| patch.ascii.clone());
-                put(
-                    "fontFamily",
-                    Any::Map(Arc::new(HashMap::from([
-                        ("ascii".into(), Any::from(patch.ascii.as_str())),
-                        ("hAnsi".into(), Any::from(h_ansi)),
-                    ]))),
-                );
+                let mut fonts = HashMap::from([
+                    ("ascii".into(), Any::from(patch.ascii.as_str())),
+                    (
+                        "hAnsi".into(),
+                        Any::from(patch.h_ansi.as_deref().unwrap_or(&patch.ascii)),
+                    ),
+                ]);
+                if let Some(east_asia) = &patch.east_asia {
+                    fonts.insert("eastAsia".into(), Any::from(east_asia.as_str()));
+                }
+                put("fontFamily", Any::Map(Arc::new(fonts)));
             }
         }
         match &self.language {
@@ -476,9 +481,19 @@ pub(crate) fn parse_inline_format_delta(
                         .ok_or_else(|| "fontFamily \"hAnsi\" must be a string".to_owned())
                 })
                 .transpose()?;
+            let east_asia = value
+                .get("eastAsia")
+                .map(|entry| {
+                    entry
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "fontFamily \"eastAsia\" must be a string".to_owned())
+                })
+                .transpose()?;
             Patch::Set(FontFamilyPatch {
                 ascii: ascii.to_owned(),
                 h_ansi,
+                east_asia,
             })
         }
         Some(_) => {
@@ -704,6 +719,7 @@ pub(crate) fn text_marks_overlay(
                         Patch::Set(FontFamilyPatch {
                             ascii: name.to_owned(),
                             h_ansi: Some(name.to_owned()),
+                            east_asia: None,
                         })
                     }
                     _ => return Err("mark \"fontFamily\" must be a font name".to_owned()),

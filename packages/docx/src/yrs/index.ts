@@ -333,7 +333,7 @@ export interface YrsInlineFormatDelta {
   highlight?: string | null;
   /** Font size in points; Rust writes both OOXML half-point size fields. */
   fontSize?: number | null;
-  fontFamily?: { ascii: string; hAnsi?: string } | null;
+  fontFamily?: { ascii: string; hAnsi?: string; eastAsia?: string } | null;
   language?: YrsLanguagePatch | null;
   /** Passive run properties not covered by the typed fields. `null` clears. */
   other?: Readonly<Record<string, unknown | null>>;

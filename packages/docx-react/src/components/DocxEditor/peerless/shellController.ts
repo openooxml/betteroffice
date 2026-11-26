@@ -594,8 +594,9 @@ export function createPeerlessShellController(initial: Options) {
             } finally { fonts.faces.length = 0; }
           }
         }
-        const delta = id === 'fontFamily' ? { fontFamily: { ascii: (args as { family: string }).family, hAnsi: (args as { family: string }).family } } :
-          { fontSize: (args as { points: number }).points };
+        const family = id === 'fontFamily' ? (args as DocxCommandArgs['fontFamily']).family : undefined;
+        const delta = family === undefined ? { fontSize: (args as DocxCommandArgs['fontSize']).points } :
+          { fontFamily: { ascii: family, hAnsi: family, eastAsia: family } };
         return settleCommand(current, current.commands.format({ kind: 'formatRange', payload: { delta } }, { fence: true }));
       }
       if (id === 'highlightColor') {

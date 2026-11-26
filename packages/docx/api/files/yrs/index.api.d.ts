@@ -200,6 +200,7 @@ export interface YrsInlineFormatDelta {
     fontFamily?: {
         ascii: string;
         hAnsi?: string;
+        eastAsia?: string;
     } | null;
     language?: YrsLanguagePatch | null;
     /** Passive run properties not covered by the typed fields. `null` clears. */

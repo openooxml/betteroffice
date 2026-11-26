@@ -55,6 +55,7 @@ fn formatted_story(chars: usize) -> EditingDoc {
             font_family: Patch::Set(FontFamilyPatch {
                 ascii: "Calibri".to_owned(),
                 h_ansi: Some("Calibri".to_owned()),
+                east_asia: None,
             }),
             other: BTreeMap::from([
                 ("lang".to_owned(), Some(Any::from("en-GB"))),
