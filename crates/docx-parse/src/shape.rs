@@ -1025,7 +1025,7 @@ fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<
     } else {
         let (mut parsed, sources) = parse_drawing_scene_with_sources(root);
         if render_connectors {
-            render_scene_connector_paths(parsed.root.as_deref_mut(), &mut sources.into_iter());
+            render_scene_connector_paths(parsed.root.as_mut(), &mut sources.into_iter());
         }
         let legacy = scene_node_to_legacy(parsed.root.as_ref()?, 0);
         scene = Some(parsed);

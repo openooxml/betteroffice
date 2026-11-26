@@ -316,7 +316,7 @@ fn parse_styled_drawing_scene(
     };
     let (mut scene, sources) = parse_drawing_scene_with_sources(source);
     if render_connectors {
-        render_scene_connector_paths(scene.root.as_deref_mut(), &mut sources.iter().copied());
+        render_scene_connector_paths(scene.root.as_mut(), &mut sources.iter().copied());
     }
     let mut shapes = Vec::new();
     if let Some(frame) = collect_scene_shapes(
