@@ -259,9 +259,7 @@ fn hidden_model_children(record: &Map<String, Value>, session: &SessionIds) -> O
 fn hidden_model_site(value: &Value, info: bool, session: &SessionIds) -> Option<u64> {
     match value {
         Value::Object(record) => {
-            if info
-                && let Some(id) = model_info_id(record).and_then(|id| session.placeholder(id))
-            {
+            if info && let Some(id) = model_info_id(record).and_then(|id| session.placeholder(id)) {
                 return Some(id);
             }
             hidden_model_children(record, session)
@@ -359,7 +357,10 @@ impl Visit for BlockContent {
         if !PATHS && collector.found.site_count != before {
             #[cfg(test)]
             count_work(|work| work.block_inserts += 1);
-            collector.found.blocks_with_sites.insert(block_key(self).unwrap());
+            collector
+                .found
+                .blocks_with_sites
+                .insert(block_key(self).unwrap());
         }
     }
 }
@@ -411,7 +412,9 @@ impl Visit for RunContent {
                 }
             }
             Self::FieldChar {
-                char_type, form_data, ..
+                char_type,
+                form_data,
+                ..
             } => {
                 collector.field("charType", char_type);
                 collector.field("formData", form_data);
@@ -525,7 +528,11 @@ impl Visit for docx_parse::paragraph_patch::UnitV1 {
                 collector.field("text", text);
                 collector.field("attrs", attrs);
             }
-            Self::Atom { atom_kind, payload, attrs } => {
+            Self::Atom {
+                atom_kind,
+                payload,
+                attrs,
+            } => {
                 collector.field("atomKind", atom_kind);
                 collector.field("payload", payload);
                 collector.field("attrs", attrs);
@@ -574,8 +581,12 @@ impl Visit for docx_parse::vml::Watermark {
 }
 
 macro_rules! wire_name {
-    ($field:ident) => { stringify!($field) };
-    ($field:ident => $name:literal) => { $name };
+    ($field:ident) => {
+        stringify!($field)
+    };
+    ($field:ident => $name:literal) => {
+        $name
+    };
 }
 
 macro_rules! record {
@@ -688,7 +699,11 @@ record!(docx_parse::serializer::S13SaveRequest {
     paragraph_ids => "paragraphIds",
 });
 
-record!(docx_parse::document::Section { id, properties, content });
+record!(docx_parse::document::Section {
+    id,
+    properties,
+    content
+});
 
 record!(docx_parse::header_footer::HeaderFooter {
     story_type => "type",
@@ -813,7 +828,10 @@ record!(docx_parse::inline::Hyperlink {
     structured_children => "structuredChildren",
 });
 
-record!(docx_parse::inline::InlineSdt { properties, content });
+record!(docx_parse::inline::InlineSdt {
+    properties,
+    content
+});
 
 record!(docx_parse::inline::SimpleField {
     instruction,
@@ -855,7 +873,11 @@ record!(docx_parse::numbering::AbstractNumbering {
     name,
 });
 
-record!(docx_parse::paragraph_patch::AttrDeltaV1 { path, before, after });
+record!(docx_parse::paragraph_patch::AttrDeltaV1 {
+    path,
+    before,
+    after
+});
 
 record!(docx_parse::borders::BorderSpec { style, color });
 
@@ -874,7 +896,14 @@ record!(docx_parse::borders::Borders {
     tr2bl,
 });
 
-record!(docx_parse::formatting::CellMargins { top, bottom, left, right, start, end });
+record!(docx_parse::formatting::CellMargins {
+    top,
+    bottom,
+    left,
+    right,
+    start,
+    end
+});
 
 record!(docx_parse::chart::Chart {
     content_type => "type",
@@ -978,7 +1007,11 @@ record!(docx_parse::image::DrawingProperties {
     descr,
 });
 
-record!(docx_parse::shape::DrawingScene { root, title, description });
+record!(docx_parse::shape::DrawingScene {
+    root,
+    title,
+    description
+});
 
 record!(docx_parse::shape::DrawingSceneNode {
     kind,
@@ -1027,7 +1060,11 @@ record!(ooxml_drawingml::GradientFill { gradient_type => "type", stops });
 
 record!(ooxml_drawingml::GradientStop { color });
 
-record!(docx_parse::vml::HorizontalRule { alignment, color, xml });
+record!(docx_parse::vml::HorizontalRule {
+    alignment,
+    color,
+    xml
+});
 
 record!(docx_parse::image::Image {
     image_type => "type",
@@ -1052,9 +1089,17 @@ record!(ooxml_drawingml::ImageEffect { kind, colors, raw_name => "rawName" });
 
 record!(ooxml_drawingml::ImageEffects { ordered });
 
-record!(ooxml_drawingml::ImageHyperlink { href, tooltip, target, doc_location });
+record!(ooxml_drawingml::ImageHyperlink {
+    href,
+    tooltip,
+    target,
+    doc_location
+});
 
-record!(docx_parse::image::ImagePosition { horizontal, vertical });
+record!(docx_parse::image::ImagePosition {
+    horizontal,
+    vertical
+});
 
 record!(docx_parse::image::ImageWrap { wrap_type => "type", wrap_text => "wrapText" });
 
@@ -1064,7 +1109,11 @@ record!(docx_parse::paragraph_patch::InheritanceV1 {
     paragraph_mark => "paragraphMark",
 });
 
-record!(docx_parse::paragraph_patch::InsertedTextV1 { text, attrs, inherit });
+record!(docx_parse::paragraph_patch::InsertedTextV1 {
+    text,
+    attrs,
+    inherit
+});
 
 record!(docx_parse::paragraph_patch::LegacyParagraphV1 { detail });
 
@@ -1187,7 +1236,11 @@ record!(docx_parse::relationships::Relationship {
     target,
 });
 
-record!(docx_parse::paragraph_patch::RunEditV1 { deltas, target, inherit });
+record!(docx_parse::paragraph_patch::RunEditV1 {
+    deltas,
+    target,
+    inherit
+});
 
 record!(docx_parse::formatting::RunLanguage { latin, east_asia => "eastAsia", bidi });
 
@@ -1309,7 +1362,11 @@ record!(docx_parse::paragraph_patch::SeedV1 {
 
 record!(docx_parse::serializer::SerializerDeterminism { seed, now });
 
-record!(docx_parse::scalars::ShadingProperties { color, fill, pattern });
+record!(docx_parse::scalars::ShadingProperties {
+    color,
+    fill,
+    pattern
+});
 
 record!(docx_parse::shape::ShapeEffect { kind, color, raw_name => "rawName" });
 

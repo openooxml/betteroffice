@@ -478,18 +478,42 @@ fn reports_reservations_at_serialized_typed_and_json_paths() {
         ("/document/content/1/pPrDel/author", 10, 1),
         ("/document/content/1/content/0/content/0/text", 11, 1),
         ("/document/content/1/content/1/instruction", 12, 1),
-        ("/document/content/1/content/1/fieldCode/0/content/0/text", 13, 1),
+        (
+            "/document/content/1/content/1/fieldCode/0/content/0/text",
+            13,
+            1,
+        ),
         ("/document/content/1/content/1/rawFormDataXml", 14, 1),
         ("/document/content/1/content/1/sourceRunXml", 15, 1),
         ("/document/content/1/content/2/content/0/xml", 16, 1),
-        ("/document/content/1/content/2/content/0/textBox/drawingRunXml", 17, 1),
-        ("/document/content/1/content/2/content/0/textBox/drawingModel/marker/id", 21, 1),
-        ("/document/content/1/content/2/content/0/textBox/textBody/content/0/a~0~1b", 18, 2),
+        (
+            "/document/content/1/content/2/content/0/textBox/drawingRunXml",
+            17,
+            1,
+        ),
+        (
+            "/document/content/1/content/2/content/0/textBox/drawingModel/marker/id",
+            21,
+            1,
+        ),
+        (
+            "/document/content/1/content/2/content/0/textBox/textBody/content/0/a~0~1b",
+            18,
+            2,
+        ),
         ("/document/content/2/properties/rawEndPropertiesXml", 19, 1),
         ("/headerEntries/0/1/content/0/xml", 20, 1),
         ("/paragraphIds/sectionEdits/edits/0/properties/xml", 21, 1),
-        ("/paragraphIds/splicedParts/0/tablePatches/0/after/xml", 21, 1),
-        ("/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/xml", 21, 1),
+        (
+            "/paragraphIds/splicedParts/0/tablePatches/0/after/xml",
+            21,
+            1,
+        ),
+        (
+            "/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/xml",
+            21,
+            1,
+        ),
         ("/document/comments/0/id", 80, 1),
     ];
     assert_eq!(
