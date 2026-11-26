@@ -25,6 +25,7 @@ paths=(
   scripts/build-stale-packages.ts
   scripts/build-vsdx-wasm.ts
   scripts/build-xlsx-wasm.ts
+  scripts/cargo-glibc.sh
   scripts/check-packed-license.mjs
   scripts/create-demo-deck.ts
   scripts/create-demo-diagram.ts
