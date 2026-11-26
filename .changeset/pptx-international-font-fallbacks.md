@@ -1,5 +1,5 @@
 ---
-'@betteroffice/pptx': minor
+'@betteroffice/pptx': patch
 '@betteroffice/fonts': patch
 ---
 

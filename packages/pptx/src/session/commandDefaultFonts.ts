@@ -74,8 +74,8 @@ function createFontSession() {
       const key = location.ref.index;
       let pending = slices.get(key);
       if (!pending) {
-        pending = importProgressiveFonts().then(({ openSlicedFace }) =>
-          openSlicedFace({ ...location, reportCdnFailure: ignoreCdnFailure }));
+        const scopedLocation = { ...location, reportCdnFailure: ignoreCdnFailure };
+        pending = importProgressiveFonts().then(({ openSlicedFace }) => openSlicedFace(scopedLocation));
         slices.set(key, pending);
         void pending.then(() => { slices.delete(key); }, async (error: unknown) => {
           if (isImplicitFontCdnError(error)) report(error);
@@ -105,16 +105,15 @@ export const commandFontProvider = {
     if (configuration.length) setFontCdnConfiguration(configuration[0]);
     const fonts = await importFonts();
     const session = createFontSession();
-    const source = fonts.createFontProvider(undefined, {
-      decoder: sessionDecoder, strict: 'except-optional-cdn-failure', reportCdnFailure: session.report,
-      checkImplicitCdnPack: session.checkImplicitCdnPack,
-      onSubstitute: (bytes, error) => { session.substitutes.set(bytes, error); },
-    });
+    const runtime = { decoder: sessionDecoder, checkImplicitCdnPack: session.checkImplicitCdnPack };
+    const primaryRuntime = {
+      ...runtime, strict: 'except-optional-cdn-failure' as const, reportCdnFailure: session.report,
+      onSubstitute: (bytes: ArrayBuffer, error: unknown) => { session.substitutes.set(bytes, error); },
+    };
+    const source = fonts.createFontProvider(undefined, primaryRuntime);
     let coverage: typeof source | undefined;
     const provider = { ...source, resolveScriptFallback(...args: Parameters<typeof source.resolveScriptFallback>) {
-      coverage ??= fonts.createFontProvider(undefined, {
-        decoder: sessionDecoder, strict: true, checkImplicitCdnPack: session.checkImplicitCdnPack,
-      });
+      coverage ??= fonts.createFontProvider(undefined, { ...runtime, strict: true });
       return coverage.resolveScriptFallback(...args);
     } };
     fontSessions.set(provider, session);
@@ -299,9 +298,10 @@ export function createCommandDefaultFonts(
                 if (isImplicitFontCdnError(error)) session.report(error);
                 throw error;
               });
+              const whole = Object.assign(load.bind(undefined), { slices: load.slices, reportCdnFailure: session.report });
               sliced.add(skeleton.family, { get revision() { return opened.revision; }, bytes: () => opened.bytes(),
                 ensureText, prefetch: (text) => { void ensureText(text).catch(() => {}); },
-                chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, load, session.report);
+                chunksOf: (text) => opened.chunksOf(text), loadedChunks: () => opened.loadedChunks() }, whole);
               return disposed ? undefined : skeleton;
             }
           } catch (error) {

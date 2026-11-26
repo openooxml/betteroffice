@@ -15,6 +15,7 @@ export {
 } from './progressive';
 
 type Faces = Map<string, Promise<ProgressiveFontFace>>;
+type ScopedSliceLocation = SliceLocation & { reportCdnFailure?: FontCdnReporter };
 const faceCaches = () => ({ faces: new Map<string, Promise<ProgressiveFontFace>>(), engines: new WeakMap<FontDecoder, Faces>() });
 const shared = faceCaches();
 const scoped = new WeakMap<FontCdnReporter, ReturnType<typeof faceCaches>>();
@@ -25,13 +26,14 @@ const scoped = new WeakMap<FontCdnReporter, ReturnType<typeof faceCaches>>();
  * call retries.
  * @public
  */
-export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
+export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace>;
+export function openSlicedFace(location: ScopedSliceLocation): Promise<ProgressiveFontFace> {
   return location.prepareUrls
     ? location.prepareUrls().then((assets) => openWithUrls({ ...location, ...assets }))
     : openWithUrls(location);
 }
 
-function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
+function openWithUrls(location: ScopedSliceLocation): Promise<ProgressiveFontFace> {
   const { ref, base, url, timeoutMs, requestTimeoutMs, decode, decoder, retain, reportCdnFailure } = location;
   let caches = shared;
   if (reportCdnFailure) {
@@ -50,8 +52,8 @@ function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
     pending = (async () => {
       const indexUrl = await url(ref.index);
       const transportTimeout = requestTimeoutMs ? requestTimeoutMs(indexUrl) : timeoutMs;
-      return openProgressiveFace(ref, {
-        read: async (file) => {
+      const transport = {
+        read: async (file: string) => {
           const asset = file === ref.index ? indexUrl : await url(file);
           return readFontAsset(file, asset, requestTimeoutMs ? requestTimeoutMs(asset) : timeoutMs);
         },
@@ -59,7 +61,8 @@ function openWithUrls(location: SliceLocation): Promise<ProgressiveFontFace> {
         timeoutMs: transportTimeout,
         decode,
         reportCdnFailure,
-      });
+      };
+      return openProgressiveFace(ref, transport);
     })();
     cache.set(key, pending);
     const current = pending;

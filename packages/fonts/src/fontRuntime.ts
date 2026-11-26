@@ -37,10 +37,8 @@ type FontPack = Exclude<FontAssetKind, 'decoder'>;
 type FontPackAssets = { urls?: FontAssetUrls; cdn?: FontCdnConfiguration };
 export type FontPackLookup = (pack: FontPack) => Promise<FontPackAssets>;
 type AssetBase = URL | Promise<URL> | undefined;
-type FontLoadOptions = {
-  decoder?: FontDecoder;
-  retain?: boolean;
-  strict?: boolean | 'except-optional-cdn-failure';
+type FontLoadOptions = { decoder?: FontDecoder; retain?: boolean; strict?: boolean | 'except-optional-cdn-failure' };
+type RuntimeFontLoadOptions = FontLoadOptions & {
   reportCdnFailure?: FontCdnReporter;
   checkImplicitCdnPack?: (pack: FontCdnDiagnostic['pack']) => void;
   onSubstitute?: (bytes: ArrayBuffer, error: unknown) => void;
@@ -80,7 +78,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
 
   function cdnAssetUrl(
     face: BundledFontFace, file: string, kind: FontPack, cdn: FontCdnConfiguration | undefined,
-    runtime?: FontLoadOptions,
+    runtime?: RuntimeFontLoadOptions,
   ): URL | undefined {
     if (!cdn?.baseUrl || kind === 'base') return undefined;
     const pack = packFor(face);
@@ -115,7 +113,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     face: BundledFontFace,
     baseUrl: URL | undefined,
     skipImplicit = false,
-    runtime?: FontLoadOptions,
+    runtime?: RuntimeFontLoadOptions,
   ): Promise<URL> {
     const { file, script } = face;
     if (baseUrl !== undefined) return new URL(file, baseUrl);
@@ -146,7 +144,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     throw new Error(`Unknown bundled font asset: ${file}`);
   }
 
-  function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets, runtime?: FontLoadOptions): URL {
+  function sliceAssetUrl(face: BundledFontFace, file: string, { urls, cdn }: FontPackAssets, runtime?: RuntimeFontLoadOptions): URL {
     const installed = urls?.[file];
     if (installed) return installed();
     if (cdn?.implicit && cdn.baseUrl) runtime?.checkImplicitCdnPack?.('cjk');
@@ -160,7 +158,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
   function sliceLocation(
     face: BundledFontFace,
     base: AssetBase,
-    runtime?: FontLoadOptions,
+    runtime?: RuntimeFontLoadOptions,
   ): SliceLocation | undefined {
     const ref = sliceRefOf(face.file);
     if (!ref) return undefined;
@@ -256,7 +254,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
     face: BundledFontFace,
     packed: typeof loadPackedFontBytes,
     base: AssetBase,
-    runtime?: FontLoadOptions,
+    runtime?: RuntimeFontLoadOptions,
     skipImplicit = false,
     onCdnFailure?: () => void,
   ): Promise<ArrayBuffer> {
@@ -306,7 +304,7 @@ export function createFontRuntime(lookup: FontPackLookup, {
   async function substituteFontBytes(
     face: BundledFontFace,
     packed: typeof loadPackedFontBytes,
-    runtime: FontLoadOptions | undefined,
+    runtime: RuntimeFontLoadOptions | undefined,
     script: boolean,
   ): Promise<ArrayBuffer> {
     const heavy = face.weight >= 600;
@@ -378,6 +376,10 @@ export function createFontRuntime(lookup: FontPackLookup, {
   function createFontProvider(
     options?: FontAssetOptions,
     runtime?: FontLoadOptions,
+  ): RuntimeFontSource;
+  function createFontProvider(
+    options?: FontAssetOptions,
+    runtime?: RuntimeFontLoadOptions,
   ): RuntimeFontSource {
     const base = assetBase(options?.baseUrl);
     const source: RuntimeFontSource = fontProvider(

@@ -39,13 +39,15 @@ export function slicedFacesSupported(
   return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
 }
 
-type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
+type WholeFaceLoader = (() => Promise<ArrayBuffer>) & {
+  slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> };
+  reportCdnFailure?: FontCdnReporter;
+};
 
 interface Entry {
   family: string;
   face: SlicedFontFace;
   whole: WholeFaceLoader;
-  reportCdnFailure: FontCdnReporter;
   wholeBytes?: ArrayBuffer;
   wholeLoad?: Promise<ArrayBuffer>;
   /** `chunks` is what the revision's bytes hold; a whole face holds everything. */
@@ -102,7 +104,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       throw error;
     });
   const replacementBytes = (entry: Entry) => wholeBytes(entry).catch((error: unknown) => {
-    if (isImplicitFontCdnError(error)) entry.reportCdnFailure(error);
+    if (isImplicitFontCdnError(error)) (entry.whole.reportCdnFailure ?? reportImplicitCdnFailure)(error);
     throw error;
   });
   const latestOf = (entry: Entry) => entry.installed[entry.installed.length - 1];
@@ -255,12 +257,9 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
       }));
       return faces.filter((face): face is NonNullable<typeof face> => face !== undefined);
     },
-    add(
-      family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>,
-      reportCdnFailure: FontCdnReporter = reportImplicitCdnFailure,
-    ): void {
+    add(family: string, face: SlicedFontFace, whole: () => Promise<ArrayBuffer>): void {
       if (!disposed && !entries.has(keyOf(family))) {
-        entries.set(keyOf(family), { family, face, whole, reportCdnFailure, installed: [] });
+        entries.set(keyOf(family), { family, face, whole, installed: [] });
       }
     },
     has: (family: string) => entries.has(keyOf(family)),

@@ -64,8 +64,6 @@ export interface SliceLocation {
   decoder?: FontDecoder;
   /** @internal Drop the opened face from the shared cache once it settles, as `retain: false` does for whole faces. */
   retain?: boolean;
-  /** @internal */
-  reportCdnFailure?: FontCdnReporter;
 }
 
 /** @internal A face row's pointer to its slice index. */
@@ -101,7 +99,6 @@ export interface SliceTransport {
   url?: SliceAssetUrl;
   /** The fetch timeout `read` uses, which another realm reading the same files keeps. */
   timeoutMs?: number;
-  reportCdnFailure?: FontCdnReporter;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
   decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
 }
@@ -178,7 +175,10 @@ function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Arr
 }
 
 /** @internal Loads a sliced face's index, skeleton and core; chunks follow on demand. */
-export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
+export function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace>;
+export async function openProgressiveFace(
+  ref: SliceRef, transport: SliceTransport & { reportCdnFailure?: FontCdnReporter },
+): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
   const report = transport.reportCdnFailure ?? reportImplicitCdnFailure;
   const index = await reportSliceFailure(readChecked(transport, ref.index, async (indexBytes) => {
