@@ -1098,6 +1098,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connector_canonical_output_keeps_the_released_path() {
+        use crate::drawingml::GeometryPathCommand::{Line, Move};
+        use crate::inline::{InlineNode, RunContent};
+        use crate::paragraph::ParagraphContent;
+
+        let bytes = ooxml_opc::rezip_parts(&[(
+            "word/document.xml".to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+              <w:body><w:p><w:r><w:drawing><wp:inline>
+                <wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Connector"/>
+                <a:graphic><a:graphicData><wps:wsp><wps:spPr>
+                  <a:xfrm><a:ext cx="914400" cy="457200"/></a:xfrm>
+                  <a:prstGeom prst="bentConnector4"><a:avLst>
+                    <a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/>
+                  </a:avLst></a:prstGeom>
+                </wps:spPr></wps:wsp></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r></w:p></w:body>
+            </w:document>"#
+                .to_vec(),
+        )])
+        .unwrap();
+        let parsed = parse_docx_s9_wire(
+            &bytes,
+            S9ParseOptions {
+                include_canonical: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut released = parsed.document;
+        let BlockContent::Paragraph(paragraph) = &mut released.package.document.content[0] else {
+            panic!("paragraph");
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] else {
+            panic!("run");
+        };
+        let RunContent::Shape { shape, .. } = &mut run.content[0] else {
+            panic!("shape");
+        };
+        let previous_path = shape.geometry_path.replace(vec![
+            Move { x: 0.0, y: 0.0 },
+            Line { x: 1.0, y: 0.0 },
+            Line { x: 0.25, y: 0.5 },
+            Line { x: 0.75, y: 0.5 },
+            Line { x: 1.0, y: 1.0 },
+        ]);
+        let released_path = shape.geometry_path.clone();
+        let canonical = canonical_document(&released, &bytes).unwrap();
+        let expected_bytes = to_canonical_bytes(&canonical).unwrap();
+        let actual_bytes = base64::engine::general_purpose::STANDARD
+            .decode(parsed.canonical_base64.unwrap())
+            .unwrap();
+        assert!(actual_bytes == expected_bytes, "released canonical bytes");
+        assert_eq!(
+            parsed.canonical_sha256.unwrap(),
+            canonical_sha256(&canonical).unwrap()
+        );
+        assert_eq!(previous_path, released_path);
+    }
+
+    #[test]
     fn full_wire_applies_options_and_package_wide_paragraph_ids() {
         let parts = vec![
             (
