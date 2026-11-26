@@ -38,6 +38,19 @@ impl Node {
         self.namespace == WORD && self.local == name
     }
 
+    pub fn is_range_marker(&self) -> bool {
+        self.namespace == WORD
+            && matches!(
+                self.local.as_str(),
+                "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "permStart"
+                    | "permEnd"
+            )
+    }
+
     pub fn attr(&self, source: &str, name: &str) -> Option<String> {
         self.attributes
             .iter()
@@ -311,17 +324,7 @@ fn visit(
             continue;
         } else if node.word("r") {
             lower_run(source, at, scope, units, result)?;
-        } else if node.namespace == WORD
-            && matches!(
-                node.local.as_str(),
-                "bookmarkStart"
-                    | "bookmarkEnd"
-                    | "commentRangeStart"
-                    | "commentRangeEnd"
-                    | "permStart"
-                    | "permEnd"
-            )
-        {
+        } else if node.is_range_marker() {
             result.markers.push(result.len);
         } else {
             return Err(Failure::structure(format!(

@@ -1,4 +1,4 @@
-use super::{NamespaceScopes, PatchContext, patch_paragraph_v1};
+use super::{NamespaceScopes, ParagraphPatchSource, PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
     RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
@@ -66,6 +66,29 @@ fn write(
     plan: &ParagraphPatchV1,
 ) -> Result<String, crate::paragraph_patch::ParagraphPatchError> {
     patch_paragraph_v1(source, plan, &PatchContext::word_document())
+}
+
+#[test]
+fn base_preserving_more_runs_refuses_different_smart_tag_ancestry() {
+    let source = concat!(
+        r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+        r#"<w:smartTag w:uri="urn:test" w:element="name"><w:r><w:t>a</w:t></w:r></w:smartTag>"#,
+        "<w:r><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r></w:p>"
+    );
+    let mut base = patch(
+        vec![text("aKEEPz", json!({}))],
+        vec![text("bKEEPy", json!({}))],
+    );
+    let mut recorded = base.clone();
+    replace(&mut base, 0, 1, "b", json!({}));
+    replace(&mut base, 5, 6, "y", json!({}));
+    replace(&mut recorded, 0, 6, "bKEEPy", json!({}));
+    let base_xml = write(source, &base).unwrap();
+    let recorded_xml = write(source, &recorded).unwrap();
+    assert!(base_xml.contains("<w:t>b</w:t></w:r></w:smartTag>"));
+    assert!(recorded_xml.contains("<w:t>bKEEPy</w:t></w:r></w:smartTag>"));
+    let source = ParagraphPatchSource::new(source.to_owned());
+    assert!(source.base_preserving_more_runs(0, &base, &recorded).is_none());
 }
 
 fn marker_properties(start: u32, end: u32) -> Attrs {

@@ -226,6 +226,7 @@ impl ParagraphPatchSource {
         if base.kept.len() <= recorded.kept.len()
             || !base.kept.is_superset(&recorded.kept)
             || base.cell_runs.len() != recorded.cell_runs.len()
+            || base.enclosing_markup != recorded.enclosing_markup
         {
             return None;
         }
@@ -246,6 +247,7 @@ struct Preview {
     kept: BTreeSet<usize>,
     cell_runs: Vec<usize>,
     run_properties: Vec<String>,
+    enclosing_markup: Vec<(Range<usize>, String)>,
 }
 
 fn preview(
@@ -295,6 +297,24 @@ impl Preview {
                 .then_some(original)
             })
             .collect();
+        let cell_at = |byte| after.cells.partition_point(|cell| cell.raw.start < byte);
+        let enclosing_markup = after
+            .xml
+            .nodes
+            .iter()
+            .skip(1)
+            .filter_map(|node| {
+                if (node.word("r") || node.word("t"))
+                    && !node.attributes.iter().any(|attribute| attribute.identifier)
+                {
+                    return None;
+                }
+                let from = cell_at(node.span.start);
+                let to = cell_at(node.span.end);
+                (from < to || node.is_range_marker())
+                    .then(|| (from..to, output[node.open.clone()].to_owned()))
+            })
+            .collect();
         Self {
             kept,
             cell_runs: after.cells.iter().map(|cell| cell.run).collect(),
@@ -307,6 +327,7 @@ impl Preview {
                         .unwrap_or_default()
                 })
                 .collect(),
+            enclosing_markup,
         }
     }
 }
