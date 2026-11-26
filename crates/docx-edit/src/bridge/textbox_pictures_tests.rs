@@ -1005,6 +1005,8 @@ fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin(
         ("paragraph", "bottom"),
         ("line", "center"),
         ("line", "bottom"),
+        ("paragraph", "outside"),
+        ("paragraph", "inside"),
     ] {
         let drawing = cell_anchor_box(
             "<wp:posOffset>914400</wp:posOffset>",

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::anchor::is_cell_shape_anchor;
 use crate::cell_layout::{
     nested_table_float_offset, nested_table_horizontal_offset, stacks_cell_shape,
 };
@@ -3718,7 +3717,6 @@ fn measure_shape(
 fn measure_cell_blocks_with_table_floats(
     blocks: &mut [LayoutBlock],
     content_width: f64,
-    rotated: bool,
     config: &MeasurementConfig,
 ) -> Result<Vec<BlockExtent>, String> {
     let mut measured = Vec::with_capacity(blocks.len());
@@ -3726,12 +3724,6 @@ fn measure_cell_blocks_with_table_floats(
     let mut y = 0.0_f64;
     let mut previous_after = 0.0_f64;
     for block in blocks {
-        if matches!(block, LayoutBlock::Shape(shape)
-            if is_cell_shape_anchor(shape.position.as_ref(), shape.wrap_type.as_deref(), rotated))
-        {
-            measured.push(measure_block(block, content_width, config)?);
-            continue;
-        }
         let spacing = match &*block {
             LayoutBlock::Paragraph(paragraph) => paragraph
                 .attrs
@@ -4123,7 +4115,6 @@ fn measure_table_cells(
                 measure_cell_blocks_with_table_floats(
                     &mut cell.blocks,
                     measure_width.max(1.0),
-                    rotated,
                     config,
                 )?
             } else {

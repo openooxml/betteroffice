@@ -100,7 +100,7 @@ pub(crate) fn is_cell_shape_anchor(
         _ => return false,
     }
     let Some(position) = position else {
-        return true;
+        return false;
     };
     !position.use_simple_pos.unwrap_or(false)
         && position.horizontal.as_ref().is_none_or(|axis| {
@@ -113,7 +113,7 @@ pub(crate) fn is_cell_shape_anchor(
             matches!(
                 axis.relative_to.as_deref(),
                 None | Some("paragraph" | "line")
-            ) && !matches!(axis.align.as_deref(), Some("center" | "bottom"))
+            ) && matches!(axis.align.as_deref(), None | Some("top"))
         })
 }
 
