@@ -1,0 +1,50 @@
+name: Retry native packages
+
+on:
+  workflow_run:
+    workflows: [Native packages]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  rerun:
+    name: Re-run failed native builds once
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.run_attempt == 1 &&
+      (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'cancelled')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      checks: read
+    steps:
+      - name: Re-run the failed jobs unless a person or a newer run cancelled them
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/1/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .conclusion, .name] | @tsv')
+          if [ -z "$jobs" ]; then
+            echo "Not re-run: $RUN_URL has no failed or cancelled job." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          while IFS=$'\t' read -r id conclusion _; do
+            [ "$conclusion" = cancelled ] || continue
+            messages=$(gh api --paginate "repos/$REPO/check-runs/$id/annotations" --jq '.[].message')
+            if grep -Eqx 'The run was canceled by @[A-Za-z0-9-]+(\[bot\])?\.|Canceling since a higher priority waiting request for .+ exists' <<< "$messages"; then
+              echo "Not re-run: $RUN_URL was cancelled by a person or a newer run." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done <<< "$jobs"
+          gh api --method POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs" --silent
+          names=$(cut -f2,3 <<< "$jobs" | awk -F'\t' '{ printf "%s%s (%s)", sep, $2, $1; sep = ", " }')
+          echo "Re-ran $RUN_URL once, attempt 1 ended with: $names." >> "$GITHUB_STEP_SUMMARY"
