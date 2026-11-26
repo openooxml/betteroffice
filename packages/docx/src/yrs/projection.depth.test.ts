@@ -47,6 +47,28 @@ function expectDeepMarker(blocks: readonly BlockContent[], levels: number): void
 describe('Native DOCX projection depth', () => {
   beforeAll(preloadSeedParityWasm, 30_000);
 
+  it('checks assembled body keys when only an auxiliary root was requested', () => {
+    const raw = createEditSession(CLIENT);
+    const session = wrapSession(raw, CLIENT);
+    try {
+      session.seedFromDocx(syntheticDocx('<w:p><w:r><w:t>Body</w:t></w:r></w:p>'));
+      const base = session.materializeDocx()!;
+      const ts = yrsToDocument(session, base);
+      const source = canonicalStories(session, base);
+      const native = {
+        document: ts,
+        paragraphSessionKeys: [],
+        sessionRevisionPlaceholders: [],
+        createdListSites: [],
+        deferred: [],
+      };
+      expect(check(session, ts, native, source, new Set(['hf:header'])).join('\n'))
+        .toContain('paragraphSessionKeys[0]');
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('carries five nested parsed tables through both native JSON exports', () => {
     const raw = createEditSession(CLIENT);
     const session = wrapSession(raw, CLIENT);

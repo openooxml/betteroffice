@@ -990,3 +990,55 @@ fn append(target: &mut Run, source: Run) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complex_field_source_span_includes_projected_hyperlink_text() {
+        let paragraph: Paragraph = serde_json::from_value(json!({
+            "type": "paragraph",
+            "content": [{
+                "type": "complexField",
+                "instruction": "IF",
+                "fieldType": "IF",
+                "fieldCode": [],
+                "fieldResult": [],
+                "structuredResult": {"inline": [{
+                    "type": "hyperlink",
+                    "children": [{
+                        "type": "run",
+                        "content": [{"type": "text", "text": "AB"}],
+                    }],
+                }]},
+            }],
+        }))
+        .unwrap();
+        assert_eq!(source_runs(&paragraph), [("\u{fffc}".repeat(3), None)]);
+    }
+
+    #[test]
+    fn restores_run_boundaries_with_nested_null_mark_fields() {
+        let boundary = OriginalBoundary {
+            text: "A".to_owned(),
+            marks_key: Some(r#"underline:{"style":"single","color":{"rgb":"FF0000","theme":null}}"#.to_owned()),
+            formatting: None,
+            breaks: None,
+            note_marks: None,
+            property_changes: None,
+        };
+        let attrs = json!({"underline":{"style":"single","color":{"rgb":"FF0000"}}});
+        assert!(
+            restore(
+                &[boundary],
+                &[],
+                "A",
+                &[("A", &Attrs::new())],
+                &[attrs.as_object().unwrap().clone()],
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+}

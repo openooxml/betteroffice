@@ -153,7 +153,7 @@ fn projects_authored_paragraph_properties_and_numbering() {
 }
 
 #[test]
-fn reprojects_after_an_edit_and_carries_the_last_assembled_body() {
+fn reprojects_after_an_edit_even_when_no_roots_are_requested() {
     let doc = seeded(r#"<w:p w14:paraId="00000011"><w:r><w:t>A😀Z</w:t></w:r></w:p>"#);
     let defaults = ProjectionInput::default();
     let before = doc.project_document(&defaults).unwrap();
@@ -165,13 +165,13 @@ fn reprojects_after_an_edit_and_carries_the_last_assembled_body() {
     )
     .unwrap();
     let story = doc.project_story("body", &defaults).unwrap();
-    let unchanged = doc
+    let partial = doc
         .project_document(&ProjectionInput {
             root_stories: Some(BTreeSet::new()),
             ..ProjectionInput::default()
         })
         .unwrap();
-    assert_eq!(text(paragraph(&body(&unchanged)[0])), "A😀Z");
+    assert_eq!(text(paragraph(&body(&partial)[0])), "A😀!Z");
     let after = doc.project_document(&defaults).unwrap();
     assert_eq!(text(paragraph(&body(&after)[0])), "A😀!Z");
     assert_eq!(story.blocks.as_slice(), body(&after));

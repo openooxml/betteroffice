@@ -12,7 +12,14 @@ pub(crate) fn story_id(relationship_id: &str) -> String {
     format!("hf:{relationship_id}")
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ALIAS_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
+    #[cfg(test)]
+    ALIAS_PARSES.set(ALIAS_PARSES.get() + 1);
     let groups: Vec<HeaderFooterAliasGroup> =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
     let mut ids = HashSet::new();

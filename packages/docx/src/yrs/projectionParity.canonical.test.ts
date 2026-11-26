@@ -1,9 +1,68 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { Paragraph } from '../types/content/paragraph';
-import { canonicalProjection, checkSourceOrdinals } from './projectionParity.support';
+import type { BlockContent, Document } from '../types/document';
+import type { EditSession } from '../wasm/edit';
+import type { YrsSession } from './index';
+import {
+  canonicalProjection,
+  checkSourceOrdinals,
+  compareSnapshots,
+  nativeProjection,
+} from './projectionParity.support';
+
+function wireDocument(content: readonly BlockContent[] = []) {
+  return { package: {
+    document: { content }, theme: {}, numbering: {}, settings: {}, fontTable: {},
+    relationshipEntries: [], mediaEntries: [], chartEntries: [],
+  } };
+}
+
+function fieldWithParagraph(paragraph: Paragraph): Paragraph {
+  return {
+    type: 'paragraph',
+    content: [{
+      type: 'complexField',
+      fieldType: 'IF',
+      instruction: 'IF',
+      fieldCode: [],
+      fieldResult: [],
+      structuredResult: { blocks: [paragraph] },
+    }],
+  };
+}
 
 describe('DOCX projection canonical form', () => {
+  it('validates the native document projection envelope version', () => {
+    const raw = { project_document_json: () => JSON.stringify({
+      wireVersion: 2,
+      document: wireDocument(),
+      embeddedFontParts: [],
+      paragraphSessionKeys: [],
+      sessionRevisionPlaceholders: [],
+      createdListSites: [],
+      deferred: [],
+    }) } as unknown as EditSession;
+    expect(() => nativeProjection(raw, new ArrayBuffer(0))).toThrow('wire.wireVersion must be 1');
+  });
+
+  it('checks the source ordinal of an edited nested field paragraph', () => {
+    const source = fieldWithParagraph({ type: 'paragraph', sourceOrdinal: 3, content: [] });
+    const edited = fieldWithParagraph({
+      type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Changed' }] }],
+    });
+    expect(checkSourceOrdinals('body', [edited], [source]).join('\n'))
+      .toContain('structuredResult.blocks[0].sourceOrdinal');
+  });
+
+  it('detects a nested source ordinal change between snapshots', () => {
+    const snapshot = (sourceOrdinal?: number) => wireDocument([
+      fieldWithParagraph({ type: 'paragraph', content: [], sourceOrdinal }),
+    ]) as unknown as Document;
+    expect(compareSnapshots({} as YrsSession, snapshot(3), snapshot(), new Set(['body'])).join('\n'))
+      .toContain('structuredResult.blocks[0].sourceOrdinal');
+  });
+
   it('checks paragraph source ordinals against the source pilcrow key', () => {
     const paragraph: Paragraph = { type: 'paragraph', content: [] };
     const source = { ...paragraph, sourceOrdinal: 3 };

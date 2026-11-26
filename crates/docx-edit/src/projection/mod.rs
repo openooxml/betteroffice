@@ -1147,3 +1147,197 @@ fn apply_host_metadata(document: &mut S9DocumentWire, host: &ProjectionHostMetad
         package.document.comments.clone_from(comments);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use yrs::{Assoc, Map, MapPrelim};
+
+    fn seeded_header() -> EditingDoc {
+        let parts = [
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+            ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#),
+            ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#),
+            ("word/header.xml", r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#),
+        ]
+        .map(|(path, xml)| (path.to_owned(), xml.as_bytes().to_vec()));
+        let doc = EditingDoc::new(41);
+        crate::seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+        doc
+    }
+
+    #[test]
+    fn cold_partial_projection_includes_untouched_header_deferrals() {
+        let doc = seeded_header();
+        let output = doc
+            .project_document(&ProjectionInput {
+                root_stories: Some(BTreeSet::from(["body".to_owned()])),
+                ..ProjectionInput::default()
+            })
+            .unwrap();
+        assert!(output.document.package.header_entries.is_some());
+        assert!(output.deferred.iter().any(|entry| {
+            entry.story_id == "hf:header" && entry.kind == "headerFooterStory"
+        }));
+    }
+
+    #[test]
+    fn partial_projection_evicts_deleted_live_roots() {
+        let doc = seeded_header();
+        doc.create_story("hf:extra", "Extra", "Normal", "left")
+            .unwrap();
+        let input = ProjectionInput {
+            root_stories: Some(BTreeSet::from(["body".to_owned()])),
+            ..ProjectionInput::default()
+        };
+        let full = doc.project_document(&ProjectionInput::default()).unwrap();
+        assert!(full.deferred.iter().any(|entry| entry.story_id == "hf:extra"));
+        doc.delete_story("hf:extra").unwrap();
+        let partial = doc.project_document(&input).unwrap();
+        assert!(!partial.deferred.iter().any(|entry| entry.story_id == "hf:extra"));
+    }
+
+    #[test]
+    fn host_can_remove_headers_from_the_projected_package() {
+        let doc = seeded_header();
+        let wire = doc
+            .project_document_json(r#"{"host":{"headers":null}}"#)
+            .unwrap();
+        let wire: Value = serde_json::from_str(&wire).unwrap();
+        assert!(wire["document"]["package"].get("headerEntries").is_none());
+        assert!(!wire["deferred"].as_array().unwrap().iter().any(|entry| {
+            entry["storyId"] == "hf:header"
+        }));
+    }
+
+    #[test]
+    fn rejects_unsupported_host_media_urls() {
+        let doc = seeded_header();
+        let error = doc
+            .project_document_json(r#"{"host":{"mediaUrls":{"media:0":"data:image/png;base64,AA=="}}}"#)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProjectionError::InvalidInput(message) if message.contains("mediaUrls")
+        ));
+    }
+
+    #[test]
+    fn rejects_deep_modeled_host_blocks_before_decoding() {
+        let mut block = r#"{"type":"rawXml","xml":"<leaf/>"}"#.to_owned();
+        for _ in 0..=docx_parse::MAX_NESTING_DEPTH {
+            block = format!(
+                r#"{{"type":"blockSdt","properties":{{"sdtType":"richText"}},"content":[{block}]}}"#
+            );
+        }
+        let input = format!(
+            r#"{{"host":{{"comments":[{{"id":1,"author":"Ada","content":[],"blockContent":[{block}]}}]}}}}"#
+        );
+        let doc = seeded_header();
+        for error in [
+            doc.project_document_json(&input).unwrap_err(),
+            doc.project_story_json("body", &input).unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                ProjectionError::InvalidInput(message) if message.contains("modeled content nesting")
+            ));
+        }
+    }
+
+    #[test]
+    fn resolves_retained_bytes_only_when_projecting() {
+        let doc = EditingDoc::new(41);
+        doc.retain_source_docx(Arc::<[u8]>::from(&b"invalid zip"[..]));
+        assert!(doc.projection.lock().unwrap().source.is_none());
+        assert!(matches!(
+            doc.project_story("body", &ProjectionInput::default()),
+            Err(ProjectionError::SourceParse(_))
+        ));
+    }
+
+    #[test]
+    fn story_rejects_non_finite_revision_ids() {
+        let doc = seeded_header();
+        let input = ProjectionInput {
+            revision_ids: BTreeMap::from([(
+                "revision".to_owned(),
+                ProjectionRevisionIds {
+                    insertion: Some(f64::NAN),
+                    deletion: None,
+                },
+            )]),
+            ..ProjectionInput::default()
+        };
+        assert!(matches!(
+            doc.project_story("body", &input),
+            Err(ProjectionError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn projects_live_language_without_original_paragraph_formatting() {
+        let doc = seeded_header();
+        let para_id = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        doc.set_paragraph_attr(&para_id, "_originalFormatting", Any::Null)
+            .unwrap();
+        doc.set_paragraph_attr(
+            &para_id,
+            "language",
+            Any::Map(Arc::new(std::collections::HashMap::from([(
+                "latin".to_owned(),
+                Any::from("fr-FR"),
+            )]))),
+        )
+        .unwrap();
+        let wire: Value =
+            serde_json::from_str(&doc.project_story_json("body", "{}").unwrap()).unwrap();
+        assert_eq!(
+            wire["blocks"][0]["formatting"]["runProperties"]["language"]["latin"],
+            "fr-FR"
+        );
+    }
+
+    #[test]
+    fn projects_valid_comment_anchors_beside_malformed_ones() {
+        let doc = seeded_header();
+        let input = ProjectionInput::default();
+        assert!(!doc.project_story("body", &input).unwrap().deferred.iter().any(|entry| {
+            entry.kind == "commentRanges"
+        }));
+        {
+            let mut txn = doc.doc.transact_mut();
+            let body = crate::story_text(&txn, "body").unwrap();
+            let start = crate::sticky_index(&body, &txn, 0, Assoc::After).unwrap();
+            let end = crate::sticky_index(&body, &txn, 1, Assoc::Before).unwrap();
+            let anchor = crate::anchor_value("body", &start, &end);
+            let comments = txn.get_map(crate::COMMENTS).unwrap();
+            let comment = comments.insert(&mut txn, "live", MapPrelim::default());
+            comment.insert(&mut txn, "anchors", Any::Array(Arc::from([anchor, Any::Null])));
+        }
+        assert!(doc.project_story("body", &input).unwrap().deferred.iter().any(|entry| {
+            entry.kind == "commentRanges"
+        }));
+    }
+
+    #[test]
+    fn document_projection_reuses_the_parsed_alias_declaration() {
+        let doc = seeded_header();
+        doc.set_header_footer_aliases(
+            &json!([{
+                "isHeader": true,
+                "partPath": "word/header.xml",
+                "relationshipIds": ["header", "alias"],
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let input = ProjectionInput::default();
+        doc.project_document(&input).unwrap();
+        let parses = crate::header_footer::ALIAS_PARSES.get();
+        doc.project_document(&input).unwrap();
+        assert_eq!(crate::header_footer::ALIAS_PARSES.get(), parses);
+    }
+}

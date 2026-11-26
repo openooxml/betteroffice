@@ -40,6 +40,14 @@ const expectedTypeScriptDisagreement = {
   ],
 };
 
+function checkDisagreementFixture(fixtures: readonly string[]): void {
+  expect(fixtures.length).toBeGreaterThan(0);
+}
+
+it('rejects discovery that omits the expected TypeScript disagreement fixture', () => {
+  expect(() => checkDisagreementFixture(['another-fixture'])).toThrow();
+});
+
 function editParagraphProperties(session: YrsSession, recordEdit: (outcome: ProjectionEdit) => void): void {
   const paragraphs = session.paragraphs('body');
   const paragraph = paragraphs[2] ?? paragraphs[0];
@@ -68,7 +76,7 @@ describe('Native DOCX projection parity', () => {
   const used: AllowanceUsage = new Map();
 
   beforeAll(async () => {
-    expect(fixtures.length).toBeGreaterThan(0);
+    checkDisagreementFixture(fixtures);
     await preloadSeedParityWasm();
     const raw = createEditSession(CLIENT);
     try {
