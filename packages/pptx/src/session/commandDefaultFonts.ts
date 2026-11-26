@@ -297,7 +297,8 @@ export function createCommandDefaultFonts(
               if (bytes && arabicFace) {
                 await waitForPrimary;
                 preferred = { family: face.family, bold, italic, bytes,
-                  ...(bold !== arabicFace.bold || italic !== arabicFace.italic ? { ownWeight: true } : {}) };
+                  ...(bold !== arabicFace.bold || italic !== arabicFace.italic
+                    ? { face: { bold: arabicFace.bold, italic: arabicFace.italic } } : {}) };
                 faceStatus.set(preferred, 'preferred');
               }
             }
@@ -332,12 +333,8 @@ export function createCommandDefaultFonts(
         let loaded = preferred;
         if (lastResort) loaded = { family: lastResort.family, bold: lastResort.weight === 700,
           italic: lastResort.style === 'italic', bytes, kind: 'coverage' };
-        else if (face.kind === 'coverage') {
-          loaded = await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily);
-          if (loaded && face.script === 'arabic' && (loaded.bold !== face.bold || loaded.italic !== face.italic)) {
-            loaded = { ...loaded, bold: face.bold, italic: face.italic, ownWeight: true };
-          }
-        } else loaded ??= { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
+        else if (face.kind === 'coverage') loaded = await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily);
+        else loaded ??= { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
         if (!loaded) {
           if (!disposed && !suppliedFamily(face)) failed(id);
           return undefined;
