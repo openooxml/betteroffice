@@ -213,61 +213,64 @@ pub(crate) fn merge_font_family(previous: Option<&Any>, patch: &Any, east_asian:
     Any::Map(Arc::new(fonts))
 }
 
-fn font_pick_characters(text: &str) -> impl Iterator<Item = (char, bool)> + '_ {
-    ooxml_text::font_slot_characters(text, false, false).map(|(ch, slot)| {
+pub(crate) fn run_font_slot_flags(complex_script: Option<&Any>, fonts: Option<&Any>) -> (bool, bool) {
+    let complex_script = match complex_script {
+        Some(Any::Map(value)) => value.get("enabled") != Some(&Any::Bool(false)),
+        Some(value) => *value != Any::Null && *value != Any::Bool(false),
+        None => false,
+    };
+    let hint = matches!(fonts, Some(Any::Map(fonts))
+        if matches!(fonts.get("hint"), Some(Any::String(hint)) if hint.as_ref() == "eastAsia"));
+    (complex_script, hint)
+}
+
+fn font_pick_characters(
+    text: &str,
+    (complex_script, hint): (bool, bool),
+) -> impl Iterator<Item = (char, bool)> + '_ {
+    ooxml_text::font_slot_characters(text, complex_script, hint).map(move |(ch, slot)| {
         let east_asian = slot == 2
-            || matches!(
-                ch as u32,
-                0x16fe0..=0x18dff | 0x1aff0..=0x1b2ff | 0x1f200..=0x1f2ff | 0x20000..=0x3ffff
-            );
+            || !complex_script
+                && matches!(
+                    ch as u32,
+                    0x16fe0..=0x18dff | 0x1aff0..=0x1b2ff | 0x1f200..=0x1f2ff | 0x20000..=0x3ffff
+                );
         (ch, east_asian)
     })
 }
 
 pub(crate) fn has_east_asian_font_pick_text(text: &str) -> bool {
-    !text.is_ascii() && font_pick_characters(text).any(|(_, east_asian)| east_asian)
+    !text.is_ascii() && font_pick_characters(text, (false, false)).any(|(_, east_asian)| east_asian)
 }
 
 fn font_pick_segments(
     text: &str,
     from: u32,
     to: u32,
+    flags: (bool, bool),
 ) -> impl Iterator<Item = (u32, u32, bool)> + '_ {
-    let selected = font_pick_text(text, from, to);
-    let ascii = selected.is_ascii();
-    let mut characters = font_pick_characters(selected).peekable();
-    let mut offset = from;
-    std::iter::from_fn(move || {
-        if ascii {
-            let start = std::mem::replace(&mut offset, to);
-            return (start < to).then_some((start, to, false));
-        }
-        let (first, east_asian) = characters.next()?;
-        let start = offset;
-        offset += first.len_utf16() as u32;
-        while let Some((ch, _)) = characters.next_if(|&(_, script)| script == east_asian) {
-            offset += ch.len_utf16() as u32;
-        }
-        Some((start, offset, east_asian))
-    })
-}
-
-fn font_pick_text(text: &str, from: u32, to: u32) -> &str {
-    if from == 0 && to as usize >= text.len() {
-        return text;
-    }
+    let unsegmented = flags.0 || text.is_ascii();
+    let mut single = Some((from, to, false));
     let mut offset = 0;
-    let mut start = 0;
-    for (index, character) in text.char_indices() {
-        if offset == from {
-            start = index;
+    let mut characters = font_pick_characters(text, flags)
+        .map(move |(ch, east_asian)| {
+            let start = offset;
+            offset += ch.len_utf16() as u32;
+            (start, offset, east_asian)
+        })
+        .skip_while(move |&(_, end, _)| end <= from)
+        .take_while(move |&(start, _, _)| start < to)
+        .peekable();
+    std::iter::from_fn(move || {
+        if unsegmented {
+            return single.take();
         }
-        if offset == to {
-            return &text[start..index];
+        let (start, mut end, east_asian) = characters.next()?;
+        while let Some((_, next_end, _)) = characters.next_if(|&(_, _, ea)| ea == east_asian) {
+            end = next_end;
         }
-        offset += character.len_utf16() as u32;
-    }
-    &text[start..]
+        Some((start.max(from), end.min(to), east_asian))
+    })
 }
 
 /// Tri-state inline formatting patch.
@@ -1130,27 +1133,31 @@ impl<'d> Keeper<'d> {
 struct StoryChunk {
     start: u32,
     end: u32,
-    text: Option<Arc<str>>,
+    text: bool,
+    font_text: Option<Arc<str>>,
     block: bool,
     pilcrow: bool,
     attrs: Option<Box<Attrs>>,
 }
 
-fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryChunk> {
+fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T, merge_font: bool) -> Vec<StoryChunk> {
     let mut chunks = Vec::new();
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
         let end = offset + out_len(&diff.insert);
+        let block = matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
+            .is_some_and(|kind| crate::segments::is_block_embed(&kind)));
+        let pilcrow = matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn));
         chunks.push(StoryChunk {
             start: offset,
             end,
-            text: match &diff.insert {
-                Out::Any(Any::String(text)) => Some(text.clone()),
+            text: matches!(diff.insert, Out::Any(Any::String(_))),
+            font_text: match diff.insert {
+                Out::Any(Any::String(text)) if merge_font => Some(text),
                 _ => None,
             },
-            block: matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
-                .is_some_and(|kind| crate::segments::is_block_embed(&kind))),
-            pilcrow: matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn)),
+            block,
+            pilcrow,
             attrs: diff.attributes,
         });
         offset = end;
@@ -1187,9 +1194,9 @@ fn changes_text_in(
     start: u32,
     end: u32,
     attrs: &Attrs,
-    merge_font: bool,
+    font_merge: Option<FontMerge<'_>>,
 ) -> bool {
-    changes_units_in(chunks, start, end, attrs, true, merge_font)
+    changes_units_in(chunks, start, end, attrs, true, font_merge)
 }
 
 /// Whether setting `attrs` would change a unit in `start..end` that a pass writes: text only, or
@@ -1201,23 +1208,17 @@ fn changes_units_in(
     end: u32,
     attrs: &Attrs,
     text_only: bool,
-    merge_font: bool,
+    font_merge: Option<FontMerge<'_>>,
 ) -> bool {
     chunks_within(chunks, start, end)
-        .filter(|chunk| {
-            if text_only {
-                chunk.text.is_some()
-            } else {
-                !chunk.block
-            }
-        })
+        .filter(|chunk| if text_only { chunk.text } else { !chunk.block })
         .any(|chunk| {
             attrs_change_chunk(
                 attrs,
                 chunk.attrs.as_deref(),
                 chunk.pilcrow,
-                merge_font,
-                chunk.text.as_deref().unwrap_or_default(),
+                font_merge,
+                chunk.font_text.as_deref().unwrap_or_default(),
                 (
                     start.saturating_sub(chunk.start),
                     end.min(chunk.end) - chunk.start,
@@ -1230,7 +1231,7 @@ fn attrs_change_chunk(
     attrs: &Attrs,
     current: Option<&Attrs>,
     pilcrow: bool,
-    merge_font: bool,
+    font_merge: Option<FontMerge<'_>>,
     text: &str,
     (from, to): (u32, u32),
 ) -> bool {
@@ -1240,9 +1241,15 @@ fn attrs_change_chunk(
             return false;
         }
         let previous = previous.unwrap_or(&Any::Null);
-        if merge_font && key.as_ref() == "fontFamily" {
-            font_pick_segments(text, from, to).any(|(_, _, east_asian)| {
-                *previous != merge_font_family(Some(previous), value, east_asian)
+        if let Some(font_merge) = font_merge
+            && key.as_ref() == "fontFamily"
+        {
+            let (base, flags) = font_merge.chunk_fonts(
+                Some(previous),
+                current.and_then(|attrs| attrs.get("complexScript")),
+            );
+            font_pick_segments(text, from, to, flags).any(|(_, _, east_asian)| {
+                *previous != merge_font_family(Some(base), value, east_asian)
             })
         } else {
             previous != value
@@ -1262,18 +1269,18 @@ fn merge_chunk_language(patch: &mut Attrs, previous: Option<&Any>, write_languag
 
 fn chunk_format_pieces<'a>(
     patch: Attrs,
-    previous_fonts: Option<&'a Any>,
-    merge_font: bool,
+    fonts: Option<(&'a Any, (bool, bool))>,
     text: &'a str,
     chunk_start: u32,
     (start, end): (u32, u32),
 ) -> impl Iterator<Item = (u32, u32, Attrs)> + 'a {
-    let text = if merge_font { text } else { "" };
-    font_pick_segments(text, start - chunk_start, end - chunk_start).map(
+    let (previous, flags) = fonts.unwrap_or((&Any::Null, (false, false)));
+    let text = if fonts.is_some() { text } else { "" };
+    font_pick_segments(text, start - chunk_start, end - chunk_start, flags).map(
         move |(from, to, east_asian)| {
             let mut attrs = patch.clone();
-            if merge_font && let Some(fonts) = attrs.get_mut("fontFamily") {
-                *fonts = merge_font_family(previous_fonts, fonts, east_asian);
+            if fonts.is_some() && let Some(fonts) = attrs.get_mut("fontFamily") {
+                *fonts = merge_font_family(Some(previous), fonts, east_asian);
             }
             (chunk_start + from, chunk_start + to, attrs)
         },
@@ -1323,7 +1330,7 @@ fn free_spans_in(chunks: &[StoryChunk], start: u32, end: u32, text_only: bool) -
     let mut spans = Vec::new();
     let mut from = start;
     for chunk in chunks_within(chunks, start, end) {
-        if chunk.block || (text_only && chunk.text.is_none()) {
+        if chunk.block || (text_only && !chunk.text) {
             let cut = chunk.start.max(start);
             if cut > from {
                 spans.push((from, cut - from));
@@ -1382,19 +1389,39 @@ fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryParagraph>
 /// and the table style around it, give; without a source it removes the attributes.
 #[derive(Clone, Copy)]
 enum RunDelta<'a> {
-    Set { attrs: &'a Attrs, merge_font: bool },
+    Set {
+        attrs: &'a Attrs,
+        font_merge: Option<FontMerge<'a>>,
+    },
     Clear(Option<&'a crate::seed::SourceMetadata>),
 }
 
-impl RunDelta<'_> {
-    fn merges_font(self) -> bool {
-        matches!(
-            self,
-            Self::Set {
-                merge_font: true,
-                ..
-            }
-        )
+impl<'a> RunDelta<'a> {
+    fn font_merge(self) -> Option<FontMerge<'a>> {
+        match self {
+            Self::Set { font_merge, .. } => font_merge,
+            Self::Clear(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FontMerge<'a> {
+    Existing,
+    Reset(&'a Any),
+}
+
+impl<'a> FontMerge<'a> {
+    fn chunk_fonts(
+        self,
+        current: Option<&'a Any>,
+        complex_script: Option<&Any>,
+    ) -> (&'a Any, (bool, bool)) {
+        let base = match self {
+            Self::Existing => current.unwrap_or(&Any::Null),
+            Self::Reset(reset) => reset,
+        };
+        (base, run_font_slot_flags(complex_script, current))
     }
 }
 
@@ -1455,7 +1482,7 @@ fn changes_text<T: ReadTxn>(
     start: u32,
     end: u32,
     attrs: &Attrs,
-    merge_font: bool,
+    font_merge: Option<FontMerge<'_>>,
 ) -> bool {
     let mut offset = 0;
     for diff in story.diff(txn, YChange::identity) {
@@ -1466,7 +1493,7 @@ fn changes_text<T: ReadTxn>(
                 attrs,
                 diff.attributes.as_deref(),
                 false,
-                merge_font,
+                font_merge,
                 &text,
                 (start.saturating_sub(offset), end.min(chunk_end) - offset),
             )
@@ -1577,7 +1604,7 @@ impl EditingDoc {
             &range,
             RunDelta::Set {
                 attrs: &attrs,
-                merge_font: false,
+                font_merge: None,
             },
             &mut keeper,
         )?;
@@ -1634,8 +1661,9 @@ impl EditingDoc {
             &range,
             RunDelta::Set {
                 attrs: &attrs,
-                merge_font: matches!(delta.font_family, Patch::Set(_))
-                    && !delta.other.contains_key("fontFamily"),
+                font_merge: (matches!(delta.font_family, Patch::Set(_))
+                    && !delta.other.contains_key("fontFamily"))
+                .then_some(FontMerge::Existing),
             },
             &mut keeper,
         )?;
@@ -1743,6 +1771,11 @@ impl EditingDoc {
         let mut keeper = Keeper::new(self);
         let mut revision_ids: Vec<String> = Vec::new();
         for (start, end, mut attrs) in pieces {
+            let reset_fonts = merge_font.then(|| attrs.remove("fontFamily")).flatten();
+            let font_merge = merge_font.then(|| match &reset_fonts {
+                Some(reset) => FontMerge::Reset(reset),
+                None => FontMerge::Existing,
+            });
             attrs.extend(set.iter().map(|(key, value)| (key.clone(), value.clone())));
             let piece = StoryRange::new(range.story.as_str(), start, end);
             for id in self.apply_run_format_through(
@@ -1752,7 +1785,7 @@ impl EditingDoc {
                 &piece,
                 RunDelta::Set {
                     attrs: &attrs,
-                    merge_font,
+                    font_merge,
                 },
                 &mut keeper,
             )? {
@@ -1918,9 +1951,9 @@ impl EditingDoc {
             .filter(|paragraph| paragraph.end > range.start && paragraph.start < range.end)
             .collect();
         let mut revision_ids = Vec::new();
-        let merge_font = delta.merges_font();
+        let font_merge = delta.font_merge();
         if paragraphs.len() > 1 {
-            let chunks = story_chunks(story, txn);
+            let chunks = story_chunks(story, txn, font_merge.is_some());
             let mut formatted = Vec::new();
             for paragraph in paragraphs {
                 let (from, to) = (
@@ -1933,11 +1966,11 @@ impl EditingDoc {
                     })?;
                 if attrs.is_empty()
                     || (matches!(delta, RunDelta::Clear(_))
-                        && !changes_units_in(&chunks, from, to, &attrs, false, false))
+                        && !changes_units_in(&chunks, from, to, &attrs, false, None))
                 {
                     continue;
                 }
-                if changes_text_in(&chunks, from, to, &attrs, merge_font)
+                if changes_text_in(&chunks, from, to, &attrs, font_merge)
                     && let Some(reason) = paragraph
                         .key
                         .as_deref()
@@ -1956,7 +1989,7 @@ impl EditingDoc {
                 story,
                 &range.story,
                 formatted,
-                merge_font,
+                (Some(&chunks), font_merge),
             )?);
         } else {
             let paragraph = paragraphs.first();
@@ -1968,15 +2001,15 @@ impl EditingDoc {
             )?;
             let unchanged = matches!(delta, RunDelta::Clear(_))
                 && !changes_units_in(
-                    &story_chunks(story, txn),
+                    &story_chunks(story, txn, false),
                     range.start,
                     range.end,
                     &attrs,
                     false,
-                    false,
+                    None,
                 );
             if let Some(key) = paragraph.and_then(|paragraph| paragraph.key.as_deref())
-                && changes_text(story, txn, range.start, range.end, &attrs, merge_font)
+                && changes_text(story, txn, range.start, range.end, &attrs, font_merge)
                 && keeper.rewrite_loss(key) == Some(KeptReason::Field)
             {
                 keeper.keep(KeptReason::Field);
@@ -1991,7 +2024,7 @@ impl EditingDoc {
                     story,
                     &range.story,
                     formatted,
-                    merge_font,
+                    (None, font_merge),
                 )?);
             }
         }
@@ -2017,8 +2050,8 @@ impl EditingDoc {
         };
         self.prepare_table_styles(delta, child);
         let mut revision_ids = Vec::new();
-        let merge_font = delta.merges_font();
-        let chunks = story_chunks(&text, txn);
+        let font_merge = delta.font_merge();
+        let chunks = story_chunks(&text, txn, font_merge.is_some());
         let mut formatted = Vec::new();
         for StoryParagraph {
             start,
@@ -2030,7 +2063,7 @@ impl EditingDoc {
             let attrs = paragraph_delta(delta, child, style.as_deref(), || {
                 clearing_attrs_in(&chunks, start, end)
             })?;
-            if attrs.is_empty() || !changes_text_in(&chunks, start, end, &attrs, merge_font) {
+            if attrs.is_empty() || !changes_text_in(&chunks, start, end, &attrs, font_merge) {
                 continue;
             }
             if let Some(reason) = key.as_deref().and_then(|key| keeper.rewrite_loss(key)) {
@@ -2041,7 +2074,14 @@ impl EditingDoc {
                 formatted.push((at, len, attrs.clone()));
             }
         }
-        revision_ids.extend(self.apply_run_formats(txn, ctx, &text, child, formatted, merge_font)?);
+        revision_ids.extend(self.apply_run_formats(
+            txn,
+            ctx,
+            &text,
+            child,
+            formatted,
+            (Some(&chunks), font_merge),
+        )?);
         let len = text.len(txn);
         for (nested, _) in block_free_spans(&text, txn, 0, len, true).1 {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &nested, delta, keeper)?);
@@ -2068,7 +2108,7 @@ impl EditingDoc {
         story: &TextRef,
         story_id: &str,
         spans: Vec<(u32, u32, Attrs)>,
-        merge_font: bool,
+        (chunks, font_merge): (Option<&[StoryChunk]>, Option<FontMerge<'_>>),
     ) -> OpResult<Vec<String>> {
         if spans.is_empty() {
             return Ok(Vec::new());
@@ -2078,20 +2118,25 @@ impl EditingDoc {
             for (at, len, attrs) in spans {
                 let span = StoryRange::new(story_id.to_owned(), at, at + len);
                 revision_ids
-                    .extend(self.suggest_run_format(txn, ctx, story, &span, &attrs, merge_font)?);
+                    .extend(self.suggest_run_format(txn, ctx, story, &span, &attrs, font_merge)?);
             }
             return Ok(revision_ids);
         }
         let mut deltas: Vec<Delta<In>> = Vec::with_capacity(spans.len() * 2);
         let mut cursor = 0;
-        let chunks = (merge_font
-            || spans
-                .iter()
-                .any(|(_, _, attrs)| matches!(attrs.get("language"), Some(Any::Map(_)))))
-        .then(|| story_chunks(story, txn));
+        let needs_chunks = |attrs: &Attrs| {
+            font_merge.is_some() || matches!(attrs.get("language"), Some(Any::Map(_)))
+        };
+        let owned_chunks;
+        let chunks = if chunks.is_none() && spans.iter().any(|(_, _, attrs)| needs_chunks(attrs)) {
+            owned_chunks = story_chunks(story, txn, font_merge.is_some());
+            Some(owned_chunks.as_slice())
+        } else {
+            chunks
+        };
         for (at, len, attrs) in spans {
-            if let Some(chunks) = &chunks
-                && (merge_font || matches!(attrs.get("language"), Some(Any::Map(_))))
+            if let Some(chunks) = chunks
+                && needs_chunks(&attrs)
             {
                 for chunk in chunks_within(chunks, at, at + len) {
                     let start = chunk.start.max(at);
@@ -2099,12 +2144,14 @@ impl EditingDoc {
                     let mut patch = attrs.clone();
                     let previous =
                         |key: &str| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key));
-                    merge_chunk_language(&mut patch, previous("language"), chunk.text.is_some());
+                    merge_chunk_language(&mut patch, previous("language"), chunk.text);
+                    let fonts = font_merge.map(|merge| {
+                        merge.chunk_fonts(previous("fontFamily"), previous("complexScript"))
+                    });
                     for (from, to, patch) in chunk_format_pieces(
                         patch,
-                        previous("fontFamily"),
-                        merge_font,
-                        chunk.text.as_deref().unwrap_or_default(),
+                        fonts,
+                        chunk.font_text.as_deref().unwrap_or_default(),
                         chunk.start,
                         (start, end),
                     ) {
@@ -2126,7 +2173,7 @@ impl EditingDoc {
         story: &TextRef,
         range: &StoryRange,
         delta: &Attrs,
-        merge_font: bool,
+        font_merge: Option<FontMerge<'_>>,
     ) -> OpResult<Vec<String>> {
         let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
         if holds_suggestion_container(&chunks, txn) {
@@ -2153,14 +2200,10 @@ impl EditingDoc {
                 crate::ops::ChunkKind::Text(text) => text.as_str(),
                 _ => "",
             };
-            let pieces = chunk_format_pieces(
-                patch,
-                chunk.attrs.get("fontFamily"),
-                merge_font,
-                text,
-                chunk.start,
-                (start, end),
-            );
+            let fonts = font_merge.map(|merge| {
+                merge.chunk_fonts(chunk.attrs.get("fontFamily"), chunk.attrs.get("complexScript"))
+            });
+            let pieces = chunk_format_pieces(patch, fonts, text, chunk.start, (start, end));
             for (start, end, mut patch) in pieces {
                 let mut current = chunk.attrs.clone();
                 for (key, value) in &patch {

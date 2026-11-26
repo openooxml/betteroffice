@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
+use crate::format::run_font_slot_flags;
 use crate::op::{OpError, OpResult};
 use crate::ops::{ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
@@ -92,12 +93,10 @@ fn fold_selection_font(family: &mut ValueAgg, chunk: &crate::ops::Chunk, from: u
         family.fold(latin);
         return;
     }
-    let complex_script = match chunk.attrs.get("complexScript") {
-        Some(Any::Map(value)) => value.get("enabled") != Some(&Any::Bool(false)),
-        Some(value) => *value != Any::Null && *value != Any::Bool(false),
-        None => false,
-    };
-    let hint = matches!(slot("hint"), Some(Any::String(hint)) if hint.as_ref() == "eastAsia");
+    let (complex_script, hint) = run_font_slot_flags(
+        chunk.attrs.get("complexScript"),
+        chunk.attrs.get("fontFamily"),
+    );
     let mut used = [false; 2];
     let mut offset = chunk.start;
     for (character, slot) in ooxml_text::font_slot_characters(text, complex_script, hint) {
