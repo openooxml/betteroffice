@@ -73,25 +73,6 @@ export async function repackDocxWithWarnings(
   return repackModel(doc, options, true);
 }
 
-function plainRepackOptions(options: RepackOptions): RepackOptions | undefined {
-  if (options === null || typeof options !== 'object') return undefined;
-  try {
-    const prototype = Object.getPrototypeOf(options);
-    if (prototype !== Object.prototype && prototype !== null) return undefined;
-    const stamp = Object.getOwnPropertyDescriptor(options, 'updateModifiedDate');
-    const modifier = Object.getOwnPropertyDescriptor(options, 'modifiedBy');
-    if (
-      (stamp ? !Object.hasOwn(stamp, 'value') : 'updateModifiedDate' in options) ||
-      (modifier ? !Object.hasOwn(modifier, 'value') : 'modifiedBy' in options)
-    ) {
-      return undefined;
-    }
-    return { updateModifiedDate: stamp?.value, modifiedBy: modifier?.value };
-  } catch {
-    return undefined;
-  }
-}
-
 async function repackModel(
   doc: Document,
   options: RepackOptions,
@@ -103,17 +84,16 @@ async function repackModel(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const writerOptions = plainRepackOptions(options);
   let sourceCopy: ArrayBuffer | undefined;
   try {
-    if (writerOptions || includeWarnings) sourceCopy = new Uint8Array(source).slice().buffer;
+    sourceCopy = new Uint8Array(source).slice().buffer;
   } catch {
     sourceCopy = undefined;
   }
 
   let determinism: RustSaveDeterminism | undefined;
   let matches = false;
-  if (writerOptions && sourceCopy) {
+  if (sourceCopy) {
     await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
     const digest = await crypto.subtle.digest('SHA-256', sourceCopy);
     determinism = {
@@ -122,9 +102,7 @@ async function repackModel(
     };
     matches = modelMatchesSource(doc, sourceCopy, determinism);
   }
-  const { buffer, warnings } = await (determinism
-    ? writeDocumentWithRust(doc, source, writerOptions, undefined, determinism)
-    : writeDocumentWithRust(doc, source, options));
+  const { buffer, warnings } = await writeDocumentWithRust(doc, source, options, undefined, determinism);
   if (!sourceCopy) return { buffer, warnings };
 
   try {

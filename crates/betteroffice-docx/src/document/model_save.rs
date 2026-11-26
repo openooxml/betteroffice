@@ -1,5 +1,7 @@
 use docx_parse::serializer::{S13SaveRequest, SerializerDeterminism};
-use docx_parse::{S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report};
+use docx_parse::{
+    S9ParseOptions, parse_docx_s9_wire_with_limits, write_docx_s13_parts_with_report,
+};
 use ooxml_opc::{MAX_TOTAL_UNCOMPRESSED_BYTES, unzip_parts_where};
 
 use super::{body_from_wire, save_report};
@@ -74,9 +76,9 @@ impl Document {
     }
 
     fn core_properties_match(&self, written: &[u8]) -> bool {
-        let Ok(written_parts) =
-            unzip_parts_where(written, MAX_TOTAL_UNCOMPRESSED_BYTES, |path| path == CORE_PROPERTIES)
-        else {
+        let Ok(written_parts) = unzip_parts_where(written, MAX_TOTAL_UNCOMPRESSED_BYTES, |path| {
+            path == CORE_PROPERTIES
+        }) else {
             return false;
         };
         let source_core = self

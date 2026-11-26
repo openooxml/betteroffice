@@ -70,7 +70,11 @@ fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     unzip_parts(bytes).unwrap().into_iter().collect()
 }
 
-fn assert_whole_model_write(source: &[u8], document: &Document, options: SaveOptions) -> SaveReport {
+fn assert_whole_model_write(
+    source: &[u8],
+    document: &Document,
+    options: SaveOptions,
+) -> SaveReport {
     let model = document.model();
     let request = S13SaveRequest {
         determinism: SerializerDeterminism {

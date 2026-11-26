@@ -167,6 +167,47 @@ test('modifiedBy uses the plain writer with timestamp stamping disabled', async 
   expect(writtenCore).toContain('2024-01-02T03:04:05Z</dcterms:modified>');
 });
 
+async function sourceWithModifier(modifiedBy: string): Promise<ArrayBuffer> {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  const { buffer } = await writeDocumentWithRust(document, document.originalBuffer!, {
+    ...WITHOUT_STAMP,
+    modifiedBy,
+  });
+  return buffer;
+}
+
+test('a proxy modifiedBy value reaches the writer and changes the saved core', async () => {
+  const source = await sourceWithModifier('Before');
+  const options = new Proxy({ ...WITHOUT_STAMP, modifiedBy: 'Before' }, {
+    get(target, key, receiver) {
+      return key === 'modifiedBy' ? 'Alice' : Reflect.get(target, key, receiver);
+    },
+  });
+  const plain = await writeDocumentWithRust(await parse(new Uint8Array(source)), source, options);
+  const saved = await repackDocx(await parse(new Uint8Array(source)), options);
+  expect(new Uint8Array(saved)).toEqual(new Uint8Array(plain.buffer));
+  expect(new Uint8Array(saved)).not.toEqual(new Uint8Array(source));
+  const core = unzipContainer(new Uint8Array(saved))[CORE];
+  expect(new TextDecoder().decode(core)).toContain('<cp:lastModifiedBy>Alice</cp:lastModifiedBy>');
+});
+
+test('the warning names a changed core with the same CRC and size', async () => {
+  const source = await sourceWithModifier('plumless');
+  const saved = await repackDocxWithWarnings(await parse(new Uint8Array(source)), {
+    ...WITHOUT_STAMP,
+    modifiedBy: 'buckeroo',
+  });
+  const before = readModelSaveDirectory(source)?.get(CORE);
+  const after = readModelSaveDirectory(saved.buffer)?.get(CORE);
+  expect(before).toBeDefined();
+  expect(after?.crc32).toBe(before?.crc32);
+  expect(after?.uncompressedSize).toBe(before?.uncompressedSize);
+  const core = unzipContainer(new Uint8Array(saved.buffer))[CORE];
+  expect(new TextDecoder().decode(core)).toContain('<cp:lastModifiedBy>buckeroo</cp:lastModifiedBy>');
+  expect(saved.warnings.find((warning) => warning.startsWith(CODE))).toContain(`"${CORE}"`);
+});
+
 test('an unchanged model keeps writer warnings when returning the source bytes', async () => {
   const { bytes } = oneSavePackage();
   const parts = new Map(Object.entries(unzipContainer(bytes)));
@@ -302,6 +343,73 @@ test('the rewritten parts warning includes additions, removals and changed conte
   expect(modelPartsRewrittenWarning(original, new ArrayBuffer(0))).toBe(UNAVAILABLE_WARNING);
 });
 
+function toZip64(bytes: Uint8Array): Uint8Array {
+  const source = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const footer = bytes.byteLength - 22;
+  const count = source.getUint16(footer + 10, true);
+  const central = source.getUint32(footer + 16, true);
+  const zip64ExtraSize = 28;
+  const zip64 = new Uint8Array(bytes.byteLength + count * zip64ExtraSize + 56 + 20);
+  const output = new DataView(zip64.buffer);
+  zip64.set(bytes.subarray(0, central));
+  let from = central;
+  let to = central;
+  for (let index = 0; index < count; index++) {
+    const extra = from + 46 + source.getUint16(from + 28, true);
+    const extraLength = source.getUint16(from + 30, true);
+    const next = extra + extraLength + source.getUint16(from + 32, true);
+    const local = source.getUint32(from + 42, true);
+    zip64.set(bytes.subarray(from, extra), to);
+    output.setUint16(local + 4, 45, true);
+    output.setUint16(to + 6, 45, true);
+    output.setUint32(to + 20, 0xffffffff, true);
+    output.setUint32(to + 24, 0xffffffff, true);
+    output.setUint16(to + 30, extraLength + zip64ExtraSize, true);
+    output.setUint32(to + 42, 0xffffffff, true);
+    const extraAt = to + extra - from;
+    output.setUint16(extraAt, 1, true);
+    output.setUint16(extraAt + 2, 24, true);
+    output.setBigUint64(extraAt + 4, BigInt(source.getUint32(from + 24, true)), true);
+    output.setBigUint64(extraAt + 12, BigInt(source.getUint32(from + 20, true)), true);
+    output.setBigUint64(extraAt + 20, BigInt(local), true);
+    zip64.set(bytes.subarray(extra, next), extraAt + zip64ExtraSize);
+    to += next - from + zip64ExtraSize;
+    from = next;
+  }
+
+  const locator = to + 56;
+  output.setUint32(to, 0x06064b50, true);
+  output.setBigUint64(to + 4, 44n, true);
+  output.setUint16(to + 12, 45, true);
+  output.setUint16(to + 14, 45, true);
+  output.setBigUint64(to + 24, BigInt(count), true);
+  output.setBigUint64(to + 32, BigInt(count), true);
+  output.setBigUint64(to + 40, BigInt(to - central), true);
+  output.setBigUint64(to + 48, BigInt(central), true);
+  output.setUint32(locator, 0x07064b50, true);
+  output.setBigUint64(locator + 8, BigInt(to), true);
+  output.setUint32(locator + 16, 1, true);
+  const end = locator + 20;
+  zip64.set(bytes.subarray(footer), end);
+  output.setUint16(end + 8, 0xffff, true);
+  output.setUint16(end + 10, 0xffff, true);
+  output.setUint32(end + 12, 0xffffffff, true);
+  output.setUint32(end + 16, 0xffffffff, true);
+  return zip64;
+}
+
+test('a ZIP64 source names the edited member in the warning', async () => {
+  const { bytes } = oneSavePackage();
+  const source = toZip64(bytes);
+  expect(new Uint8Array(await repackDocx(await parse(source), WITHOUT_STAMP))).toEqual(source);
+  const document = await parse(source);
+  editableRun(document).textNode.text = 'Edited ZIP64 model';
+  const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+  const warning = saved.warnings.find((entry) => entry.startsWith(CODE));
+  expect(warning).toContain('"word/document.xml"');
+  expect(warning).not.toContain(`"${CORE}"`);
+});
+
 test.each(['__proto__', 'length', 'word/media/'])('the warning accounts for the ZIP member %s', async (name) => {
   const { bytes } = oneSavePackage();
   const parts = new Map(Object.entries(unzipContainer(bytes)));
@@ -319,8 +427,14 @@ test.each(['__proto__', 'length', 'word/media/'])('the warning accounts for the 
     expect(after?.has(name)).toBe(false);
     expect(warning).toContain(`"${name}"`);
   } else {
-    expect(after?.get(name)).toEqual(before?.get(name));
-    expect(warning).not.toContain(`"${name}"`);
+    expect(after?.has(name)).toBe(true);
+    expect(after?.get(name)?.crc32).toBe(before?.get(name)?.crc32);
+    expect(after?.get(name)?.uncompressedSize).toBe(before?.get(name)?.uncompressedSize);
+    if (name === '__proto__') {
+      expect(warning).toContain(`"${name}"`);
+    } else {
+      expect(warning).not.toContain(`"${name}"`);
+    }
   }
 });
 
