@@ -372,11 +372,8 @@ fn state_digest(txn: &impl ReadTxn) -> [u8; CHECKSUM_BYTES] {
     .into()
 }
 
-fn references_older_insertions(
-    entries: &BTreeMap<String, Entry>,
-    base: &StateVector,
-) -> bool {
-    entries.values().filter_map(Entry::records).any(|records| {
+fn references_older_insertions(entry: &Entry, base: &StateVector) -> bool {
+    entry.records().is_some_and(|records| {
         records.splices.iter().any(|splice| {
             splice
                 .inserted
@@ -1366,15 +1363,24 @@ impl EditingDoc {
         let result = self.integrate_updates_inner(vec![decoded], UpdateOrigin::Local);
         if result.is_ok()
             && !self.holds_pending_update()
-            && let Some(incoming) = incoming
+            && let Some((mut incoming, base)) = incoming
         {
             let txn = self.doc.transact();
-            if generation(&txn).as_deref() == Some(incoming.generation.as_str())
-                && incoming
+            if generation(&txn).as_deref() == Some(incoming.generation.as_str()) {
+                if incoming
                     .state_digest
-                    .is_none_or(|digest| digest == state_digest(&txn))
-            {
-                if let Some(watch) = watch.as_mut() {
+                    .is_some_and(|digest| digest != state_digest(&txn))
+                {
+                    incoming
+                        .entries
+                        .retain(|_, entry| !references_older_insertions(entry, &base));
+                    if let Some(watch) = watch.take() {
+                        lock_touched(&watch.touched)
+                            .keys
+                            .retain(|key| !incoming.entries.contains_key(key));
+                        drop(watch);
+                    }
+                } else if let Some(watch) = watch.as_mut() {
                     watch.disarm();
                 }
                 lock_provenance(&self.provenance).merge(
@@ -1407,7 +1413,11 @@ fn encode_sidecar(
             base: base.map(|(bytes, _)| bytes),
             digest,
             state_digest: base
-                .is_some_and(|(_, vector)| references_older_insertions(entries, vector))
+                .is_some_and(|(_, vector)| {
+                    entries
+                        .values()
+                        .any(|entry| references_older_insertions(entry, vector))
+                })
                 .then(|| state_digest(txn)),
             overflowed,
             entries,
@@ -1423,16 +1433,23 @@ fn encode_sidecar(
         .unwrap_or_default()
 }
 
-fn decode_update_sidecar(txn: &impl ReadTxn, update: &[u8], sidecar: &[u8]) -> Option<Incoming> {
+fn decode_update_sidecar(
+    txn: &impl ReadTxn,
+    update: &[u8],
+    sidecar: &[u8],
+) -> Option<(Incoming, StateVector)> {
     let incoming = decode_sidecar(txn, update, sidecar)?;
     let base = StateVector::decode_v1(incoming.base.as_deref()?).ok()?;
     if base != txn.state_vector()
         || (incoming.state_digest.is_none()
-            && references_older_insertions(&incoming.entries, &base))
+            && incoming
+                .entries
+                .values()
+                .any(|entry| references_older_insertions(entry, &base)))
     {
         return None;
     }
-    Some(incoming)
+    Some((incoming, base))
 }
 
 fn decode_sidecar(txn: &impl ReadTxn, bytes: &[u8], sidecar: &[u8]) -> Option<Incoming> {

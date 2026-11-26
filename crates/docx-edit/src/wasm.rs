@@ -2980,7 +2980,7 @@ impl EditSession {
     /// with their ordinals.
     pub fn paragraph_save_plan(&self, use_local_provenance: Option<bool>) -> Result<String, JsValue> {
         self.core
-            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(true))
+            .paragraph_save_plan_with_local_provenance(use_local_provenance.unwrap_or(false))
             .map_err(JsValue::from)
     }
 

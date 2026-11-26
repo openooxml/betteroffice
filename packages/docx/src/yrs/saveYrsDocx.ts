@@ -111,6 +111,8 @@ export interface DocxCommentSaveBaseline {
 
 export interface DocxSaveOptions extends RepackOptions {
   /** @internal */
+  useLocalProvenance?: boolean;
+  /** @internal */
   commentIdentities?: ReadonlyMap<string, DocxCommentSaveIdentity>;
   /** @internal */
   commentBaseline?: DocxCommentSaveBaseline;
@@ -408,7 +410,7 @@ export interface DocxSessionSave {
 export function captureSessionSave(
   session: YrsSession,
   identities: DocxParagraphIdentitySnapshot = session.paragraphIdentities(),
-  useLocalProvenance = true
+  useLocalProvenance = false
 ): DocxSessionSave {
   engineProgress();
   const plan = session.paragraphSavePlan(useLocalProvenance);
@@ -775,7 +777,7 @@ export async function saveYrsDocx(
     throw new Error('saveYrsDocx requires a session opened from DOCX bytes');
   }
   if (options.commentDeletion && !options.commentBaseline) throw new Error('Comment deletion requires a saved comment baseline');
-  let capture = captureSessionSave(session);
+  let capture = captureSessionSave(session, undefined, options.useLocalProvenance);
   if (options.commentBaseline) {
     await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
     const source = options.commentDeletion ? Uint8Array.from(options.commentBaseline.bytes).buffer

@@ -1401,42 +1401,23 @@ pub(crate) fn diff_paragraph_v1(
     live: &[StorySegment],
     context: PatchContext<'_>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
-    diff_paragraph_with_proof(seeded, live, context, None)
+    let widened = Cell::new(false);
+    plan_paragraph(seeded, live, context, RunRules::Full, &widened, None).map_err(|legacy| {
+        if !widened.get() {
+            return legacy;
+        }
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, None)
+            .err()
+            .unwrap_or(legacy)
+    })
 }
-
-const UNPROVEN_DETAIL: &str = "ambiguous: unproven edit provenance";
 
 pub(crate) fn unproven_paragraph(ordinal: u32) -> LegacyParagraphV1 {
     LegacyParagraphV1 {
         ordinal,
         code: PatchErrorCode::AmbiguousAlignment,
-        detail: UNPROVEN_DETAIL.to_owned(),
+        detail: "ambiguous: unproven edit provenance".to_owned(),
     }
-}
-
-pub(crate) fn diff_paragraph_with_proof(
-    seeded: &[StorySegment],
-    live: &[StorySegment],
-    context: PatchContext<'_>,
-    proof: Option<&Proof>,
-) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
-    let widened = Cell::new(false);
-    let result = plan_paragraph(seeded, live, context, RunRules::Full, &widened, proof);
-    if proof.is_some()
-        && result
-            .as_ref()
-            .is_err_and(|legacy| legacy.detail == UNPROVEN_DETAIL)
-    {
-        return diff_paragraph_v1(seeded, live, context);
-    }
-    result.map_err(|legacy| {
-        if !widened.get() {
-            return legacy;
-        }
-        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, proof)
-            .err()
-            .unwrap_or(legacy)
-    })
 }
 
 pub(crate) fn diff_recorded_paragraph(
@@ -2273,7 +2254,7 @@ mod tests {
     }
 
     #[test]
-    fn reversed_recorded_ranges_use_base_alignment() {
+    fn reversed_recorded_ranges_do_not_produce_a_patch() {
         let seeded = paragraph("abc", json!({}));
         let live = paragraph("aXc", json!({}));
         let proof = Proof {
@@ -2287,12 +2268,12 @@ mod tests {
                 donor: DonorV1::At { at: 0 },
             }],
         };
-        let patch = diff_paragraph_with_proof(&seeded, &live, context(), Some(&proof)).unwrap();
-        assert_eq!(patch, diff_paragraph_v1(&seeded, &live, context()).unwrap());
+        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof).unwrap_err();
+        assert_eq!(error, unproven_paragraph(0));
     }
 
     #[test]
-    fn unproven_donor_after_a_widened_run_edit_uses_base_alignment() {
+    fn unproven_donor_after_a_widened_run_edit_does_not_produce_a_patch() {
         let seeded = paragraph("abc", json!({}));
         let mut live = paragraph("a", json!({}));
         live[0].attributes.insert(
@@ -2314,8 +2295,8 @@ mod tests {
         let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
         assert_eq!(base.run_edits.len(), 1);
         assert_eq!(base.text_edits.len(), 1);
-        let patch = diff_paragraph_with_proof(&seeded, &live, context(), Some(&proof)).unwrap();
-        assert_eq!(patch, base);
+        let error = diff_recorded_paragraph(&seeded, &live, context(), &proof).unwrap_err();
+        assert_eq!(error, unproven_paragraph(0));
     }
 
     #[test]

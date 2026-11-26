@@ -3682,13 +3682,14 @@ fn occurrence_byte_cap_only_invalidates_that_occurrence() {
     let content = format!(
         r#"{}</w:p><w:p w14:paraId="00000003">{}"#,
         text(&"a".repeat(160)),
-        text("xyz"),
+        ADJACENT_SOURCE,
     );
     let doc = open(&content);
     for at in (0..160).rev() {
         replace(&doc, at, at + 1, "b");
     }
-    replace(&doc, 161, 162, "X");
+    replace(&doc, 164, 167, "YZ");
+    replace(&doc, 161, 164, "X");
     let paragraphs = doc.paragraphs("body").unwrap();
     let proof = provenance_state(&doc);
     assert_eq!(proof["overflowed"], json!(false));
@@ -3700,9 +3701,28 @@ fn occurrence_byte_cap_only_invalidates_that_occurrence() {
     let sidecar = doc.encode_edit_provenance_for_transfer(&state, None);
     let part = bootstrap_body_plan(&source, &state, &metadata, &sidecar, true);
     assert_eq!(part["changed"], json!([0, 1]));
+    let base = bootstrap_body_plan(&source, &state, &metadata, &sidecar, false);
+    for field in ["paragraphPatches", "legacyParagraphs"] {
+        let capped = |plan: &serde_json::Value| {
+            plan[field]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["ordinal"] == json!(0))
+                .cloned()
+        };
+        assert_eq!(capped(&part), capped(&base));
+    }
+    let second = part["paragraphPatches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|patch| patch["ordinal"] == json!(1))
+        .unwrap();
+    let patch = serde_json::from_value::<ParagraphPatchV1>(second.clone()).unwrap();
     assert_eq!(
-        part,
-        bootstrap_body_plan(&source, &state, &metadata, &sidecar, false)
+        splice_summary(&patch),
+        owned_splices(&[(0, 3, 0, "X"), (3, 6, 3, "YZ")]),
     );
 }
 
@@ -4037,7 +4057,7 @@ fn session_body_plan_with_provenance(session: &EditSessionCore, enabled: bool) -
 }
 
 #[test]
-fn run_rewrite_batches_transfer_records_with_matching_deletion_retention() {
+fn run_rewrite_batches_transfer_new_occurrences_with_different_deletion_retention() {
     let bytes = package(&format!(
         r#"{ADJACENT_SOURCE}</w:p><w:p w14:paraId="00000003">{ADJACENT_SOURCE}"#
     ));
@@ -4111,26 +4131,8 @@ fn run_rewrite_batches_transfer_records_with_matching_deletion_retention() {
         let sidecar = owner.encode_edit_provenance_for_transfer(&state, None);
         let saved = bootstrap(75, &state, &sidecar);
         let part = session_body_plan(&saved);
-        if retain_deleted {
-            assert_patches(&part, 2);
-            assert_eq!(part["legacyParagraphs"], json!([]));
-        } else {
-            let base = session_body_plan_with_provenance(&saved, false);
-            let patches: Vec<ParagraphPatchV1> =
-                serde_json::from_value(part["paragraphPatches"].clone()).unwrap();
-            assert_eq!(splice_summary(&patches[0]), expected);
-            for field in ["paragraphPatches", "legacyParagraphs"] {
-                let second = |plan: &serde_json::Value| {
-                    plan[field]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|entry| entry["ordinal"] == json!(1))
-                        .cloned()
-                };
-                assert_eq!(second(&part), second(&base));
-            }
-        }
+        assert_patches(&part, 2);
+        assert_eq!(part["legacyParagraphs"], json!([]));
     }
 }
 

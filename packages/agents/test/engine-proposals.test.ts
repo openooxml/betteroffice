@@ -1068,13 +1068,13 @@ test('attached DOCX peer stales the trimmed span when an edit changes retained t
   } finally { doc.close(); owner.close(); }
 });
 
-for (const { name, original, first, second, expectedStart, expectedText } of [
+for (const { name, original, first, second, expectedStart, expectedSpliceStart, expectedText } of [
   { name: 'ignores unchanged context outside the trimmed span', original: 'alpha guard center',
-    first: ['alpha guard center', 'ALPHA guard center'], second: ['center', 'CENTER'], expectedStart: 12, expectedText: 'ALPHA guard CENTER' },
+    first: ['alpha guard center', 'ALPHA guard center'], second: ['center', 'CENTER'], expectedStart: 12, expectedSpliceStart: 12, expectedText: 'ALPHA guard CENTER' },
   { name: 'keeps a pending edit between accepted splices', original: 'alpha center omega',
-    first: ['alpha center omega', 'ALPHA center OMEGA'], second: ['center', 'CENTER'], expectedStart: 6, expectedText: 'ALPHA CENTER OMEGA' },
+    first: ['alpha center omega', 'ALPHA center OMEGA'], second: ['center', 'CENTER'], expectedStart: 6, expectedSpliceStart: 6, expectedText: 'ALPHA CENTER OMEGA' },
   { name: 'rebases the reported change and its splice past a boundary insertion', original: 'alpha beta',
-    first: ['alpha', 'alpha!'], second: [' beta', 'BETA'], expectedStart: 6, expectedText: 'alpha!BETA' },
+    first: ['alpha', 'alpha!'], second: [' beta', ' BETA'], expectedStart: 6, expectedSpliceStart: 7, expectedText: 'alpha! BETA' },
 ] as const) test(`attached DOCX peer ${name}`, async () => {
   const owner = await proposalRaceFixture(original);
   const doc = attachDocx(owner.session, { editPeer: {
@@ -1088,7 +1088,7 @@ for (const { name, original, first, second, expectedStart, expectedText } of [
     const accepted = await doc.proposeAsync({ author: 'First', edits: [{ ...p, oldText: first[0], newText: first[1] }] });
     await doc.accept(accepted.id);
     expect(doc.review(pending.id)).toMatchObject({ staleRefs: [], changes: [{ start: expectedStart }] });
-    expect(doc['proposals'].get(pending.id)?.splices).toMatchObject([{ start: expectedStart }]);
+    expect(doc['proposals'].get(pending.id)?.splices).toMatchObject([{ start: expectedSpliceStart }]);
     expect(await doc.accept(pending.id)).toMatchObject({ status: 'accepted' });
     expect(doc.read(p.ref).text).toBe(expectedText);
   } finally { doc.close(); owner.close(); }
@@ -1136,7 +1136,7 @@ test('attached DOCX peer stales an insertion when its original prefix changes at
 });
 
 test('attached DOCX peer stales an insertion after deleting its context before identical text', async () => {
-  const owner = await proposalRaceFixture('alphaalpha');
+  const owner = await proposalRaceFixture('alphaalphaalpha');
   const doc = attachDocx(owner.session, { editPeer: {
     async proposeChanges(request) { return owner.session.proposeChanges(request); },
     async setProposalStates(request) { return owner.session.setProposalStates(request); },
@@ -1144,18 +1144,18 @@ test('attached DOCX peer stales an insertion after deleting its context before i
   } });
   try {
     const p = doc.list({ story: 'body' }).items[0];
-    const propose = (newText: string) => doc.proposeAsync({
-      author: 'Agent', edits: [{ ...p, start: 0, oldText: 'alpha', newText }],
+    const propose = (oldText: string, newText: string) => doc.proposeAsync({
+      author: 'Agent', edits: [{ ...p, start: 0, oldText, newText }],
     });
-    const insertion = await propose('alpha!');
-    const deletion = await propose('');
+    const insertion = await propose('alphaalpha', 'alphaalpha!');
+    const deletion = await propose('alpha', '');
     await doc.accept(deletion.id);
-    expect(doc.read(p.ref).text).toBe('alpha');
+    expect(doc.read(p.ref).text).toBe('alphaalpha');
     expect(doc.review(insertion.id).staleRefs).toEqual([p.ref]);
     await expect(doc.accept(insertion.id)).rejects.toMatchObject({
       code: 'STALE_TARGET', details: { refs: [p.ref] },
     });
-    expect(doc.read(p.ref).text).toBe('alpha');
+    expect(doc.read(p.ref).text).toBe('alphaalpha');
   } finally { doc.close(); owner.close(); }
 });
 
@@ -1208,7 +1208,8 @@ test('attached DOCX bounds ownership per record when decision replies keep laggi
     const [record] = proposal.records!;
     for (let i = 0; i < 257; i++) await doc.rejectAsync(proposal.id);
     const versions = doc['ownStateVersions'].get(record.id)!;
-    expect(versions.size).toBeLessThanOrEqual(256);
+    expect(versions.size).toBe(256);
+    expect(versions.has(lagging!.previewVersion - 256)).toBe(false);
     expect(versions.has(lagging!.previewVersion)).toBe(true);
     expect(doc.review(proposal.id).status).toBe('pending');
   } finally { doc.close(); owner.close(); }

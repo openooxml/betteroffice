@@ -772,7 +772,7 @@ export class DocxAgentDocument {
       const comments = draft.listComments();
       const baseline = this.commentSaveBaseline && JSON.stringify(comments) === JSON.stringify(this.commentSaveBaseline.comments)
         ? this.commentSaveBaseline : undefined;
-      const saved = await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate,
+      const saved = await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate, useLocalProvenance: true,
         commentIdentities: this.deletedComments.size ? this.commentSaveIdentities : undefined,
         commentBaseline: baseline,
         commentDeletion: !!baseline && !held && this.commentSaveBaselineVersion === version,
@@ -1534,17 +1534,17 @@ export class DocxAgentDocument {
                 const kept = await this.fork(draft.clientId);
                 try {
                   for (const [index, step] of steps.entries()) if (edits[index].op !== 'delete_comment') step(kept);
-                  baseline = (await engines.get('docx').module.yrs.saveYrsDocx(kept, { updateModifiedDate: false, commentIdentities: identities,
+                  baseline = (await engines.get('docx').module.yrs.saveYrsDocx(kept, { updateModifiedDate: false, useLocalProvenance: true, commentIdentities: identities,
                     commentBaseline: { bytes: baseline, comments: previous },
                   })).bytes;
                 } finally { kept.destroy(); }
               }
-              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate: false, commentIdentities: identities,
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, { updateModifiedDate: false, useLocalProvenance: true, commentIdentities: identities,
                 commentBaseline: { bytes: baseline, comments: previous }, commentDeletion: true,
               })).bytes;
               commentBaseline = { bytes: saved, comments };
             } else {
-              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, identities ? { commentIdentities: identities } : undefined)).bytes;
+              saved = (await engines.get('docx').module.yrs.saveYrsDocx(draft, { useLocalProvenance: true, commentIdentities: identities })).bytes;
               resetCommentBaseline = true;
             }
             await verifyCommentOutput(source, saved, comments.filter(comment => !seeded.has(comment.id)).length,

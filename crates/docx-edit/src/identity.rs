@@ -4415,6 +4415,7 @@ impl EditingDoc {
                     .keys()
                     .eq(part_stories(&live, part).keys());
                 if part.as_written {
+                    let inline_tail = ends_with_inline_tail(seeded, part);
                     let equal = equal_output
                         .get(&index)
                         .into_iter()
@@ -4476,13 +4477,6 @@ impl EditingDoc {
                             seeded_markers: &was.markers,
                             live_markers: &now.markers,
                         };
-                        if same_stories
-                            && equal.is_none()
-                            && checked.is_none()
-                            && formatting_alone(was, now)
-                        {
-                            spliced.format_only.push(ordinal);
-                        }
                         let Some(seeded) = was.segments.as_deref() else {
                             unavailable();
                             continue;
@@ -4495,14 +4489,30 @@ impl EditingDoc {
                             unavailable();
                             continue;
                         };
-                        let patch = if let Some(proof) = equal {
+                        let recorded_patch = equal.or(checked.as_ref()).and_then(|proof| {
                             crate::paragraph_patch_plan::diff_recorded_paragraph(
                                 seeded, live, context, proof,
                             )
-                        } else {
-                            crate::paragraph_patch_plan::diff_paragraph_with_proof(
-                                seeded, live, context, checked.as_ref(),
-                            )
+                            .ok()
+                            .filter(|patch| {
+                                !inline_tail
+                                    || patch.run_edits.is_empty()
+                                    || !source.rewrite_loses_source_runs(
+                                        part,
+                                        &[ordinal],
+                                        reformatting_loses_fields,
+                                    )
+                            })
+                        });
+                        if same_stories && equal.is_none() && formatting_alone(was, now) {
+                            spliced.format_only.push(ordinal);
+                        }
+                        let patch = match recorded_patch {
+                            Some(patch) => Ok(patch),
+                            None if equal.is_some() => continue,
+                            None => {
+                                crate::paragraph_patch_plan::diff_paragraph_v1(seeded, live, context)
+                            }
                         };
                         match patch {
                             Ok(mut patch) => {
@@ -4519,7 +4529,6 @@ impl EditingDoc {
                                     spliced.paragraph_patches.push(patch);
                                 }
                             }
-                            Err(_) if equal.is_some() => {}
                             Err(legacy) => spliced.legacy_paragraphs.push(legacy),
                         }
                     }
@@ -4539,7 +4548,6 @@ impl EditingDoc {
                         && spliced.inserted.is_empty()
                         && spliced.removed.is_empty()
                         && spliced.table_patches.is_empty();
-                    let inline_tail = ends_with_inline_tail(seeded, part);
                     if formatting_alone
                         || !inline_tail
                         || (!source.rewrite_loses_source_runs(
@@ -4553,16 +4561,6 @@ impl EditingDoc {
                         ))
                     {
                         for patch in equal_patches {
-                            if inline_tail
-                                && !patch.run_edits.is_empty()
-                                && source.rewrite_loses_source_runs(
-                                    part,
-                                    &[patch.ordinal],
-                                    reformatting_loses_fields,
-                                )
-                            {
-                                continue;
-                            }
                             patched_equal.push(patch.ordinal);
                             spliced.changed.push(patch.ordinal);
                             spliced.paragraph_patches.push(patch);
