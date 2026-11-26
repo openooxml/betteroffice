@@ -677,6 +677,7 @@ export type ShapePathCommand =
 
 export interface ShapePrimitive extends DocAttrs {
   kind: 'shape';
+  shapeType?: string;
   x: number;
   y: number;
   w: number;
