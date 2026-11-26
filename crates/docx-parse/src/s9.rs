@@ -1134,6 +1134,7 @@ mod tests {
         let BlockContent::Paragraph(paragraph) = &mut released.package.document.content[0] else {
             panic!("paragraph");
         };
+        let paragraph = Arc::make_mut(paragraph);
         let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] else {
             panic!("run");
         };
