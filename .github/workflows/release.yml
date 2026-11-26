@@ -73,12 +73,16 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
+      - name: Note skipped tests
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'
+        run: echo "::warning::RELEASE_SKIP_TESTS is true, so this release skips its type check and tests."
+
       - name: Type check
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run typecheck:packages
 
       - name: Test
-        if: steps.pending.outputs.publishing == 'true'
+        if: steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'
         run: bun run test
 
       - name: Build packages
@@ -300,8 +304,8 @@ jobs:
     needs: release
     if: needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'
     runs-on: ubuntu-latest
-    # Covers native-dist (45 minutes) and publishing (15 minutes) with dispatch overhead.
-    timeout-minutes: 75
+    # Covers native-dist (75 minutes on the Intel Mac, then 15 for the musl smoke test) and publishing (15 minutes) with dispatch overhead.
+    timeout-minutes: 120
     permissions:
       contents: read
       actions: write

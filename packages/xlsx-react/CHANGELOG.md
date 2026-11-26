@@ -1,5 +1,12 @@
 # @betteroffice/xlsx-react
 
+## 0.6.1
+
+### Patch Changes
+
+- @betteroffice/xlsx@0.6.1
+- @betteroffice/xlsx-i18n@0.6.1
+
 ## 0.6.0
 
 ### Minor Changes

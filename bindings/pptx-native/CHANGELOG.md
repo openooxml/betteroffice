@@ -1,5 +1,11 @@
 # @betteroffice/pptx-native
 
+## 0.6.1
+
+### Patch Changes
+
+- 365ae9d: The Linux native packages load again on Ubuntu 24.04, Debian 12 and other distributions with glibc 2.35 or newer.
+
 ## 0.6.0
 
 ### Minor Changes

@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-native"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-docx-engine",
  "betteroffice-docx-layout",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-native"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-native"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",

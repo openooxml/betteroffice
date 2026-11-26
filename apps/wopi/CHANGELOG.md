@@ -1,5 +1,16 @@
 # @betteroffice/wopi
 
+## 0.1.2
+
+### Patch Changes
+
+- @betteroffice/docx@0.6.1
+- @betteroffice/docx-react@0.6.1
+- @betteroffice/xlsx@0.6.1
+- @betteroffice/xlsx-react@0.6.1
+- @betteroffice/pptx@0.6.1
+- @betteroffice/pptx-react@0.6.1
+
 ## 0.1.1
 
 ### Patch Changes

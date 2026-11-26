@@ -995,4 +995,17 @@ describe('release workflow crates auth', () => {
       "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
     );
   });
+
+  test('the type check and tests run unless RELEASE_SKIP_TESTS is true, which logs the skip', () => {
+    for (const name of ['Type check', 'Test']) {
+      expect(named.get(name).if).toBe(
+        "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS != 'true'"
+      );
+    }
+    const note = named.get('Note skipped tests');
+    expect(note.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_TESTS == 'true'"
+    );
+    expect(note.run).toContain('::warning::');
+  });
 });

@@ -165,12 +165,14 @@ it('paints completed current-gesture previews while coalescing latest work and d
     return next.promise;
   });
   const release = mock(() => {});
+  const ensureWholeFonts = mock(async () => {});
+  const fontCoverage = { prepare: async (family: string) => family };
   const run = {
     current: true,
     require: () => {},
     client: { previewShapeRect },
     images: { pin: () => ({ ready: Promise.resolve(), resolve: () => null, release }) },
-    ensureWholeFonts: async () => {},
+    ensureWholeFonts, fontCoverage,
   } as unknown as PeerlessPresentation;
   const context = {
     setTransform: mock(() => {}),
@@ -194,6 +196,8 @@ it('paints completed current-gesture previews while coalescing latest work and d
     await waitFor(() => expect(previewShapeRect).toHaveBeenCalledTimes(2));
     expect(previewShapeRect.mock.calls[1]![2]).toMatchObject({ width: 40 });
     expect(paint).toHaveBeenCalledTimes(1);
+    expect(ensureWholeFonts).not.toHaveBeenCalled();
+    expect(paint.mock.calls[0]![4]?.fontCoverage).toBe(fontCoverage);
     expect(view.getByTestId('pptx-shape-resize-preview').style.width).toBe('80px');
     await act(async () => { pending[1]!.resolve(frame(40)); });
     await waitFor(() => expect(paint).toHaveBeenCalledTimes(2));
@@ -234,7 +238,6 @@ it('uses the scale captured by each preview job and never lets an old pump paint
     require: () => {},
     client: { previewShapeRect },
     images: { pin: () => ({ ready: Promise.resolve(), resolve: () => null, release: () => {} }) },
-    ensureWholeFonts: async () => {},
   } as unknown as PeerlessPresentation;
   const context = {
     setTransform: mock(() => {}),

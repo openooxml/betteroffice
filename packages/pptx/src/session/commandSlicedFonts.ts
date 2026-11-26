@@ -1,4 +1,5 @@
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import { slicedFacesSupported as browserSupportsSlicedFaces } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { readFontTraits } from '../../../../shared/fontTraits';
 import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../shared/fontCdnDiagnostics';
 import type { PaintFontCoverage } from '../render/canvas';
@@ -33,10 +34,8 @@ const FILL_DELAY_MS = 1000;
  * Sliced faces are verified in Chromium and Firefox. Safari, iOS browsers (all WebKit) and unknown engines
  * use whole faces.
  */
-export function slicedFacesSupported(
-  userAgent = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent ?? '',
-): boolean {
-  return /(?:Chrome|Chromium|Firefox)\//.test(userAgent) && !/\b(?:iPhone|iPad|iPod|CriOS|FxiOS)\b/.test(userAgent);
+export function slicedFacesSupported(userAgent?: string): boolean {
+  return browserSupportsSlicedFaces(userAgent);
 }
 
 type WholeFaceLoader = (() => Promise<ArrayBuffer>) & { slices?: { loadWholeForExport?: () => Promise<ArrayBuffer> } };
@@ -80,7 +79,7 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   /** Revisions only grow, so a parse that finishes behind a newer revision gives way to it instead of waiting in line. */
   async function install(entry: Entry, revision: number, bytes: ArrayBuffer, chunks: ReadonlySet<number> | null): Promise<string> {
     const fonts = (globalThis as typeof globalThis & { fonts?: FontFaceSet }).fonts;
-    if (!fonts) return entry.family;
+    if (!fonts || typeof FontFace !== 'function') return entry.family;
     const family = revision === WHOLE ? `${entry.family} whole` : `${entry.family} r${revision}`;
     const face = await new FontFace(family, bytes, descriptors(bytes)).load();
     if (disposed || !entries.has(keyOf(entry.family))) return entry.family;
@@ -124,14 +123,14 @@ export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
     try {
       await entry.face.ensureText(text);
     } catch (error) {
-      if (isImplicitFontCdnError(error)) return latestOf(entry)?.family ?? entry.family;
+      if (isImplicitFontCdnError(error)) return entry.family;
       let bytes: ArrayBuffer;
       try { bytes = await replacementBytes(entry); } catch { return entry.family; }
       const latest = latestOf(entry);
       if (latest?.revision === WHOLE) return latest.family;
       try { return await install(entry, WHOLE, bytes, null); } catch { return entry.family; }
     }
-    return publish(entry);
+    try { return await publish(entry); } catch { return entry.family; }
   }
 
   const coverage: PaintFontCoverage = {
