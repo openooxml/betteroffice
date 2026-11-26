@@ -12999,6 +12999,14 @@ fn cell_floating_shapes<'a>(
                 (fragment.width, fragment.height),
             );
             fragment.y += frame.content_top;
+            let (x, y, width, height) = frame.physical;
+            if fragment.x >= x + width
+                || fragment.y >= y + height
+                || fragment.x + fragment.width <= x
+                || fragment.y + fragment.height <= y
+            {
+                continue;
+            }
             shapes.push(CellShape {
                 index,
                 block: shape,

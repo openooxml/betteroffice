@@ -1062,6 +1062,47 @@ fn body_text_box_keeps_its_column_and_paragraph_offsets() {
 }
 
 #[test]
+fn cell_text_box_leaving_its_cell_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>3657600</wp:posOffset>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
+fn inside_or_outside_aligned_cell_text_box_keeps_the_cell_stack_origin() {
+    for align in ["inside", "outside"] {
+        let drawing = cell_anchor_box(
+            &format!("<wp:align>{align}</wp:align>"),
+            "<wp:posOffset>0</wp:posOffset>",
+            "<wp:wrapNone/>",
+            114300,
+        )
+        .replace(r#"relativeFrom="column""#, r#"relativeFrom="margin""#);
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+        let (table, _) = cell_anchor_table(&layout);
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    }
+}
+
+#[test]
 fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
     let drawing = cell_anchor_box(
         "<wp:posOffset>914400</wp:posOffset>",

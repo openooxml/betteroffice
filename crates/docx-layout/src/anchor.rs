@@ -103,7 +103,7 @@ pub(crate) fn is_cell_shape_anchor(
             matches!(
                 axis.relative_to.as_deref(),
                 None | Some("column" | "character" | "margin")
-            )
+            ) && !matches!(axis.align.as_deref(), Some("inside" | "outside"))
         })
         && position.vertical.as_ref().is_none_or(|axis| {
             matches!(
