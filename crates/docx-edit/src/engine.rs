@@ -21941,60 +21941,113 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
         let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="7200" w:h="8640"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300"/></w:sectPr>"#;
-        let mut body = preview_fixture::paragraph(
-            1,
-            &format!(
-                r#"<w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>{}"#,
-                preview_fixture::run("Before the picture")
-            ),
-        );
+        let prefix_paragraph = |id, text| {
+            preview_fixture::paragraph(
+                id,
+                &format!(
+                    r#"<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>{}"#,
+                    preview_fixture::run(text)
+                ),
+            )
+        };
+        let mut body = prefix_paragraph(1, "First prefix paragraph");
+        body += &prefix_paragraph(2, "Second prefix paragraph");
         body += &preview_fixture::paragraph(
-            2,
-            &(preview_fixture::run("Picture anchor") + &float_flow_picture(2, 1828800, 914400)),
+            3,
+            &(preview_fixture::run("Picture anchor") + &float_flow_picture(3, 1828800, 914400)),
         );
-        body += &preview_fixture::paragraph(3, &preview_fixture::run("Editable paragraph"));
+        body += &preview_fixture::paragraph(4, &preview_fixture::run("Editable paragraph"));
         body += &preview_fixture::paragraph(
-            4,
+            5,
             &format!(
                 "<w:pPr>{section}</w:pPr>{}",
                 preview_fixture::run("Section end")
             ),
         );
-        body += &preview_fixture::paragraph(5, &preview_fixture::run("Next section"));
+        body += &preview_fixture::paragraph(6, &preview_fixture::run("Next section"));
         body += section;
         let bytes = preview_fixture::document(&body);
+        let line_geometry = |engine: &EngineSession, index: usize| {
+            let pagination = engine.pagination.borrow();
+            let entry = &pagination.input.as_ref().unwrap().measured[index];
+            let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(extent)) =
+                (&entry.block, &entry.measure)
+            else {
+                panic!("expected a measured prefix paragraph");
+            };
+            assert_eq!(extent.lines.len(), 1);
+            let y = pagination.layout.as_ref().unwrap().pages[0]
+                .fragments
+                .iter()
+                .find_map(|fragment| match fragment {
+                    Fragment::Paragraph(paragraph) if paragraph.block_id == block.id => {
+                        Some(paragraph.y)
+                    }
+                    _ => None,
+                })
+                .expect("prefix paragraph on first page");
+            (extent.lines[0].line_height, y)
+        };
         for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
             let engine = EngineSession::new(9635);
             crate::seed_from_docx(engine.doc(), &bytes).unwrap();
             let mut request = lowering_pages::region_request(&engine, &bytes, font);
             assert_eq!(request["regions"]["sections"].as_array().unwrap().len(), 2);
             certified_float_layout(&engine, &request.to_string(), trigger);
-            let prefix = float_flow_slot(&engine, 0);
+            let prefix = [0, 1].map(|paragraph| float_flow_slot(&engine, paragraph));
+            let edited = float_flow_slot(&engine, 3);
+            let before = prefix.map(|index| line_geometry(&engine, index));
             {
                 let pagination = engine.pagination.borrow();
-                assert!(pagination.float_flow[prefix].as_ref().unwrap().starts());
-                assert_eq!(
-                    engine.render.borrow().stories["body"].blocks.get(prefix),
-                    Some(&pagination.input.as_ref().unwrap().measured[prefix].block),
+                assert!(pagination.float_flow[prefix[0]].as_ref().unwrap().starts());
+                assert!(
+                    pagination.float_flow[prefix[0] + 1..=edited]
+                        .iter()
+                        .all(|step| step.as_ref().is_some_and(|step| !step.starts()))
                 );
+                for index in prefix {
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].blocks.get(index),
+                        Some(&pagination.input.as_ref().unwrap().measured[index].block),
+                    );
+                }
             }
 
-            let offset = certified_float_offset(&engine, 2);
-            engine
-                .doc()
-                .replace_range(
-                    &crate::EditCtx::local("", ""),
-                    crate::StoryRange::new("body", offset, offset + 1),
-                    "x",
-                )
-                .unwrap();
+            {
+                let _host = (trigger == RelayoutTrigger::Bulk)
+                    .then(|| crate::batch::HostEditGuard::new(&engine.doc().host_edit_depth));
+                let offset = certified_float_offset(&engine, 3);
+                engine
+                    .doc()
+                    .replace_range(
+                        &crate::EditCtx::local("", ""),
+                        crate::StoryRange::new("body", offset, offset + 1),
+                        "x",
+                    )
+                    .unwrap();
+            }
             request["regions"]["sections"][0]["properties"]["docGrid"] =
                 json!({"type": "lines", "linePitch": 480});
             let request = request.to_string();
             let (measured, full) = certified_float_layout(&engine, &request, trigger);
             assert_eq!(full, 0, "{trigger:?}");
-            assert!(measured.contains(&prefix), "{trigger:?} {measured:?}");
-            assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+            assert!(measured.contains(&edited), "{trigger:?} {measured:?}");
+
+            let cold = cold_session(&engine, 9636, Some((9635, &bytes)));
+            cold.layout_regions_for_trigger(&request, None, RelayoutTrigger::Open)
+                .unwrap();
+            let expected = prefix.map(|index| line_geometry(&cold, index));
+            assert!(expected[0].0 > before[0].0 && expected[1].0 > before[1].0);
+            assert!(expected[1].1 > before[1].1);
+            assert_eq!(
+                prefix.map(|index| line_geometry(&engine, index)),
+                expected,
+                "{trigger:?} prefix line heights and positions"
+            );
+            assert!(
+                prefix.iter().all(|index| measured.contains(index)),
+                "{trigger:?} {measured:?}"
+            );
         }
     }
 
