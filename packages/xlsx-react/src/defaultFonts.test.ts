@@ -221,6 +221,21 @@ test('only requests and paints the script face for the rich-text piece that uses
   } finally { painter.dispose(); }
 });
 
+test.each([
+  ['number format parts', cellText('7', {
+    numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'م' }] },
+  })],
+  ['rich-text runs', cellText('A مرحبا', { runs: [{ start: 2, end: 7, bold: true }] })],
+] as const)('Arabic in %s makes no script face request', async (_source, command) => {
+  browser();
+  const { scriptFace } = provider();
+  const painter = createDefaultFontPainter(decoder(), () => {});
+  try {
+    await painter.load(cells(command));
+    expect(scriptFace).not.toHaveBeenCalled();
+  } finally { painter.dispose(); }
+});
+
 test('another editor and an explicit-face PNG export do not pick up a disposed editor’s script fallback', async () => {
   const { added } = browser();
   const { context, painted } = canvasText();
@@ -392,7 +407,9 @@ test.each([
     const exported = remove.mock.calls.map(([face]) => face).filter(({ bytes }) =>
       new TextDecoder().decode(bytes.slice(0, engineFace.file.length)) === engineFace.file);
     expect(exported).toHaveLength(1);
-    if (editorFamily) expect(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
+    if (editorFamily) {
+      expect<ArrayBuffer | undefined>(exported[0]!.bytes).toEqual(added.find(({ family }) => family === editorFamily)?.bytes);
+    }
     expect(painted).toContainEqual({ text, font: expect.stringContaining(`"${exported[0]!.family}"`) });
   } finally { painter.dispose(); handle.dispose(); }
 }, 30_000);
