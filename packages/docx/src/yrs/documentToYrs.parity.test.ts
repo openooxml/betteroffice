@@ -34,6 +34,22 @@ function sequencePackage(body: string): Uint8Array<ArrayBuffer> {
   );
 }
 
+function quoteFieldXml(result: string, hidden = false): string {
+  const properties = hidden ? '<w:rPr><w:vanish/></w:rPr>' : '';
+  return `<w:r>${properties}<w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> QUOTE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+}
+
+function textRunXml(value: string, hidden = false): string {
+  const properties = hidden ? '<w:rPr><w:vanish/></w:rPr>' : '';
+  return `<w:r>${properties}<w:t xml:space="preserve">${value}</w:t></w:r>`;
+}
+
+function fieldDisplayTexts(session: YrsSession): unknown[] {
+  return session.storySegments('body').flatMap((segment) =>
+    segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload.displayText] : []
+  );
+}
+
 const RULE_PNG = Uint8Array.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
   0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
@@ -240,6 +256,47 @@ describe('DOCX engine seeding', () => {
       }
     } finally {
       for (const session of seeded.sessions) session.destroy();
+    }
+  });
+
+  it('keeps cached captions after a simple SEQ in a complex result', async () => {
+    const sequence = (cached: string) => `<w:fldSimple w:instr="SEQ Figure">${textRunXml(cached)}</w:fldSimple>`;
+    const bytes = sequencePackage(`<w:p>${quoteFieldXml(sequence('4'))}</w:p><w:p>${sequence('9')}</w:p>`);
+    const { engine, projected, sessions } = await seedSequenceSessions(bytes);
+    try {
+      expect(fieldDisplayTexts(engine)).toEqual(fieldDisplayTexts(projected));
+      for (const session of [engine, projected]) {
+        expect(fieldDisplayTexts(session)).toEqual(['4', '', '9']);
+        const blocks = session.yrsBlocksForStory('body', {}) as LayoutBlock[];
+        const captions = sequenceRuns(blocks).flatMap((run) =>
+          run.kind === 'field' && run.instruction === 'SEQ Figure' ? [run.fallback] : []
+        );
+        expect(captions).toEqual(['4', '9']);
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it.each([
+    ['omits a hidden nested result run', quoteFieldXml(quoteFieldXml(textRunXml('Hidden', true))), ''],
+    [
+      'keeps visible result text in order across three field levels',
+      quoteFieldXml(
+        textRunXml('A ') +
+        quoteFieldXml(textRunXml('B ') + quoteFieldXml(textRunXml('C ')) + textRunXml('D ')) +
+        quoteFieldXml(quoteFieldXml(textRunXml('Hidden ')), true) +
+        textRunXml('E')
+      ),
+      'A B C D E',
+    ],
+  ])('%s', async (_name, field, expected) => {
+    const { engine, projected, sessions } = await seedSequenceSessions(sequencePackage(`<w:p>${field}</w:p>`));
+    try {
+      expect(fieldDisplayTexts(engine)).toEqual(fieldDisplayTexts(projected));
+      expect(fieldDisplayTexts(engine)).toEqual([expected]);
+    } finally {
+      for (const session of sessions) session.destroy();
     }
   });
 

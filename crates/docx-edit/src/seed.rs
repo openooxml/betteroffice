@@ -9548,6 +9548,63 @@ mod tests {
         }
     }
 
+    fn quote_field(result: Value) -> Value {
+        json!({
+            "type":"complexField", "fieldType":"QUOTE", "instruction":"QUOTE",
+            "fieldCode":[], "fieldResult":[], "structuredResult":{"inline":result}
+        })
+    }
+
+    #[test]
+    fn a_simple_sequence_in_a_complex_result_keeps_later_captions_cached() {
+        let sequence = |cached: &str| {
+            json!({
+                "type":"simpleField", "fieldType":"SEQ", "instruction":"SEQ Figure",
+                "content":[run(cached)]
+            })
+        };
+        let owner = quote_field(json!([sequence("4")]));
+        let (document, names) = lowered_body(&[
+            json!({"type":"paragraph","content":[owner]}),
+            json!({"type":"paragraph","content":[sequence("9")]}),
+        ]);
+        seed_opaque_sequences(&document, &names, None);
+        let (_, output) = rendered(&document);
+        let blocks: Value = serde_json::from_str(&output).unwrap();
+        let captions: Vec<_> = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|block| block["runs"].as_array().cloned().unwrap_or_default())
+            .filter(|run| run["instruction"] == "SEQ Figure")
+            .map(|run| run["fallback"].clone())
+            .collect();
+        assert_eq!(captions, [json!("4"), json!("9")]);
+    }
+
+    #[test]
+    fn a_hidden_nested_result_run_does_not_enter_the_owner_label() {
+        let mut hidden = run("Hidden");
+        hidden["formatting"] = json!({"hidden":true});
+        let mut inner = quote_field(json!([hidden]));
+        inner["fieldResult"] = json!([hidden]);
+        let outer = quote_field(json!([inner]));
+        let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+        assert_eq!(payload["displayText"], json!(""));
+        assert_eq!(payload["hasCachedResult"], json!(false));
+    }
+
+    #[test]
+    fn three_field_levels_keep_visible_result_text_in_order() {
+        let deepest = quote_field(json!([run("C ")]));
+        let middle = quote_field(json!([run("B "), deepest, run("D ")]));
+        let mut hidden = quote_field(json!([quote_field(json!([run("Hidden ")]))]));
+        hidden["formatting"] = json!({"hidden":true});
+        let outer = quote_field(json!([run("A "), middle, hidden, run("E")]));
+        let (payload, _) = field_payload(&outer, None, &BTreeMap::new());
+        assert_eq!(payload["displayText"], json!("A B C D E"));
+    }
+
     #[test]
     fn numeric_field_detection_preserves_formulas_and_named_fields() {
         assert!(numeric_field_instruction(" 123 "));
