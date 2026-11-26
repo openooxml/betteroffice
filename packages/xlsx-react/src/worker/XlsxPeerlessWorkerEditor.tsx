@@ -1274,7 +1274,7 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
         canvas.height = Math.round(request.height * request.dpr);
         canvas.style.width = `${request.width}px`; canvas.style.height = `${request.height}px`;
         canvas.dataset.defaultFonts = paintWithDefaultFonts(frame.displayList,
-          () => paintDisplayList(context, frame.displayList, request.dpr * request.zoom)) ? 'settled' : 'pending';
+          (list) => paintDisplayList(context, list, request.dpr * request.zoom)) ? 'settled' : 'pending';
         canvas.dataset.workerSequence = String(frame.sequence);
         canvas.dataset.commandCoverage = String(frame.coversThroughSeq ?? 0);
         canvas.dataset.paintSource = frame.source; canvas.dataset.workerZoom = String(request.zoom);
@@ -1300,7 +1300,8 @@ export function XlsxPeerlessWorkerEditor(props: PeerlessSessionWorkbookProps) {
       onError: (error) => run.fail(error),
     });
     sourceRef.current = source;
-    const echo = new WorkerCellEcho({ source, context: () => canvasRef.current?.getContext('2d') ?? null });
+    const echo = new WorkerCellEcho({ source, context: () => canvasRef.current?.getContext('2d') ?? null,
+      withScriptFonts: paintWithDefaultFonts.withScriptFonts });
     echoRef.current = echo;
     const sheet = run.session.editState.activeSheet ?? run.session.state.activeSheet;
     activeSheetId.current = sheetId(sheet);

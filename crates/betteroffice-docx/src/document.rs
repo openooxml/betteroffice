@@ -50,6 +50,8 @@ use crate::{
     SaveOptions, SaveReport,
 };
 
+mod model_save;
+
 /// The product worker's save seed caps (`residentEngineWorker.ts`).
 const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
@@ -69,6 +71,7 @@ pub struct Document {
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
     dirty: Dirty,
+    parse_limits: ParseLimits,
     #[cfg(feature = "raster")]
     default_limits: bool,
     #[cfg(any(feature = "fonts", feature = "raster"))]
@@ -136,6 +139,7 @@ impl Document {
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
+            parse_limits: limits.clone(),
             #[cfg(feature = "raster")]
             default_limits: *limits == ParseLimits::default(),
             model,
@@ -572,6 +576,9 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
+        if self.dirty == Dirty::ModelChanged {
+            return self.save_model_report(options);
+        }
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
@@ -590,7 +597,27 @@ impl Document {
         }
         let paragraph_ids = self.session_save_plan()?;
         let whole_model_write = paragraph_ids.is_none();
-        let request = S13SaveRequest {
+        let request = self.save_request(
+            determinism,
+            options.update_modified_date,
+            options.modified_by,
+            paragraph_ids,
+        );
+        #[cfg(test)]
+        session_save_tests::count_package_write();
+        let (bytes, report) =
+            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
+        Ok(save_report(bytes, report, whole_model_write))
+    }
+
+    fn save_request(
+        &self,
+        determinism: SerializerDeterminism,
+        update_modified_date: bool,
+        modified_by: Option<String>,
+        paragraph_ids: Option<S13ParagraphIds>,
+    ) -> S13SaveRequest {
+        S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
@@ -602,17 +629,12 @@ impl Document {
             relationship_entries: self.model.relationships.clone(),
             numbering: Some(self.model.numbering.clone()),
             options: S13SaveOptions {
-                update_modified_date: options.update_modified_date,
-                modified_by: options.modified_by,
+                update_modified_date,
+                modified_by,
             },
             selective: None,
             paragraph_ids,
-        };
-        #[cfg(test)]
-        session_save_tests::count_package_write();
-        let (bytes, report) =
-            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        Ok(save_report(bytes, report, whole_model_write))
+        }
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1744,11 +1766,12 @@ mod session_save_tests {
     }
 
     #[test]
-    fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
-        let mut document = open();
+    fn model_mut_borrow_without_change_returns_source_bytes() {
+        let source = package(&source());
+        let mut document = Document::open(&source).unwrap();
         document.model_mut();
         let counts = counted(|| {
-            document.save().unwrap();
+            assert_eq!(document.save().unwrap(), source);
         });
         assert_eq!(counts, (0, 1));
     }

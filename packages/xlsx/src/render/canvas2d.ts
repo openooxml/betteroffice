@@ -7,6 +7,7 @@
  * no allocation of app state and no reads back from the canvas.
  */
 
+import type { CellScriptFamilies, ScriptFontDisplayList } from '../../../../shared/office-session/xlsxScriptFonts';
 import type {
   DisplayList,
   DrawCmd,
@@ -82,7 +83,8 @@ export function paintDisplayList(
   const right = Math.min(dl.width, ((ctx.canvas?.width ?? Infinity) - origin.x) / dpr);
   const bottom = Math.min(dl.height, ((ctx.canvas?.height ?? Infinity) - origin.y) / dpr);
   const bounds = { x: left, y: top, w: right - left, h: bottom - top };
-  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options, bounds);
+  const { cellScriptFamilies } = dl as ScriptFontDisplayList;
+  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options, bounds, cellScriptFamilies);
   ctx.restore();
 }
 
@@ -93,6 +95,7 @@ function paintCommand(
   origin: { x: number; y: number },
   options: PaintOptions,
   bounds: Rect,
+  cellScriptFamilies?: CellScriptFamilies,
 ): void {
   switch (cmd.op) {
     case 'image':
@@ -114,7 +117,7 @@ function paintCommand(
       paintClipped(ctx, cmd.clip, () => paintPath(ctx, cmd));
       return;
     case 'text':
-      paintText(ctx, cmd, bounds);
+      paintText(ctx, cmd, bounds, cellScriptFamilies);
       return;
   }
 }
@@ -285,7 +288,7 @@ function strokeSegment(
 // this run so it never bleeds into later commands. underline/strike are drawn
 // as lines positioned off the measured run box, since canvas has no native
 // text-decoration.
-function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd, bounds: Rect): void {
+function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd, bounds: Rect, cellScriptFamilies?: CellScriptFamilies): void {
   ctx.save();
   if (cmd.clip) {
     ctx.beginPath();
@@ -293,15 +296,15 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd, bounds: Rect): v
     ctx.clip();
   }
   ctx.fillStyle = cmd.color;
-  const font = fontString(cmd);
+  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
+  const font = fontString(cmd, pieces ? undefined : cellScriptFamilies);
   ctx.font = font;
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
-  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
   if (pieces && cmd.wrap) {
-    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font), bounds);
+    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font, cellScriptFamilies), bounds);
   } else if (pieces) {
-    paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font));
+    paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font, cellScriptFamilies));
   } else if (cmd.stacked) {
     paintStackedText(ctx, cmd);
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
@@ -333,16 +336,17 @@ interface PiecePaint {
   font: string;
   fonts: Map<TextPiece['cmd'], string>;
   widths: Map<string, Map<string, number>>;
+  cellScriptFamilies?: CellScriptFamilies;
 }
 
-function newPiecePaint(font: string): PiecePaint {
-  return { font, fonts: new Map(), widths: new Map() };
+function newPiecePaint(font: string, cellScriptFamilies?: CellScriptFamilies): PiecePaint {
+  return { font, fonts: new Map(), widths: new Map(), cellScriptFamilies };
 }
 
 function pieceFont(paint: PiecePaint, piece: TextPiece): string {
   let font = paint.fonts.get(piece.cmd);
   if (font === undefined) {
-    font = fontString(piece.cmd);
+    font = fontString(piece.cmd, paint.cellScriptFamilies);
     paint.fonts.set(piece.cmd, font);
   }
   return font;
