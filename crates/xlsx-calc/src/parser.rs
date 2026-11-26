@@ -199,12 +199,12 @@ fn parse_source(
 fn is_name_range_join(token: &Token, source: &str, has_sheet: &dyn Fn(&str) -> bool) -> bool {
     // A bare name can also be the left operand of a join to a qualified address.
     matches!(&token.kind, TokKind::ThreeDRef { first, last, target }
-        if !source[token.start..].starts_with('\'') && !address_shaped(first)
-            && !matches!(target.as_ref(), TokKind::RowRange { .. })
-            && !has_sheet(first)
-            && (can_start_span(last) || first.split_once('.').is_some_and(|(prefix, _)| {
-                prefix.eq_ignore_ascii_case("_xlpm")
-            })))
+    if !source[token.start..].starts_with('\'') && !address_shaped(first)
+        && !matches!(target.as_ref(), TokKind::RowRange { .. })
+        && !has_sheet(first)
+        && (can_start_span(last) || first.split_once('.').is_some_and(|(prefix, _)| {
+            prefix.eq_ignore_ascii_case("_xlpm")
+        })))
 }
 
 fn qualify_reference(kind: TokKind, sheet: String) -> TokKind {
@@ -1036,7 +1036,10 @@ mod tests {
             ("_xlpm.c:A1!B2", "_xlpm.c:'A1'!B2"),
             ("_xlpm.c:TRUE!A2", "_xlpm.c:'TRUE'!A2"),
         ] {
-            assert_eq!(parse_formula(source).unwrap(), parse_formula(quoted).unwrap());
+            assert_eq!(
+                parse_formula(source).unwrap(),
+                parse_formula(quoted).unwrap()
+            );
         }
     }
 

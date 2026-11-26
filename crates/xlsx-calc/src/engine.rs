@@ -2437,10 +2437,12 @@ mod tests {
     #[test]
     fn unquoted_whole_row_sheet_spans_keep_cached_values() {
         let mut workbook = Workbook::default();
-        workbook.sheets = ["Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report"]
-            .into_iter()
-            .map(Sheet::new)
-            .collect();
+        workbook.sheets = [
+            "Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report",
+        ]
+        .into_iter()
+        .map(Sheet::new)
+        .collect();
         let report = SheetId(5);
         for (source, cache) in [
             ("SUM(Sheet1:Sheet3!1:2)", 42.0),

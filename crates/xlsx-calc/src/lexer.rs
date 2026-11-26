@@ -194,7 +194,10 @@ pub fn ensure_unambiguous_spaced_calls(input: &str, tokens: &[Token]) -> Result<
 }
 
 #[doc(hidden)]
-pub fn ensure_unambiguous_spaced_references(input: &str, tokens: &[Token]) -> Result<(), ParseError> {
+pub fn ensure_unambiguous_spaced_references(
+    input: &str,
+    tokens: &[Token],
+) -> Result<(), ParseError> {
     check_spaced_calls(input, tokens, true)
 }
 
@@ -245,7 +248,17 @@ fn check_spaced_calls(
             && matches!(reference.kind, TokKind::Ref { sheet: None, .. })
             && matches!(
                 group,
-                [Token { kind: TokKind::Num(_), .. }, Token { kind: TokKind::RParen, .. }, ..]
+                [
+                    Token {
+                        kind: TokKind::Num(_),
+                        ..
+                    },
+                    Token {
+                        kind: TokKind::RParen,
+                        ..
+                    },
+                    ..
+                ]
             )
         {
             continue;
@@ -894,7 +907,8 @@ impl Lexer<'_> {
             && self.consume_bang()
         {
             let first = workbook_scope(first).unwrap_or(first);
-            if quoted_last && !quoted
+            if quoted_last
+                && !quoted
                 && (last.is_empty() || last.contains(':') || !(self.has_sheet)(&last))
             {
                 self.pos = save;

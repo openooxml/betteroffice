@@ -3215,7 +3215,10 @@ mod tests {
             assert_eq!(formula(&edited, SheetId(1), "B1").as_deref(), Some(renamed));
 
             crate::apply(&mut workbook, &Op::RemoveSheet { index: 0 }).unwrap();
-            assert_eq!(formula(&workbook, SheetId(0), "B1").as_deref(), Some(removed));
+            assert_eq!(
+                formula(&workbook, SheetId(0), "B1").as_deref(),
+                Some(removed)
+            );
         }
     }
 
@@ -3350,11 +3353,7 @@ mod tests {
                 SheetId(2),
                 "SUM('Feb:End Sheet'!A1)",
             ),
-            (
-                Op::RemoveSheet { index: 2 },
-                SheetId(2),
-                "SUM(Jan:Feb!A1)",
-            ),
+            (Op::RemoveSheet { index: 2 }, SheetId(2), "SUM(Jan:Feb!A1)"),
         ] {
             let mut edited = workbook.clone();
             crate::apply(&mut edited, &op).unwrap();
@@ -3380,22 +3379,27 @@ mod tests {
                 "sheet {target}"
             );
             assert_eq!(shifted.defined_names[0].formula, "SUM(Jan:'End Sheet'!A2)");
-            assert_eq!(chart_formulas(&shifted, report), ["SUM(Jan:'End Sheet'!A2)"]);
+            assert_eq!(
+                chart_formulas(&shifted, report),
+                ["SUM(Jan:'End Sheet'!A2)"]
+            );
         }
         assert!(formula_has_sheet_span(source, &workbook));
-        workbook.sheets[3].conditional_formats.push(ConditionalFormatting {
-            sqref: "B1".into(),
-            rules: vec![ConditionalFormatRule {
-                id: "span".into(),
-                rule_type: "expression".into(),
-                operator: None,
-                formulas: vec![source.into()],
-                priority: 1,
-                dxf_id: None,
-                format: Default::default(),
-                raw_xml: None,
-            }],
-        });
+        workbook.sheets[3]
+            .conditional_formats
+            .push(ConditionalFormatting {
+                sqref: "B1".into(),
+                rules: vec![ConditionalFormatRule {
+                    id: "span".into(),
+                    rule_type: "expression".into(),
+                    operator: None,
+                    formulas: vec![source.into()],
+                    priority: 1,
+                    dxf_id: None,
+                    format: Default::default(),
+                    raw_xml: None,
+                }],
+            });
         assert_sheet_edit_refuses(
             &workbook,
             &insert_rows(1, 0, 1),
@@ -3945,13 +3949,19 @@ mod tests {
 
     #[test]
     fn unquoted_whole_row_sheet_spans_still_remap() {
-        let names = ["Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report"]
-            .map(str::to_owned);
+        let names = [
+            "Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report",
+        ]
+        .map(str::to_owned);
         for (source, target, expected) in [
             ("SUM(Sheet1:Sheet3!1:2)", 1, "SUM('Sheet1:Sheet3'!2:3)"),
             ("SUM(Sheet1:Sheet2!$1:$5)", 0, "SUM('Sheet1:Sheet2'!$2:$6)"),
             ("Sheet1:Sheet3!1:1", 2, "'Sheet1:Sheet3'!2:2"),
-            ("SUM(Q1_Sales:Q2_Sales!1:10)", 3, "SUM('Q1_Sales:Q2_Sales'!2:11)"),
+            (
+                "SUM(Q1_Sales:Q2_Sales!1:10)",
+                3,
+                "SUM('Q1_Sales:Q2_Sales'!2:11)",
+            ),
         ] {
             let op = insert_rows(target, 0, 1);
             assert_eq!(
