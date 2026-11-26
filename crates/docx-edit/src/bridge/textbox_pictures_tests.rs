@@ -77,18 +77,6 @@ fn display_with_layout_edit(
     media_tokens: bool,
     edit: impl FnOnce(&EngineSession),
 ) -> (Value, Value) {
-    let (engine, output, _) = layout_with_engine(bytes, media_tokens, edit);
-    (
-        serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap(),
-        serde_json::from_str(&output).unwrap(),
-    )
-}
-
-fn layout_with_engine(
-    bytes: &[u8],
-    media_tokens: bool,
-    edit: impl FnOnce(&EngineSession),
-) -> (EngineSession, String, u32) {
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
         .document
@@ -107,7 +95,10 @@ fn layout_with_engine(
             .to_string(),
         )
         .unwrap();
-    (engine, output, font)
+    (
+        serde_json::from_str(&engine.build_display_list_json(&output).unwrap()).unwrap(),
+        serde_json::from_str(&output).unwrap(),
+    )
 }
 
 fn images(primitives: &[Value]) -> Vec<&Value> {
@@ -816,9 +807,10 @@ fn table_boundary_vertically_merged_picture_paints_once_on_anchor_page() {
 }
 
 #[test]
-fn table_boundary_wrap_square_shape_paints_on_its_anchor_page() {
+fn table_boundary_in_flow_wrap_square_shape_is_not_lost() {
     let shape =
         anchored_shape().replace("<wp:wrapNone/>", r#"<wp:wrapSquare wrapText="bothSides"/>"#);
+    let mut separates_shape_and_paragraph = false;
     for before in [10080, 10800, 11520, 12000] {
         let bytes = table_boundary_document(&document(&shape, false), before, 1);
         let (display, layout) = display_with_layout(&bytes, true);
@@ -837,8 +829,9 @@ fn table_boundary_wrap_square_shape_paints_on_its_anchor_page() {
             })
             .collect();
         let anchor_pages = shown_anchor_pages(&display, &layout, "Anchor paragraph");
+        assert!(!shape_pages.is_empty(), "before={before}");
         assert_eq!(anchor_pages.len(), 1, "before={before}");
-        assert_eq!(shape_pages, anchor_pages, "before={before}");
+        separates_shape_and_paragraph |= shape_pages[0] < anchor_pages[0];
         let cell_text: String = pages
             .iter()
             .map(|page| text(page["primitives"].as_array().unwrap()))
@@ -847,6 +840,7 @@ fn table_boundary_wrap_square_shape_paints_on_its_anchor_page() {
             assert!(cell_text.contains(&format!("Cell tail {line:02};")));
         }
     }
+    assert!(separates_shape_and_paragraph);
 }
 
 fn cell_anchor_box(horizontal: &str, vertical: &str, wrap: &str, height: u32) -> String {
@@ -936,82 +930,36 @@ fn cell_text_box_centers_across_the_content_width() {
 }
 
 #[test]
-fn cell_square_wrap_uses_the_painted_text_box_rectangle() {
+fn cell_square_wrap_text_box_stacks_above_the_anchor_paragraph() {
     let drawing = cell_anchor_box(
         "<wp:posOffset>304800</wp:posOffset>",
-        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
         r#"<wp:wrapSquare wrapText="right"/>"#,
         342900,
     );
-    let story = "Anchor text and more words for the lines beside and below the floating text box. "
-        .repeat(10);
-    let (engine, layout, font) =
-        layout_with_engine(&cell_anchor_package(&drawing, &story), true, |_| {});
-    let (display, unreadable) = engine
-        .retained_page_display_list(
-            &std::collections::BTreeMap::from([("calibri|0|0".to_owned(), vec![font])]),
-            0,
-        )
-        .unwrap();
-    assert!(unreadable.is_empty());
-    let layout = serde_json::from_str(&layout).unwrap();
-    let display = serde_json::to_value(display).unwrap();
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let (control, control_layout) =
+        display_with_layout(&cell_anchor_package("", "Anchor text"), true);
     let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let control = control["pages"][0]["primitives"].as_array().unwrap();
     let shape = painted_cell_anchor(primitives);
     let (table, measure) = cell_anchor_table(&layout);
-    let cell_x = table["x"].as_f64().unwrap() + 160.0;
-    let line_top = table["y"].as_f64().unwrap() + 4.0;
-    let right = shape["x"].as_f64().unwrap() + shape["w"].as_f64().unwrap();
-    assert_eq!(shape["x"], cell_x + 32.0);
-    assert_eq!(shape["y"], line_top);
-    assert_eq!(shape["h"], 36.0);
-    let lines = measure["rows"][0]["cells"][1]["blocks"][1]["lines"]
-        .as_array()
-        .unwrap();
-    for line in &lines[..2] {
-        assert_eq!(line["leftOffset"], right - cell_x);
-    }
-    assert_eq!(lines[2]["leftOffset"].as_f64().unwrap_or(0.0), 0.0);
-    let runs: Vec<_> = primitives
-        .iter()
-        .filter(|item| {
-            item["kind"] == "glyphRun"
-                && item["cell"]["col"] == 1
-                && item["lineIndex"].as_u64().is_some_and(|line| line < 2)
-                && !item["blockKey"]
-                    .as_str()
-                    .is_some_and(|key| key.starts_with("shape:"))
-                && baseline_y(item) < line_top + 36.0
-        })
-        .collect();
-    assert!(!runs.is_empty());
-    let overlapping: Vec<_> = runs
-        .iter()
-        .filter(|item| {
-            item["glyphs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|glyph| glyph["x"].as_f64().unwrap() < right - 0.01)
-        })
-        .map(|item| (&item["blockKey"], &item["text"], &item["x"]))
-        .collect();
-    assert!(overlapping.is_empty(), "{overlapping:?}");
-
-    let tall = drawing.replace("342900", "762000");
-    let (display, layout) = display_with_layout(&cell_anchor_package(&tall, "Anchor text"), true);
-    let (_, control) = display_with_layout(&cell_anchor_package("", "Anchor text"), true);
-    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
-    let (table, measure) = cell_anchor_table(&layout);
-    let row_height = measure["rows"][0]["height"].as_f64().unwrap();
-    let shape_bottom = shape["y"].as_f64().unwrap() + shape["h"].as_f64().unwrap();
-    assert_eq!(row_height, shape_bottom - table["y"].as_f64().unwrap());
-    assert!(
-        row_height
-            > cell_anchor_table(&control).1["rows"][0]["height"]
-                .as_f64()
-                .unwrap()
+    let table_y = table["y"].as_f64().unwrap();
+    let shape_height = 36.0;
+    assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+    assert_eq!(shape["y"].as_f64(), Some(table_y));
+    assert_eq!(shape["h"].as_f64(), Some(shape_height));
+    assert_eq!(
+        measure["rows"][0]["height"].as_f64().unwrap(),
+        cell_anchor_table(&control_layout).1["rows"][0]["height"]
+            .as_f64()
+            .unwrap()
+            + shape_height
     );
+    let anchor = text_run(primitives, "Anchor text");
+    assert!(baseline_y(anchor) > table_y + shape_height);
+    assert_eq!(start_x(anchor), start_x(text_run(control, "Anchor text")));
 }
 
 #[test]

@@ -91,11 +91,16 @@ pub(crate) fn is_cell_shape_anchor(
     wrap: Option<&str>,
     rotated: bool,
 ) -> bool {
-    if rotated || wrap == Some("inline") {
+    if rotated {
         return false;
     }
+    match wrap {
+        Some("none" | "behind" | "inFront") => {}
+        None if position.is_some() => {}
+        _ => return false,
+    }
     let Some(position) = position else {
-        return wrap.is_some();
+        return true;
     };
     !position.use_simple_pos.unwrap_or(false)
         && position.horizontal.as_ref().is_none_or(|axis| {
@@ -112,12 +117,12 @@ pub(crate) fn is_cell_shape_anchor(
         })
 }
 
-pub(crate) fn cell_shape_rect(
+pub(crate) fn cell_shape_position(
     position: Option<&ImageRunPosition>,
     (x, width): (f64, f64),
     paragraph_top: f64,
     (shape_width, shape_height): (f64, f64),
-) -> (f64, f64, f64, f64) {
+) -> (f64, f64) {
     let frame = AnchorFrame {
         page_width: x + width,
         page_height: 0.0,
@@ -131,6 +136,5 @@ pub(crate) fn cell_shape_rect(
         flow_height: 0.0,
         odd_page: true,
     };
-    let (x, y) = resolve_position(position, shape_width, shape_height, &frame);
-    (x, y, shape_width, shape_height)
+    resolve_position(position, shape_width, shape_height, &frame)
 }

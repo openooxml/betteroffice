@@ -12734,6 +12734,14 @@ struct CellShape {
     behind: bool,
 }
 
+fn cell_anchor_block(cell: &TableCellIn, index: usize) -> usize {
+    let is_paragraph = |i: &usize| matches!(cell.blocks[*i], BlockIn::Paragraph(_));
+    (index..cell.blocks.len())
+        .find(is_paragraph)
+        .or_else(|| (0..index).rev().find(is_paragraph))
+        .unwrap_or(index)
+}
+
 impl CellContentFrame {
     fn content_cuts(&self, frag: &TableFragmentIn, g: &GridCell) -> (bool, bool) {
         let starts_before = g.row_index < frag.row_start
@@ -12756,10 +12764,7 @@ impl CellContentFrame {
         if !split_row {
             return true;
         }
-        let anchor = crate::cell_layout::cell_shape_anchor(index, cell.blocks.len(), |i| {
-            matches!(cell.blocks[i], BlockIn::Paragraph(_))
-        });
-        self.shows_anchor_at(measure, anchor, true)
+        self.shows_anchor_at(measure, cell_anchor_block(cell, index), true)
     }
 
     fn shows_anchor_at(
@@ -12892,10 +12897,7 @@ fn cell_content_frame<'m>(
                 prev_after = 0.0;
             }
             (BlockIn::Shape(sb), Some(MeasureIn::Shape(sm))) if sb.has_cell_anchor(rotated) => {
-                let anchor = crate::cell_layout::cell_shape_anchor(i, cell.blocks.len(), |index| {
-                    matches!(cell.blocks[index], BlockIn::Paragraph(_))
-                });
-                floating_shapes.push((anchor, i, sb, sm));
+                floating_shapes.push((cell_anchor_block(cell, i), i, sb, sm));
                 block_tops.push(stack_cursor);
             }
             (BlockIn::Shape(sb), Some(MeasureIn::Shape(_)))
@@ -12921,23 +12923,18 @@ fn cell_content_frame<'m>(
         .into_iter()
         .map(|(anchor, index, shape, extent)| {
             let position = shape.position.as_ref();
-            let wrap = shape.wrap_type.as_deref();
             let mut fragment = cell_shape_fragment(shape, extent, true);
-            let (x, y, _, height) = crate::anchor::cell_shape_rect(
+            (fragment.x, fragment.y) = crate::anchor::cell_shape_position(
                 position,
                 (content_x, content_width),
                 block_tops[anchor],
                 (fragment.width, fragment.height),
             );
-            (fragment.x, fragment.y) = (x, y);
-            if crate::cell_layout::shape_wraps_text(wrap) {
-                float_bottom = float_bottom.max(y + height);
-            }
             let behind = shape
                 .behind_doc
                 .or_else(|| position.and_then(|p| p.behind_doc))
                 == Some(true)
-                || wrap == Some("behind");
+                || shape.wrap_type.as_deref() == Some("behind");
             CellShape {
                 anchor,
                 index,
@@ -13660,11 +13657,7 @@ fn emit_cell_floating_images(
             // Nested tables advance the anchor cursor by their measured height.
             match (blk, cell_measure.blocks.get(i)) {
                 (BlockIn::Shape(shape), Some(MeasureIn::Shape(_)))
-                    if shape.has_cell_anchor(frame.rotation != 0.0)
-                        || crate::cell_layout::cell_overlay_drawing(
-                            shape.position.is_some(),
-                            shape.wrap_type.as_deref(),
-                        ) => {}
+                    if shape.has_cell_anchor(frame.rotation != 0.0) => {}
                 (_, Some(MeasureIn::Table(tm))) => paragraph_y += tm.total_height,
                 (_, Some(MeasureIn::Shape(sm) | MeasureIn::Chart(sm))) => paragraph_y += sm.height,
                 _ => {}

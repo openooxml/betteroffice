@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::anchor::{cell_shape_rect, is_cell_shape_anchor};
+use crate::anchor::is_cell_shape_anchor;
 use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock, ShapeBlock};
 
 pub(crate) fn is_floating_image(wrap_type: Option<&str>, display_mode: Option<&str>) -> bool {
@@ -32,28 +32,17 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
 
 /// Whether a cell anchor only paints, reserving no row height.
 pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) -> bool {
-    positioned && !shape_wraps_text(wrap_type)
-}
-
-pub(crate) fn shape_wraps_text(wrap: Option<&str>) -> bool {
-    matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom"))
+    positioned
+        && !matches!(
+            wrap_type,
+            Some("square" | "tight" | "through" | "topAndBottom")
+        )
 }
 
 pub(crate) fn stacks_cell_shape(shape: &ShapeBlock, rotated: bool) -> bool {
     let wrap = shape.wrap_type.as_deref();
     !is_cell_shape_anchor(shape.position.as_ref(), wrap, rotated)
         && !cell_overlay_drawing(shape.position.is_some(), wrap)
-}
-
-pub(crate) fn cell_shape_anchor(
-    index: usize,
-    len: usize,
-    is_paragraph: impl Fn(usize) -> bool,
-) -> usize {
-    (index..len)
-        .find(|&i| is_paragraph(i))
-        .or_else(|| (0..index).rev().find(|&i| is_paragraph(i)))
-        .unwrap_or(index)
 }
 
 /// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
@@ -182,7 +171,6 @@ pub(crate) fn layout_cell_content_with_rotation(
     let mut y = start_y;
     let mut prev_after = 0.0f64;
     let mut float_bottom = start_y;
-    let mut shape_bottoms = Vec::new();
     let n = block_measures.map(|m| m.len()).unwrap_or(0);
 
     for i in 0..n {
@@ -213,24 +201,8 @@ pub(crate) fn layout_cell_content_with_rotation(
             line_tops.push(Vec::new());
             flat_bottoms.push(bottom);
             prev_after = 0.0;
-        } else if let Some(LayoutBlock::Shape(shape)) = block
-            && !stacks_cell_shape(shape, rotated)
+        } else if matches!(block, Some(LayoutBlock::Shape(shape)) if !stacks_cell_shape(shape, rotated))
         {
-            if shape_wraps_text(shape.wrap_type.as_deref()) {
-                let anchor = cell_shape_anchor(i, n, |index| {
-                    matches!(
-                        blocks.and_then(|b| b.get(index)),
-                        Some(LayoutBlock::Paragraph(_))
-                    )
-                });
-                let (_, top, _, height) = cell_shape_rect(
-                    shape.position.as_ref(),
-                    (0.0, 0.0),
-                    0.0,
-                    (shape.width, shape.height),
-                );
-                shape_bottoms.push((anchor, y, top + height));
-            }
             line_tops.push(Vec::new());
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
@@ -242,18 +214,6 @@ pub(crate) fn layout_cell_content_with_rotation(
         } else {
             line_tops.push(Vec::new());
         }
-    }
-    for (anchor, fallback, bottom) in shape_bottoms {
-        let top = match &block_measures.unwrap()[anchor] {
-            BlockExtent::Paragraph(paragraph) => line_tops[anchor]
-                .first()
-                .zip(paragraph.lines.first())
-                .map_or(fallback, |(top, line)| {
-                    top - line.float_skip_before.unwrap_or(0.0)
-                }),
-            _ => fallback,
-        };
-        float_bottom = float_bottom.max(top + bottom);
     }
 
     // The final block's trailing space-after becomes the cell's bottom padding.
