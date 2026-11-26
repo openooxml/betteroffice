@@ -810,7 +810,10 @@ mod tests {
         }
 
         let ascii = seed_font_run("abc", &[]);
-        assert_eq!(context(&ascii, 1, 2).font_family.as_deref(), Some("Calibri"));
+        assert_eq!(
+            context(&ascii, 1, 2).font_family.as_deref(),
+            Some("Calibri")
+        );
     }
 
     #[test]
@@ -826,8 +829,14 @@ mod tests {
         let plain = seed_font_run("é", &[]);
         let hinted = seed_font_run("é", &[("hint", "eastAsia")]);
 
-        assert_eq!(context(&plain, 0, 1).font_family.as_deref(), Some("Calibri"));
-        assert_eq!(context(&hinted, 0, 1).font_family.as_deref(), Some("SimSun"));
+        assert_eq!(
+            context(&plain, 0, 1).font_family.as_deref(),
+            Some("Calibri")
+        );
+        assert_eq!(
+            context(&hinted, 0, 1).font_family.as_deref(),
+            Some("SimSun")
+        );
     }
 
     #[test]
