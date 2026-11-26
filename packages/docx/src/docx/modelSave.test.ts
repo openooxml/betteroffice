@@ -5,7 +5,7 @@ import { preloadOpcWasm, unzipContainer } from './wasm';
 import { parseDocx } from './parser';
 import { repackDocx, repackDocxWithWarnings } from './rezip';
 import { rezipPartsToArrayBuffer, toBytes } from './rezip/parts';
-import { modelPartsRewrittenWarning } from './modelSave';
+import { modelPartsRewrittenWarning, readModelSaveDirectory } from './modelSave';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { EDIT_PARAGRAPH_ID, oneSavePackage } from '../yrs/__fixtures__/oneSavePackage';
 import { createYrsSession } from '../yrs/index';
@@ -134,7 +134,9 @@ test('the default stamp returns the plain writer output with opaque ZIP members'
     const after = unzipContainer(new Uint8Array(saved.buffer));
     expect(new TextDecoder().decode(after[CORE])).toContain(`${NOW}</dcterms:modified>`);
     expect(Object.getPrototypeOf(after)).toEqual(opaque);
-    expect(saved.warnings).toEqual([...plain.warnings, UNAVAILABLE_WARNING]);
+    const warning = modelPartsRewrittenWarning(source, plain.buffer);
+    expect(warning).toContain(`"${CORE}"`);
+    expect(saved.warnings).toEqual([...plain.warnings, warning]);
   } finally {
     setSystemTime();
   }
@@ -155,10 +157,10 @@ test('modifiedBy uses the plain writer with timestamp stamping disabled', async 
     ...WITHOUT_STAMP,
     get modifiedBy() {
       reads++;
-      return 'Alice';
+      return reads === 1 ? 'Before' : 'Alice';
     },
   });
-  expect(reads).toBe(1);
+  expect(reads).toBe(2);
   expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
   const writtenCore = new TextDecoder().decode(unzipContainer(new Uint8Array(saved.buffer))[CORE]);
   expect(writtenCore).toContain('<cp:lastModifiedBy>Alice</cp:lastModifiedBy>');
@@ -195,21 +197,50 @@ function editableRun(document: Document) {
   return { run, textNode: run.content[0] };
 }
 
-test('the timestamp option is read once before matching the model', async () => {
+test('a timestamp getter cannot discard the body captured by the writer', async () => {
   const { bytes } = oneSavePackage();
   const document = await parse(bytes);
+  const original = document.package.document;
+  document.package.document = { ...original, content: structuredClone(original.content) };
   const { textNode } = editableRun(document);
+  textNode.text = 'Edited body before the save';
   let reads = 0;
   const saved = await repackDocx(document, {
     get updateModifiedDate() {
       reads++;
-      textNode.text = 'Edited by save option';
+      document.package.document = original;
       return false;
     },
   });
   expect(reads).toBe(1);
   const xml = unzipContainer(new Uint8Array(saved))['word/document.xml'];
-  expect(new TextDecoder().decode(xml)).toContain('Edited by save option');
+  expect(new TextDecoder().decode(xml)).toContain('Edited body before the save');
+});
+
+test('the completed write survives a warnings iterator detaching the source', async () => {
+  const { bytes } = oneSavePackage();
+  const document = await parse(bytes);
+  const plainDocument = await parse(bytes);
+  editableRun(document).textNode.text = 'Edited model';
+  editableRun(plainDocument).textNode.text = 'Edited model';
+  const source = document.originalBuffer!;
+  document.warnings = [];
+  Object.defineProperty(document.warnings, Symbol.iterator, {
+    value: function* () {
+      structuredClone(source, { transfer: [source] });
+      yield 'Caller warning';
+    },
+  });
+  plainDocument.warnings = ['Caller warning'];
+
+  const plain = await writeDocumentWithRust(plainDocument, plainDocument.originalBuffer!, WITHOUT_STAMP);
+  const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+  expect(source.byteLength).toBe(0);
+  expect(new Uint8Array(saved.buffer)).toEqual(new Uint8Array(plain.buffer));
+  expect(saved.warnings).toEqual([
+    ...plain.warnings,
+    modelPartsRewrittenWarning(plainDocument.originalBuffer!, plain.buffer),
+  ]);
 });
 
 test('model matching uses the value the writer serializes from a text proxy', async () => {
@@ -256,17 +287,22 @@ test('a changed model uses the plan-less writer and reports the rewritten parts'
   }
 });
 
-test('the rewritten parts warning includes additions and removals', () => {
+test('the rewritten parts warning includes additions, removals and changed contents', () => {
   const bytes = toBytes('member');
-  const original = new Map([['removed.xml', bytes], ['unchanged.xml', bytes]]);
-  const written = new Map([['added.xml', bytes], ['unchanged.xml', bytes.slice()]]);
+  const original = rezipPartsToArrayBuffer(new Map([
+    ['removed.xml', bytes], ['unchanged.xml', bytes], ['changed.xml', bytes],
+  ]));
+  const written = rezipPartsToArrayBuffer(new Map([
+    ['added.xml', bytes], ['unchanged.xml', bytes.slice()], ['changed.xml', toBytes('edited')],
+  ]));
   expect(modelPartsRewrittenWarning(original, written)).toBe(
-    `${CODE} ["added.xml","removed.xml"] Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`
+    `${CODE} ["added.xml","changed.xml","removed.xml"] Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.`
   );
   expect(modelPartsRewrittenWarning(original, original)).toBeUndefined();
+  expect(modelPartsRewrittenWarning(original, new ArrayBuffer(0))).toBe(UNAVAILABLE_WARNING);
 });
 
-test.each(['length', 'word/media/'])('the warning accounts for the ZIP member %s', async (name) => {
+test.each(['__proto__', 'length', 'word/media/'])('the warning accounts for the ZIP member %s', async (name) => {
   const { bytes } = oneSavePackage();
   const parts = new Map(Object.entries(unzipContainer(bytes)));
   parts.set(name, new Uint8Array());
@@ -274,7 +310,18 @@ test.each(['length', 'word/media/'])('the warning accounts for the ZIP member %s
   const document = await parseDocx(source, { preloadFonts: false });
   editableRun(document).textNode.text = 'Edited model';
   const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
-  expect(saved.warnings.at(-1)).toBe(UNAVAILABLE_WARNING);
+  const before = readModelSaveDirectory(source);
+  const after = readModelSaveDirectory(saved.buffer);
+  const warning = saved.warnings.at(-1);
+  expect(before?.has(name)).toBe(true);
+  expect(warning).toContain('"word/document.xml"');
+  if (name === 'word/media/') {
+    expect(after?.has(name)).toBe(false);
+    expect(warning).toContain(`"${name}"`);
+  } else {
+    expect(after?.get(name)).toEqual(before?.get(name));
+    expect(warning).not.toContain(`"${name}"`);
+  }
 });
 
 test('a changed Yrs projection is saved as a caller model', async () => {

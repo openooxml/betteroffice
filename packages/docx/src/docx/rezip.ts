@@ -14,11 +14,10 @@ import type { RawDocxContent } from './unzip';
 import {
   modelMatchesSource,
   modelPartsRewrittenWarning,
-  readModelSaveParts,
-  samePartBytes,
+  sameModelSaveCore,
 } from './modelSave';
 import { preloadParseWasm } from './parseWasm';
-import { writeDocumentWithRust } from './rustSaveFacade';
+import { writeDocumentWithRust, type RustSaveDeterminism } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 import { createEmptyDocx } from './rezip/createEmpty';
@@ -74,6 +73,25 @@ export async function repackDocxWithWarnings(
   return repackModel(doc, options, true);
 }
 
+function plainRepackOptions(options: RepackOptions): RepackOptions | undefined {
+  if (options === null || typeof options !== 'object') return undefined;
+  try {
+    const prototype = Object.getPrototypeOf(options);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const stamp = Object.getOwnPropertyDescriptor(options, 'updateModifiedDate');
+    const modifier = Object.getOwnPropertyDescriptor(options, 'modifiedBy');
+    if (
+      (stamp ? !Object.hasOwn(stamp, 'value') : 'updateModifiedDate' in options) ||
+      (modifier ? !Object.hasOwn(modifier, 'value') : 'modifiedBy' in options)
+    ) {
+      return undefined;
+    }
+    return { updateModifiedDate: stamp?.value, modifiedBy: modifier?.value };
+  } catch {
+    return undefined;
+  }
+}
+
 async function repackModel(
   doc: Document,
   options: RepackOptions,
@@ -85,28 +103,40 @@ async function repackModel(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
-  const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(new Uint8Array(source)).buffer);
-  const determinism = {
-    seed: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
-    now: new Date().toISOString(),
-  };
-  const writerOptions = {
-    updateModifiedDate: options.updateModifiedDate,
-    modifiedBy: options.modifiedBy,
-  };
-  const matches = modelMatchesSource(doc, source, determinism);
-  const { buffer, warnings } = await writeDocumentWithRust(doc, source, writerOptions, undefined, determinism);
-  if (!matches && !includeWarnings) return { buffer, warnings };
-
-  const original = readModelSaveParts(source);
-  const written = readModelSaveParts(buffer);
-  if (matches && samePartBytes(original.core, written.core)) {
-    return { buffer: new Uint8Array(source).slice().buffer, warnings };
+  const writerOptions = plainRepackOptions(options);
+  let sourceCopy: ArrayBuffer | undefined;
+  try {
+    if (writerOptions || includeWarnings) sourceCopy = new Uint8Array(source).slice().buffer;
+  } catch {
+    sourceCopy = undefined;
   }
-  if (includeWarnings) {
-    const warning = modelPartsRewrittenWarning(original.parts, written.parts);
-    if (warning) warnings.push(warning);
+
+  let determinism: RustSaveDeterminism | undefined;
+  let matches = false;
+  if (writerOptions && sourceCopy) {
+    await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+    const digest = await crypto.subtle.digest('SHA-256', sourceCopy);
+    determinism = {
+      seed: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+      now: new Date().toISOString(),
+    };
+    matches = modelMatchesSource(doc, sourceCopy, determinism);
+  }
+  const { buffer, warnings } = await (determinism
+    ? writeDocumentWithRust(doc, source, writerOptions, undefined, determinism)
+    : writeDocumentWithRust(doc, source, options));
+  if (!sourceCopy) return { buffer, warnings };
+
+  try {
+    if (matches && sameModelSaveCore(sourceCopy, buffer)) {
+      return { buffer: sourceCopy, warnings };
+    }
+    if (includeWarnings) {
+      const warning = modelPartsRewrittenWarning(sourceCopy, buffer);
+      if (warning) warnings.push(warning);
+    }
+  } catch {
+    return { buffer, warnings };
   }
   return { buffer, warnings };
 }

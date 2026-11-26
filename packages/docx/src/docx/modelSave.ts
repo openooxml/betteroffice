@@ -8,6 +8,9 @@ import { unzipContainer } from './wasm';
 const MODEL_PARTS_REWRITTEN = 'DOCX_MODEL_PARTS_REWRITTEN';
 const CORE_PROPERTIES = 'docProps/core.xml';
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const CP437_HIGH_BYTES = 'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»' +
+  '░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀' +
+  'αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u00a0';
 
 function readSaveValue<T extends object, K extends keyof T>(object: T, key: K): T[K] {
   const descriptor = Object.getOwnPropertyDescriptor(object, key);
@@ -102,57 +105,109 @@ export function modelMatchesSource(
   }
 }
 
-function zipEntryCount(buffer: ArrayBuffer): number | undefined {
+interface ZipMember {
+  crc32: number;
+  compressedSize: number;
+  uncompressedSize: number;
+  method: number;
+}
+
+export function readModelSaveDirectory(buffer: ArrayBuffer): Map<string, ZipMember> | undefined {
   const view = new DataView(buffer);
   const footerSize = 22;
   const last = view.byteLength - footerSize;
   const first = Math.max(0, last - 0xffff);
-  for (let at = last; at >= first; at--) {
-    if (view.getUint32(at, true) !== 0x06054b50) continue;
-    const end = at + footerSize + view.getUint16(at + 20, true);
-    if (end > view.byteLength) continue;
-    if (end < view.byteLength) return undefined;
-
-    const count = view.getUint16(at + 10, true);
-    const directorySize = view.getUint32(at + 12, true);
-    const directoryOffset = view.getUint32(at + 16, true);
+  let footer = last;
+  for (; footer >= first; footer--) {
     if (
-      view.getUint32(at + 4, true) !== 0 || view.getUint16(at + 8, true) !== count ||
-      count === 0xffff || (at >= 20 && view.getUint32(at - 20, true) === 0x07064b50) ||
-      directorySize < count * 46 || directoryOffset + directorySize !== at ||
-      (count !== 0 && view.getUint32(directoryOffset, true) !== 0x02014b50)
+      view.getUint32(footer, true) === 0x06054b50 &&
+      footer + footerSize + view.getUint16(footer + 20, true) === view.byteLength
+    ) {
+      break;
+    }
+  }
+  if (footer < first) return undefined;
+
+  const entrySize = 46;
+  const count = view.getUint16(footer + 10, true);
+  const directorySize = view.getUint32(footer + 12, true);
+  let offset = view.getUint32(footer + 16, true);
+  if (
+    view.getUint32(footer + 4, true) !== 0 || view.getUint16(footer + 8, true) !== count ||
+    count === 0xffff || directorySize === 0xffffffff || offset === 0xffffffff ||
+    (footer >= 20 && view.getUint32(footer - 20, true) === 0x07064b50) ||
+    directorySize < count * entrySize || offset + directorySize !== footer
+  ) {
+    return undefined;
+  }
+
+  const members = new Map<string, ZipMember>();
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
+  for (let entry = 0; entry < count; entry++) {
+    if (offset + entrySize > footer || view.getUint32(offset, true) !== 0x02014b50) return undefined;
+    const nameSize = view.getUint16(offset + 28, true);
+    const next = offset + entrySize + nameSize +
+      view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
+    if (
+      nameSize === 0 || next > footer || view.getUint16(offset + 34, true) !== 0 ||
+      view.getUint32(offset + 42, true) === 0xffffffff ||
+      compressedSize === 0xffffffff || uncompressedSize === 0xffffffff
     ) {
       return undefined;
     }
-    return count;
+
+    const nameBytes = new Uint8Array(buffer, offset + entrySize, nameSize);
+    const utf8 = (view.getUint16(offset + 8, true) & 0x0800) !== 0;
+    const name = utf8
+      ? decoder.decode(nameBytes)
+      : Array.from(nameBytes, (byte) => byte < 0x80 ? String.fromCharCode(byte) : CP437_HIGH_BYTES[byte - 0x80]).join('');
+    if (utf8 && name.includes('\ufffd')) {
+      const encoded = new TextEncoder().encode(name);
+      if (encoded.length !== nameBytes.length || !nameBytes.every((byte, index) => byte === encoded[index])) {
+        return undefined;
+      }
+    }
+    if (members.has(name)) return undefined;
+    members.set(name, {
+      crc32: view.getUint32(offset + 16, true),
+      compressedSize,
+      uncompressedSize,
+      method: view.getUint16(offset + 10, true),
+    });
+    offset = next;
   }
-  return undefined;
+  return offset === footer ? members : undefined;
 }
 
-export function readModelSaveParts(buffer: ArrayBuffer) {
+function readModelSaveCore(buffer: ArrayBuffer): Uint8Array | undefined {
   const entries = unzipContainer(new Uint8Array(buffer));
-  const core = Object.hasOwn(entries, CORE_PROPERTIES) ? entries[CORE_PROPERTIES] : undefined;
-  const members = Object.entries(entries);
-  const reliable = Object.getPrototypeOf(entries) === Object.prototype &&
-    members.length === zipEntryCount(buffer) &&
-    members.every(([name]) => !(name in Object.prototype || name in Uint8Array.prototype));
-  return { core, parts: reliable ? new Map(members) : undefined };
+  return Object.hasOwn(entries, CORE_PROPERTIES) ? entries[CORE_PROPERTIES] : undefined;
 }
 
-export function samePartBytes(before?: Uint8Array, after?: Uint8Array): boolean {
+export function sameModelSaveCore(original: ArrayBuffer, written: ArrayBuffer): boolean {
+  const before = readModelSaveCore(original);
+  const after = readModelSaveCore(written);
   if (before === after) return true;
   return before !== undefined && after !== undefined && before.byteLength === after.byteLength &&
     before.every((byte, index) => byte === after[index]);
 }
 
 export function modelPartsRewrittenWarning(
-  original: Map<string, Uint8Array> | undefined,
-  written: Map<string, Uint8Array> | undefined
+  original: ArrayBuffer,
+  written: ArrayBuffer
 ): string | undefined {
   const guidance = 'Use createYrsSession/seedFromDocx/saveYrsDocx to keep unchanged content when editing.';
-  if (!original || !written) return `${MODEL_PARTS_REWRITTEN} (part names unavailable) ${guidance}`;
-  const paths = [...new Set([...original.keys(), ...written.keys()])]
-    .filter((path) => !samePartBytes(original.get(path), written.get(path)))
+  const before = readModelSaveDirectory(original);
+  const after = readModelSaveDirectory(written);
+  if (!before || !after) return `${MODEL_PARTS_REWRITTEN} (part names unavailable) ${guidance}`;
+  const paths = [...new Set([...before.keys(), ...after.keys()])]
+    .filter((path) => {
+      const old = before.get(path);
+      const current = after.get(path);
+      return !old || !current || old.crc32 !== current.crc32 || old.uncompressedSize !== current.uncompressedSize;
+    })
     .sort();
   if (!paths.length) return undefined;
   return `${MODEL_PARTS_REWRITTEN} ${JSON.stringify(paths)} ${guidance}`;
