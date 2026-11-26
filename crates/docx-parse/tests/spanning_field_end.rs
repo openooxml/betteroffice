@@ -249,14 +249,14 @@ fn splice_paragraphs(
 }
 
 fn save(source: &[u8], edit: Edit, route: WriteRoute) -> Result<Vec<u8>, Box<dyn Error>> {
-    save_story(source, edit, route, false)
+    save_story(source, edit, route, "/document/content")
 }
 
 fn save_story(
     source: &[u8],
     edit: Edit,
     route: WriteRoute,
-    in_sdt: bool,
+    story_path: &str,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     let parsed = parse_docx_s9_wire(source, S9ParseOptions::default())?;
     let mut package = serde_json::to_value(parsed.document.package)?;
@@ -270,11 +270,10 @@ fn save_story(
         "options": {"updateModifiedDate": false}
     });
     let digest = format!("{:x}", Sha256::digest(document_xml(source)?.as_bytes()));
-    let mut content = &mut request["document"]["content"];
-    if in_sdt {
-        content = &mut content[0]["content"];
-    }
-    let paragraphs = content.as_array_mut().ok_or("missing story blocks")?;
+    let paragraphs = request
+        .pointer_mut(story_path)
+        .and_then(Value::as_array_mut)
+        .ok_or("missing story blocks")?;
     if let Edit::Paragraph(edit) = edit {
         let plan = splice_paragraphs(
             paragraphs,
@@ -438,7 +437,12 @@ fn assert_save(
     let body = body(scenario);
     let source = package(&if in_sdt { block_sdt(&body) } else { body })?;
     let mut expected = inspect(&document_xml(&source)?);
-    let saved = save_story(&source, edit, route, in_sdt)?;
+    let story_path = if in_sdt {
+        "/document/content/0/content"
+    } else {
+        "/document/content"
+    };
+    let saved = save_story(&source, edit, route, story_path)?;
     let actual = inspect(&document_xml(&saved)?);
 
     match edit {
@@ -592,6 +596,24 @@ fn spanning_quote_keeps_its_complete_nested_result_field() -> Result<(), Box<dyn
 }
 
 #[test]
+fn spanning_quote_keeps_bookmarks_around_a_projected_pageref() -> Result<(), Box<dyn Error>> {
+    let start = r#"<w:bookmarkStart w:id="41" w:name="Entry"/>"#;
+    let stop = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let entry = entry(1, "ENTRYONE", PAGE_MARKERS[0]);
+    let source = paragraph(0, &format!("{}{start}{entry}{stop}", field_start("QUOTE")))
+        + &paragraph(1, &field_char("end"));
+    let expected = inspect(&source.replace(">ENTRYONE<", ">ENTRYONE edited<"));
+    for route in [WriteRoute::SourceParagraphs, WriteRoute::Whole] {
+        let saved = save(&package(&source)?, Edit::Text("ENTRYONE"), route)?;
+        let xml = document_xml(&saved)?;
+        assert_eq!(inspect(&xml), expected);
+        assert!(xml.contains(&format!("{start}<w:hyperlink")), "{xml}");
+        assert!(xml.contains(&format!("</w:hyperlink>{stop}")), "{xml}");
+    }
+    Ok(())
+}
+
+#[test]
 fn spanning_results_keep_links_without_page_numbers() -> Result<(), Box<dyn Error>> {
     let label = text_run("ENTRYONE");
     let control = format!(
@@ -668,6 +690,73 @@ fn whole_write_matches_an_end_only_paragraph_after_insertion() -> Result<(), Box
         WriteRoute::Whole,
     )?;
     assert_eq!(inspect(&document_xml(&saved)?), inspect(&expected));
+    Ok(())
+}
+
+#[test]
+fn whole_write_matches_repeated_toc_entries_by_anchor() -> Result<(), Box<dyn Error>> {
+    let repeated = |number| entry(number, "Same title", "7");
+    let second = paragraph(1, &repeated(2));
+    let source = paragraph(0, &(field_start(r"TOC \h") + &repeated(1)))
+        + &second
+        + &paragraph(2, &(repeated(3) + &field_char("end")))
+        + &paragraph(3, &text_run(BODY_NEXT));
+    let expected = source.replace(&second, &(second.clone() + &paragraph(9, &text_run(INSERTED))));
+    let saved = save(
+        &package(&without_paragraph_ids(&source))?,
+        Edit::Paragraph(ParagraphEdit::InsertAfter(1)),
+        WriteRoute::Whole,
+    )?;
+    let xml = document_xml(&saved)?;
+    assert_eq!(inspect(&xml), inspect(&expected));
+    for number in 1..=3 {
+        assert!(xml.contains(&format!(r#"w:anchor="_Toc{number}""#)), "{xml}");
+    }
+    Ok(())
+}
+
+#[test]
+fn block_bookmarks_between_toc_entries_keep_the_field_open() -> Result<(), Box<dyn Error>> {
+    let start = r#"<w:bookmarkStart w:id="41" w:name="Entry"/>"#;
+    let stop = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let middle = paragraph(1, &entry(2, ENTRY_TWO, PAGE_MARKERS[1]));
+    let source = body("TA").replace(&middle, &format!("{start}{middle}{stop}"));
+    let packaged = package(&source)?;
+    for route in [
+        WriteRoute::Whole,
+        WriteRoute::SourceParagraphs,
+        WriteRoute::ChangedParaIds,
+    ] {
+        for label in ["ENTRYONE", "ENTRYTHREE"] {
+            let saved = save(&packaged, Edit::Text(label), route)?;
+            let xml = document_xml(&saved)?;
+            let expected = source.replace(label, &format!("{label} edited"));
+            assert_eq!(inspect(&xml), inspect(&expected));
+            assert!(xml.contains(&format!("</w:p>{start}<w:p")), "{xml}");
+            assert!(xml.contains(&format!("</w:p>{stop}<w:p")), "{xml}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_toc_closes_after_the_bookmark_end_in_the_last_entry() -> Result<(), Box<dyn Error>> {
+    let start = r#"<w:bookmarkStart w:id="41" w:name="Entry"/>"#;
+    let stop = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let last = entry(3, "ENTRYTHREE", PAGE_MARKERS[2]);
+    let source = body("TA").replace(&last, &format!("{start}{last}{stop}"));
+    let expected = inspect(&source.replace("ENTRYTHREE", "ENTRYTHREE edited"));
+    for route in [
+        WriteRoute::Whole,
+        WriteRoute::SourceParagraphs,
+        WriteRoute::ChangedParaIds,
+    ] {
+        let saved = save(&package(&source)?, Edit::Text("ENTRYTHREE"), route)?;
+        let xml = document_xml(&saved)?;
+        assert_eq!(inspect(&xml), expected);
+        let closing = format!("</w:hyperlink>{stop}{}", field_char("end"));
+        assert!(xml.contains(&closing), "{xml}");
+    }
     Ok(())
 }
 
@@ -950,6 +1039,47 @@ fn cross_container_closes_keep_the_legacy_opening_paragraph() -> Result<(), Box<
         );
         assert!(xml.contains(&container), "{xml}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_field_spanning_paragraphs_in_one_cell_keeps_its_end() -> Result<(), Box<dyn Error>> {
+    let source = format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", body("S1"));
+    let packaged = package(&source)?;
+    for route in [WriteRoute::ChangedParaIds, WriteRoute::Whole] {
+        for label in ["SPANSTART", "SPANEND"] {
+            let saved = save_story(
+                &packaged,
+                Edit::Text(label),
+                route,
+                "/document/content/0/rows/0/cells/0/content",
+            )?;
+            let expected = source.replace(label, &format!("{label} edited"));
+            assert_eq!(inspect(&document_xml(&saved)?), inspect(&expected));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cross_cell_closes_keep_the_legacy_opening_paragraph() -> Result<(), Box<dyn Error>> {
+    let end = field_char("end");
+    let opening = field_start("QUOTE") + &text_run("SPANSTART");
+    let first_cell = paragraph(0, &opening) + &paragraph(1, &text_run("CONTINUATION"));
+    let second_cell = paragraph(2, &end);
+    let source = package(&format!(
+        "<w:tbl><w:tr><w:tc>{first_cell}</w:tc><w:tc>{second_cell}</w:tc></w:tr></w:tbl>"
+    ))?;
+    let saved = save_story(
+        &source,
+        Edit::Text("SPANSTART"),
+        WriteRoute::ChangedParaIds,
+        "/document/content/0/rows/0/cells/0/content",
+    )?;
+    let xml = document_xml(&saved)?;
+    let first_cell = xml.split_once("</w:tc>").unwrap().0;
+    assert_eq!(inspect(first_cell).fields[0].end, Some(0), "{xml}");
+    assert!(xml.contains(&format!("<w:tc>{second_cell}</w:tc>")), "{xml}");
     Ok(())
 }
 

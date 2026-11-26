@@ -380,6 +380,29 @@ test('editing both sides of a TOC entry keeps the PAGEREF result after the label
   }
 }, 30_000);
 
+test('editing numbered first and last TOC entries keeps their PAGEREF instructions', async () => {
+  const entries = [['ENTRYONE', 'PAGEONE'], ['ENTRYTHREE', 'PAGETHREE']] as const;
+  const tab = '<w:r><w:tab/></w:r>';
+  const source = body('TA')
+    .replace(textRun('ENTRYONE'), textRun('1') + tab + textRun('ENTRYONE'))
+    .replace(textRun('ENTRYTHREE'), textRun('3') + tab + textRun('ENTRYTHREE'));
+  for (const fullWrite of [false, true]) {
+    for (const [label, page] of entries) {
+      const xml = await editAndSave(source, session => {
+        insertInText(session, label, 1, ' LONGER TITLE ');
+        insertInText(session, page, 1, ' NEW PAGE ');
+      }, fullWrite);
+      const expected = source.replace(label, label[0] + ' LONGER TITLE ' + label.slice(1))
+        .replace(page, page[0] + ' NEW PAGE ' + page.slice(1));
+      expect(inspect(xml)).toEqual(inspect(expected));
+      const link = [...xml.matchAll(/<w:hyperlink\b[^>]*>([\s\S]*?)<\/w:hyperlink>/g)]
+        .find(([, content]) => content?.includes('LONGER TITLE'))?.[1] ?? '';
+      expect(link.match(/<w:tab\b/g) ?? []).toHaveLength(2);
+      expect(link.lastIndexOf('<w:tab')).toBeLessThan(link.indexOf('w:fldCharType="begin"'));
+    }
+  }
+}, 30_000);
+
 test('a spanning QUOTE keeps a complete nested field in its edited opening result', async () => {
   const source = body('TA').replace('TOC \\o "1-3" \\h \\z \\u', 'QUOTE');
   for (const fullWrite of [false, true]) {

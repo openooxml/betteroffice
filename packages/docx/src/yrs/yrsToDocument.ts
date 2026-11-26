@@ -3778,21 +3778,18 @@ function replaceFields(
   return changed ? next : content;
 }
 
-function pageReferenceTab(children: readonly HyperlinkContent[]): number | undefined {
+function pageReferenceTabs(children: readonly HyperlinkContent[]): number[] | undefined {
   let offset = 0;
-  let tab: number | undefined;
+  const tabs: number[] = [];
   for (const child of children) {
     if (child.type !== 'run') return undefined;
     for (const item of child.content) {
       if (item.type === 'fieldChar' || item.type === 'instrText') return undefined;
       offset += runContentLength(item);
-      if (item.type === 'tab') {
-        if (tab !== undefined) return undefined;
-        tab = offset;
-      }
+      if (item.type === 'tab') tabs.push(offset);
     }
   }
-  return tab;
+  return tabs;
 }
 
 function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
@@ -3805,8 +3802,6 @@ function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
       );
     }) };
   });
-  const tab = pageReferenceTab(live);
-  if (tab === undefined) return link;
   const children = source.structuredChildren ?? source.children;
   const start = children.findIndex(child => child.type === 'run' &&
     child.content.some(item => item.type === 'fieldChar'));
@@ -3824,16 +3819,19 @@ function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
   const types = markers.flatMap(run => run.content.flatMap(item => item.type === 'fieldChar' ? [item.charType] : []));
   const instruction = markers.flatMap(run => run.content.flatMap(item => item.type === 'instrText' ? [item.text] : [])).join('');
   const label = children.slice(0, start);
-  const labelEnd = pageReferenceTab(label);
+  const labelTabs = pageReferenceTabs(label);
+  const tabs = pageReferenceTabs(live);
+  const separator = tabs?.at(-1);
+  const length = live.reduce((sum, child) => sum + linkChildLength(child), 0);
   if (
-    labelEnd === undefined || labelEnd !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
+    separator === undefined || tabs?.length !== labelTabs?.length ||
+    labelTabs?.at(-1) !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
     types.join(',') !== 'begin,separate,end' || !/^\s*PAGEREF\b/i.test(instruction) ||
     children[start] !== markers[0] || children.at(-1) !== markers.at(-1) ||
     !markers.at(-1)!.content.every(item => item.type === 'fieldChar' && item.charType === 'end')
   ) return link;
-  const length = live.reduce((sum, child) => sum + linkChildLength(child), 0);
   const restored = insertBoundaries(live, markers.map((_, id) => ({
-    id, kind: 'start', offset: id === markers.length - 1 ? length : tab,
+    id, kind: 'start', offset: id === markers.length - 1 ? length : separator,
   })), boundary => markers[boundary.id]!);
   return linkPart(link, restored as HyperlinkContent[])!;
 }

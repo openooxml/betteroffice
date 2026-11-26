@@ -1121,9 +1121,7 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
     (end_later
         && nodes.iter().flat_map(field_runs).eq(&field.field_result)
         && closed_inline_fields(nodes)
-        && (field.field_type == "TOC"
-            || !inline_holds_field(nodes)
-            || field_result_bookmarks(field).is_empty())
+        && (!result_has_unprojected_fields(nodes) || field_result_bookmarks(field).is_empty())
         && nodes.iter().all(|node| match node {
             InlineNode::Hyperlink(link) => {
                 link.structured_children.as_ref().is_none_or(|children| {
@@ -1137,6 +1135,22 @@ fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[Inli
         })
         && !super::splice::spanning_result_has_unprojected_comments(nodes))
     .then_some((nodes, true))
+}
+
+fn result_has_unprojected_fields(nodes: &[InlineNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        InlineNode::Run(_) => false,
+        InlineNode::Hyperlink(link) => link
+            .structured_children
+            .as_deref()
+            .unwrap_or(&link.children)
+            .iter()
+            .any(|child| {
+                !matches!(child, InlineNode::Run(_))
+                    && inline_holds_field(std::slice::from_ref(child))
+            }),
+        _ => inline_holds_field(std::slice::from_ref(node)),
+    })
 }
 
 fn closed_inline_fields(nodes: &[InlineNode]) -> bool {

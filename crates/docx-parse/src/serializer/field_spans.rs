@@ -1,9 +1,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::block::{BlockContent, story_block_elements};
+use crate::block::{BlockContent, is_bookmark_block, story_block_elements, table_part_elements};
 use crate::inline::{ComplexField, InlineNode, RunContent, parse_run};
 use crate::paragraph::{Paragraph, ParagraphContent, TrackedInline, parse_tracked_change_info};
 use crate::paragraph_identity::parse_paragraph_id;
+use crate::table::Table;
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 
 #[derive(Clone, Debug, Default)]
@@ -41,7 +42,12 @@ fn story_has_span(model: &[BlockContent]) -> bool {
                 if spans_paragraphs(field))
         }),
         BlockContent::BlockSdt(sdt) => story_has_span(&sdt.content),
-        _ => false,
+        BlockContent::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| story_has_span(&cell.content)),
+        BlockContent::RawXml(_) => false,
     })
 }
 
@@ -291,6 +297,28 @@ fn unique<K: std::hash::Hash + Eq>(
     indices
 }
 
+fn single_anchor<'a>(mut anchors: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    let anchor = anchors.next()?;
+    (anchors.next().is_none() && !anchor.is_empty()).then_some(anchor)
+}
+
+fn live_anchor(paragraph: &Paragraph) -> Option<&str> {
+    fn anchor(node: &InlineNode) -> Option<&str> {
+        match node {
+            InlineNode::Hyperlink(link) => link.anchor.as_deref(),
+            _ => None,
+        }
+    }
+    single_anchor(paragraph.content.iter().filter_map(|child| match child {
+        ParagraphContent::Inline(InlineNode::ComplexField(field)) if spans_paragraphs(field) => {
+            let nodes = field.structured_result.as_ref()?.inline.as_deref()?;
+            single_anchor(nodes.iter().filter_map(anchor))
+        }
+        ParagraphContent::Inline(node) => anchor(node),
+        _ => None,
+    }))
+}
+
 fn project_paragraphs(
     source: &[(Vec<u32>, &XmlElement)],
     model: &[BlockContent],
@@ -334,8 +362,23 @@ fn project_paragraphs(
             })
         })
         .collect();
+    let is_removed = |index: usize| {
+        source[index]
+            .1
+            .paragraph_ordinal
+            .is_some_and(|ordinal| removed.contains(&ordinal))
+    };
     let mut used: HashSet<_> = matches.iter().flatten().copied().collect();
     if source.len() != model.len() {
+        let source_anchors = unique(source.iter().map(|(_, element)| {
+            element.paragraph_ordinal?;
+            single_anchor(
+                element
+                    .children_named("w", "hyperlink")
+                    .filter_map(|link| link.attribute(Some("w"), "anchor")),
+            )
+        }));
+        let live_anchors = unique(model.iter().map(|block| live_anchor(paragraph(block)?)));
         let source_text = unique(
             paragraphs
                 .iter()
@@ -346,27 +389,19 @@ fn project_paragraphs(
             .map(|block| paragraph(block).map(visible_text))
             .collect();
         let live_text = unique(texts.iter().map(Option::as_ref));
-        for (text, index) in source_text {
-            let (Some(index), Some(live)) = (index, live_text.get(text).copied().flatten()) else {
-                continue;
-            };
-            if matches[index].is_none()
-                && !source[index]
-                    .1
-                    .paragraph_ordinal
-                    .is_some_and(|ordinal| removed.contains(&ordinal))
-                && used.insert(live)
-            {
+        let anchors = source_anchors.into_iter().filter_map(|(anchor, index)| {
+            let live = live_anchors.get(anchor).copied().flatten()?;
+            Some((index?, live))
+        });
+        let texts = source_text
+            .into_iter()
+            .filter_map(|(text, index)| Some((index?, live_text.get(text).copied().flatten()?)));
+        for (index, live) in anchors.chain(texts) {
+            if matches[index].is_none() && !is_removed(index) && used.insert(live) {
                 matches[index] = Some(live);
             }
         }
     }
-    let is_removed = |index: usize| {
-        source[index]
-            .1
-            .paragraph_ordinal
-            .is_some_and(|ordinal| removed.contains(&ordinal))
-    };
     let mut prior = (0, 0);
     for (next_source, next_model) in matches
         .clone()
@@ -388,6 +423,7 @@ fn project_paragraphs(
                                 && control_id(source[index].1)
                                     == sdt.properties.id.map(f64::to_bits)
                         }
+                        BlockContent::Table(_) => source[index].1.matches_name("w", "tbl"),
                         _ => false,
                     }
                     && used.insert(live)
@@ -441,6 +477,38 @@ fn paragraph(block: &BlockContent) -> Option<&Paragraph> {
         BlockContent::Paragraph(paragraph) => Some(paragraph),
         _ => None,
     }
+}
+
+fn bookmark(element: &XmlElement) -> Option<(&str, f64)> {
+    match element.name.as_str() {
+        name @ ("w:bookmarkStart" | "w:bookmarkEnd") => {
+            Some((name, element.parse_numeric_attribute(Some("w"), "id", 1.0)?))
+        }
+        _ => None,
+    }
+}
+
+fn has_inline_bookmark(element: &XmlElement, key: (&str, f64)) -> bool {
+    element.child_elements().any(|child| {
+        bookmark(child) == Some(key)
+            || (child.name != "w:txbxContent" && has_inline_bookmark(child, key))
+    })
+}
+
+fn crosses_inline_bookmark(source: &[(Vec<u32>, &XmlElement)]) -> bool {
+    source.iter().any(|(_, element)| {
+        let Some((name, id)) = bookmark(element) else {
+            return false;
+        };
+        let opposite = if name == "w:bookmarkStart" {
+            "w:bookmarkEnd"
+        } else {
+            "w:bookmarkStart"
+        };
+        source.iter().any(|(_, paragraph)| {
+            paragraph.name == "w:p" && has_inline_bookmark(paragraph, (opposite, id))
+        })
+    })
 }
 
 fn anchored_offset(before: &str, after: &str, current: &str) -> Option<usize> {
@@ -536,6 +604,47 @@ fn run_boundary(
         })
         .collect::<Option<Vec<_>>>()?;
     (original[..cut] == live[..cut] || original[cut..] == live[cut..]).then_some(cut)
+}
+
+fn bookmark_boundary(
+    source: &XmlElement,
+    closing: &Closing<'_>,
+    paragraph: &Paragraph,
+) -> Option<usize> {
+    if !closing.standalone() {
+        return None;
+    }
+    let marker = closing.revision.unwrap_or(closing.run);
+    let mut children = source.child_elements();
+    let mut previous = None;
+    for child in children.by_ref() {
+        if std::ptr::eq(child, marker) {
+            break;
+        }
+        previous = Some(child);
+    }
+    let live_index = |element: &XmlElement| {
+        let key = bookmark(element)?;
+        let mut matches = paragraph
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, content)| match content {
+                ParagraphContent::Inline(InlineNode::BookmarkStart(start)) => {
+                    key == ("w:bookmarkStart", start.id)
+                }
+                ParagraphContent::Inline(InlineNode::BookmarkEnd(end)) => {
+                    key == ("w:bookmarkEnd", end.id)
+                }
+                _ => false,
+            });
+        let (index, _) = matches.next()?;
+        matches.next().is_none().then_some(index)
+    };
+    previous
+        .and_then(live_index)
+        .map(|index| index + 1)
+        .or_else(|| children.next().and_then(live_index))
 }
 
 fn place(
@@ -639,7 +748,9 @@ fn place_closing(
         content.push(marker);
         return Some(content);
     }
-    if let Some(boundary) = run_boundary(source, closing, paragraph) {
+    if let Some(boundary) = bookmark_boundary(source, closing, paragraph)
+        .or_else(|| run_boundary(source, closing, paragraph))
+    {
         let mut content = paragraph.content.clone();
         content.insert(boundary, marker);
         return Some(content);
@@ -748,6 +859,35 @@ impl FieldSpans {
         plan
     }
 
+    fn plan_table(
+        &mut self,
+        source: &XmlElement,
+        table: &Table,
+        removed: &HashSet<u32>,
+        selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
+    ) {
+        let rows = table_part_elements(source, "tr");
+        if rows.len() != table.rows.len() {
+            return;
+        }
+        for ((_, source_row), row) in rows.into_iter().zip(&table.rows) {
+            let cells = table_part_elements(source_row, "tc");
+            if cells.len() != row.cells.len() {
+                continue;
+            }
+            for ((_, source_cell), cell) in cells.into_iter().zip(&row.cells) {
+                if story_has_span(&cell.content) {
+                    self.plan_story(
+                        &story_block_elements(source_cell),
+                        &cell.content,
+                        removed,
+                        selected,
+                    );
+                }
+            }
+        }
+    }
+
     fn plan_story(
         &mut self,
         source: &[(Vec<u32>, &XmlElement)],
@@ -772,25 +912,35 @@ impl FieldSpans {
         let model_groups: Vec<_> = model
             .iter()
             .scan(0usize, |group, block| {
-                *group += usize::from(paragraph(block).is_none());
+                *group += usize::from(paragraph(block).is_none() && !is_bookmark_block(block));
                 Some(*group)
             })
             .collect();
         let mut pending = None;
         for (end, entry) in paragraphs.iter_mut().enumerate() {
             let Some(entry) = entry else {
+                let element = source[end].1;
+                if matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
+                    continue;
+                }
                 pending = None;
-                if let Some(index) = matches[end]
-                    && let BlockContent::BlockSdt(sdt) = &model[index]
-                    && story_has_span(&sdt.content)
-                    && let Some(content) = source[end].1.child("w", "sdtContent")
-                {
-                    self.plan_story(
-                        &story_block_elements(content),
-                        &sdt.content,
-                        removed,
-                        selected,
-                    );
+                if let Some(index) = matches[end] {
+                    match &model[index] {
+                        BlockContent::BlockSdt(sdt) if story_has_span(&sdt.content) => {
+                            if let Some(content) = element.child("w", "sdtContent") {
+                                self.plan_story(
+                                    &story_block_elements(content),
+                                    &sdt.content,
+                                    removed,
+                                    selected,
+                                );
+                            }
+                        }
+                        BlockContent::Table(table) => {
+                            self.plan_table(element, table, removed, selected);
+                        }
+                        _ => {}
+                    }
                 }
                 continue;
             };
@@ -890,7 +1040,9 @@ impl FieldSpans {
             }
             None => return,
         };
-        if model_groups[owner] != model_groups[target] {
+        if model_groups[owner] != model_groups[target]
+            || crosses_inline_bookmark(&source[opening.block..=end])
+        {
             return;
         }
         let Some(closer) = paragraph(&model[target]) else {
