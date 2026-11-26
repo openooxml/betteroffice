@@ -3059,16 +3059,11 @@ fn field_payload_with_projection(
         .flat_map(cached_run_texts)
         .collect();
     let has_cached_result = !cached_text.is_empty();
-    let display_text: String = match cached_result_fragments(
-        field_value,
-        runs,
-        style_formatting,
-        styles,
-        projected,
-    ) {
-        Some(fragments) => fragments.into_iter().collect(),
-        None => cached_text,
-    };
+    let display_text: String =
+        match cached_result_fragments(field_value, runs, style_formatting, styles, projected) {
+            Some(fragments) => fragments.into_iter().collect(),
+            None => cached_text,
+        };
     let formatting = field_formatting_from_runs(field_value, runs);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
@@ -9816,7 +9811,11 @@ mod tests {
         assert_eq!(payload["displayText"], json!("Shown"));
     }
 
-    fn quote_field_xml(result: &str, begin_properties: &str, instruction_properties: &str) -> String {
+    fn quote_field_xml(
+        result: &str,
+        begin_properties: &str,
+        instruction_properties: &str,
+    ) -> String {
         format!(
             concat!(
                 r#"<w:r>{}<w:fldChar w:fldCharType="begin"/></w:r>"#,
@@ -9836,7 +9835,10 @@ mod tests {
 
     fn seeded_field_payload(content: &str, character_style: &str) -> BTreeMap<String, Any> {
         let bytes = fixture::Package::new(&fixture::para("00000001", content))
-            .styles(&format!(r#"<w:styles {}>{character_style}</w:styles>"#, fixture::NS))
+            .styles(&format!(
+                r#"<w:styles {}>{character_style}</w:styles>"#,
+                fixture::NS
+            ))
             .bytes();
         let doc = EditingDoc::new(71);
         seed_from_docx(&doc, &bytes).unwrap();
@@ -9870,7 +9872,10 @@ mod tests {
 
     #[test]
     fn a_matching_hidden_begin_and_first_result_respect_the_later_run_style() {
-        let result = format!("<w:r>{VANISH}<w:t>First</w:t></w:r>{}", fixture::run("Plain"));
+        let result = format!(
+            "<w:r>{VANISH}<w:t>First</w:t></w:r>{}",
+            fixture::run("Plain")
+        );
         let inner = quote_field_xml(&result, VANISH, "");
         let owner = quote_field_xml(&inner, "", "");
         let payload = seeded_field_payload(&owner, "");
