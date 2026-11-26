@@ -11,12 +11,6 @@ export function boundary(text: string, offset: number): boolean {
       text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff);
 }
 
-export function graphemeRange(text: string, start: number, end: number): boolean {
-  const segments = graphemes.segment(text);
-  return (start === text.length || segments.containing(start)?.index === start) &&
-    (end === text.length || segments.containing(end)?.index === end);
-}
-
 function graphemeCuts(text: string): Set<number> {
   const cuts = new Set<number>();
   for (const { index } of graphemes.segment(text)) if (boundary(text, index)) cuts.add(index);
@@ -69,7 +63,7 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
   const oldOffsets = tokenOffsets(oldText, oldCuts, left, left + trimmed.oldText.length);
   const newOffsets = tokenOffsets(newText, newCuts, left, left + trimmed.newText.length);
   const oldCount = oldOffsets.length - 1, newCount = newOffsets.length - 1;
-  const splice = (oldFrom: number, oldTo: number, newFrom: number, newTo: number): ProposalChange => ({
+  const splice = (oldFrom: number, oldTo: number, newFrom: number, newTo: number): ProposalChange => trimChange({
     ...change, start: change.start + oldOffsets[oldFrom]!,
     oldText: oldText.slice(oldOffsets[oldFrom], oldOffsets[oldTo]),
     newText: newText.slice(newOffsets[newFrom], newOffsets[newTo]),
@@ -106,5 +100,5 @@ export function spliceChange(change: ProposalChange): ProposalChange[] {
     }
   }
   if (oldFrom !== oldCount || newFrom !== newCount) splices.push(splice(oldFrom, oldCount, newFrom, newCount));
-  return splices;
+  return splices.filter(({ oldText, newText }) => oldText || newText);
 }

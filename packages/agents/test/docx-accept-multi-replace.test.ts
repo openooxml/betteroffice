@@ -197,6 +197,14 @@ test('accepts a lone recorded insertion and keeps the untouched run byte-identic
     paragraph => expectRuns(paragraph, [untouched], [['fii', false], [' ti', false]]));
 }, 30_000);
 
+test('acceptance retains a shared suffix run inside a changed token byte-identically', async () => {
+  const untouched = run(3, 'a&#x62;').replace('<w:t', '<w:rPr><w:noProof/></w:rPr><w:t');
+  await checkProposal([run(1, 'u '), run(2, 'cd.'), untouched, run(4, ' v')],
+    [{ query: 'u cd.ab v', newText: 'U EF-ab V' }], paragraph => {
+      expectRuns(paragraph, [untouched], [['U ', false], ['EF-', false], ['a&#x62;', false], [' V', false]]);
+    });
+}, 30_000);
+
 test('accepting 33 replacements retains every KEEP run byte-identically', async () => {
   const kept = Array.from({ length: 32 }, (_, i) => run(2 * i + 2, ' K&#x45;EP ', true));
   const runs = kept.flatMap((xml, i) => [run(2 * i + 1, 'a'), xml]);
@@ -208,6 +216,30 @@ test('accepting 33 replacements retains every KEEP run byte-identically', async 
     expect(runsOf(paragraph).filter(xml => runText(xml)[0] === 'b')).toHaveLength(33);
   });
 }, 30_000);
+
+for (const attached of [false, true]) {
+  test(`accepting 129 replacements retains every KEEP run byte-identically, attached=${attached}`, async () => {
+    const count = 129;
+    const kept = Array.from({ length: count - 1 }, (_, i) => run(2 * i + 2, ' K&#x45;EP ', true));
+    const runs = kept.flatMap((xml, i) => [run(2 * i + 1, 'a'), xml]);
+    runs.push(run(2 * count - 1, 'a'));
+    const owner = await openDocx(await fixture(runs));
+    const doc = attached ? attachDocx(owner.session) : owner;
+    try {
+      const [hit] = doc.grep({ query: Array(count).fill('a').join(' KEEP ') }).matches;
+      const newText = Array(count).fill('b').join(' KEEP ');
+      const proposal = doc.propose({ author: 'test', edits: [{ match: hit!.match, newText }] });
+      if (attached) expect(proposal.records).toHaveLength(1);
+      expect(await doc.accept(proposal.id)).toMatchObject({ status: 'accepted' });
+      expect(doc.read(hit!.ref).text).toBe(newText);
+      await checkExport(() => doc.export(), paragraph => {
+        const exported = runsOf(paragraph);
+        expect(exported.filter(xml => runText(xml)[0] === 'b')).toHaveLength(count);
+        for (const sourceRun of kept) expect(exported).toContain(sourceRun);
+      });
+    } finally { doc.close(); if (attached) owner.close(); }
+  }, 30_000);
+}
 
 for (const kind of ['headless', 'attached', 'set_runs', 'crossing runs'] as const) {
   test(`${kind} DOCX export keeps every paragraph patched by base alignment`, async () => {

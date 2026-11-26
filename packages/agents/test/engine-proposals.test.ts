@@ -691,8 +691,9 @@ test('attached DOCX refuses acceptance of a preview joined by same-author typing
     expect(doc.review(proposal.id).status).toBe('pending');
     expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(['proposed']);
     expect((await doc.export(proposal.id)).length).toBeGreaterThan(0);
+    const snapshot = owner.session.getProposals();
     doc.close();
-    expect(owner.session.getProposals().proposals).toEqual([]);
+    expect(owner.session.getProposals()).toEqual(snapshot);
     expect(owner.session.storySegments('body')).toEqual(text);
   } finally { doc.close(); owner.close(); }
 });
@@ -1070,6 +1071,8 @@ test('attached DOCX peer stales the trimmed span when an edit changes retained t
 for (const { name, original, first, second, expectedStart, expectedText } of [
   { name: 'ignores unchanged context outside the trimmed span', original: 'alpha guard center',
     first: ['alpha guard center', 'ALPHA guard center'], second: ['center', 'CENTER'], expectedStart: 12, expectedText: 'ALPHA guard CENTER' },
+  { name: 'keeps a pending edit between accepted splices', original: 'alpha center omega',
+    first: ['alpha center omega', 'ALPHA center OMEGA'], second: ['center', 'CENTER'], expectedStart: 6, expectedText: 'ALPHA CENTER OMEGA' },
   { name: 'rebases the reported change and its splice past a boundary insertion', original: 'alpha beta',
     first: ['alpha', 'alpha!'], second: [' beta', 'BETA'], expectedStart: 6, expectedText: 'alpha!BETA' },
 ] as const) test(`attached DOCX peer ${name}`, async () => {
@@ -1108,6 +1111,27 @@ test('attached DOCX peer refuses split insertions when an accepted edit changes 
     expect(doc.review(pending.id).staleRefs).toEqual([p.ref]);
     await expect(doc.accept(pending.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
     expect(doc.read(p.ref).text).toBe('alpha guard changed guard omega');
+  } finally { doc.close(); owner.close(); }
+});
+
+test('attached DOCX peer stales an insertion when its original prefix changes at the same offsets', async () => {
+  const oldText = 'Executive summary';
+  const owner = await proposalRaceFixture(oldText);
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const p = doc.list({ story: 'body' }).items[0];
+    const insertion = await doc.proposeAsync({ author: 'Agent', edits: [{ ...p, oldText, newText: `${oldText} proposed` }] });
+    const prefix = await doc.proposeAsync({ author: 'Agent', edits: [{ ...p, oldText: 'Executive', newText: 'Alternate' }] });
+    await doc.accept(prefix.id);
+    expect(doc.review(insertion.id).staleRefs).toEqual([p.ref]);
+    const snapshot = owner.session.getProposals();
+    await expect(doc.accept(insertion.id)).rejects.toMatchObject({ code: 'STALE_TARGET' });
+    expect(owner.session.getProposals()).toEqual(snapshot);
+    expect(doc.read(p.ref).text).toBe('Alternate summary');
   } finally { doc.close(); owner.close(); }
 });
 
@@ -1179,6 +1203,33 @@ test('attached DOCX close leaves records staged by an in-flight peer intact', as
     resume();
     await expect(proposal).rejects.toMatchObject({ code: 'CLOSED' });
     expect(owner.session.getProposals().proposals.map(record => record.state)).toEqual(['proposed', 'proposed']);
+  } finally { resume(); doc.close(); owner.close(); }
+});
+
+test('attached DOCX preserves the base rollback when registered staging replies after close', async () => {
+  const owner = await proposalRaceFixture('alpha');
+  let resume = () => {};
+  const staged = new Promise<void>(resolve => { resume = () => resolve(); });
+  let withdrawals = 0;
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) {
+      const result = owner.session.proposeChanges(request);
+      await staged;
+      return result;
+    },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) { withdrawals++; return owner.session.withdrawProposals(request); },
+  } });
+  try {
+    const [hit] = doc.grep({ query: 'alpha' }).matches;
+    const proposal = doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+    expect(doc.review(doc.listProposals()[0]!.id).records).toHaveLength(1);
+    expect(owner.session.getProposals().proposals).toHaveLength(1);
+    doc.close();
+    resume();
+    await expect(proposal).rejects.toMatchObject({ code: 'CLOSED' });
+    expect(withdrawals).toBe(1);
+    expect(owner.session.getProposals().proposals).toEqual([]);
   } finally { resume(); doc.close(); owner.close(); }
 });
 
@@ -1488,38 +1539,57 @@ for (const peer of [false, true]) for (const action of ['accept', 'reject', 'dis
 }
 
 for (const peer of [false, true]) {
-  test(`attached DOCX bounds ownership history, peer=${peer}`, async () => {
+  test(`attached DOCX bounds ownership by held proposals across eviction cycles, peer=${peer}`, async () => {
     const owner = await proposalRaceFixture();
     const doc = attachDocx(owner.session, peer ? { editPeer: {
       async proposeChanges(request) { return owner.session.proposeChanges(request); },
       async setProposalStates(request) { return owner.session.setProposalStates(request); },
       async withdrawProposals(request) { return owner.session.withdrawProposals(request); },
     } } : {});
-    const tracking = doc as unknown as { ownStateVersions: Map<string, Set<number>>; ownWithdrawals: Set<string> };
     try {
       const hit = doc.grep({ query: 'alpha' }).matches[0];
-      const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
-      const ids = owner.session.getProposals().proposals.map(record => record.id);
-      for (let index = 0; index < 300; index++) {
-        tracking.ownStateVersions.set(`history${index}`, new Set(Array.from({ length: 300 }, (_, version) => version)));
-        tracking.ownWithdrawals.add(`history${index}`);
+      for (let index = 0; index < 70; index++) {
+        const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+        await doc.rejectAsync(proposal.id);
+        const heldIds = new Set([...doc['proposals'].values()].flatMap(held => held.engine.map(record => record.id)));
+        expect([...doc['ownStateVersions'].keys()].every(id => heldIds.has(id))).toBe(true);
+        expect([...doc['ownWithdrawals']].every(id => heldIds.has(id))).toBe(true);
       }
-      await doc.rejectAsync(proposal.id);
-      expect(tracking.ownStateVersions.size).toBeLessThanOrEqual(256);
-      expect(tracking.ownWithdrawals.size).toBeLessThanOrEqual(256);
-      expect([...tracking.ownStateVersions.values()].every(versions => versions.size <= 256)).toBe(true);
-      expect(tracking.ownStateVersions.get('history299')?.has(299)).toBe(true);
-      expect(tracking.ownStateVersions.get('history299')?.has(0)).toBe(false);
-      expect(tracking.ownWithdrawals.has('history299')).toBe(true);
-      expect(tracking.ownStateVersions.has('history0')).toBe(false);
-      expect(tracking.ownWithdrawals.has('history0')).toBe(false);
-      for (const id of ids) {
-        expect(tracking.ownStateVersions.has(id)).toBe(false);
-        expect(tracking.ownWithdrawals.has(id)).toBe(false);
-      }
+      expect(doc.listProposals()).toHaveLength(64);
+      expect(doc.listProposals()[0]!.id).toBe('proposal7');
     } finally { doc.close(); owner.close(); }
-  });
+  }, 30_000);
 }
+
+test('attached DOCX ignores ownership from a late withdrawal reply after discard', async () => {
+  const owner = await proposalRaceFixture();
+  let resume = () => {};
+  const reply = new Promise<void>(resolve => { resume = () => resolve(); });
+  let notify = () => {};
+  const withdrawing = new Promise<void>(resolve => { notify = () => resolve(); });
+  const doc = attachDocx(owner.session, { editPeer: {
+    async proposeChanges(request) { return owner.session.proposeChanges(request); },
+    async setProposalStates(request) { return owner.session.setProposalStates(request); },
+    async withdrawProposals(request) {
+      const result = owner.session.withdrawProposals(request);
+      notify();
+      await reply;
+      return result;
+    },
+  } });
+  try {
+    const [hit] = doc.grep({ query: 'alpha' }).matches;
+    const proposal = await doc.proposeAsync({ author: 'Agent', edits: [{ match: hit.match, newText: 'ALPHA' }] });
+    const rejection = doc.rejectAsync(proposal.id);
+    await withdrawing;
+    await doc.discardAsync(proposal.id);
+    expect(doc.listProposals()).toEqual([]);
+    resume();
+    await rejection;
+    expect(doc['ownStateVersions'].size).toBe(0);
+    expect(doc['ownWithdrawals'].size).toBe(0);
+  } finally { resume(); doc.close(); owner.close(); }
+});
 
 test('attached DOCX retains withdrawal provenance with a legacy peer result', async () => {
   const owner = await proposalRaceFixture();

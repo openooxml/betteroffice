@@ -3887,7 +3887,7 @@ fn a_sender_without_source_metadata_cannot_certify_a_transfer() {
 }
 
 #[test]
-fn an_unpaired_prefix_deletion_marks_an_occurrence_before_its_first_record() {
+fn an_unpaired_prefix_deletion_skips_marking_without_records() {
     let receiver = open_for_transfer(ADJACENT_SOURCE, "prefix");
     let sender = open_for_transfer(ADJACENT_SOURCE, "prefix");
     let base = receiver.encode_state_vector_v1();
@@ -3897,9 +3897,12 @@ fn an_unpaired_prefix_deletion_marks_an_occurrence_before_its_first_record() {
     receiver
         .apply_update_v1(&sender.encode_diff_v1(&base).unwrap())
         .unwrap();
-    assert_unproven(&receiver);
+    let state = receiver.encode_state_as_update_v1();
+    let sidecar = receiver.encode_edit_provenance_for_transfer(&state, None);
+    let value: serde_json::Value = serde_json::from_slice(&sidecar[1..sidecar.len() - 32]).unwrap();
+    assert_eq!(value["entries"], json!({}));
     replace(&receiver, 1, 2, "X");
-    assert_unproven(&receiver);
+    assert_splices(&receiver, &[(0, 1, 0, ""), (2, 3, 2, "X")]);
 }
 
 #[test]

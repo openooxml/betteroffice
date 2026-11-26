@@ -701,6 +701,7 @@ pub(crate) enum WatchKind {
     All,
     Recorded,
     History,
+    Unpaired,
 }
 
 #[derive(Default)]
@@ -830,7 +831,7 @@ impl Watch {
                 .filter_map(|(key, entry)| Some((key.clone(), entry.records()?.story.clone())))
                 .collect::<BTreeMap<_, _>>()
         };
-        if kind == WatchKind::Recorded && recorded.is_empty() {
+        if matches!(kind, WatchKind::Recorded | WatchKind::Unpaired) && recorded.is_empty() {
             return watch;
         }
         {

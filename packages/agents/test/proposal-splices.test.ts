@@ -42,17 +42,24 @@ test('splices remove brackets, retain the unchanged word and space, and merge a 
 });
 
 test('splices keep punctuation inside numbers, dates, IDs and URL components', () => {
-  for (const [oldToken, newToken] of [
-    ['1,234.56', '1,923.56'],
-    ['2024-01-31', '2024-02-31'],
-    ['tenant-prod-123', 'tenant-dev-123'],
-    ['alpha.example', 'beta.example'],
-  ]) {
+  for (const [oldToken, newToken, oldText, newText, offset] of [
+    ['1,234.56', '1,923.56', '234', '923', 4],
+    ['2024-01-31', '2024-02-31', '1', '2', 8],
+    ['tenant-prod-123', 'tenant-dev-123', 'prod', 'dev', 9],
+    ['alpha.example', 'beta.example', 'alph', 'bet', 2],
+  ] as const) {
     expect(spliceChange(change(`x ${oldToken} a`, `y ${newToken} b`)))
-      .toEqual([change('x', 'y'), change(oldToken, newToken, 2), change('a', 'b', oldToken.length + 3)]);
+      .toEqual([change('x', 'y'), change(oldText, newText, offset), change('a', 'b', oldToken.length + 3)]);
   }
   expect(spliceChange(change('x https://alpha.example/path a', 'y https://beta.example/path b')))
-    .toEqual([change('x', 'y'), change('alpha.example/path', 'beta.example/path', 10), change('a', 'b', 29)]);
+    .toEqual([change('x', 'y'), change('alph', 'bet', 10), change('a', 'b', 29)]);
+});
+
+test('splices trim shared text within a changed token', () => {
+  expect(spliceChange(change('u cd.ab v', 'U EF-ab V')))
+    .toEqual([change('u', 'U'), change('cd.', 'EF-', 2), change('v', 'V', 8)]);
+  expect(spliceChange(change('u cd.e\u0301z v', 'U EF-e\u0300z V')))
+    .toEqual([change('u', 'U'), change('cd.e\u0301', 'EF-e\u0300', 2), change('v', 'V', 9)]);
 });
 
 test('splices retain words between parentheses and other non-joining punctuation', () => {

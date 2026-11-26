@@ -245,18 +245,13 @@ describe('grep, read, propose, export', () => {
     }
   });
 
-  test('refuses explicit proposal ranges beginning or ending inside a paragraph grapheme', async () => {
+  test('accepts replacing only a combining accent in a paragraph', async () => {
     const doc = await open();
     const [hit] = doc.grep({ query: 'Executive summary' }).matches;
     const { paraId } = doc.session.paragraphs('body')[0];
     doc.session.insertText({ story: 'body', paraId, offset: 0 }, 'e\u0301 ');
     const p = doc.read(hit.ref);
-    for (const [start, oldText] of [[1, '\u0301'], [0, 'e'], [1, '']] as const) {
-      expect(() => doc.propose({ author: 'test', edits: [{ ...p, start, oldText, newText: 'x' }] }))
-        .toThrow('Text ranges must not split a Unicode character.');
-    }
-    expect(doc.listProposals()).toHaveLength(0);
-    const proposal = doc.propose({ author: 'test', edits: [{ ...p, start: 0, oldText: 'e\u0301', newText: 'e\u0300' }] });
+    const proposal = doc.propose({ author: 'test', edits: [{ ...p, start: 1, oldText: '\u0301', newText: '\u0300' }] });
     await doc.accept(proposal.id);
     expect(doc.read(p.ref).text).toBe('e\u0300 Executive summary');
   });
@@ -298,6 +293,22 @@ describe('grep, read, propose, export', () => {
       await expect(Promise.resolve().then(() => doc['apply'](draft, held))).rejects.toMatchObject({ code: 'STALE_TARGET' });
       expect(draft.encodeState()).toEqual(before);
     } finally { draft.destroy(); }
+  });
+
+  test('applying a trimmed insertion checks the original context before making any edit', async () => {
+    const doc = await open();
+    const [hit] = doc.grep({ query: 'Executive summary' }).matches;
+    const proposal = doc.propose({ author: 'test', edits: [{ match: hit.match, newText: 'Executive summary proposed' }] });
+    const held = doc['proposals'].get(proposal.id)!;
+    expect(held.splices).toMatchObject([{ oldText: '', newText: ' proposed' }]);
+    const draft = await doc['fork']();
+    try {
+      const { paraId } = draft.paragraphs('body')[0];
+      draft.replaceRange({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 9 } }, 'Alternate');
+      const before = draft.encodeState();
+      expect(() => doc['apply'](draft, held)).toThrow('Target text changed.');
+      expect(draft.encodeState()).toEqual(before);
+    } finally { draft.destroy(); doc.close(); }
   });
 
   test('direct accept inherits formatting at each splice and preserves untouched runs', async () => {
