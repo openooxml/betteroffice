@@ -6715,6 +6715,51 @@ mod tests {
     }
 
     #[test]
+    fn a_field_without_nested_results_renders_its_stored_label_in_both_modes() {
+        let result = json!([{"type": "run", "content": [{"type": "text", "text": 42}]}]);
+        let field = json!({
+            "type": "simpleField", "instruction": "QUOTE", "fieldType": "QUOTE",
+            "content": result, "structuredResult": {"inline": result}
+        });
+        let doc = EditingDoc::new(63);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "field".to_owned(),
+                payload: vec![
+                    ("instruction".to_owned(), Any::from("QUOTE")),
+                    ("fieldType".to_owned(), Any::from("QUOTE")),
+                    ("displayText".to_owned(), Any::from("42")),
+                    ("fieldData".to_owned(), Any::from(field.to_string())),
+                ],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        for show_hidden_text in [false, true] {
+            let blocks = yrs_doc_to_layout_blocks(
+                &doc,
+                "body",
+                &RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let [Run::Field(field)] = paragraph.runs.as_slice() else {
+                panic!("expected field");
+            };
+            assert_eq!(field.fallback.as_deref(), Some("42"), "{show_hidden_text}");
+        }
+    }
+
+    #[test]
     fn hostile_colour_value_does_not_panic() {
         assert!(!automatic_text_needs_white("#abcde\u{20ac}"));
     }

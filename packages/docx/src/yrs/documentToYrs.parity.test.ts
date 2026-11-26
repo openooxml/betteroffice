@@ -524,6 +524,26 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it.each([
+    ['from a direct base', 'Derived', '', ''],
+    ['from a transitive base', 'Leaf', '', ''],
+    ['with a direct run override', 'Derived', '<w:vanish w:val="0"/>', 'Cached'],
+    ['with an unrelated character style', 'Unrelated', '', ''],
+  ])('applies default character vanish %s', async (_case, styleId, direct, expected) => {
+    const styles = defaultCharacterVanish
+      + '<w:style w:type="character" w:styleId="Derived"><w:basedOn w:val="DefaultParagraphFont"/></w:style>'
+      + '<w:style w:type="character" w:styleId="Leaf"><w:basedOn w:val="Derived"/></w:style>'
+      + '<w:style w:type="character" w:styleId="Unrelated"/>';
+    const result = `<w:r><w:rPr><w:rStyle w:val="${styleId}"/>${direct}</w:rPr><w:t>Cached</w:t></w:r>`;
+    const owner = quoteFieldXml(quoteFieldXml(result));
+    const { engine, projected, sessions } = await seedSequenceSessions(fieldCachePackage(owner, styles));
+    try {
+      for (const session of [engine, projected]) expect(fieldDisplayTexts(session)).toEqual([expected]);
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
   it('keeps flattened simple field runs in the label of an owner inside a control', async () => {
     const nested = quoteFieldXml(textRunXml('Hidden ', true) + textRunXml('Nested'));
     const simple = `<w:fldSimple w:instr="QUOTE">${textRunXml('Simple ', true)}${nested}</w:fldSimple>`;

@@ -10067,6 +10067,37 @@ mod tests {
     }
 
     #[test]
+    fn nested_results_apply_derived_default_character_vanish_once() {
+        let styles = format!(
+            concat!(
+                "{}",
+                r#"<w:style w:type="character" w:styleId="Derived"><w:basedOn w:val="DefaultParagraphFont"/></w:style>"#,
+                r#"<w:style w:type="character" w:styleId="Leaf"><w:basedOn w:val="Derived"/></w:style>"#,
+                r#"<w:style w:type="character" w:styleId="Unrelated"/>"#,
+            ),
+            DEFAULT_CHARACTER_VANISH,
+        );
+        for (style_id, direct, expected) in [
+            ("Derived", "", ""),
+            ("Leaf", "", ""),
+            ("Derived", r#"<w:vanish w:val="0"/>"#, "Cached"),
+            ("Unrelated", "", ""),
+        ] {
+            let result = format!(
+                r#"<w:r><w:rPr><w:rStyle w:val="{style_id}"/>{direct}</w:rPr><w:t>Cached</w:t></w:r>"#,
+            );
+            let inner = quote_field_xml(&result, "", "");
+            let owner = quote_field_xml(&inner, "", "");
+            let payload = seeded_field_payload(&owner, &styles);
+            assert_eq!(
+                payload["displayText"],
+                Any::from(expected),
+                "{style_id} {direct}"
+            );
+        }
+    }
+
+    #[test]
     fn an_unprojected_owner_keeps_its_flattened_simple_field_runs() {
         let mut simple_run = run("Simple ");
         simple_run["formatting"] = json!({"hidden":true});
@@ -10079,7 +10110,7 @@ mod tests {
         });
         let mut owner = quote_field(json!([run("Before "), simple, run(" After")]));
         owner["fieldResult"] = json!([run("Before "), simple_run, run(" After")]);
-        let paragraph = json!({"content":[{
+        let paragraph = json!({"type":"paragraph", "content":[{
             "type":"inlineSdt", "properties":{}, "content":[owner]
         }]});
         let styles = StyleResolver::new(None);
@@ -10090,6 +10121,29 @@ mod tests {
         let field = &payload["content"][0]["payload"];
         assert_eq!(field["displayText"], json!("Before Simple Nested After"));
         assert_eq!(field["hasCachedResult"], json!(true));
+
+        let document = seed_body(&[paragraph]);
+        for (show_hidden_text, expected) in [
+            (false, "Before Simple Nested After"),
+            (true, "Before Simple Hidden Nested After"),
+        ] {
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let [docx_layout::types::Run::Field(field)] = paragraph.runs.as_slice() else {
+                panic!("expected field in content control");
+            };
+            assert_eq!(field.fallback.as_deref(), Some(expected));
+        }
     }
 
     #[test]
@@ -10106,8 +10160,46 @@ mod tests {
             fixture::run(" After"),
         );
         let owner = quote_field_xml(&result, "", "");
-        let payload = seeded_field_payload(&owner, "");
+        let document = EditingDoc::new(71);
+        let bytes = fixture::Package::new(&fixture::para("00000001", &owner)).bytes();
+        seed_from_docx(&document, &bytes).unwrap();
+        let payload = document
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                crate::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(payload["displayText"], Any::from("Before Nested After"));
+
+        for (show_hidden_text, expected) in [
+            (false, "Before Nested After"),
+            (true, "Before HiddenNested After"),
+        ] {
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let [docx_layout::types::Run::Text(link), docx_layout::types::Run::Field(field)] =
+                paragraph.runs.as_slice()
+            else {
+                panic!("expected projected link and owner field");
+            };
+            assert_eq!(link.text, "Link");
+            assert_eq!(field.fallback.as_deref(), Some(expected));
+        }
     }
 
     #[test]
