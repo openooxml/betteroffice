@@ -368,9 +368,9 @@ fn is_quoted_workbook_path(scope: &str) -> bool {
         && rest.starts_with(['\\', '/']))
         || (rest.starts_with("//")
             && prefix.starts_with(|ch: char| ch.is_ascii_alphabetic())
-            && prefix.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
-            }))
+            && prefix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')))
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -785,7 +785,10 @@ impl Lexer<'_> {
         {
             let first = workbook_scope(first).unwrap_or(first);
             if quoted
-                && (first.is_empty() || last.is_empty() || first.contains(':') || last.contains(':'))
+                && (first.is_empty()
+                    || last.is_empty()
+                    || first.contains(':')
+                    || last.contains(':'))
             {
                 return Err(ParseError::new(start, "invalid 3-D sheet qualifier"));
             }

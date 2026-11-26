@@ -2989,7 +2989,9 @@ mod tests {
                     format!("SUM(Renamed:Sheet2!{target})"),
                 );
                 assert_eq!(
-                    xlsx_model::sheet_qualifier::remove_sheet_references(&source, "Sheet2", &sheets),
+                    xlsx_model::sheet_qualifier::remove_sheet_references(
+                        &source, "Sheet2", &sheets
+                    ),
                     Some(format!("SUM({first}:Mid!{target})")),
                 );
                 assert_eq!(
@@ -3623,12 +3625,7 @@ mod tests {
         let mut workbook = wb(&["Data", "Report"]);
         let owner = SheetId(1);
         let op = insert_rows(0, 0, 1);
-        set_formula(
-            &mut workbook,
-            owner,
-            "A1",
-            "'[1]Sheet1:Sheet2'!A1+Data!A1",
-        );
+        set_formula(&mut workbook, owner, "A1", "'[1]Sheet1:Sheet2'!A1+Data!A1");
         remap_formulas(&mut workbook, &op).unwrap();
         assert_eq!(
             formula(&workbook, owner, "A1").as_deref(),
