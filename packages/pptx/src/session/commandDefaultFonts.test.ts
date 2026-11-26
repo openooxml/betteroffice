@@ -352,7 +352,7 @@ test.each([403, 404, 410])('a Naskh HTTP %s miss uses the available last resort 
   const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], register, () => {});
   try {
     expect(await manager.load()).toContainEqual(primary);
-    expect(register).toHaveBeenCalledWith({ ...primary, bytes });
+    expect(register).toHaveBeenCalledWith({ ...primary, bytes, paintFamily: expect.any(String) });
     advance(60_000);
     expect(manager.hasPending()).toBe(false);
     expect(await manager.load()).toEqual([]);
@@ -862,7 +862,9 @@ test.each([false, true])('Simplified Arabic uses its last resort while the Naskh
     (face) => registered.push(face), () => {});
   try {
     expect(await manager.load()).toContainEqual(primary);
-    expect(registered.filter((face) => face.family === primary.family)).toEqual([{ ...primary, bytes }]);
+    expect(registered.filter((face) => face.family === primary.family)).toEqual([
+      { ...primary, bytes, paintFamily: expect.any(String) },
+    ]);
     advance(delay - 1);
     expect(manager.hasPending()).toBe(false);
     expect(await manager.load()).toEqual([]);
@@ -870,9 +872,34 @@ test.each([false, true])('Simplified Arabic uses its last resort while the Naskh
     advance(1);
     expect(manager.hasPending()).toBe(true);
     expect(await manager.load()).toEqual([primary]);
-    expect(registered.filter((face) => face.family === primary.family)).toEqual([{ ...primary, bytes }, { ...primary, bytes: naskh }]);
+    expect(registered.filter((face) => face.family === primary.family)).toEqual([
+      { ...primary, bytes, paintFamily: expect.any(String) }, { ...primary, bytes: naskh },
+    ]);
     expect(load).toHaveBeenCalledTimes(2);
     expect(manager.hasPending()).toBe(false);
+  } finally { manager.dispose(); }
+});
+
+test('retrying a styled Arabic default keeps the temporary Latin face in a separate paint family', async () => {
+  const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
+  const advance = retryClock();
+  const load = mock(async () => naskh).mockRejectedValueOnce(new Error('Offline'));
+  const source = provider(() => undefined, () => load);
+  source.resolveLastResort.mockReturnValue(async () => bytes);
+  const primary = { family: 'Simplified Arabic', bold: true, italic: true };
+  const installed: DefaultFontFace[] = [];
+  const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {},
+    async (faces) => { installed.push(...faces); return faces; });
+  try {
+    expect(await manager.load()).toContainEqual(primary);
+    advance(2000);
+    expect(await manager.load()).toEqual([primary]);
+    const requests = installed.filter((face) => face.family === primary.family);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ ...primary, bytes, paintFamily: expect.any(String) });
+    expect(requests[0]).not.toHaveProperty('paintFamily', primary.family);
+    expect(requests[1]).toMatchObject({ ...primary, bytes: naskh, face: { bold: false, italic: false } });
+    expect(requests[1]).not.toHaveProperty('paintFamily');
   } finally { manager.dispose(); }
 });
 

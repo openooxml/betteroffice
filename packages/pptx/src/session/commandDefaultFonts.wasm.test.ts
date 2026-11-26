@@ -17,6 +17,7 @@ import { decodeFontFace, initWasm, openPresentation } from '../wasm/loader';
 import { PptxDocument, PptxRenderer } from '../wasm/engine';
 import { defaultFontLayout, releaseDefaultFontLayout } from '../wasm/enginePngFonts';
 import type { SlideDisplayList } from '../types';
+import { paintSlide } from '../render/canvas';
 import { openPresentationSession, type PresentationSession } from '../worker';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
 import { commandFontProvider } from './commandDefaultFonts';
@@ -43,7 +44,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function deck(families = ['Calibri', 'Cambria'], text: string | readonly string[] = 'alpha', traits = '',
+async function deck(families = ['Calibri', 'Cambria'], text: string | readonly string[] = 'alpha', traits: string | readonly string[] = '',
   runFamilies?: readonly string[],
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -55,7 +56,7 @@ async function deck(families = ['Calibri', 'Cambria'], text: string | readonly s
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${families.map((_, index) => `<Relationship Id="rId${index + 1}" Type="${rel}/slide" Target="slides/slide${index + 1}.xml"/>`).join('')}</Relationships>`);
   for (const [index, family] of families.entries()) {
     const runs = (typeof text === 'string' ? [text] : text).map((value, run) =>
-      `<a:r><a:rPr sz="2400" ${traits}><a:latin typeface="${runFamilies?.[run] ?? family}"/></a:rPr><a:t>${value}</a:t></a:r>`).join('');
+      `<a:r><a:rPr sz="2400" ${typeof traits === 'string' ? traits : traits[run]}><a:latin typeface="${runFamilies?.[run] ?? family}"/></a:rPr><a:t>${value}</a:t></a:r>`).join('');
     zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
   }
   return zip.generateAsync({ type: 'uint8array' });
@@ -121,11 +122,14 @@ afterEach(async () => {
   for (const restore of restorers.splice(0).reverse()) restore();
 });
 
-function stubPngCanvas(encoded: BlobPart = 'png', installed?: (family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) => void) {
+function stubPngCanvas(encoded: BlobPart = 'png', installed?: (family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) => void,
+  paint?: (text: string, font: string) => void) {
   const painted = mock((_text: string) => {});
   class Canvas {
     getContext() {
-      return new Proxy({ fillText: painted, measureText: (text: string) => ({ width: text.length }) }, {
+      const context = { font: '', fillText(text: string) { painted(text); paint?.(text, context.font); },
+        measureText: (text: string) => ({ width: text.length }) };
+      return new Proxy(context, {
         get: (context, property) => Reflect.get(context, property) ?? (() => {}),
       });
     }
@@ -860,6 +864,71 @@ for (const family of ['Arial', 'Simplified Arabic', 'Traditional Arabic', 'Noto 
       expect(pngFaces).toEqual([descriptors, descriptors]);
     } finally {
       handle.dispose();
+      renderer.dispose();
+      port.port2.close();
+    }
+  });
+}
+
+for (const [latinFamily, arabicFamily, italic, separateSlides] of [
+  ['Simplified Arabic', 'Simplified Arabic', false, false],
+  ['Noto Sans Arabic', 'Noto Sans Arabic', true, true],
+  ['Noto Naskh Arabic', 'Arial', false, false],
+] as const) {
+  standaloneWasmTest(`${latinFamily} Latin leaves ${arabicFamily} Arabic paintable beside it`, async () => {
+    const bold = !italic;
+    const latinFace = fonts.resolveLastResortChoice(latinFamily, bold, italic, 'powerpoint').face;
+    const latin = await fonts.loadBundledFontBytes(latinFace, undefined, { decoder: decodeFontFace, strict: true });
+    const arabicFace = fonts.resolveScriptFallbackFace('arabic', true, true, arabicFamily)!;
+    const arabic = await fonts.loadBundledFontBytes(arabicFace, undefined, { decoder: decodeFontFace, strict: true });
+    const manager = source({}, (script) => script === 'arabic' ? async () => arabic : undefined);
+    manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
+      resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => latin });
+    let bytes = await deck(separateSlides ? [latinFamily, arabicFamily] : [latinFamily],
+      separateSlides ? '2026' : ['2026', 'مرحبا'], [bold ? 'b="1"' : 'i="1"', 'b="1" i="1"'], [latinFamily, arabicFamily]);
+    if (separateSlides) {
+      const zip = await JSZip.loadAsync(bytes);
+      const path = 'ppt/slides/slide2.xml';
+      const slide = await zip.file(path)!.async('string');
+      zip.file(path, slide.replace('i="1"', 'b="1" i="1"').replace('2026', 'مرحبا'));
+      bytes = await zip.generateAsync({ type: 'uint8array' });
+    }
+    const installed: { family: string; digest: string; descriptors: FontFaceDescriptors }[] = [];
+    const drawn: { text: string; font: string }[] = [];
+    const digest = (bytes: ArrayBuffer) => createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
+    const latinDigest = digest(latin);
+    const arabicDigest = digest(arabic);
+    stubPngCanvas('png', (family, bytes, descriptors) => installed.push({ family, digest: digest(bytes), descriptors }),
+      (text, font) => drawn.push({ text, font }));
+    const port = new MessageChannel();
+    const renderer = createPptxWorkerRenderer(port.port1);
+    port.port1.onmessage!(new MessageEvent('message', { data: { kind: 'view', scale: 1, dpr: 1 } }));
+    try {
+      const client = await createPresentationCommandClient(bytes, Object.assign({ ...options }, {
+        [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { renderer.defaultFonts(faces); },
+      }), connection().transport);
+      clients.push(client);
+      const currentList = () => JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+      const latinList = currentList();
+      if (separateSlides) await client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.slides[1]!.id } });
+      const arabicList = currentList();
+      for (let tick = 0; tick < 50 && !installed.some((face) => face.digest === arabicDigest); tick++)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      const ctx = new OffscreenCanvas(960, 720).getContext('2d') as unknown as CanvasRenderingContext2D;
+      await paintSlide(ctx, latinList);
+      if (separateSlides) await paintSlide(ctx, arabicList);
+      const latinFont = drawn.find(({ text }) => /[0-9]/.test(text))?.font;
+      const arabicFont = drawn.find(({ text }) => /[\u0600-\u06ff]/.test(text))?.font;
+      const firstFamily = (font: string | undefined) => font?.match(/px (?:"([^"]*)"|([^,]+))/)?.slice(1).find(Boolean);
+      const latinCss = firstFamily(latinFont);
+      const arabicCss = firstFamily(arabicFont);
+      expect(installed).toContainEqual({ family: latinCss, digest: latinDigest,
+        descriptors: { weight: bold ? '700' : '400', style: italic ? 'italic' : 'normal' } });
+      expect(installed.filter((face) => face.family === arabicCss)).toEqual([{
+        family: arabicCss, digest: arabicDigest, descriptors: { weight: String(arabicFace.weight), style: 'normal' },
+      }]);
+      expect(arabicFont).toStartWith('italic bold ');
+    } finally {
       renderer.dispose();
       port.port2.close();
     }
