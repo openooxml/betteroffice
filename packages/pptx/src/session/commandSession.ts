@@ -9,7 +9,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { isWorkerEngineTrap } from '../../../../shared/office-session/trap';
 import { requestWasmCompile, supplyWasmFetch } from '../../../../shared/office-session/client';
 import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';
-import { takePresentationFontWorker } from './fontWorker';
+import { fontMode, takePreparedPresentationFontWorker } from './preparedFontWorkers';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
@@ -31,7 +31,7 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
   activeSlideIndex?: number;
   /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
   defaultFonts?: boolean;
-  /** Defaults to sliced CJK coverage faces in Chromium and Firefox with worker rendering. */
+  /** Opens CJK coverage faces in slices that load as text needs them. Defaults to false. */
   slicedFonts?: boolean;
   collaboration?: { clientId: number; initialUpdate?: Uint8Array };
   signal?: AbortSignal;
@@ -69,7 +69,7 @@ export function createPptxWorkerSession(
   const slicedFonts = shouldSlicePresentationFonts(options.slicedFonts);
   const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? sessionWasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
-  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes, options);
+  const preparedWorker = options.worker ? undefined : takePreparedPresentationFontWorker(bytes, fontMode(options.defaultFonts, slicedFonts));
   const transport = createWorkerTransport(options.worker ? options.worker() :
     preparedWorker ?? createSessionWorker());
   let stopEngineFetch = () => {};

@@ -57,7 +57,7 @@ const styleOf = (bold: boolean, italic: boolean) => `${bold ? 1 : 0}|${italic ? 
 /**
  * The sliced faces of one session. A paint prepares its text first: the chunks it needs load, and when that
  * changed the face a new revision is installed under its own family name, because a canvas in a worker never sees
- * a replaced face under the same family.
+ * a replaced face under the same family. If a chunk cannot load the whole face takes over, so no glyph draws blank.
  */
 export function createSlicedFontFaces(quietMs = FILL_QUIET_MS) {
   const entries = new Map<string, Entry>();

@@ -4,6 +4,7 @@ import { createSessionClient, requestWasmCompile } from '../../../../shared/offi
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from './sessionWorker';
+import { fontMode, getOrCreatePreparedFontWorker, takePreparedPresentationFontWorker } from './preparedFontWorkers';
 import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
@@ -16,10 +17,6 @@ interface PreparedFontWorker {
   take(): Worker;
 }
 
-type FontMode = 'disabled' | 'whole' | 'sliced';
-const fontMode = ({ defaultFonts, slicedFonts }: { defaultFonts?: boolean; slicedFonts?: boolean }): FontMode =>
-  defaultFonts === false ? 'disabled' : shouldSlicePresentationFonts(slicedFonts) ? 'sliced' : 'whole';
-const preparedWorkers = new WeakMap<object, Map<FontMode, ReturnType<typeof createPreparedFontWorker>>>();
 const Registry = (globalThis as unknown as {
   FinalizationRegistry?: new (cleanup: (release: () => void) => void) => {
     register(target: object, release: () => void, token: object): void;
@@ -30,25 +27,21 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
 
 /**
  * Starts the session worker for `source` early and returns a handle to its font decoder; the editor that opens the
- * same `source` object with the same font mode adopts the worker. Each shared handle is
+ * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
  * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
- * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts`,
- * `activeSlideIndex` and `slicedFonts` the editor will use.
+ * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
+ * `activeSlideIndex` the editor will use.
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
   options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}): PreparedFontWorker {
-  const mode = fontMode(options);
-  let workers = preparedWorkers.get(source);
-  if (!workers) preparedWorkers.set(source, workers = new Map());
-  let owner = workers.get(mode);
-  if (!owner || owner.retired()) {
-    owner = createPreparedFontWorker();
-    workers.set(mode, owner);
+  const mode = fontMode(options.defaultFonts, shouldSlicePresentationFonts(options.slicedFonts));
+  return getOrCreatePreparedFontWorker(source, mode, () => {
+    const owner = createPreparedFontWorker();
     if (mode !== 'disabled') {
       owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, mode === 'sliced');
     }
-  }
-  return owner.handle();
+    return owner;
+  }).handle();
 }
 
 function createPreparedFontWorker() {
@@ -143,12 +136,6 @@ function createPreparedFontWorker() {
 }
 
 /** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
-export function takePresentationFontWorker(source: Uint8Array | ArrayBuffer,
-  options: { defaultFonts?: boolean; slicedFonts?: boolean } = {}): Worker | undefined {
-  const workers = preparedWorkers.get(source);
-  const mode = fontMode(options);
-  const owner = workers?.get(mode);
-  if (owner?.shared() && !owner.retired()) return undefined;
-  workers?.delete(mode);
-  return owner && !owner.retired() ? owner.take() : undefined;
+export function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined {
+  return takePreparedPresentationFontWorker(source, fontMode());
 }

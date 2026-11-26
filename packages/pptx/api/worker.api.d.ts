@@ -1283,7 +1283,7 @@ export interface PptxWorkerSessionOptions extends OpenPresentationSessionOptions
     activeSlideIndex?: number;
     /** Loads bundled faces for document families `fonts` does not supply; false fetches none. Defaults to true. */
     defaultFonts?: boolean;
-    /** Defaults to sliced CJK coverage faces in Chromium and Firefox with worker rendering. */
+    /** Opens CJK coverage faces in slices that load as text needs them. Defaults to false. */
     slicedFonts?: boolean;
     collaboration?: {
         clientId: number;
@@ -1359,7 +1359,7 @@ export declare function slicedFacesSupported(userAgent?: string): boolean;
 /**
  * The sliced faces of one session. A paint prepares its text first: the chunks it needs load, and when that
  * changed the face a new revision is installed under its own family name, because a canvas in a worker never sees
- * a replaced face under the same family.
+ * a replaced face under the same family. If a chunk cannot load the whole face takes over, so no glyph draws blank.
  */
 export declare function createSlicedFontFaces(quietMs?: number): {
     coverage: PaintFontCoverage;
@@ -1508,10 +1508,10 @@ interface PreparedFontWorker {
 }
 /**
  * Starts the session worker for `source` early and returns a handle to its font decoder; the editor that opens the
- * same `source` object with the same font mode adopts the worker. Each shared handle is
+ * same `source` object adopts the worker. Preparing the same `source` again shares the worker: each handle is
  * released on its own, and the worker stops when the last one is released. Unless `defaultFonts` is false, the
- * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts`,
- * `activeSlideIndex` and `slicedFonts` the editor will use.
+ * worker also starts fetching the CJK coverage faces the opening slide needs. Pass the `defaultFonts` and
+ * `activeSlideIndex` the editor will use.
  */
 export declare function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer, options?: {
     defaultFonts?: boolean;
@@ -1519,10 +1519,7 @@ export declare function preparePresentationFontDecoder(source: Uint8Array | Arra
     slicedFonts?: boolean;
 }): PreparedFontWorker;
 /** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
-export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer, options?: {
-    defaultFonts?: boolean;
-    slicedFonts?: boolean;
-}): Worker | undefined;
+export declare function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined;
 export {};
 
 // ---- session/frame.d.ts ----
