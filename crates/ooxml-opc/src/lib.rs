@@ -200,7 +200,8 @@ fn write_deflated(
         .start_file(
             name,
             zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated),
+                .compression_method(zip::CompressionMethod::Deflated)
+                .system(zip::System::Unix),
         )
         .map_err(|e| format!("start_file {name}: {e}"))?;
     writer
@@ -463,6 +464,33 @@ mod tests {
         let zipped = rezip_parts(&sample()).expect("rezip");
         let back = unzip_parts(&zipped).expect("unzip");
         assert_eq!(back, sample());
+    }
+
+    fn made_by_hosts(zipped: &[u8]) -> Vec<u8> {
+        let eocd = zipped
+            .windows(4)
+            .rposition(|w| w == b"PK\x05\x06")
+            .expect("end of central directory");
+        let count = u16::from_le_bytes([zipped[eocd + 10], zipped[eocd + 11]]) as usize;
+        let mut pos = u32::from_le_bytes(zipped[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let mut hosts = Vec::with_capacity(count);
+        for _ in 0..count {
+            assert_eq!(&zipped[pos..pos + 4], b"PK\x01\x02");
+            hosts.push(zipped[pos + 5]);
+            let field = |at: usize| u16::from_le_bytes([zipped[pos + at], zipped[pos + at + 1]]) as usize;
+            pos += 46 + field(28) + field(30) + field(32);
+        }
+        hosts
+    }
+
+    #[test]
+    fn written_entries_name_the_same_host_on_every_platform() {
+        let zipped = rezip_parts(&sample()).expect("rezip");
+        assert_eq!(made_by_hosts(&zipped), vec![3; sample().len()]);
+        let mut changed = sample();
+        changed[1].1 = b"<w:document><w:body/></w:document>".to_vec();
+        let preserved = rezip_parts_preserving(&changed, &zipped).expect("rezip preserving");
+        assert_eq!(made_by_hosts(&preserved), vec![3; changed.len()]);
     }
 
     fn names(parts: &[(String, Vec<u8>)]) -> Vec<&str> {
