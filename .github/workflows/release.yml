@@ -94,10 +94,12 @@ jobs:
               python=$(node scripts/python-bindings.mjs --pending)
             fi
           fi
-          echo "native=$native" >> "$GITHUB_OUTPUT"
-          echo "python=$python" >> "$GITHUB_OUTPUT"
-          echo "skip_native=$skip_native" >> "$GITHUB_OUTPUT"
-          echo "skip_python=$skip_python" >> "$GITHUB_OUTPUT"
+          {
+            echo "native=$native"
+            echo "python=$python"
+            echo "skip_native=$skip_native"
+            echo "skip_python=$skip_python"
+          } >> "$GITHUB_OUTPUT"
 
   test:
     name: Test release
