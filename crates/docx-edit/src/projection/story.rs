@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use docx_parse::BlockContent;
@@ -8,9 +8,9 @@ use docx_parse::s9::S9DocumentBodyWire;
 use yrs::Any;
 
 use super::{
-    Attrs, HOOKS, Lowered, LoweringInput, ProjectionContext, ProjectionError, ProjectionHooks,
-    StoryPosition, StoryProjection, StoryState, attr_string, embed_hook, fields_dispatch,
-    markers_dispatch, paragraph, runs,
+    Attrs, HOOKS, Lowered, LoweringInput, ProjectionContext, ProjectionError, ProjectionFamily,
+    ProjectionHooks, StoryPosition, StoryProjection, StoryState, attr_string, embed_hook,
+    fields_dispatch, markers_dispatch, paragraph, runs,
 };
 use crate::{ParagraphProperties, SegmentContent, StorySegment};
 
@@ -46,6 +46,7 @@ pub(super) fn project(
     for hook in HOOKS {
         hook.setup_story(context, &mut story, &segments)?;
     }
+    let relocated_breaks = relocated_breaks(context, id, &segments);
     let segments = tabs_as_embeds(segments);
     let mut items = Vec::new();
     let mut raw_blocks = RawBlocks::new(&context.source.blocks);
@@ -136,9 +137,16 @@ pub(super) fn project(
                 }
                 story.state.offset += 1;
             }
-            SegmentContent::OtherEmbed { .. } => {
+            SegmentContent::OtherEmbed { kind, .. } => {
                 let offset = story.state.offset;
                 story.state.offset += 1;
+                if matches!(kind.as_str(), "pageBreak" | "columnBreak")
+                    && let Ok(offset) = u32::try_from(offset)
+                    && let Some(&owner) = relocated_breaks.get(&offset)
+                {
+                    story.result.defer(ProjectionFamily::Fields, kind, id, Some(owner));
+                    continue;
+                }
                 items.push(PlacedSegment {
                     offset,
                     segment,
@@ -155,6 +163,44 @@ pub(super) fn project(
         hook.finish_story(context, &mut story)?;
     }
     Ok(story.result)
+}
+
+fn relocated_breaks(
+    context: &ProjectionContext<'_, '_>,
+    id: &str,
+    segments: &[StorySegment],
+) -> HashMap<u32, usize> {
+    let Some(source) = context.source_index else {
+        return HashMap::new();
+    };
+    let provenance = &source.read().provenance;
+    let Some((_, relocated)) = provenance.by_story.get(id) else {
+        return HashMap::new();
+    };
+    if relocated.is_empty() {
+        return HashMap::new();
+    }
+    let paragraphs: HashMap<_, _> = segments
+        .iter()
+        .filter_map(|segment| match &segment.content {
+            SegmentContent::Pilcrow(properties) => Some(properties.para_id.as_str()),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect();
+    let mut resolved = HashMap::new();
+    relocated
+        .iter()
+        .filter_map(|&index| {
+            let relocated = &provenance.relocated[index];
+            let paragraph = *paragraphs.get(relocated.para_id.as_str())?;
+            Some((
+                relocated.pin.resolve(context.txn, &mut resolved)?,
+                paragraph,
+            ))
+        })
+        .collect()
 }
 
 fn tabs_as_embeds(segments: Vec<StorySegment>) -> Vec<StorySegment> {
@@ -348,6 +394,7 @@ fn lower_items(
     items: &[PlacedSegment],
     source: Option<&Paragraph>,
 ) -> Result<Vec<ParagraphContent>, ProjectionError> {
+    let authored = runs::AuthoredRuns::new(source, attrs)?;
     let plain = |item: &PlacedSegment| {
         item.projected.is_none()
             && matches!(item.segment.content, SegmentContent::Text(_))
@@ -362,31 +409,27 @@ fn lower_items(
             &story.state,
             attrs,
             &text_items(items),
-            source,
+            &authored,
             None,
         );
     }
 
     let mut offsets = Vec::with_capacity(items.len() + 1);
-    let mapped = source.map(|source| {
-        let mut live = Vec::new();
-        for item in items {
-            offsets.push(live.len());
-            match &item.segment.content {
-                SegmentContent::Text(text) => live.extend(text.chars()),
-                SegmentContent::OtherEmbed { kind, .. } if kind == "tab" => live.push('\t'),
-                SegmentContent::OtherEmbed { .. } => live.push('\u{fffc}'),
-                SegmentContent::Pilcrow(_) => unreachable!("pilcrows close segments"),
-            }
-        }
+    let mut live = Vec::new();
+    for item in items {
         offsets.push(live.len());
-        runs::MappedSourceRuns::new(source, live)
-    });
-    let source_slice = |start: usize, end: usize| {
-        mapped.as_ref().map_or_else(Vec::new, |source| {
-            source.slice(offsets[start]..offsets[end])
-        })
-    };
+        match &item.segment.content {
+            SegmentContent::Text(text) => live.extend(text.chars()),
+            SegmentContent::OtherEmbed { kind, .. } if kind == "tab" => live.push('\t'),
+            SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "pageBreak" | "columnBreak") => {}
+            SegmentContent::OtherEmbed { .. } => live.push('\u{fffc}'),
+            SegmentContent::Pilcrow(_) => unreachable!("pilcrows close segments"),
+        }
+    }
+    offsets.push(live.len());
+    let mapped = runs::MappedSourceRuns::new(&authored, live);
+    let source_slice = |start: usize, end: usize| mapped.slice(offsets[start]..offsets[end]);
     let mut fallback = SourceInlines::new(source);
     let mut content = Vec::new();
     let paragraph_end = story.state.offset;
@@ -411,7 +454,7 @@ fn lower_items(
                 &story.state,
                 attrs,
                 &text,
-                None,
+                &authored,
                 Some(source_slice(index, end)),
             )?);
             index = end;

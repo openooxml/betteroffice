@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use docx_parse::formatting::{ParagraphFormatting, TextFormatting};
+use docx_parse::formatting::TextFormatting;
 use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::theme::{Theme, resolve_theme_font_ref};
@@ -67,57 +67,76 @@ struct OriginalBoundary {
     property_changes: Option<Vec<docx_parse::inline::RunPropertyChange>>,
 }
 
-pub(super) fn lower_plain(
-    context: &mut ProjectionContext<'_, '_>,
-    state: &StoryState,
-    paragraph_attrs: &Attrs,
-    items: &[(&str, &Attrs)],
-    source: Option<&Paragraph>,
-    mapped_sources: Option<Vec<SourceRun<'_>>>,
-) -> Result<Vec<ParagraphContent>, ProjectionError> {
-    let boundaries: Vec<OriginalBoundary> = decode(
-        paragraph_attrs
-            .get("_originalRunBoundaries")
-            .map(json_value)
-            .transpose()?
-            .as_ref(),
-    )?
-    .unwrap_or_default();
-    let live: String = items.iter().map(|(text, _)| *text).collect();
-    let mark_fallback = if mapped_sources.is_none() && source.is_none() && boundaries.is_empty() {
-        let original = paragraph_attrs
-            .get("_originalFormatting")
-            .map(json_value)
-            .transpose()?;
-        decode::<Option<ParagraphFormatting>>(original.as_ref())?
-            .flatten()
-            .and_then(|formatting| formatting.run_properties)
-            .map(|mark| TextFormatting {
+pub(super) struct AuthoredRuns<'a> {
+    source: Option<&'a Paragraph>,
+    boundaries: Vec<OriginalBoundary>,
+    mark: Option<TextFormatting>,
+}
+
+impl<'a> AuthoredRuns<'a> {
+    pub(super) fn new(
+        source: Option<&'a Paragraph>,
+        attrs: &Attrs,
+    ) -> Result<Self, ProjectionError> {
+        let boundaries: Option<Vec<OriginalBoundary>> = decode(
+            attrs
+                .get("_originalRunBoundaries")
+                .map(json_value)
+                .transpose()?
+                .as_ref(),
+        )?;
+        let mark = if source.is_none() && boundaries.is_none() {
+            let original = attrs.get("_originalFormatting").map(json_value).transpose()?;
+            let mark = original
+                .as_ref()
+                .and_then(|value| value.get("runProperties"))
+                .filter(|value| !value.is_null());
+            decode::<TextFormatting>(mark)?.map(|mark| TextFormatting {
                 font_family: mark.font_family,
                 language: mark.language,
                 ..TextFormatting::default()
             })
-    } else {
-        None
-    };
-    let restore_boundaries = mapped_sources.is_none();
-    let mut sources = mapped_sources
-        .or_else(|| source.map(source_runs))
-        .unwrap_or_else(|| {
-            boundaries
+        } else {
+            None
+        };
+        Ok(Self {
+            source,
+            boundaries: boundaries.unwrap_or_default(),
+            mark,
+        })
+    }
+
+    fn sources(&self, live: impl FnOnce() -> String) -> Vec<SourceRun<'_>> {
+        if let Some(source) = self.source {
+            source_runs(source)
+        } else if let Some(mark) = &self.mark {
+            vec![(live(), Some(mark))]
+        } else {
+            self.boundaries
                 .iter()
                 .map(|boundary| (boundary.text.clone(), boundary.formatting.as_ref()))
                 .collect()
-        });
-    if let Some(mark) = &mark_fallback {
-        sources.push((live.clone(), Some(mark)));
+        }
     }
+}
+
+pub(super) fn lower_plain<'a>(
+    context: &mut ProjectionContext<'_, '_>,
+    state: &StoryState,
+    paragraph_attrs: &Attrs,
+    items: &[(&str, &Attrs)],
+    authored: &'a AuthoredRuns<'_>,
+    mapped_sources: Option<Vec<SourceRun<'a>>>,
+) -> Result<Vec<ParagraphContent>, ProjectionError> {
+    let live: String = items.iter().map(|(text, _)| *text).collect();
+    let restore_boundaries = mapped_sources.is_none();
+    let sources = mapped_sources.unwrap_or_else(|| authored.sources(|| live.clone()));
     let live_attrs: Vec<_> = items
         .iter()
         .map(|(_, attrs)| attributes(attrs))
         .collect::<Result<_, _>>()?;
     if restore_boundaries
-        && let Some(content) = restore(&boundaries, &sources, &live, items, &live_attrs)?
+        && let Some(content) = restore(&authored.boundaries, &sources, &live, items, &live_attrs)?
     {
         return Ok(content);
     }
@@ -126,12 +145,13 @@ pub(super) fn lower_plain(
     let live_chars: Vec<_> = live.chars().collect();
     let original_chars: Vec<_> = source_text.chars().collect();
     let spans = source_spans(&sources, &original_chars, &live_chars);
-    let source_is_plain = source.is_some_and(|paragraph| {
-        paragraph.content.iter().all(|content| {
-            matches!(content, ParagraphContent::Inline(InlineNode::Run(run))
-            if run.property_changes.is_none() && run.content.iter().all(is_plain))
-        })
-    });
+    let source_is_plain = restore_boundaries
+        && authored.source.is_some_and(|paragraph| {
+            paragraph.content.iter().all(|content| {
+                matches!(content, ParagraphContent::Inline(InlineNode::Run(run))
+                if run.property_changes.is_none() && run.content.iter().all(is_plain))
+            })
+        });
     let coalesce = source_is_plain && live != source_text;
     let mut projected = Vec::new();
     let mut current: Option<(Run, Properties, Option<usize>)> = None;
@@ -661,8 +681,8 @@ pub(super) struct MappedSourceRuns<'a> {
 }
 
 impl<'a> MappedSourceRuns<'a> {
-    pub(super) fn new(source: &'a Paragraph, live: Vec<char>) -> Self {
-        let sources = source_runs(source);
+    pub(super) fn new(authored: &'a AuthoredRuns<'_>, live: Vec<char>) -> Self {
+        let sources = authored.sources(|| live.iter().collect());
         let original = sources
             .iter()
             .flat_map(|(text, _)| text.chars())

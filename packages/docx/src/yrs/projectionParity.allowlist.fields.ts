@@ -18,6 +18,6 @@ export const fields: readonly ProjectionAllowance[] = [
   { kind: 'image', path: 'blocks[].content[].content[].image.position.horizontal.offset', reason: 'Retained pictures carry the source horizontal offset.' },
   { kind: 'opaqueDrawing', path: 'blocks[].content[].content[].preview.filename', reason: 'Retained opaque drawings carry the source preview filename.' },
   { kind: 'opaqueDrawing', path: 'blocks[].content[].content[].preview.mimeType', reason: 'Retained opaque drawings carry the source preview MIME type.' },
-  { kind: 'chart', path: 'blocks[].content[].content[].drawing', reason: 'Retained chart drawings carry their source drawing properties.' },
+  { kind: 'opaqueDrawing', path: 'blocks[].content[].content[].drawing', reason: 'Retained opaque drawings carry their source drawing properties.' },
   { kind: 'shape', path: 'blocks[].content[].content[].drawing', reason: 'Retained shapes carry their source drawing properties.' },
 ];

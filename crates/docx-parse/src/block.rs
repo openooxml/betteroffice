@@ -346,36 +346,12 @@ impl StoryParser<'_, '_> {
             }
             self.budget.charge_block(self.part)?;
             let mut parsed = match child.local_name() {
-                "p" => {
-                    let mut drawing = DrawingContext {
-                        media: self.media,
-                        charts: self.charts,
-                        smart_art: &mut *self.smart_art,
-                    };
-                    let mut paragraph = parse_paragraph_with_story_context(
-                        child,
-                        self.relationships,
-                        self.theme,
-                        self.styles,
-                        self.doc_defaults,
-                        self.numbering,
-                        self.part,
-                        self.budget,
-                        self.ids,
-                        Some(&mut drawing),
-                        context,
-                        depth,
-                    )?;
-                    self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
-                    BlockContent::Paragraph(Arc::new(paragraph))
-                }
-                "tbl" => BlockContent::Table(Arc::new(self.parse_table(child, depth, context)?)),
-                "sdt" => {
-                    BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(child, depth, context)?))
-                }
+                "p" => self.parse_paragraph(child, depth, context)?,
+                "tbl" => self.parse_table(child, depth, context)?,
+                "sdt" => self.parse_block_sdt(child, depth, context)?,
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
-                    BlockContent::Paragraph(Arc::new(math_paragraph(child)))
+                    math_block(child)
                 }
                 _ => unreachable!(),
             };
@@ -422,19 +398,48 @@ impl StoryParser<'_, '_> {
         Ok((content, read, budget_stopped))
     }
 
+    fn parse_paragraph(
+        &mut self,
+        element: &XmlElement,
+        depth: usize,
+        context: StoryContext,
+    ) -> Result<BlockContent, ParseError> {
+        let mut drawing = DrawingContext {
+            media: self.media,
+            charts: self.charts,
+            smart_art: &mut *self.smart_art,
+        };
+        let mut paragraph = parse_paragraph_with_story_context(
+            element,
+            self.relationships,
+            self.theme,
+            self.styles,
+            self.doc_defaults,
+            self.numbering,
+            self.part,
+            self.budget,
+            self.ids,
+            Some(&mut drawing),
+            context,
+            depth,
+        )?;
+        self.enrich_paragraph_text_boxes(&mut paragraph, element, depth)?;
+        Ok(BlockContent::Paragraph(Arc::new(paragraph)))
+    }
+
     fn parse_block_sdt(
         &mut self,
         element: &XmlElement,
         depth: usize,
         context: StoryContext,
-    ) -> Result<BlockSdt, ParseError> {
+    ) -> Result<BlockContent, ParseError> {
         let next_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(next_depth, self.part)?;
         let nested = match element.child("w", "sdtContent") {
             Some(container) => self.parse_blocks_with_context(container, next_depth, context)?,
             None => Vec::new(),
         };
-        Ok(BlockSdt {
+        Ok(BlockContent::BlockSdt(Arc::new(BlockSdt {
             node_type: "blockSdt".to_owned(),
             properties: parse_sdt_properties(
                 element.child("w", "sdtPr"),
@@ -442,7 +447,7 @@ impl StoryParser<'_, '_> {
                 self.theme,
             ),
             content: nested,
-        })
+        })))
     }
 
     fn parse_table(
@@ -450,18 +455,9 @@ impl StoryParser<'_, '_> {
         element: &XmlElement,
         depth: usize,
         context: StoryContext,
-    ) -> Result<Table, ParseError> {
+    ) -> Result<BlockContent, ParseError> {
         self.budget.charge_table(self.part)?;
-        let properties = element.child("w", "tblPr");
-        let formatting = parse_document_table_properties(properties);
-        let mut table = Table {
-            node_type: "table".to_owned(),
-            property_changes: parse_table_property_changes(properties, formatting.as_ref()),
-            formatting,
-            column_widths: parse_table_grid(element.child("w", "tblGrid")),
-            rows: Vec::new(),
-            trailing_bookmarks: None,
-        };
+        let mut rows = Vec::new();
         let mut pending = Vec::new();
         for child in transparent_children(element, true) {
             if is_block_bookmark(element, child) {
@@ -470,12 +466,10 @@ impl StoryParser<'_, '_> {
                 self.budget.charge_table_row(self.part)?;
                 let mut row = self.parse_table_row(child, depth, context)?;
                 row.leading_bookmarks = take_bookmarks(&mut pending);
-                table.rows.push(row);
+                rows.push(row);
             }
         }
-        table.trailing_bookmarks = take_bookmarks(&mut pending);
-        infer_implicit_single_cell_row_spans(&mut table);
-        Ok(table)
+        Ok(table_block(element, rows, take_bookmarks(&mut pending)))
     }
 
     fn parse_table_row(
@@ -534,24 +528,15 @@ impl StoryParser<'_, '_> {
         depth: usize,
         context: StoryContext,
     ) -> Result<TableCell, ParseError> {
-        let properties = element.child("w", "tcPr");
-        let formatting = parse_document_table_cell_properties(properties);
         let cell_depth = depth.saturating_add(1);
         self.budget.check_nesting_depth(cell_depth, self.part)?;
         let mut content = self.parse_blocks_with_context(element, cell_depth, context)?;
         if content.iter().all(is_bookmark_block) {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
-            content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
+            content.push(empty_paragraph_block());
         }
-        Ok(TableCell {
-            node_type: "tableCell".to_owned(),
-            property_changes: parse_table_cell_property_changes(properties, formatting.as_ref()),
-            structural_change: parse_table_cell_structural_change(properties),
-            formatting,
-            content,
-            leading_bookmarks: None,
-        })
+        Ok(table_cell(element, content))
     }
 
     fn enrich_paragraph_text_boxes(
@@ -756,6 +741,38 @@ impl StoryParser<'_, '_> {
         shape.text_body_properties = body;
         *slot = Some(Box::new(shape));
         Ok(())
+    }
+}
+
+fn table_block(
+    element: &XmlElement,
+    rows: Vec<TableRow>,
+    trailing_bookmarks: Option<Vec<String>>,
+) -> BlockContent {
+    let properties = element.child("w", "tblPr");
+    let formatting = parse_document_table_properties(properties);
+    let mut table = Table {
+        node_type: "table".to_owned(),
+        property_changes: parse_table_property_changes(properties, formatting.as_ref()),
+        formatting,
+        column_widths: parse_table_grid(element.child("w", "tblGrid")),
+        rows,
+        trailing_bookmarks,
+    };
+    infer_implicit_single_cell_row_spans(&mut table);
+    BlockContent::Table(Arc::new(table))
+}
+
+fn table_cell(element: &XmlElement, content: Vec<BlockContent>) -> TableCell {
+    let properties = element.child("w", "tcPr");
+    let formatting = parse_document_table_cell_properties(properties);
+    TableCell {
+        node_type: "tableCell".to_owned(),
+        property_changes: parse_table_cell_property_changes(properties, formatting.as_ref()),
+        structural_change: parse_table_cell_structural_change(properties),
+        formatting,
+        content,
+        leading_bookmarks: None,
     }
 }
 
@@ -1182,8 +1199,8 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
     });
 }
 
-fn math_paragraph(element: &XmlElement) -> Paragraph {
-    Paragraph {
+fn math_block(element: &XmlElement) -> BlockContent {
+    BlockContent::Paragraph(Arc::new(Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         repeated_para_id: None,
@@ -1213,11 +1230,11 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
         list_rendering: None,
         rendered_page_break_before: None,
         section_properties: None,
-    }
+    }))
 }
 
-fn empty_paragraph() -> Paragraph {
-    Paragraph {
+fn empty_paragraph_block() -> BlockContent {
+    BlockContent::Paragraph(Arc::new(Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         repeated_para_id: None,
@@ -1233,7 +1250,7 @@ fn empty_paragraph() -> Paragraph {
         list_rendering: None,
         rendered_page_break_before: None,
         section_properties: None,
-    }
+    }))
 }
 
 fn append_text(element: &XmlElement, output: &mut String) {
