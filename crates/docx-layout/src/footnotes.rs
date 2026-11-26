@@ -1124,6 +1124,34 @@ fn fragment_bottom(fragment: &Fragment) -> f64 {
 }
 
 pub(crate) fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
+    let (blocks, measures) = note_item_content(content);
+    NoteLayoutItemContract {
+        blocks: Some(blocks),
+        measures: Some(measures),
+        ..note_item_outline(content)
+    }
+}
+
+/// The blocks and measures a note's item carries, as JSON.
+pub fn note_item_content(
+    content: &NoteContent,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    (
+        content
+            .blocks
+            .iter()
+            .filter_map(|block| serde_json::to_value(block).ok())
+            .collect(),
+        content
+            .measures
+            .iter()
+            .filter_map(|measure| serde_json::to_value(measure).ok())
+            .collect(),
+    )
+}
+
+/// A note's item without the blocks and measures [`note_item_content`] gives.
+pub fn note_item_outline(content: &NoteContent) -> NoteLayoutItemContract {
     NoteLayoutItemContract {
         kind: Some(content.note_kind.as_str().to_owned()),
         id: Some(content.id),
@@ -1132,28 +1160,6 @@ pub(crate) fn note_item(content: &NoteContent) -> NoteLayoutItemContract {
                 .display_number
                 .map(|display_number| display_number.to_string())
         }),
-        blocks: Some(
-            content
-                .blocks
-                .iter()
-                .filter_map(|block| {
-                    serde_json::to_string(&block)
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
-                        .ok()
-                })
-                .collect(),
-        ),
-        measures: Some(
-            content
-                .measures
-                .iter()
-                .filter_map(|measure| {
-                    serde_json::to_string(&measure)
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
-                        .ok()
-                })
-                .collect(),
-        ),
         height: Some(content.height),
         anchor_doc_start: content
             .anchor
@@ -1199,6 +1205,25 @@ pub fn attach_note_areas(
     contents: &[NoteContent],
     separator_heights: &NoteSeparatorHeights,
     regions: &DocumentRegions,
+) {
+    attach_note_areas_with(
+        layout,
+        page_note_map,
+        contents,
+        separator_heights,
+        regions,
+        note_item,
+    );
+}
+
+/// [`attach_note_areas`], each note's item made by `item`.
+pub fn attach_note_areas_with(
+    layout: &mut Layout,
+    page_note_map: &OrderedMap<u32, Vec<i64>>,
+    contents: &[NoteContent],
+    separator_heights: &NoteSeparatorHeights,
+    regions: &DocumentRegions,
+    mut item: impl FnMut(&NoteContent) -> NoteLayoutItemContract,
 ) {
     let contents = content_map(contents);
     for page in &mut layout.pages {
@@ -1293,7 +1318,7 @@ pub fn attach_note_areas(
                         ..Default::default()
                     }
                 }),
-                notes: Some(group.iter().map(|content| note_item(content)).collect()),
+                notes: Some(group.iter().map(|content| item(content)).collect()),
                 continuation: None,
                 x: None,
                 width: None,
@@ -2081,5 +2106,45 @@ mod tests {
         assert_eq!(marker.text, "III  ");
         assert_eq!(marker.fmt.font_family.as_deref(), Some("Cambria"));
         assert_eq!(marker.fmt.superscript, Some(true));
+    }
+
+    #[test]
+    fn note_items_carry_blocks_and_measures_as_their_json_reads_back() {
+        let mut note = content(7, NoteKind::Footnote, 0.0);
+        note.blocks = vec![block(json!({
+            "kind": "paragraph",
+            "id": "fn-7",
+            "pmStart": 3,
+            "pmEnd": 41,
+            "attrs": {"spacing": {"before": 1.0 / 3.0, "line": 1.15}, "indent": {"left": 0.1}},
+            "runs": [
+                {"kind": "text", "text": "A note \u{2153} wide", "fontSize": 7.333_333, "fontFamily": "Cambria"},
+                {"kind": "tab"},
+                {"kind": "text", "text": "tail", "pmStart": 9, "pmEnd": 13}
+            ]
+        }))];
+        apply_note_presentation(&mut note.blocks, 7, "vii");
+        note.measures = crate::measure_blocks::measure_blocks_without_table_compat_shift(
+            &mut note.blocks,
+            123.456,
+            &crate::measure_blocks::MeasurementConfig::default(),
+        )
+        .unwrap();
+        let read_back = |value: String| serde_json::from_str::<serde_json::Value>(&value).unwrap();
+        let item = note_item(&note);
+        assert_eq!(
+            item.blocks.unwrap(),
+            note.blocks
+                .iter()
+                .map(|block| read_back(serde_json::to_string(block).unwrap()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            item.measures.unwrap(),
+            note.measures
+                .iter()
+                .map(|measure| read_back(serde_json::to_string(measure).unwrap()))
+                .collect::<Vec<_>>()
+        );
     }
 }
