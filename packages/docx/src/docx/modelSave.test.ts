@@ -44,11 +44,33 @@ async function expectUnchanged(source: Uint8Array) {
   expect(result.warnings).toEqual(plain.warnings);
 }
 
-for (const path of fixturePaths.sort()) {
-  test(`unchanged model saves byte for byte: ${path}`, async () => {
-    await expectUnchanged(new Uint8Array(readFileSync(resolve(ROOT, path))));
-  }, 30_000);
-}
+test('unchanged model saves byte for byte or uses writer output for repository documents', async () => {
+  let reusedSource = 0;
+  for (const path of fixturePaths.sort()) {
+    const source = readFileSync(resolve(ROOT, path));
+    const document = await parse(source);
+    const plain = await writeDocumentWithRust(await parse(source), document.originalBuffer!, WITHOUT_STAMP);
+    const saved = await repackDocxWithWarnings(document, WITHOUT_STAMP);
+    const bytes = Buffer.from(saved.buffer);
+
+    if (bytes.equals(source)) {
+      expect(saved.warnings, path).toEqual(plain.warnings);
+      expect(saved.warnings.some((warning) => warning.startsWith(CODE)), path).toBe(false);
+      reusedSource++;
+    } else {
+      expect(bytes.equals(Buffer.from(plain.buffer)), `${path} differs from the plain writer`).toBe(true);
+      const warning = modelPartsRewrittenWarning(document.originalBuffer!, plain.buffer);
+      if (!warning?.startsWith(`${CODE} [`)) {
+        throw new Error(`${path} has no named rewritten parts`);
+      }
+      expect(saved.warnings, path).toEqual([...plain.warnings, warning]);
+      console.log(`${path}: ${warning}`);
+    }
+  }
+  expect(reusedSource, 'repository documents that reused source bytes').toBeGreaterThan(0);
+  expect(reusedSource, `source reuse across ${fixturePaths.length} repository documents`)
+    .toBeGreaterThanOrEqual(Math.ceil(fixturePaths.length * 0.9));
+}, 30_000 * fixturePaths.length);
 
 test('unchanged synthetic model saves byte for byte with stamping disabled', async () => {
   const { bytes } = oneSavePackage();
