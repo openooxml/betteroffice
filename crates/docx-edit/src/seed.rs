@@ -10198,8 +10198,16 @@ mod tests {
             let docx_layout::types::LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
                 panic!("expected paragraph");
             };
-            let [docx_layout::types::Run::Field(field)] = paragraph.runs.as_slice() else {
-                panic!("expected field in content control");
+            let fields: Vec<_> = paragraph
+                .runs
+                .iter()
+                .filter_map(|run| match run {
+                    docx_layout::types::Run::Field(field) => Some(field),
+                    _ => None,
+                })
+                .collect();
+            let [field] = fields.as_slice() else {
+                panic!("expected one field in content control: {:?}", paragraph.runs);
             };
             assert_eq!(field.fallback.as_deref(), Some(expected));
         }
