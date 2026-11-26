@@ -70,13 +70,13 @@ pub struct LegacySheetDimensions {
 pub(crate) fn parse_workbook_indexed(
     parts: &[(String, Vec<u8>)],
 ) -> Result<IndexedWorkbook, ParseError> {
-    parse_workbook_indexed_subset(parts, None, |_| Ok(Vec::new()))
+    parse_workbook_indexed_subset(parts, None, false)
 }
 
 pub(crate) fn parse_workbook_indexed_subset(
     parts: &[(String, Vec<u8>)],
     included: Option<&BTreeSet<usize>>,
-    load_omitted: impl FnOnce(BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, ParseError>,
+    implicit_default_style: bool,
 ) -> Result<IndexedWorkbook, ParseError> {
     let wb_xml = find_part(parts, "xl/workbook.xml")
         .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
@@ -100,14 +100,10 @@ pub(crate) fn parse_workbook_indexed_subset(
     let mut legacy_dimensions = Vec::with_capacity(meta.sheets.len());
     let mut declined_parts = Vec::new();
     let mut tables = Vec::new();
-    let mut omitted = BTreeSet::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
         xlsx_model::progress::pulse();
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if included.is_some_and(|included| !included.contains(&idx)) {
-            if styles.cell_xfs.is_empty() && relationship.is_none_or(Relationship::is_worksheet) {
-                omitted.insert(worksheet_path(relationship, idx));
-            }
             sheets.push(Sheet::new(&entry.name));
             shared_string_cells.push(SharedStringCells::new());
             cell_facts.push(WorksheetCellFacts::default());
@@ -158,29 +154,8 @@ pub(crate) fn parse_workbook_indexed_subset(
     }
 
     let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
-    if styles.cell_xfs.is_empty() {
-        let mut zero = references_zero_style(&sheets);
-        if !zero && !omitted.is_empty() {
-            for (_, bytes) in load_omitted(omitted)? {
-                let sheet = parse_worksheet(
-                    "",
-                    &bytes,
-                    &shared_strings,
-                    &BTreeMap::new(),
-                    &mut SharedStringCells::new(),
-                    &mut LegacySheetDimensions::default(),
-                    &mut WorksheetCellFacts::default(),
-                    &styles.dxfs,
-                )?;
-                if references_zero_style(std::slice::from_ref(&sheet)) {
-                    zero = true;
-                    break;
-                }
-            }
-        }
-        if zero {
-            styles.cell_xfs.push(xlsx_model::Xf::default());
-        }
+    if styles.cell_xfs.is_empty() && (implicit_default_style || references_zero_style(&sheets)) {
+        styles.cell_xfs.push(xlsx_model::Xf::default());
     }
     Ok(IndexedWorkbook {
         workbook: Workbook {

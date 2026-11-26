@@ -1446,7 +1446,7 @@ impl Workbook {
             Ok(plan) => plan,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        if self.has_alternate_content()
+        if self.needs_alternate_preview()
             && let Some(prepared) = &mut plan.staged
         {
             let seeds = edit_seeds(&plan.steps, &plan.changed);
@@ -1608,7 +1608,7 @@ impl Workbook {
         seeds: &[(SheetId, CellRef)],
         now_serial: Option<f64>,
     ) -> (DepGraph, RecalcResult) {
-        if self.is_collaborative() && self.has_alternate_content() {
+        if self.is_collaborative() && self.needs_alternate_preview() {
             return xlsx_calc::rebuild_and_recalc_all_after(
                 model,
                 self.graph.as_ref(),

@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use ooxml_opc::SourceContainer;
-use xlsx_model::{SheetPicture, Workbook as WorkbookModel};
+use xlsx_model::{SheetPicture, Stylesheet, Workbook as WorkbookModel, Xf};
 use xlsx_parse::{
     AlternateContentSources, PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage,
     SheetAxes,
@@ -13,33 +13,40 @@ use crate::{Error, Result};
 
 const PACKAGE_DEFERRED: bool = true;
 
+type SheetAlternates = OnceLock<std::result::Result<Option<Box<AlternateContentSources>>, String>>;
+
 pub(crate) enum PackageSlot {
     Present(PreservedPackage),
     Deferred {
         source: SourceContainer,
         facts: PackageFacts,
         rebuilt: OnceLock<std::result::Result<PreservedPackage, String>>,
-        alternate_validation: OnceLock<std::result::Result<Box<AlternateContentSources>, String>>,
+        sheet_alternates: Vec<SheetAlternates>,
+        implicit_default_style: bool,
     },
 }
 
 impl PackageSlot {
-    pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts) -> Self {
+    pub(crate) fn deferred(source: SourceContainer, facts: PackageFacts, styles: &Stylesheet) -> Self {
+        let sheet_alternates = (0..PackageFactsView::from_facts(&facts).source_sheet_count())
+            .map(|_| OnceLock::new())
+            .collect();
         Self::Deferred {
             source,
             facts,
             rebuilt: OnceLock::new(),
-            alternate_validation: OnceLock::new(),
+            sheet_alternates,
+            implicit_default_style: styles.cell_xfs.first() == Some(&Xf::default()),
         }
     }
 
     pub(crate) fn from_snapshot(
         source: SourceContainer,
-        mut facts: PackageFacts,
+        facts: PackageFacts,
+        styles: &Stylesheet,
     ) -> SnapshotResult<Self> {
         if PACKAGE_DEFERRED {
-            fill_legacy_alternate_content_facts(&source, &mut facts)?;
-            Ok(Self::deferred(source, facts))
+            Ok(Self::deferred(source, facts, styles))
         } else {
             rebuild(&source)
                 .map(Self::Present)
@@ -203,10 +210,58 @@ impl PackageSlot {
         }
     }
 
-    pub(crate) fn sheet_has_alternate_content(&self, sheet: usize) -> bool {
-        self.facts()
-            .source_sheet_has_alternate_content(sheet)
-            .unwrap_or(false)
+    pub(crate) fn sheet_may_have_alternate_content(&self, sheet: usize) -> bool {
+        if let Some(package) = self.materialized() {
+            return package
+                .source_cell_facts(sheet)
+                .is_some_and(|facts| facts.has_sheet_data_alternates());
+        }
+        let Self::Deferred {
+            sheet_alternates, ..
+        } = self
+        else {
+            unreachable!("a present package is materialized");
+        };
+        self.facts().source_sheet_is_worksheet(sheet)
+            && sheet_alternates
+                .get(sheet)
+                .is_some_and(|cached| !matches!(cached.get(), Some(Ok(None))))
+    }
+
+    pub(crate) fn sheet_has_alternate_content(&self, sheet: usize) -> Result<bool> {
+        if self.materialized().is_some() {
+            return Ok(self.sheet_may_have_alternate_content(sheet));
+        }
+        Ok(self.sheet_alternate_source(sheet)?.is_some())
+    }
+
+    fn sheet_alternate_source(&self, sheet: usize) -> Result<Option<&AlternateContentSources>> {
+        let Self::Deferred {
+            source,
+            facts,
+            sheet_alternates,
+            implicit_default_style,
+            ..
+        } = self
+        else {
+            unreachable!("a present package is materialized");
+        };
+        let facts = PackageFactsView::from_facts(facts);
+        let Some((cached, path)) = sheet_alternates
+            .get(sheet)
+            .zip(facts.source_sheet_part(sheet))
+            .filter(|_| facts.source_sheet_is_worksheet(sheet))
+        else {
+            return Ok(None);
+        };
+        cached
+            .get_or_init(|| {
+                load_sheet_alternates(source, sheet, path, *implicit_default_style)
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map(|source| source.as_deref())
+            .map_err(|error| Error::Package(error.clone()))
     }
 
     pub(crate) fn validate_alternate_content(
@@ -215,6 +270,7 @@ impl PackageSlot {
         origins: &[Option<usize>],
         axes: &[Option<SheetAxes>],
         use_source_hidden_sizes: bool,
+        changed_origins: impl Iterator<Item = usize>,
     ) -> Result<()> {
         if let Some(package) = self.materialized() {
             return Ok(xlsx_parse::validate_alternate_content(
@@ -225,47 +281,17 @@ impl PackageSlot {
                 use_source_hidden_sizes,
             )?);
         }
-        let Self::Deferred {
-            source,
-            facts,
-            alternate_validation,
-            ..
-        } = self
-        else {
-            unreachable!("a present package is materialized");
-        };
-        let sources = alternate_validation
-            .get_or_init(|| {
-                let facts = PackageFactsView::from_facts(facts);
-                let included = (0..facts.source_sheet_count())
-                    .filter(|&index| self.sheet_has_alternate_content(index))
-                    .filter_map(|index| facts.source_sheet_part(index).map(|path| (index, path)))
-                    .collect::<Vec<_>>();
-                let mut loaded = HashSet::new();
-                let mut remaining = ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES;
-                AlternateContentSources::from_source(&included, |paths| {
-                    let paths = paths
-                        .into_iter()
-                        .map(|path| path.trim_start_matches('/').to_owned())
-                        .filter(|path| loaded.insert(path.clone()))
-                        .collect::<HashSet<_>>();
-                    let parts =
-                        ooxml_opc::unzip_parts_where(source.as_bytes(), remaining, |path| {
-                            paths.contains(path.trim_start_matches('/'))
-                        })
-                        .map_err(xlsx_parse::ParseError::Malformed)?;
-                    remaining -= parts
-                        .iter()
-                        .map(|(_, bytes)| bytes.len() as u64)
-                        .sum::<u64>();
-                    Ok(parts)
-                })
-                .map(Box::new)
-                .map_err(|error| error.to_string())
-            })
-            .as_ref()
-            .map_err(|error| Error::Package(error.clone()))?;
-        Ok(sources.validate(workbook, origins, axes, use_source_hidden_sizes)?)
+        for origin in changed_origins {
+            if let Some(sources) = self.sheet_alternate_source(origin)? {
+                sources.validate(workbook, origins, axes, use_source_hidden_sizes)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sheet_alternates_cached(&self, sheet: usize) -> bool {
+        matches!(self, Self::Deferred { sheet_alternates, .. } if sheet_alternates[sheet].get().is_some())
     }
 
     /// The parsed package, without parsing a deferred one.
@@ -277,45 +303,46 @@ impl PackageSlot {
     }
 }
 
-fn fill_legacy_alternate_content_facts(
+fn load_sheet_alternates(
     source: &SourceContainer,
-    facts: &mut PackageFacts,
-) -> SnapshotResult<()> {
-    let view = PackageFactsView::from_facts(facts);
-    let unknown = (0..view.source_sheet_count())
-        .filter(|&index| view.source_sheet_has_alternate_content(index).is_none())
-        .filter(|&index| view.source_sheet_is_worksheet(index))
-        .filter_map(|index| {
-            view.source_sheet_part(index)
-                .map(|path| (index, path.trim_start_matches('/').to_ascii_lowercase()))
-        })
-        .collect::<Vec<_>>();
-    if unknown.is_empty() {
-        return Ok(());
-    }
-    let paths = unknown
-        .iter()
-        .map(|(_, path)| path.clone())
-        .collect::<HashSet<_>>();
-    let parts = ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |path| {
-        paths.contains(&path.trim_start_matches('/').to_ascii_lowercase())
+    sheet: usize,
+    path: &str,
+    implicit_default_style: bool,
+) -> std::result::Result<Option<Box<AlternateContentSources>>, xlsx_parse::ParseError> {
+    let path = path.trim_start_matches('/');
+    let mut worksheet = ooxml_opc::unzip_parts_where(source.as_bytes(), u64::MAX, |name| {
+        name.trim_start_matches('/') == path
     })
-    .map_err(SnapshotError::new)?;
-    let present = parts
-        .iter()
-        .map(|(path, bytes)| {
-            xlsx_parse::worksheet_has_alternate_content(bytes)
-                .map(|present| (path.trim_start_matches('/').to_ascii_lowercase(), present))
-        })
-        .collect::<std::result::Result<HashMap<_, _>, _>>()
-        .map_err(|error| SnapshotError::new(error.to_string()))?;
-    for (index, path) in unknown {
-        let present = present
-            .get(&path)
-            .ok_or_else(|| SnapshotError::new(format!("Missing worksheet part {path}")))?;
-        facts.set_source_sheet_has_alternate_content(index, *present);
+    .map_err(xlsx_parse::ParseError::Malformed)?
+    .pop();
+    let (_, bytes) = worksheet
+        .as_ref()
+        .ok_or_else(|| xlsx_parse::ParseError::MissingPart(path.to_owned()))?;
+    if !xlsx_parse::worksheet_has_alternate_content(bytes)? {
+        return Ok(None);
     }
-    Ok(())
+    let mut loaded = HashSet::from([path.to_owned()]);
+    let mut remaining = ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES - bytes.len() as u64;
+    let sources =
+        AlternateContentSources::from_source(&[(sheet, path)], implicit_default_style, |paths| {
+            let paths = paths
+                .into_iter()
+                .map(|path| path.trim_start_matches('/').to_owned())
+                .filter(|path| loaded.insert(path.clone()))
+                .collect::<HashSet<_>>();
+            let mut parts = if paths.is_empty() {
+                Vec::new()
+            } else {
+                ooxml_opc::unzip_parts_where(source.as_bytes(), remaining, |name| {
+                    paths.contains(name.trim_start_matches('/'))
+                })
+                .map_err(xlsx_parse::ParseError::Malformed)?
+            };
+            remaining -= parts.iter().map(|(_, bytes)| bytes.len() as u64).sum::<u64>();
+            parts.extend(worksheet.take());
+            Ok(parts)
+        })?;
+    Ok(Some(Box::new(sources)))
 }
 
 fn rebuild(source: &SourceContainer) -> std::result::Result<PreservedPackage, String> {
@@ -471,7 +498,7 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
     }
 
     #[test]
-    fn deferred_edit_does_not_probe_a_sheet_without_grid_wrappers() {
+    fn deferred_edit_ignores_wrappers_outside_the_grid() {
         let mut parts = ooxml_opc::unzip_parts(&source(false, false)).unwrap();
         let (_, bytes) = parts
             .iter_mut()
@@ -727,6 +754,7 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
         let slot = PackageSlot::deferred(
             SourceContainer::new(b"invalid zip".to_vec()),
             PackageFacts::from_package(&package),
+            &package.original_workbook().styles,
         );
         let first = slot.materialize().unwrap_err().to_string();
         let PackageSlot::Deferred { rebuilt, .. } = &slot else {
@@ -742,8 +770,12 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
     fn snapshot_package_policy_uses_the_selected_mode() {
         let source = SourceContainer::new(source(false, false));
         let package = rebuild(&source).unwrap();
-        let slot =
-            PackageSlot::from_snapshot(source, PackageFacts::from_package(&package)).unwrap();
+        let slot = PackageSlot::from_snapshot(
+            source,
+            PackageFacts::from_package(&package),
+            &package.original_workbook().styles,
+        )
+        .unwrap();
         if PACKAGE_DEFERRED {
             let PackageSlot::Deferred { rebuilt, .. } = slot else {
                 panic!("expected deferred package");

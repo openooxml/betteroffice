@@ -14,6 +14,7 @@ use crate::write::{
 use crate::{
     ParseError, SaveEdits, SharedStringCells, SheetAxes, serialize_workbook,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
+    worksheet_has_alternate_content,
 };
 
 /// Materializes entries a borrowed-entry save returns, so a fixture stays
@@ -8977,6 +8978,26 @@ fn a_chart_reference_holding_a_character_xml_cannot_carry_is_never_written() {
 }
 
 const MC: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#;
+
+#[test]
+fn worksheet_wrapper_probe_stays_inside_sheet_data() {
+    let xml = br#"<s:worksheet xmlns:s="urn:sheet" xmlns:m="urn:mc">
+        <s:sheetData>
+            <!-- </s:sheetData><m:AlternateContent/> -->
+            <![CDATA[</s:sheetData><m:AlternateContent/>]]>
+            <?extra </s:sheetData><m:AlternateContent/> ?>
+            <m:AlternateContentExtra/>
+        </s:sheetData >
+        <m:AlternateContent/>
+    </s:worksheet>"#;
+    assert!(!worksheet_has_alternate_content(xml).unwrap());
+    let xml = core::str::from_utf8(xml)
+        .unwrap()
+        .replace("<m:AlternateContentExtra/>", "<m:AlternateContent/>");
+    assert!(worksheet_has_alternate_content(xml.as_bytes()).unwrap());
+    let empty = br#"<worksheet><sheetData/><AlternateContent/></worksheet>"#;
+    assert!(!worksheet_has_alternate_content(empty).unwrap());
+}
 
 fn alternate_cell(cell: &str) -> Workbook {
     let body = format!(r#"<sheetData><row r="1">{cell}</row></sheetData>"#);

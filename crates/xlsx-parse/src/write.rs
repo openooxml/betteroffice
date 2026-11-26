@@ -3190,6 +3190,7 @@ pub struct AlternateContentSources {
 impl AlternateContentSources {
     pub fn from_source(
         sheets: &[(usize, &str)],
+        implicit_default_style: bool,
         mut load: impl FnMut(BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, ParseError>,
     ) -> Result<Self, ParseError> {
         let mut paths = BTreeSet::from([
@@ -3232,7 +3233,11 @@ impl AlternateContentSources {
             parts.extend(load(paths)?);
         }
         let included = sheets.iter().map(|&(index, _)| index).collect();
-        let parsed = crate::read::parse_workbook_indexed_subset(&parts, Some(&included), load)?;
+        let parsed = crate::read::parse_workbook_indexed_subset(
+            &parts,
+            Some(&included),
+            implicit_default_style,
+        )?;
         let mut sources = BTreeMap::new();
         for &(index, path) in sheets {
             let bytes =

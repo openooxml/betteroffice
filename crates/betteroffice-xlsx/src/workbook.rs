@@ -1937,8 +1937,13 @@ impl Workbook {
             .source_package
             .as_ref()
             .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
-        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
-        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
+        let package = package.materialize()?;
+        let facts = xlsx_parse::PackageFacts::from_package(package);
+        self.source_package = Some(PackageSlot::deferred(
+            source.clone(),
+            facts,
+            &package.original_workbook().styles,
+        ));
         Ok(())
     }
 
@@ -2522,22 +2527,37 @@ impl Workbook {
             cell: state,
         }];
         ops.extend(format);
-        if self.has_alternate_content() {
+        let seeds = [(sheet, cell)];
+        if self.needs_cell_alternate_preview(std::iter::once(sheet))? {
             let mut preview = self.model.clone();
             let inverse = xlsx_ops::apply_ops(&mut preview, &ops)?;
-            let prepared = self.prepare_commit(
-                ops,
-                StagedApply::new(preview, inverse),
-                SyncOrigin::User,
-                CommitHistory::Separate,
-                None,
-            )?;
-            let (mutation, update) = self.commit_precalculated_cells(
-                prepared,
-                &[(sheet, cell, formula)],
-                options,
-                true,
-            )?;
+            let touched = [(sheet, cell, formula)];
+            let (mutation, update) = if self.is_collaborative()
+                || self
+                    .source_package
+                    .as_ref()
+                    .and_then(PackageSlot::materialized)
+                    .is_some()
+            {
+                let prepared = self.prepare_commit(
+                    ops,
+                    StagedApply::new(preview, inverse),
+                    SyncOrigin::User,
+                    CommitHistory::Separate,
+                    None,
+                )?;
+                self.commit_precalculated_cells(prepared, &touched, options, true)?
+            } else {
+                let (graph, recalc) =
+                    self.calculate_standalone_cell_preview(&mut preview, &touched, &seeds, options);
+                self.validate_alternate_preview(&preview, &self.preserved)?;
+                let keeps_graph = self.edits_only_values(&touched);
+                let update = self.commit_user(&ops)?;
+                self.model = preview;
+                let mutation =
+                    self.adopt_cell_calculation(graph, recalc, &seeds, options, keeps_graph);
+                (mutation, update)
+            };
             mark(EditStage::Applied);
             mark(EditStage::Recalculated);
             self.publish(update);
@@ -2552,7 +2572,6 @@ impl Workbook {
             formula.as_deref(),
         );
         mark(EditStage::Applied);
-        let seeds = [(sheet, cell)];
         let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
@@ -2682,7 +2701,7 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        if self.has_alternate_content() {
+        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet))? {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, true)?;
             self.publish(update);
@@ -3051,7 +3070,7 @@ impl Workbook {
         )?;
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
-        let staged_calculation = if scope != CalculationScope::Kept && self.has_alternate_content()
+        let staged_calculation = if scope != CalculationScope::Kept && self.needs_alternate_preview()
         {
             let previous = self.graph.as_ref().map(|previous| {
                 let graph = DepGraph::build(&self.model);
@@ -3200,7 +3219,7 @@ impl Workbook {
             .preserved_undo
             .last()
             .map_or(&self.preserved, |history| &history.before);
-        let staged_calculation = if self.has_alternate_content_in(&preserved.origins) {
+        let staged_calculation = if self.needs_alternate_preview_in(&preserved.origins) {
             let mut preview = self.model.clone();
             xlsx_ops::apply_ops(&mut preview, &ops)?;
             let scope = before
@@ -3299,7 +3318,7 @@ impl Workbook {
             .preserved_redo
             .last()
             .map_or(&self.preserved, |history| &history.after);
-        let staged_calculation = if self.has_alternate_content_in(&preserved.origins) {
+        let staged_calculation = if self.needs_alternate_preview_in(&preserved.origins) {
             let mut preview = self.model.clone();
             xlsx_ops::apply_ops(&mut preview, &ops)?;
             let scope = before
@@ -3390,7 +3409,7 @@ impl Workbook {
         options: CalculationOptions,
         redo: bool,
     ) -> Result<MutationResult> {
-        if self.has_alternate_content() {
+        if self.needs_alternate_preview() {
             let mut candidate = self.authority()?.fork_history().map_err(authority_error)?;
             let history = match if redo {
                 candidate.redo()
@@ -3698,7 +3717,7 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        if self.has_alternate_content() {
+        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet))? {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, false)?;
             self.proposals.remove(id);
@@ -4586,16 +4605,53 @@ impl Workbook {
         Ok(())
     }
 
-    fn has_alternate_content(&self) -> bool {
-        self.has_alternate_content_in(&self.preserved.origins)
+    fn needs_cell_alternate_preview(
+        &mut self,
+        sheets: impl Iterator<Item = SheetId>,
+    ) -> Result<bool> {
+        let Some(package) = &self.source_package else {
+            return Ok(false);
+        };
+        if package.materialized().is_some() {
+            return Ok(self.needs_alternate_preview());
+        }
+        for sheet in sheets {
+            if let Some(Some(origin)) = self.preserved.origins.get(sheet.0 as usize)
+                && package.sheet_has_alternate_content(*origin)?
+            {
+                return Ok(true);
+            }
+        }
+        if !self.needs_alternate_preview() {
+            return Ok(false);
+        }
+        self.ensure_graph();
+        let package = self.source_package.as_ref().expect("source package");
+        Ok(self
+            .graph
+            .as_ref()
+            .expect("graph initialized")
+            .formula_cells()
+            .any(|(sheet, _)| {
+                self.preserved
+                    .origins
+                    .get(sheet.0 as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|origin| package.sheet_may_have_alternate_content(origin))
+            }))
     }
 
-    fn has_alternate_content_in(&self, origins: &[Option<usize>]) -> bool {
+    fn needs_alternate_preview(&self) -> bool {
+        self.needs_alternate_preview_in(&self.preserved.origins)
+    }
+
+    fn needs_alternate_preview_in(&self, origins: &[Option<usize>]) -> bool {
         self.source_package.as_ref().is_some_and(|package| {
             origins
                 .iter()
                 .flatten()
-                .any(|&origin| package.sheet_has_alternate_content(origin))
+                .any(|&origin| package.sheet_may_have_alternate_content(origin))
         })
     }
 
@@ -4614,9 +4670,47 @@ impl Workbook {
         axes: &[Option<xlsx_parse::SheetAxes>],
     ) -> Result<()> {
         if let Some(package) = &self.source_package
-            && self.has_alternate_content_in(origins)
+            && self.needs_alternate_preview_in(origins)
         {
-            package.validate_alternate_content(model, origins, axes, self.is_collaborative())?;
+            if package.materialized().is_some() {
+                return package.validate_alternate_content(
+                    model,
+                    origins,
+                    axes,
+                    self.is_collaborative(),
+                    std::iter::empty(),
+                );
+            }
+            let all_sheets_may_change = model.shared_strings != self.model.shared_strings
+                || origins != self.preserved.origins.as_slice()
+                || model
+                    .sheets
+                    .iter()
+                    .zip(&self.model.sheets)
+                    .any(|(after, before)| after.name != before.name)
+                || (axes != self.preserved.axes.as_slice()
+                    && axes
+                        .iter()
+                        .chain(&self.preserved.axes)
+                        .flatten()
+                        .any(|axes| !axes.is_identity()));
+            let changed_origins = origins
+                .iter()
+                .zip(&model.sheets)
+                .enumerate()
+                .filter_map(|(index, (&origin, sheet))| {
+                    let origin = origin?;
+                    (package.sheet_may_have_alternate_content(origin)
+                        && (all_sheets_may_change || self.model.sheets.get(index) != Some(sheet)))
+                    .then_some(origin)
+                });
+            package.validate_alternate_content(
+                model,
+                origins,
+                axes,
+                self.is_collaborative(),
+                changed_origins,
+            )?;
         }
         Ok(())
     }
@@ -4627,7 +4721,7 @@ impl Workbook {
         before: &[String],
         after: &[String],
     ) -> Result<()> {
-        if self.has_alternate_content() {
+        if self.needs_alternate_preview() {
             let mut preserved = self.preserved.clone();
             preserved.rekey(before, after);
             preserved.forget_axes();
@@ -4651,35 +4745,57 @@ impl Workbook {
         let (graph, result) = if self.is_collaborative() {
             self.recalculate_edit_preview(&mut prepared.model, &seeds, options.now_serial)
         } else {
-            let mut graph = DepGraph::build(&self.model);
-            match &self.graph {
-                Some(previous) => graph.adopt_unevaluated(previous),
-                None => assume_unevaluated(&graph, &self.last_calculation),
-            }
-            for (sheet, cell, formula) in touched {
-                graph.set_formula(*sheet, *cell, formula.as_deref());
-            }
-            let result = recalc_after_with_seed(
-                &mut prepared.model,
-                &mut graph,
-                &seeds,
-                options.now_serial,
-                self.rand_seed,
-            );
-            (graph, result)
+            self.calculate_standalone_cell_preview(&mut prepared.model, touched, &seeds, options)
         };
         let update = if cell_inputs {
             self.commit_prepared_cell_inputs(prepared)?
         } else {
             self.commit_prepared(prepared)?
         };
-        let mutation = self.mutation_result(true, result, &seeds);
+        let mutation = self.adopt_cell_calculation(graph, result, &seeds, options, keeps_graph);
+        Ok((mutation, update))
+    }
+
+    fn calculate_standalone_cell_preview(
+        &self,
+        model: &mut WorkbookModel,
+        touched: &[(SheetId, CellRef, Option<String>)],
+        seeds: &[(SheetId, CellRef)],
+        options: CalculationOptions,
+    ) -> (DepGraph, RecalcResult) {
+        let mut graph = DepGraph::build(&self.model);
+        match &self.graph {
+            Some(previous) => graph.adopt_unevaluated(previous),
+            None => assume_unevaluated(&graph, &self.last_calculation),
+        }
+        for (sheet, cell, formula) in touched {
+            graph.set_formula(*sheet, *cell, formula.as_deref());
+        }
+        let recalc = recalc_after_with_seed(
+            model,
+            &mut graph,
+            seeds,
+            options.now_serial,
+            self.rand_seed,
+        );
+        (graph, recalc)
+    }
+
+    fn adopt_cell_calculation(
+        &mut self,
+        graph: DepGraph,
+        recalc: RecalcResult,
+        seeds: &[(SheetId, CellRef)],
+        options: CalculationOptions,
+        keeps_graph: bool,
+    ) -> MutationResult {
+        let mutation = self.mutation_result(true, recalc, seeds);
         self.graph = Some(graph);
         if keeps_graph {
             self.mark_graph_current();
         }
         self.calculated_now = options.now_serial;
-        Ok((mutation, update))
+        mutation
     }
 
     /// Commits a single-cell edit without staging a copy of the authority. Returns the update

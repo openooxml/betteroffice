@@ -832,8 +832,9 @@ fn deferred_filter_edit_uses_the_source_default_style_without_loading_media() {
         .into_bytes();
     let media = "xl/media/unused.bin";
     parts.push((media.to_owned(), vec![123; 64]));
-    xlsx_parse::AlternateContentSources::from_source(&[(1, sheet2)], |paths| {
+    xlsx_parse::AlternateContentSources::from_source(&[(1, sheet2)], true, |paths| {
         assert!(!paths.contains(media));
+        assert!(!paths.contains(sheet1));
         Ok(parts
             .iter()
             .filter(|(name, _)| paths.contains(name))

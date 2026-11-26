@@ -22,7 +22,6 @@ pub(crate) struct SheetFacts {
     pub(crate) worksheet: bool,
     pub(crate) protected: bool,
     pub(crate) format_cells: bool,
-    pub(crate) sheet_data_alternates: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,10 +37,6 @@ pub(crate) struct ReferenceAreaFacts {
 }
 
 impl PackageFacts {
-    pub fn set_source_sheet_has_alternate_content(&mut self, index: usize, present: bool) {
-        self.sheets[index].sheet_data_alternates = Some(present);
-    }
-
     #[doc(hidden)]
     pub fn from_package(package: &PreservedPackage) -> Self {
         Self {
@@ -80,11 +75,6 @@ pub(crate) fn sheet_facts(package: &PreservedPackage, index: usize) -> SheetFact
         worksheet: package.source_sheet_is_worksheet(index),
         protected: package.source_sheet_is_protected(index),
         format_cells: package.source_sheet_allows_format_cells(index),
-        sheet_data_alternates: Some(
-            package
-                .source_cell_facts(index)
-                .is_some_and(|facts| facts.has_sheet_data_alternates()),
-        ),
     }
 }
 
@@ -165,17 +155,6 @@ impl<'a> PackageFactsView<'a> {
         match self.0 {
             FactsSource::Package(package) => any_uncached_formula(package),
             FactsSource::Facts(facts) => facts.any_uncached_formula,
-        }
-    }
-
-    pub fn source_sheet_has_alternate_content(&self, index: usize) -> Option<bool> {
-        match self.0 {
-            FactsSource::Package(package) => Some(
-                package
-                    .source_cell_facts(index)
-                    .is_some_and(|facts| facts.has_sheet_data_alternates()),
-            ),
-            FactsSource::Facts(facts) => facts.sheets.get(index)?.sheet_data_alternates,
         }
     }
 

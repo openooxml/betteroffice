@@ -902,40 +902,61 @@ pub(crate) struct XmlChild {
 
 #[doc(hidden)]
 pub fn worksheet_has_alternate_content(bytes: &[u8]) -> Result<bool, ParseError> {
+    let bytes = &bytes[utf8_bom_len(bytes)..];
     let mut reader = Reader::from_reader(bytes);
-    let mut depth = 0;
-    let mut grid = false;
+    let mut root = false;
     loop {
-        let event = reader.read_event().map_err(xml_err)?;
-        match event {
+        match reader.read_event().map_err(xml_err)? {
+            Event::Start(_) if !root => root = true,
             Event::Start(element) => {
-                let name = element.local_name();
-                if depth == 1 {
-                    grid = name.as_ref() == b"sheetData";
+                if element.local_name().as_ref() == b"sheetData" {
+                    let offset = reader.buffer_position() as usize;
+                    return Ok(grid_has_alternate_content(
+                        &bytes[offset..],
+                        element.name().as_ref(),
+                    ));
                 }
-                if grid && name.as_ref() == b"AlternateContent" {
-                    return Ok(true);
-                }
-                depth += 1;
-                if depth > MAX_DEPTH {
-                    return Err(ParseError::DepthExceeded);
-                }
+                reader.read_to_end(element.name()).map_err(xml_err)?;
             }
-            Event::Empty(element)
-                if grid && element.local_name().as_ref() == b"AlternateContent" =>
-            {
-                return Ok(true);
+            Event::Empty(element) if !root || element.local_name().as_ref() == b"sheetData" => {
+                return Ok(false);
             }
-            Event::End(_) => {
-                depth -= 1;
-                if depth == 1 {
-                    grid = false;
-                }
-            }
-            Event::Eof => return Ok(false),
+            Event::End(_) | Event::Eof => return Ok(false),
             _ => {}
         }
     }
+}
+
+fn grid_has_alternate_content(mut bytes: &[u8], grid_name: &[u8]) -> bool {
+    while let Some(start) = memchr::memchr(b'<', bytes) {
+        bytes = &bytes[start + 1..];
+        let special = if let Some(rest) = bytes.strip_prefix(b"!--") {
+            Some((rest, b"-->".as_slice()))
+        } else if let Some(rest) = bytes.strip_prefix(b"![CDATA[") {
+            Some((rest, b"]]>".as_slice()))
+        } else {
+            bytes.strip_prefix(b"?").map(|rest| (rest, b"?>".as_slice()))
+        };
+        if let Some((rest, end)) = special {
+            let Some(position) = memchr::memmem::find(rest, end) else {
+                return false;
+            };
+            bytes = &rest[position + end.len()..];
+            continue;
+        }
+        let closing = bytes.first() == Some(&b'/');
+        let name = bytes[usize::from(closing)..]
+            .split(|&byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+            .next()
+            .unwrap_or_default();
+        if closing && name == grid_name {
+            return false;
+        }
+        if !closing && name.rsplit(|&byte| byte == b':').next() == Some(b"AlternateContent") {
+            return true;
+        }
+    }
+    false
 }
 
 impl XmlTemplate {

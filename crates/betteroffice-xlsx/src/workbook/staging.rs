@@ -152,7 +152,7 @@ impl Workbook {
             }
             _ => None,
         };
-        if self.has_alternate_content() {
+        if self.needs_alternate_preview() {
             let mut preserved = self.preserved.clone();
             for op in &ops {
                 match *op {
