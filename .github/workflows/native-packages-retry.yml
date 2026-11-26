@@ -38,24 +38,12 @@ jobs:
         run: |
           set -euo pipefail
           summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
-          trap 'summary "Not re-run: a GitHub API call for $RUN_URL failed."' ERR
-
-          run=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
-            --jq '[.path, .event, .head_branch, .head_repository.full_name, .run_attempt, .status, .conclusion] | @tsv')
-          IFS=$'\t' read -r path event branch head attempt status conclusion <<< "$run"
-          if [ "$path" != .github/workflows/native-packages.yml ] || [ "$event" != push ] || [ "$branch" != main ] || [ "$head" != "$REPO" ]; then
-            summary "Not re-run: $RUN_URL is not a push to main of this repository's Native packages workflow."
-            exit 0
-          fi
-          if [ "$attempt" != 1 ] || [ "$status" != completed ]; then
-            summary "Not re-run: $RUN_URL is on attempt $attempt ($status), so it was already re-run."
-            exit 0
-          fi
+          trap 'summary "No re-run confirmed: a GitHub API call for $RUN_URL failed."' ERR
 
           for state in requested queued pending waiting; do
-            count=$(gh api "repos/$REPO/actions/workflows/native-packages.yml/runs?branch=main&event=push&status=$state&per_page=1" --jq '.total_count')
+            count=$(gh api "repos/$REPO/actions/workflows/native-packages.yml/runs?branch=main&status=$state&per_page=1" --jq '.total_count')
             if [ "$count" != 0 ]; then
-              summary "Not re-run: a newer Native packages run on main is $state, and a re-run would take its place in the queue."
+              summary "Not re-run: another Native packages run on main is $state, and a re-run would take its place in the queue."
               exit 0
             fi
           done
@@ -63,7 +51,7 @@ jobs:
           jobs=$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/1/jobs?per_page=100" \
             --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .conclusion, .name] | @tsv')
           if [ -z "$jobs" ]; then
-            summary "Not re-run: $RUN_URL ($conclusion) has no failed or cancelled job."
+            summary "Not re-run: $RUN_URL/attempts/1 has no failed or cancelled job."
             exit 0
           fi
           stopped='^"(The run was canceled by @[A-Za-z0-9-]+(\[bot\])?\.|Canceling since a higher priority waiting request for [^"\\]+ exists)"$'
@@ -78,6 +66,19 @@ jobs:
             done <<< "$messages"
           done <<< "$jobs"
 
+          run=$(gh api "repos/$REPO/actions/runs/$RUN_ID" \
+            --jq '[.path, .event, .head_branch, .head_repository.full_name, .run_attempt, .status, .conclusion] | @tsv')
+          IFS=$'\t' read -r path event branch head attempt status _ <<< "$run"
+          path=${path%%@*}
+          if [ "$path" != .github/workflows/native-packages.yml ] || [ "$event" != push ] || [ "$branch" != main ] || [ "$head" != "$REPO" ]; then
+            summary "Not re-run: $RUN_URL is not a push to main of this repository's Native packages workflow."
+            exit 0
+          fi
+          if [ "$attempt" != 1 ] || [ "$status" != completed ]; then
+            summary "Not re-run: $RUN_URL is on attempt $attempt ($status), so it was already re-run."
+            exit 0
+          fi
+
           gh api --method POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs" --silent
           names=$(cut -f2,3 <<< "$jobs" | awk -F'\t' '{ printf "%s%s (%s)", sep, $2, $1; sep = ", " }')
-          summary "Requested one re-run of $RUN_URL, whose attempt 1 ended with: $names."
+          summary "Requested one re-run of $RUN_URL; attempt 1 ($RUN_URL/attempts/1) ended with: $names."

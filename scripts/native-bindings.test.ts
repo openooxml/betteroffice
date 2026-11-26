@@ -1163,7 +1163,7 @@ describe('native packages retry', () => {
   const sourceRun = ['.github/workflows/native-packages.yml', 'push', 'main', repo, '1', 'completed', 'cancelled'];
   const runCall = `api repos/${repo}/actions/runs/77 --jq [.path, .event, .head_branch, .head_repository.full_name, .run_attempt, .status, .conclusion] | @tsv`;
   const queueCall = (state: string) =>
-    `api repos/${repo}/actions/workflows/native-packages.yml/runs?branch=main&event=push&status=${state}&per_page=1 --jq .total_count`;
+    `api repos/${repo}/actions/workflows/native-packages.yml/runs?branch=main&status=${state}&per_page=1 --jq .total_count`;
   const jobsCall = `api --paginate repos/${repo}/actions/runs/77/attempts/1/jobs?per_page=100 --jq .jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .conclusion, .name] | @tsv`;
   const annotationsCall = (id: number) => `api --paginate repos/${repo}/check-runs/${id}/annotations?per_page=100 --jq .[].message | tojson`;
   const rerunCall = `api --method POST repos/${repo}/actions/runs/77/rerun-failed-jobs --silent`;
@@ -1190,9 +1190,11 @@ describe('native packages retry', () => {
     const value = (operand: string) =>
       operand.startsWith("'")
         ? operand.slice(1, -1)
-        : operand === 'github.repository'
-          ? repo
-          : operand.replace(/^github\.event\.workflow_run\./, '').split('.').reduce((at: any, key) => at?.[key], event);
+        : /^\d+$/.test(operand)
+          ? Number(operand)
+          : operand === 'github.repository'
+            ? repo
+            : operand.replace(/^github\.event\.workflow_run\./, '').split('.').reduce((at: any, key) => at?.[key], event);
     const operands: unknown[] = [];
     const condition = String(job.if).replace(
       /([\w.]+|'[^']*')\s*==\s*([\w.]+|'[^']*')/g,
@@ -1291,6 +1293,7 @@ describe('native packages retry', () => {
   test('acts only on a failed or cancelled first attempt of a push to main in this repository', () => {
     expect(triggered({})).toBe(true);
     expect(triggered({ conclusion: 'failure' })).toBe(true);
+    expect(triggered({ run_attempt: '1' })).toBe(true);
     for (const conclusion of ['success', 'skipped', 'neutral', 'timed_out', 'action_required', 'startup_failure', null]) {
       expect(triggered({ conclusion }), String(conclusion)).toBe(false);
     }
@@ -1315,11 +1318,20 @@ describe('native packages retry', () => {
     ['the branch differs in case', ['.github/workflows/native-packages.yml', 'push', 'Main', repo, '1', 'completed', 'failure'], "is not a push to main of this repository's Native packages workflow."],
     ['the workflow file differs', ['.github/workflows/other.yml', 'push', 'main', repo, '1', 'completed', 'failure'], "is not a push to main of this repository's Native packages workflow."],
     ['the head is a fork', ['.github/workflows/native-packages.yml', 'push', 'main', 'someone/betteroffice', '1', 'completed', 'failure'], "is not a push to main of this repository's Native packages workflow."]
-  ])('checks the live run before re-running: not when %s', (_, run, reason) => {
+  ])('checks the live run right before re-running: not when %s', (_, run, reason) => {
     const result = rerun({ run, jobs: [[10, 'failure', 'dist (docx) / aarch64-apple-darwin']] });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.calls).toEqual([runCall]);
+    expect(result.calls).toEqual([...queueCalls, jobsCall, runCall]);
     expect(result.summary).toBe(`Not re-run: ${runUrl} ${reason}`);
+  });
+
+  test('accepts a live path that names its ref', () => {
+    const result = rerun({
+      run: ['.github/workflows/native-packages.yml@main', 'push', 'main', repo, '1', 'completed', 'failure'],
+      jobs: [[10, 'failure', 'dist (docx) / aarch64-apple-darwin']]
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls).toEqual([...queueCalls, jobsCall, runCall, rerunCall]);
   });
 
   test.each(['requested', 'queued', 'pending', 'waiting'])('does not displace a newer %s run of the queue', (state) => {
@@ -1327,7 +1339,7 @@ describe('native packages retry', () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.posted).toBe(false);
     expect(result.summary).toBe(
-      `Not re-run: a newer Native packages run on main is ${state}, and a re-run would take its place in the queue.`
+      `Not re-run: another Native packages run on main is ${state}, and a re-run would take its place in the queue.`
     );
   });
 
@@ -1337,9 +1349,9 @@ describe('native packages retry', () => {
       annotations: { 10: ['The operation was canceled.'] }
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.calls).toEqual([runCall, ...queueCalls, jobsCall, annotationsCall(10), rerunCall]);
+    expect(result.calls).toEqual([...queueCalls, jobsCall, annotationsCall(10), runCall, rerunCall]);
     expect(result.summary).toBe(
-      `Requested one re-run of ${runUrl}, whose attempt 1 ended with: dist (pptx) / x86_64-apple-darwin (cancelled).`
+      `Requested one re-run of ${runUrl}; attempt 1 (${runUrl}/attempts/1) ended with: dist (pptx) / x86_64-apple-darwin (cancelled).`
     );
   });
 
@@ -1350,9 +1362,9 @@ describe('native packages retry', () => {
       annotations: { 11: ['The job was not acquired by Runner of type hosted even after multiple attempts'] }
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.calls).toEqual([runCall, ...queueCalls, jobsCall, annotationsCall(11), rerunCall]);
+    expect(result.calls).toEqual([...queueCalls, jobsCall, annotationsCall(11), runCall, rerunCall]);
     expect(result.summary).toBe(
-      `Requested one re-run of ${runUrl}, whose attempt 1 ended with: dist (docx) / aarch64-apple-darwin (failure), dist (docx) / x86_64-apple-darwin (cancelled).`
+      `Requested one re-run of ${runUrl}; attempt 1 (${runUrl}/attempts/1) ended with: dist (docx) / aarch64-apple-darwin (failure), dist (docx) / x86_64-apple-darwin (cancelled).`
     );
   });
 
@@ -1387,7 +1399,7 @@ describe('native packages retry', () => {
     const result = rerun({});
     expect(result.status, result.stderr).toBe(0);
     expect(result.posted).toBe(false);
-    expect(result.summary).toBe(`Not re-run: ${runUrl} (cancelled) has no failed or cancelled job.`);
+    expect(result.summary).toBe(`Not re-run: ${runUrl}/attempts/1 has no failed or cancelled job.`);
   });
 
   test.each([
@@ -1400,6 +1412,6 @@ describe('native packages retry', () => {
     const result = rerun({ jobs: [[10, 'cancelled', 'dist (docx) / aarch64-apple-darwin']], fail });
     expect(result.status).not.toBe(0);
     expect(result.calls.at(-1)).toContain(fail);
-    expect(result.summary).toBe(`Not re-run: a GitHub API call for ${runUrl} failed.`);
+    expect(result.summary).toBe(`No re-run confirmed: a GitHub API call for ${runUrl} failed.`);
   });
 });
