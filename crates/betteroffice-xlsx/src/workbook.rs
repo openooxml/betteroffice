@@ -4647,6 +4647,7 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect::<Vec<_>>();
+        let keeps_graph = self.is_collaborative() || self.edits_only_values(touched);
         let (graph, result) = if self.is_collaborative() {
             self.recalculate_edit_preview(&mut prepared.model, &seeds, options.now_serial)
         } else {
@@ -4674,7 +4675,9 @@ impl Workbook {
         };
         let mutation = self.mutation_result(true, result, &seeds);
         self.graph = Some(graph);
-        self.mark_graph_current();
+        if keeps_graph {
+            self.mark_graph_current();
+        }
         self.calculated_now = options.now_serial;
         Ok((mutation, update))
     }
@@ -5094,13 +5097,16 @@ impl Workbook {
 
     /// Whether the graph is current and stays so after `touched`, which set or clear no formula.
     fn keeps_graph_current(&self, touched: &[(SheetId, CellRef, Option<String>)]) -> bool {
-        let values_only = touched.iter().all(|(sheet, cell, formula)| {
+        self.graph_current() && !self.is_collaborative() && self.edits_only_values(touched)
+    }
+
+    fn edits_only_values(&self, touched: &[(SheetId, CellRef, Option<String>)]) -> bool {
+        touched.iter().all(|(sheet, cell, formula)| {
             formula.is_none()
                 && current_cell_state(&self.model, *sheet, *cell)
                     .formula
                     .is_none()
-        });
-        self.graph_current() && !self.is_collaborative() && values_only
+        })
     }
 
     /// Full recalculations that kept the dependency graph, and those that rebuilt it.

@@ -2,7 +2,7 @@ use super::*;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use xlsx_model::{Cell, Table};
+use xlsx_model::{Cell, CellProvider, Table};
 
 const NOW_SERIAL: f64 = 45_000.25;
 const RAND_SEED: u32 = 17;
@@ -204,6 +204,52 @@ fn a_formula_set_rebuilds_the_graph() {
 #[test]
 fn a_formula_clear_rebuilds_the_graph() {
     check(true, false, |workbook| edit(workbook, 0, "B3", ""));
+}
+
+#[test]
+fn formula_edits_beside_a_wrapped_cell_rebuild_the_graph() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Sheet1"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let (_, sheet_xml) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    *sheet_xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:x="urn:test:ext" mc:Ignorable="x">
+        <sheetData><row r="1">
+            <c r="A1"><v>5</v></c>
+            <mc:AlternateContent>
+                <mc:Choice Requires="x"><c r="B1"><v>2</v></c></mc:Choice>
+                <mc:Fallback><c r="B1"><v>2</v></c></mc:Fallback>
+            </mc:AlternateContent>
+            <c r="C1"><f>A1*2</f><v>10</v></c>
+            <c r="D1"><f>A1*3</f><v>15</v></c>
+        </row></sheetData>
+    </worksheet>"#
+        .to_vec();
+    let mut workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    assert!(workbook.has_alternate_content());
+
+    let sheet = SheetId(0);
+    assert_eq!(
+        workbook.model().value(sheet, at("C1")),
+        CellValue::Number { value: 10.0 }
+    );
+    for (label, input, expected) in [
+        ("clear", "", CellValue::Empty),
+        ("enter", "=A1*10", CellValue::Number { value: 50.0 }),
+    ] {
+        edit(&mut workbook, sheet.0, "C1", input);
+        assert_next_full_recalculation(&mut workbook, false, label);
+        assert_eq!(workbook.model().value(sheet, at("C1")), expected, "{label}");
+        assert_eq!(
+            workbook.model().value(sheet, at("D1")),
+            CellValue::Number { value: 15.0 },
+            "{label}"
+        );
+    }
 }
 
 #[test]
