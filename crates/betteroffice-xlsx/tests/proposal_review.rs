@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellAddress, CellRef, CellValue, DefinedName, EditRequest, Error,
-    Op, ProposalEditInput, ProposalRequest, Sheet, SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellAddress, CellRef, CellValue, DefinedName, EditRequest, Error, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetId, Workbook, WorkbookModel,
 };
 
 fn cell(value: &str) -> CellRef {

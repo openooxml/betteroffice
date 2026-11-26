@@ -287,7 +287,9 @@ fn workbook_names_can_be_authored_and_synced_from_a_nonfirst_sheet_context() {
             .edit_cell(sheet, FORMULA_CELL, "=IFERROR(Summary,-1)", options)
             .unwrap();
     }
-    let update = author.encode_diff_v1(&peer.encode_state_vector_v1()).unwrap();
+    let update = author
+        .encode_diff_v1(&peer.encode_state_vector_v1())
+        .unwrap();
     peer.apply_update_v1(&update, options).unwrap();
     for workbook in [&mut author, &mut peer] {
         workbook.recalculate_all(options);
