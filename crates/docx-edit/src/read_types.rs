@@ -129,6 +129,17 @@ fn present(value: Option<&Any>) -> Option<&Any> {
     value.filter(|value| !matches!(value, Any::Null | Any::Undefined))
 }
 
+pub(crate) fn payload_str(value: Option<&Any>) -> Option<&str> {
+    match present(value)? {
+        Any::String(value) => Some(value),
+        _ => None,
+    }
+}
+
+pub(crate) fn payload_json(json: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(json).ok()
+}
+
 fn text(value: Option<&Any>) -> Option<String> {
     match present(value)? {
         Any::String(value) => Some(value.to_string()),

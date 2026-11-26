@@ -109,6 +109,8 @@ mod part_metadata;
 mod peer_bootstrap;
 mod policy;
 mod presence;
+#[doc(hidden)]
+pub mod projection;
 mod provenance;
 mod queries;
 mod raw;
@@ -859,6 +861,7 @@ pub struct EditingDoc {
     story_views: Mutex<EpochCache<target::StoryView>>,
     paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
+    projection: Mutex<projection::ProjectionCache>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     source_note_separators: Mutex<Option<SourceNoteSeparators>>,
@@ -976,6 +979,7 @@ impl EditingDoc {
             story_views: Mutex::default(),
             paragraph_facts: Mutex::default(),
             source: Arc::new(Mutex::new(None)),
+            projection: Mutex::default(),
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             source_note_separators: Mutex::default(),
@@ -1122,6 +1126,7 @@ impl EditingDoc {
     #[allow(dead_code)]
     pub(crate) fn invalidate_projections(&self) {
         self.save_story_states.lock().unwrap().clear();
+        self.projection.lock().unwrap().invalidate_stories();
         self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1372,6 +1377,7 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        *self.projection.lock().unwrap() = projection::ProjectionCache::default();
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
@@ -1893,14 +1899,22 @@ impl EditingDoc {
 
     pub fn comment_anchors(&self, comment_id: &str) -> EditResult<Vec<CommentAnchor>> {
         let txn = self.doc.transact();
+        self.comment_anchors_in(&txn, comment_id)
+    }
+
+    pub(crate) fn comment_anchors_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        comment_id: &str,
+    ) -> EditResult<Vec<CommentAnchor>> {
         let comments = txn
             .get_map(COMMENTS)
             .expect("comments root is declared by EditingDoc::new");
         let comment = comments
-            .get(&txn, comment_id)
+            .get(txn, comment_id)
             .and_then(|value| value.cast::<MapRef>().ok())
             .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
-        let anchors = match comment.get(&txn, "anchors") {
+        let anchors = match comment.get(txn, "anchors") {
             Some(Out::Any(Any::Array(values))) => values,
             _ => {
                 return Err(EditError::InvalidComment("anchors must be an array".into()));
@@ -1953,11 +1967,15 @@ impl EditingDoc {
     /// content.
     pub fn resolve_raw_marks(&self) -> Vec<ResolvedRawMark> {
         let txn = self.doc.transact();
+        self.resolve_raw_marks_in(&txn)
+    }
+
+    pub(crate) fn resolve_raw_marks_in<T: ReadTxn>(&self, txn: &T) -> Vec<ResolvedRawMark> {
         let Some(marks) = txn.get_map(RAW_INLINES) else {
             return Vec::new();
         };
         let mut resolved: Vec<ResolvedRawMark> = marks
-            .iter(&txn)
+            .iter(txn)
             .filter_map(|(_, value)| {
                 let Out::Any(Any::Map(mark)) = value else {
                     return None;
@@ -1974,8 +1992,8 @@ impl EditingDoc {
                 let Some(Any::Number(ordinal)) = mark.get("ordinal") else {
                     return None;
                 };
-                story_ref(&txn, &story).ok()?;
-                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, &txn)?.index;
+                story_ref(txn, &story).ok()?;
+                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, txn)?.index;
                 Some(ResolvedRawMark {
                     story,
                     offset,

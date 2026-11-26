@@ -63,9 +63,13 @@ impl EditingDoc {
     #[doc(hidden)]
     pub fn header_footer_aliases(&self) -> Vec<(String, String)> {
         let txn = self.yrs_doc().transact();
+        self.header_footer_aliases_in(&txn)
+    }
+
+    pub(crate) fn header_footer_aliases_in<T: ReadTxn>(&self, txn: &T) -> Vec<(String, String)> {
         let Some(groups) = txn
             .get_map(crate::identity::SESSION)
-            .and_then(|session| map_string(&session, &txn, HF_ALIASES))
+            .and_then(|session| map_string(&session, txn, HF_ALIASES))
             .and_then(|json| parse_groups(&json).ok())
         else {
             return Vec::new();
@@ -78,7 +82,7 @@ impl EditingDoc {
                 let root = story_id(alias);
                 let prefix = format!("{root}:");
                 stories.as_ref().is_some_and(|stories| {
-                    crate::live_stories(stories, &txn)
+                    crate::live_stories(stories, txn)
                         .any(|(key, _)| key == root || key.starts_with(&prefix))
                 })
             });

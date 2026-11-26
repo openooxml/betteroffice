@@ -3162,6 +3162,7 @@ impl EditingDoc {
     pub fn begin_opening(&self, generation: Option<&str>) {
         self.clear_edit_provenance();
         self.save_story_states.lock().unwrap().clear();
+        *self.projection.lock().unwrap() = crate::projection::ProjectionCache::default();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
         txn.get_map(SESSION)
@@ -3791,16 +3792,25 @@ impl EditingDoc {
     pub fn story_paragraph_ids(&self, story_id: &str) -> EditResult<Vec<Option<String>>> {
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let story = match story_ref(&txn, story_id) {
+        self.story_paragraph_ids_in(&txn, story_id, source.as_deref())
+    }
+
+    pub(crate) fn story_paragraph_ids_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+        source: Option<&SourceIndex>,
+    ) -> EditResult<Vec<Option<String>>> {
+        let story = match story_ref(txn, story_id) {
             Ok(story) => story,
             Err(crate::EditError::CellHasNoStory(_)) => return Ok(vec![None]),
             Err(error) => return Err(error),
         };
-        Ok(pilcrows(&story, &txn)
+        Ok(pilcrows(&story, txn)
             .into_iter()
             .map(|(_, map)| {
-                Pilcrow::read(story_id, map, &txn)
-                    .saved_id(source.as_deref())
+                Pilcrow::read(story_id, map, txn)
+                    .saved_id(source)
                     .map(|(id, _)| id)
             })
             .collect())

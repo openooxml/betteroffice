@@ -814,6 +814,10 @@ impl SourceMetadata {
         &self.read
     }
 
+    pub(crate) fn projection_inheritance(&self) -> RunInheritance {
+        RunInheritance(self.styles.clone())
+    }
+
     /// The document's numbering definitions.
     pub(crate) fn numbering(&self) -> Arc<docx_parse::NumberingMap> {
         Arc::clone(&self.read.numbering)
@@ -6289,7 +6293,7 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
 }
 
 /// For each row of `table`, the source index of every cell seeding keeps as a cell story.
-fn source_cells(table: &Value) -> Vec<Vec<usize>> {
+pub(crate) fn source_cells(table: &Value) -> Vec<Vec<usize>> {
     let spans = calculate_row_spans(table);
     array(field(Some(table), "rows"))
         .iter()
