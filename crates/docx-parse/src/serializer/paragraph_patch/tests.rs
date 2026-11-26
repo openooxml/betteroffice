@@ -88,7 +88,11 @@ fn base_preserving_more_runs_refuses_different_smart_tag_ancestry() {
     assert!(base_xml.contains("<w:t>b</w:t></w:r></w:smartTag>"));
     assert!(recorded_xml.contains("<w:t>bKEEPy</w:t></w:r></w:smartTag>"));
     let source = ParagraphPatchSource::new(source.to_owned());
-    assert!(source.base_preserving_more_runs(0, &base, &recorded).is_none());
+    assert!(
+        source
+            .base_preserving_more_runs(0, &base, &recorded)
+            .is_none()
+    );
 }
 
 fn marker_properties(start: u32, end: u32) -> Attrs {
