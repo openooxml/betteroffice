@@ -28,6 +28,16 @@ pub fn preset_geometry_layers(
     adjustments: &HashMap<String, f64>,
     aspect_ratio: f64,
 ) -> Option<Vec<PresetGeometryPath>> {
+    if matches!(
+        shape_type,
+        "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
+    ) {
+        return Some(vec![PresetGeometryPath {
+            commands: preset_geometry_to_path(shape_type, adjustments, aspect_ratio)?,
+            fill: PresetPathFill::None,
+            stroke: true,
+        }]);
+    }
     presets::paths(shape_type, adjustments, aspect_ratio)
 }
 
@@ -78,7 +88,9 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         "donut" => vec![("adj", 0.25)],
         "noSmoking" => vec![("adj", 0.1875)],
         "foldedCorner" => vec![("adj", 0.166_67)],
-        "corner" => vec![("adj1", 0.5), ("adj2", 0.5)],
+        "bentConnector3" => vec![("adj1", 0.5)],
+        "corner" | "bentConnector4" => vec![("adj1", 0.5), ("adj2", 0.5)],
+        "bentConnector5" => vec![("adj1", 0.5), ("adj2", 0.5), ("adj3", 0.5)],
         "mathMultiply" => vec![("adj1", 0.2352)],
         "ribbon" => vec![("adj1", 0.166_67), ("adj2", 0.5)],
         "ellipseRibbon" => vec![("adj1", 0.25), ("adj2", 0.5), ("adj3", 0.125)],
@@ -1168,10 +1180,10 @@ fn curved_connector(segments: usize) -> Vec<GeometryPathCommand> {
         return vec![
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Cubic {
-                cp1x: ELLIPSE_KAPPA,
+                cp1x: 0.5,
                 cp1y: 0.0,
                 cp2x: 1.0,
-                cp2y: 1.0 - ELLIPSE_KAPPA,
+                cp2y: 0.5,
                 x: 1.0,
                 y: 1.0,
             },
@@ -1548,17 +1560,17 @@ mod tests {
     }
 
     #[test]
-    fn curved_connector2_follows_a_quarter_ellipse() {
+    fn curved_connector2_curves_from_horizontal_to_vertical() {
         let cmds = preset_geometry_to_path("curvedConnector2", &HashMap::new(), 1.0).unwrap();
         assert_eq!(
             cmds,
             vec![
                 GeometryPathCommand::Move { x: 0.0, y: 0.0 },
                 GeometryPathCommand::Cubic {
-                    cp1x: ELLIPSE_KAPPA,
+                    cp1x: 0.5,
                     cp1y: 0.0,
                     cp2x: 1.0,
-                    cp2y: 1.0 - ELLIPSE_KAPPA,
+                    cp2y: 0.5,
                     x: 1.0,
                     y: 1.0,
                 },
@@ -1815,6 +1827,19 @@ mod tests {
             Some(&0.5)
         );
         assert!(preset_geometry_default_adjustments("rect").is_empty());
+        for (preset, count) in [
+            ("bentConnector2", 0),
+            ("bentConnector3", 1),
+            ("bentConnector4", 2),
+            ("bentConnector5", 3),
+        ] {
+            assert_eq!(
+                preset_geometry_default_adjustments(preset),
+                (1..=count)
+                    .map(|i| (format!("adj{i}"), 0.5))
+                    .collect::<HashMap<_, _>>()
+            );
+        }
     }
 
     #[test]

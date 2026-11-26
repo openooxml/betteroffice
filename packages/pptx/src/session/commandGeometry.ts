@@ -1,3 +1,4 @@
+import { bentConnectorHit, containsBentConnector } from '../../../../shared/bentConnectorHit';
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
 import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
@@ -10,8 +11,10 @@ export interface CommandGeometryLine {
   transforms: readonly SlidePrimitive[];
 }
 
+type ConnectorHit = ReturnType<typeof bentConnectorHit>;
+
 export interface CommandGeometryIndex {
-  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number }[];
+  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number; connector?: ConnectorHit }[];
   lines: Map<string, CommandGeometryLine[]>;
 }
 
@@ -23,7 +26,7 @@ interface NavigationIndex { lines: Map<string, NavigationLine[]> }
 
 export interface CommandHitGeometryIndex extends NavigationIndex {
   size?: { width: number; height: number };
-  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number }[];
+  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number; connector?: ConnectorHit }[];
 }
 
 const displayLists = new WeakMap<PresentationCommandFrame, SlideDisplayList>();
@@ -50,6 +53,7 @@ export function indexGeometry(list: SlideDisplayList): CommandGeometryIndex {
     for (const primitive of primitives) {
       const transforms = [...parents, primitive];
       if (primitive.shapeId) index.hits.push({ primitive, transforms, clips,
+        connector: primitive.kind === 'shape' ? bentConnectorHit(primitive) : undefined,
         ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive) } : {}) });
       if (primitive.kind === 'textBox' && primitive.shapeId && primitive.storyId) {
         const key = targetKey(primitive.shapeId, primitive.storyId);
@@ -74,6 +78,7 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
         ...(source.transform ? { transform: { ...source.transform } } : {}) };
       const transforms = [...parents, primitive];
       if (source.shapeId) index.hits.push({ primitive, transforms, clips,
+        connector: source.kind === 'shape' ? bentConnectorHit(source) : undefined,
         ...(source.kind === 'textBox' ? { textLength: textBoxLength(source) } : {}) });
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
@@ -174,7 +179,8 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
     }
     const primitive = entry.primitive;
     if (target && (primitive.shapeId !== target.shapeId || primitive.storyId !== target.storyId)) continue;
-    if ((!target && (clipped || !contains(primitive, local))) || !primitive.shapeId) continue;
+    if (!primitive.shapeId || (!target && (clipped ||
+      !(entry.connector ? containsBentConnector(entry.connector, local) : contains(primitive, local))))) continue;
     if (!target && borderScale !== undefined) {
       const band = Math.min(6 / borderScale, primitive.w / 3, primitive.h / 3);
       if (local.x - primitive.x <= band || primitive.x + primitive.w - local.x <= band ||

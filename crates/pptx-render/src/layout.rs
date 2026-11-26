@@ -2221,12 +2221,16 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     };
-                    bent_connector = BentConnectorHit::from_primitive(&primitive);
+                    let start = self.primitives.len();
                     if use_bg_fill {
                         self.push_background_shape(primitive, paths, picture)?;
                     } else {
                         self.push_shape(primitive, paths, picture)?;
                     }
+                    bent_connector = self.primitives[start..]
+                        .iter()
+                        .rev()
+                        .find_map(BentConnectorHit::from_primitive);
                 }
                 ShapeKind::Picture => {
                     let source = picture_source(original);
@@ -2445,12 +2449,16 @@ impl<'a> LayoutBuilder<'a> {
                     shadow,
                     transform,
                 };
-                bent_connector = BentConnectorHit::from_primitive(&primitive);
+                let start = self.primitives.len();
                 if use_bg_fill {
                     self.push_background_shape(primitive, &value.paths, picture)?;
                 } else {
                     self.push_shape(primitive, &value.paths, picture)?;
                 }
+                bent_connector = self.primitives[start..]
+                    .iter()
+                    .rev()
+                    .find_map(BentConnectorHit::from_primitive);
             }
             ShapeNode::Picture(value) => {
                 let outline = self
@@ -7048,6 +7056,7 @@ impl HitRegion {
     }
 }
 
+#[derive(Default)]
 struct BentConnectorHit {
     points: Vec<(f64, f64)>,
     tolerance: f64,
@@ -7062,7 +7071,7 @@ impl BentConnectorHit {
             y,
             w,
             h,
-            stroke: Some(stroke),
+            stroke,
             ..
         } = primitive
         else {
@@ -7074,6 +7083,12 @@ impl BentConnectorHit {
         ) {
             return None;
         }
+        let Some(stroke) = stroke
+            .as_ref()
+            .filter(|stroke| stroke.width.is_finite() && stroke.width > 0.0)
+        else {
+            return Some(Self::default());
+        };
         let points = path
             .iter()
             .map(|command| match *command {
@@ -11554,6 +11569,14 @@ mod tests {
                 outline: None,
                 text: None,
             }));
+        let Some(ShapeNode::Shape(mut connector)) = package.masters[0].shapes.last().cloned() else {
+            unreachable!()
+        };
+        connector.base.id = 9_003;
+        connector.geometry = "bentConnector3".to_owned();
+        connector.outline = Some(red_outline(76_200.0));
+        package.masters[0].shapes.push(ShapeNode::Shape(connector));
+
         let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
         let image = rendered
             .display_list
@@ -11574,6 +11597,10 @@ mod tests {
         };
         assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
         assert!(tile.is_some());
+        assert!(rendered.display_list.primitives.iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Shape { object_id: 9_003, fill: None, stroke: Some(_), .. }
+        )));
     }
 
     #[test]
@@ -11971,12 +11998,24 @@ mod tests {
         let shape = &mut shapes[0];
         shape.rotation_deg = 90.0;
         shape.flip_h = true;
+        shape.fill = Some(ShapeFill {
+            color: Some(ColorValue {
+                rgb: Some("00FF00".to_owned()),
+                ..Default::default()
+            }),
+            ..ShapeFill::named("solid")
+        });
         shape.outline = Some(red_outline(76_200.0));
         shape.adjust_values.insert("adj1".to_owned(), 1.5);
 
         let rendered = SlideRenderer::new()
             .layout_slide(&PptxPackage::default(), &snapshot, 0)
             .unwrap();
+        assert!(rendered.display_list.primitives.iter().any(|primitive| matches!(
+            primitive,
+            Primitive::Shape { shape_id: Some(id), fill: None, stroke: Some(_), .. }
+                if id == &added.shape_id
+        )));
         assert_eq!(
             rendered.hit_test(150.0, 53.5),
             Some(HitTestResult::Shape {
@@ -11984,6 +12023,13 @@ mod tests {
             })
         );
         assert_eq!(rendered.hit_test(150.0, 55.0), None);
+        assert_eq!(rendered.hit_test(150.0, 150.0), None);
+
+        snapshot.slides[0].shapes[0].outline = None;
+        let rendered = SlideRenderer::new()
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(rendered.hit_test(150.0, 53.5), None);
         assert_eq!(rendered.hit_test(150.0, 150.0), None);
     }
 

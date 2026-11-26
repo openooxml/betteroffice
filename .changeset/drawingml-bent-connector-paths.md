@@ -7,4 +7,4 @@
 "@betteroffice/python-pptx": patch
 ---
 
-Bent connectors follow right-angle paths that can extend beyond their endpoints, and `curvedConnector2` curves smoothly from horizontal to vertical. PowerPoint lets you select detours and preserves them when editing other guides with `setShapeAdjust`, and Word arrowheads follow the path at both ends.
+PowerPoint and Word draw connectors along their corrected paths, keep dashes aligned in PNG exports, and point Word arrowheads along the line. PowerPoint also lets you select bent connectors along their visible route.

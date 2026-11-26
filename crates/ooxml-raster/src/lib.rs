@@ -1,5 +1,6 @@
 //! Shared tiny-skia raster helpers.
 
+mod dash;
 mod glyph;
 #[cfg(all(feature = "svg", not(target_arch = "wasm32")))]
 pub mod svg;
@@ -10,6 +11,7 @@ pub mod downscale;
 #[cfg(all(feature = "downscale", target_arch = "wasm32"))]
 compile_error!("the reduced raster decoder is native only");
 
+pub use dash::{clip_dashed_polyline, stroke_path_length};
 pub use glyph::{CachedGlyph, GlyphCache, fill_glyph};
 
 use ooxml_drawingml::GeometryPathCommand;

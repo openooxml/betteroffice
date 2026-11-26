@@ -46,7 +46,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
-use ooxml_raster::encode_png;
+use ooxml_raster::{clip_dashed_polyline, encode_png, stroke_path_length};
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
     GradientType, ImageCrop, ImageDestination, ImageTile, Paint as SlidePaint, Primitive,
@@ -788,7 +788,7 @@ impl Painter<'_, '_> {
                     if let Some(stroke) = part.stroke
                         && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
                     {
-                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                        stroke_visible_path(scratch, &part.path, &paint, &stroke, local, None)?;
                     }
                 }
                 Ok(())
@@ -889,7 +889,7 @@ impl Painter<'_, '_> {
                     if let Some(stroke) = part.stroke
                         && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
                     {
-                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                        stroke_visible_path(scratch, &part.path, &paint, &stroke, local, None)?;
                     }
                 }
                 Ok(())
@@ -972,9 +972,7 @@ impl Painter<'_, '_> {
             return Ok(());
         };
         let (paint, stroke) = paint;
-        self.pixmap
-            .stroke_path(path, &paint, &stroke, transform, clip);
-        Ok(())
+        stroke_visible_path(self.pixmap, path, &paint, &stroke, transform, clip)
     }
 
     fn decode(
@@ -1261,6 +1259,50 @@ fn gradient_paint(
     })
 }
 
+fn dash_pattern(width: f32) -> [f32; 2] {
+    [3.0_f32.max(width * 2.0), 2.0_f32.max(width)]
+}
+
+fn stroke_visible_path(
+    target: &mut Pixmap,
+    path: &Path,
+    paint: &Paint<'_>,
+    stroke: &Stroke,
+    transform: Transform,
+    clip: Option<&Mask>,
+) -> Result<(), String> {
+    if stroke.dash.is_some() {
+        const MAX_DASH_SEGMENTS: f64 = 1_000_000.0;
+        let pattern = dash_pattern(stroke.width);
+        let period = f64::from(pattern.iter().sum::<f32>());
+        let cost = |path: &Path| (f64::from(stroke_path_length(path)) / period).ceil();
+        let fragments = clip_dashed_polyline(
+            path,
+            stroke,
+            transform,
+            (target.width(), target.height()),
+            period,
+        );
+        let segments = match &fragments {
+            Some(fragments) => fragments.iter().map(|(path, _)| cost(path)).sum(),
+            None => cost(path),
+        };
+        if !segments.is_finite() || segments > MAX_DASH_SEGMENTS {
+            return Err("dashed stroke exceeds raster path budget".to_owned());
+        }
+        if let Some(fragments) = fragments {
+            let mut stroke = stroke.clone();
+            for (fragment, phase) in fragments {
+                stroke.dash = StrokeDash::new(pattern.to_vec(), phase);
+                target.stroke_path(&fragment, paint, &stroke, transform, clip);
+            }
+            return Ok(());
+        }
+    }
+    target.stroke_path(path, paint, stroke, transform, clip);
+    Ok(())
+}
+
 /// The dash pattern mirrors `strokeCurrentPath` in the canvas backend, so a
 /// dashed outline breaks at the same places in both.
 fn stroke_paint(
@@ -1278,12 +1320,9 @@ fn stroke_paint(
         paint.anti_alias = true;
         paint
     };
-    let dash = stroke.dashed.then(|| {
-        StrokeDash::new(
-            vec![3.0_f32.max(stroke.width * 2.0), 2.0_f32.max(stroke.width)],
-            0.0,
-        )
-    });
+    let dash = stroke
+        .dashed
+        .then(|| StrokeDash::new(dash_pattern(stroke.width).to_vec(), 0.0));
     Ok(Some((
         paint,
         Stroke {
@@ -1673,24 +1712,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extreme_bent_connector_guides_keep_a_finite_raster_path() {
-        for guide in [1e37, -1e37] {
+    fn extreme_bent_connector_guides_paint_visible_dashes_at_the_original_phase() {
+        let fonts = FontStore::new();
+        let images = AssetMap::new();
+        let resources = RenderResources::new(&fonts, &images);
+        for (guide, painted, gap) in [(1e37, 160, 154), (-1e37, 10, 17)] {
             let commands = ooxml_drawingml::preset_geometry_to_path(
                 "bentConnector3",
                 &std::collections::HashMap::from([("adj1".to_owned(), guide)]),
                 1.0,
             )
             .unwrap();
-            let path = geometry_path(&commands, 20.0, 20.0, 100.0, 100.0)
-                .expect("the extreme guide still produces a finite raster path");
-            let bounds = path.bounds();
-            assert!(bounds.left().is_finite() && bounds.right().is_finite());
-            assert_eq!((bounds.top(), bounds.bottom()), (20.0, 120.0));
-            if guide > 0.0 {
-                assert!(bounds.right() > 120.0, "the path still runs past the frame");
-            } else {
-                assert!(bounds.left() < 20.0, "the path still runs past the frame");
-            }
+            let mut list = empty_list(192.0, 160.0);
+            list.primitives.push(Primitive::Shape {
+                clip: None,
+                even_odd: false,
+                object_id: 1,
+                shape_id: None,
+                name: "Connector".to_owned(),
+                x: 32.0,
+                y: 24.0,
+                w: 96.0,
+                h: 96.0,
+                geometry: "bentConnector3".to_owned(),
+                geometry_fallback: false,
+                adjust_values: Default::default(),
+                path: commands,
+                fill: None,
+                stroke: Some(SlideStroke {
+                    join: None,
+                    color: "#ff0000".to_owned(),
+                    width: 4.0,
+                    dashed: true,
+                    head_end: None,
+                    tail_end: None,
+                    paint: None,
+                }),
+                shadow: None,
+                transform: SlideTransform::default(),
+            });
+            let png = render_png(&list, &resources).unwrap();
+            let pixmap = Pixmap::decode_png(&png).unwrap();
+            assert_eq!(pixmap.pixel(painted, 120).unwrap().green(), 0, "{guide}");
+            assert_eq!(pixmap.pixel(gap, 120).unwrap().green(), 255, "{guide}");
         }
     }
 

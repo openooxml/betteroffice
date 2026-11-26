@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
-import type { PositionedTextLine, SlideDisplayList, TextBoxPrimitive } from '../types';
+import type { PositionedTextLine, ShapePrimitive, SlideDisplayList, TextBoxPrimitive } from '../types';
 import * as wasm from '../wasm/loader';
 import { buildCommandFrame, commandFrameMedia } from './commandFrame';
 import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry, selectionGeometry } from './commandGeometry';
@@ -22,6 +22,25 @@ function list(text = 'alpha beta\nx\nalpha beta', lines = [line(0, 10, 0), line(
   return { contractVersion: 1, width: 960, height: 540,
     background: { kind: 'solid', color: '#ffffff' }, primitives: [box] };
 }
+
+test('full and compact hit geometry follow a rotated bent connector detour', () => {
+  const connector: ShapePrimitive = {
+    kind: 'shape', objectId: 2, shapeId: 'connector', name: 'Connector', geometry: 'bentConnector3',
+    x: 100, y: 100, w: 100, h: 100, transform: { rotationDeg: 90, flipH: true },
+    stroke: { color: '#ff0000', width: 8 },
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1.5, y: 0 },
+      { type: 'line', x: 1.5, y: 1 }, { type: 'line', x: 1, y: 1 }],
+  };
+  const source = { ...list(), primitives: [connector] };
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(hitGeometry(geometry, { x: 150, y: 53.5 })).toEqual({ kind: 'shape', shapeId: 'connector' });
+    expect(hitGeometry(geometry, { x: 150, y: 55 })).toBeNull();
+    expect(hitGeometry(geometry, { x: 150, y: 150 })).toBeNull();
+    const unstroked = index({ ...source, primitives: [{ ...connector, stroke: undefined }] });
+    expect(hitGeometry(unstroked, { x: 150, y: 150 })).toBeNull();
+  }
+});
 
 test('vertical_goal_worker', () => {
   const index = indexHitGeometry(list());

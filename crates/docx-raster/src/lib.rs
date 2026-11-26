@@ -23,12 +23,12 @@ use docx_layout::display_list::{
 };
 use docx_layout::skipped_effects::{PrimitiveAt, Region};
 use ooxml_raster::svg;
-use ooxml_raster::{encode_png, parse_css_color};
+use ooxml_raster::{clip_dashed_polyline, encode_png, parse_css_color, stroke_path_length};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
-    LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
+    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point,
     RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
@@ -876,9 +876,6 @@ fn paint_shape<'k>(
         )?;
     }
     let stroked = shape_stroke(shape, opacity)?;
-    if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
-        budget.charge_path(dash_segments(path_length(&path), dash))?;
-    }
     let mut ends = Vec::new();
     if let Some(stroked) = &stroked
         && (stroked.head.is_some() || stroked.tail.is_some())
@@ -899,20 +896,22 @@ fn paint_shape<'k>(
         );
         budget.charge_path(ends.len() as u64)?;
     }
-    type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
+    type Draw<'d> =
+        Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>, &mut PageBudget) -> Result<(), String> + 'd>;
     let mut parts: Vec<Draw<'_>> = Vec::new();
     if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
         let path = &path;
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+                Ok(())
             },
         ));
     }
     if failed_picture {
         let path = &path;
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 paint_picture_placeholder(
                     target,
                     path,
@@ -921,20 +920,44 @@ fn paint_shape<'k>(
                     mask,
                     opacity,
                 );
+                Ok(())
             },
         ));
     }
     if let Some(paint) = &fill {
         parts.push(Box::new(
-            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 target.fill_path(&path, paint, FillRule::Winding, transform, mask);
+                Ok(())
             },
         ));
     }
     if let Some(stroked) = &stroked {
         parts.push(Box::new(
-            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, budget| {
+                if let Some(dash) = &stroked.dash {
+                    let period = f64::from(dash.iter().sum::<f32>());
+                    if let Some(fragments) = clip_dashed_polyline(
+                        &path,
+                        &stroked.stroke,
+                        transform,
+                        (target.width(), target.height()),
+                        period,
+                    ) {
+                        for (fragment, _) in &fragments {
+                            budget.charge_path(dash_segments(stroke_path_length(fragment), dash))?;
+                        }
+                        let mut stroke = stroked.stroke.clone();
+                        for (fragment, phase) in fragments {
+                            stroke.dash = StrokeDash::new(dash.clone(), phase);
+                            target.stroke_path(&fragment, &stroked.paint, &stroke, transform, mask);
+                        }
+                        return Ok(());
+                    }
+                    budget.charge_path(dash_segments(stroke_path_length(&path), dash))?;
+                }
                 target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+                Ok(())
             },
         ));
     }
@@ -947,7 +970,7 @@ fn paint_shape<'k>(
             ..stroked.stroke.clone()
         };
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 for (end, open) in ends {
                     if *open {
                         target.stroke_path(end, &stroked.paint, &outline, transform, mask);
@@ -955,6 +978,7 @@ fn paint_shape<'k>(
                         target.fill_path(end, &stroked.paint, FillRule::Winding, transform, mask);
                     }
                 }
+                Ok(())
             },
         ));
     }
@@ -982,10 +1006,11 @@ fn paint_shape<'k>(
                 &mut surface.pixmap,
                 surface.offset.pre_concat(transform),
                 None,
-            );
+                budget,
+            )?;
             shadow::composite_shadow(pixmap, mask, surface, &shadow);
         }
-        draw(pixmap, transform, mask);
+        draw(pixmap, transform, mask, budget)?;
     }
     Ok(())
 }
@@ -3156,45 +3181,6 @@ fn dash_segments(length: f32, dash: &[f32]) -> u64 {
     count.min(u64::MAX as f64) as u64
 }
 
-/// An upper bound on the length a stroke walks, since a curve is no longer
-/// than the control polygon it is drawn from.
-fn path_length(path: &Path) -> f32 {
-    let mut total = 0.0;
-    let mut cursor = Point::zero();
-    let mut start = Point::zero();
-    let mut step = |from: Point, to: Point| {
-        total += (to.x - from.x).hypot(to.y - from.y);
-    };
-    for segment in path.segments() {
-        match segment {
-            PathSegment::MoveTo(point) => {
-                cursor = point;
-                start = point;
-            }
-            PathSegment::LineTo(point) => {
-                step(cursor, point);
-                cursor = point;
-            }
-            PathSegment::QuadTo(control, point) => {
-                step(cursor, control);
-                step(control, point);
-                cursor = point;
-            }
-            PathSegment::CubicTo(first, second, point) => {
-                step(cursor, first);
-                step(first, second);
-                step(second, point);
-                cursor = point;
-            }
-            PathSegment::Close => {
-                step(cursor, start);
-                cursor = start;
-            }
-        }
-    }
-    total
-}
-
 fn stroke_style(width: f32, dash: Option<&[f32]>, style: StrokeStyle) -> Result<Stroke, String> {
     if !width.is_finite() || width < 0.0 {
         return Err("stroke width must be finite and non-negative".to_string());
@@ -4062,6 +4048,34 @@ fn ensure_keys(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn off_page_dashed_connector_exports_with_its_original_dash_phase() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0, "width": 192, "height": 160,
+                "primitives": [{
+                    "kind": "shape", "x": 32, "y": 24, "w": 96, "h": 96,
+                    "geometryPath": [
+                        {"type": "move", "x": 32, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 120},
+                        {"type": "line", "x": 128, "y": 120}
+                    ],
+                    "strokePaint": {"color": "#ff0000", "width": 4, "customDash": [2, 1]}
+                }]
+            }]
+        }))
+        .unwrap();
+        let png = render_png(
+            &scene,
+            0,
+            &RenderResources::new(&FontStore::new(), &FontChains::new(), &ImageMap::new()),
+        )
+        .unwrap();
+        assert_eq!(picture_pixel(&png, 160, 120), [255, 0, 0, 255]);
+        assert_eq!(picture_pixel(&png, 154, 120), [255, 255, 255, 255]);
+    }
 
     #[test]
     fn shape_line_ends_point_back_along_the_outline() {
