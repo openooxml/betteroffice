@@ -31,9 +31,11 @@ function httpStatus(error: unknown): number | undefined {
   return (cause as { status?: number } | null)?.status;
 }
 
-function settledHttpMiss(error: unknown): boolean {
+async function settledFontMiss(error: unknown): Promise<boolean> {
   const status = httpStatus(error);
-  return status === 403 || status === 404 || status === 410;
+  if (status === 403 || status === 404 || status === 410) return true;
+  return !isImplicitFontCdnError(error) && await importFonts().then(
+    ({ isMissingFontAddon }) => isMissingFontAddon(error), () => false);
 }
 
 function createFontSession() {
@@ -61,9 +63,9 @@ function createFontSession() {
       if (!pending) {
         pending = load();
         coverage.set(load, pending);
-        void pending.then(() => { coverage.delete(load); }, (error: unknown) => {
-          if (!settledHttpMiss(error)) coverage.delete(load);
+        void pending.then(() => { coverage.delete(load); }, async (error: unknown) => {
           if (isImplicitFontCdnError(error)) report(error);
+          if (!(await settledFontMiss(error))) coverage.delete(load);
         });
       }
       return pending;
@@ -75,9 +77,9 @@ function createFontSession() {
         pending = importProgressiveFonts().then(({ openSlicedFace }) =>
           openSlicedFace({ ...location, reportCdnFailure: ignoreCdnFailure }));
         slices.set(key, pending);
-        void pending.then(() => { slices.delete(key); }, (error: unknown) => {
-          if (!settledHttpMiss(error)) slices.delete(key);
+        void pending.then(() => { slices.delete(key); }, async (error: unknown) => {
           if (isImplicitFontCdnError(error)) report(error);
+          if (!(await settledFontMiss(error))) slices.delete(key);
         });
       }
       return pending;
@@ -152,9 +154,7 @@ export function createCommandDefaultFonts(
   sliced?: ReturnType<typeof createSlicedFontFaces>,
 ) {
   const families = new Set(supplied.map((face) => face.family.trim().toLowerCase()));
-  const attempted = new Set<string>();
-  const attempts = new Map<string, number>();
-  const retryAt = new Map<string, number>();
+  const attempts = new Map<string, { count: number; retryAt?: number }>();
   const pending = new Map<string, Promise<DefaultFontFace | undefined>>();
   const installations = new Map<string, Promise<boolean>>();
   const registered = new Map<string, 'substitute' | 'regular' | 'preferred'>();
@@ -170,11 +170,13 @@ export function createCommandDefaultFonts(
     JSON.stringify([kind, family.trim().toLowerCase(), bold, italic]);
   const suppliedFamily = (face: FontRequest) => face.kind === 'primary' && families.has(face.family.trim().toLowerCase());
 
-  const retryable = (id: string) => !attempted.has(id) ||
-    ((attempts.get(id) ?? 0) < DEFAULT_FONT_MAX_ATTEMPTS && Date.now() >= (retryAt.get(id) ?? Infinity));
+  const retryable = (id: string) => {
+    const attempt = attempts.get(id);
+    return !attempt || (attempt.count < DEFAULT_FONT_MAX_ATTEMPTS && Date.now() >= (attempt.retryAt ?? Infinity));
+  };
   const failed = (id: string) => {
-    if (!retryAt.has(id)) retryAt.set(id,
-      Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[(attempts.get(id) ?? 1) - 1] ?? Infinity));
+    const attempt = attempts.get(id);
+    if (attempt) attempt.retryAt ??= Date.now() + (DEFAULT_FONT_RETRY_DELAYS_MS[attempt.count - 1] ?? Infinity);
   };
 
   function publish(wanted: FontRequest[], faces: (DefaultFontFace | undefined)[]): DefaultFontLanding[] {
@@ -206,14 +208,22 @@ export function createCommandDefaultFonts(
     const existing = pending.get(id);
     if (existing) return existing;
     if (!retryable(id) || suppliedFamily(face)) return Promise.resolve(undefined);
-    const previousAttempts = attempts.get(id);
-    const previousRetry = retryAt.get(id);
-    attempted.add(id);
-    attempts.set(id, (previousAttempts ?? 0) + 1);
-    retryAt.delete(id);
-    const retryAfterCdnFailure = (error: { retryAt?: number }) => {
-      attempts.set(id, previousAttempts ?? 0);
-      retryAt.set(id, error.retryAt ?? Date.now() + DEFAULT_FONT_RETRY_DELAYS_MS[0]);
+    const previousAttempts = attempts.get(id)?.count ?? 0;
+    const attempt: { count: number; retryAt?: number } = { count: previousAttempts + 1 };
+    attempts.set(id, attempt);
+    let reportCdnFailure: FontCdnReporter | undefined;
+    const recordFailure = async (error: unknown): Promise<'miss' | 'retry'> => {
+      const cdn = isImplicitFontCdnError(error) ? error : undefined;
+      if (cdn) reportCdnFailure?.(cdn);
+      if (await settledFontMiss(error)) return 'miss';
+      if (!disposed && !suppliedFamily(face)) {
+        if (cdn) {
+          attempt.count = previousAttempts;
+          const retryAt = cdn.retryAt ?? Date.now() + DEFAULT_FONT_RETRY_DELAYS_MS[0];
+          attempt.retryAt = Math.max(attempt.retryAt ?? 0, retryAt);
+        } else failed(id);
+      }
+      return 'retry';
     };
     const task = new Promise<DefaultFontFace | undefined>((resolve) => {
       let finished = false;
@@ -227,7 +237,6 @@ export function createCommandDefaultFonts(
       const cancel = () => finish();
       const timer = setTimeout(cancel, 5000);
       cancellations.add(cancel);
-      let available = false;
       provider ??= Promise.resolve().then(() => shared ? shared() : commandFontProvider.load()).catch((error) => {
         provider = undefined;
         throw error;
@@ -235,6 +244,7 @@ export function createCommandDefaultFonts(
       void provider.then(async (source) => {
         if (disposed) return undefined;
         const session = fontSession(source);
+        reportCdnFailure = session.report;
         const waitForPrimary = face.kind === 'primary' && face.preferArabic
           ? pending.get(key({ ...face, preferArabic: false })) : undefined;
         let bold = face.bold;
@@ -263,11 +273,7 @@ export function createCommandDefaultFonts(
             const arabic = source.resolveScriptFallback('arabic', bold, italic, face.family);
             if (arabic) {
               const bytes = await session.loadCoverage(arabic).catch(async (error: unknown) => {
-                if (settledHttpMiss(error)) throw error;
-                if (!(await importFonts()).isMissingFontAddon(error)) {
-                  if (isImplicitFontCdnError(error)) retryAfterCdnFailure(error);
-                  else failed(id);
-                }
+                await recordFailure(error);
                 return undefined;
               });
               const arabicFace = bytes && await scriptFontFace('arabic', bold, italic, bytes, face.family);
@@ -282,7 +288,6 @@ export function createCommandDefaultFonts(
           load = named ?? light ?? (preferred ? undefined : source.resolveLastResort(face.family, bold, italic, 'powerpoint'));
         }
         if (!load && !preferred) return undefined;
-        available = true;
         if (load?.slices && sliced?.supported()) {
           try {
             const opened = await session.openSlices(load.slices);
@@ -304,34 +309,27 @@ export function createCommandDefaultFonts(
           }
         }
         const loading = load && (face.kind === 'coverage' ? session.loadCoverage(load) : load());
-        const bytes = preferred?.bytes ?? await loading?.catch(async (error: unknown) => {
-          const implicit = isImplicitFontCdnError(error);
-          if (implicit) session.report(error);
-          if (!implicit && (await importFonts()).isMissingFontAddon(error)) {
-            available = false;
-            return undefined;
-          }
-          throw error;
-        });
+        const bytes = preferred?.bytes ?? await loading;
         if (!bytes || disposed || suppliedFamily(face)) return undefined;
         let loaded = preferred;
         if (lastResort) loaded = { family: lastResort.family, bold: lastResort.weight === 700,
           italic: lastResort.style === 'italic', bytes, kind: 'coverage' };
         else if (face.kind === 'coverage') loaded = await scriptFontFace(face.script, bold, italic, bytes, face.requestedFamily);
         else loaded ??= { family: face.family, bold: face.bold, italic: face.italic, bytes, ...(light ? { ownWeight: true } : {}) };
-        if (!loaded || disposed || suppliedFamily(face)) return undefined;
-        const previous = registered.get(faceKey(loaded, loaded.kind));
-        if (!preferred && previous === 'preferred') {
-          available = false;
+        if (!loaded) {
+          if (!disposed && !suppliedFamily(face)) failed(id);
           return undefined;
         }
         const substitute = session.substitutes.get(bytes);
-        if (isImplicitFontCdnError(substitute) && !settledHttpMiss(substitute)) {
-          retryAfterCdnFailure(substitute);
+        const substituteFailure = substitute === undefined ? undefined : await recordFailure(substitute);
+        if (disposed || suppliedFamily(face)) return undefined;
+        const previous = registered.get(faceKey(loaded, loaded.kind));
+        if (!preferred && previous === 'preferred') return undefined;
+        if (!load?.slices || substituteFailure !== 'retry') sliced?.plain(loaded.family, loaded.bold, loaded.italic);
+        if (substituteFailure) {
           if (previous) return undefined;
           faceStatus.set(loaded, 'substitute');
         }
-        if (!load?.slices || faceStatus.get(loaded) !== 'substitute') sliced?.plain(loaded.family, loaded.bold, loaded.italic);
         const identity = JSON.stringify([loaded.family.trim().toLowerCase(), loaded.bold, loaded.italic,
           Boolean(preferred), substitute !== undefined]);
         let installation = installations.get(identity);
@@ -342,27 +340,18 @@ export function createCommandDefaultFonts(
           const forget = () => { if (installations.get(identity) === current) installations.delete(identity); };
           void installation.then((success) => { if (!success || substitute !== undefined) forget(); }, forget);
         }
-        return await installation && !disposed ? loaded : undefined;
+        const installed = await installation;
+        if (disposed || suppliedFamily(face)) return undefined;
+        if (!installed) failed(id);
+        return installed ? loaded : undefined;
       }).then((loaded) => {
         pending.delete(id);
-        if (!loaded && available && !disposed && !suppliedFamily(face)) failed(id);
         if (finished && loaded) publish([face], [loaded]);
         else finish(loaded);
-      }, (error: unknown) => {
+      }, async (error: unknown) => {
+        await recordFailure(error);
         pending.delete(id);
         finish();
-        if (disposed || suppliedFamily(face) || settledHttpMiss(error)) return;
-        if (isImplicitFontCdnError(error)) {
-          if (face.kind === 'coverage' || (face.kind === 'primary' && face.preferArabic)) {
-            retryAfterCdnFailure(error);
-          } else if (previousAttempts === undefined) {
-            attempted.delete(id);
-            attempts.delete(id);
-          } else {
-            attempts.set(id, previousAttempts);
-            if (previousRetry !== undefined) retryAt.set(id, previousRetry);
-          }
-        } else failed(id);
       });
     });
     pending.set(id, task);
