@@ -820,9 +820,7 @@ impl Workbook {
         }
         let structure = if checkpoint.collaborative {
             let structure = authority.structure().map_err(authority_error)?;
-            if let Some(source_model) = source_model {
-                derive_source_hidden_sizes(&mut model, &structure.sheet_keys, source_model);
-            }
+            derive_source_hidden_sizes(&mut model, &structure.sheet_keys, source_model);
             Some(structure)
         } else {
             None

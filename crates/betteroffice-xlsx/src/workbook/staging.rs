@@ -4,7 +4,6 @@
 use xlsx_model::Workbook as WorkbookModel;
 use xlsx_ops::Op;
 
-use super::hidden_sizes::{DimensionTransition, HiddenSizeHistory};
 use super::{
     DeferredChange, PreservedStateHistory, StagedApply, Workbook, WorkbookMode, authority_error,
     retain_array_formulas, retain_formula_caches, validate_collaboration_size,
@@ -158,7 +157,6 @@ impl Workbook {
             _ => None,
         };
         let recorded = history == CommitHistory::Separate;
-        let undo_depth = (collaborative && recorded).then(|| self.built_authority().undo_depth());
         let hidden_sizes = match &mut authority {
             PreparedAuthority::Staged(authority) => std::mem::take(&mut authority.hidden_sizes),
             _ => Default::default(),
@@ -211,22 +209,7 @@ impl Workbook {
             self.authority.deferred = None;
         }
         if let Some(structure) = &new_structure {
-            let depth = self.built_authority().undo_depth();
-            let record = undo_depth.is_some_and(|before| before < depth);
-            let step = self.derive_replica_hidden_sizes(
-                &mut model,
-                structure,
-                DimensionTransition::Local(hidden_sizes),
-                if record {
-                    HiddenSizeHistory::Record
-                } else {
-                    HiddenSizeHistory::None
-                },
-            );
-            self.truncate_hidden_size_history();
-            if record {
-                self.hidden_sizes.record(depth, step);
-            }
+            self.derive_replica_hidden_sizes(&mut model, structure, Some(hidden_sizes));
         }
         self.install_model_with_ops(model, &ops, cell_inputs && !collaborative)?;
         self.adopt_rebased_proposals(rebased);

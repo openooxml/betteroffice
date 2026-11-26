@@ -10804,6 +10804,66 @@ fn collaborative_chart_repin_uses_the_authored_height_restored_by_unhide() {
     assert_eq!(workbook.encode_state_as_update_v1(), state);
 }
 
+#[test]
+fn collaborative_redundant_chart_repin_skips_geometry_validation() {
+    let mut workbook = Workbook::open_collaborative(&charted_fixture(), 830).unwrap();
+    let sheet = SheetId(0);
+    let chart = &workbook.sheet(sheet).unwrap().charts[0];
+    let before = chart.anchor;
+    let ChartAnchor::TwoCell { edit_as, .. } = before else {
+        panic!("expected a two-cell anchor");
+    };
+    let frame = chart.frame_id();
+    let part = chart.part.clone();
+    let anchor = ChartAnchor::TwoCell {
+        from: AnchorCell {
+            row_off: 95_250,
+            ..Default::default()
+        },
+        to: AnchorCell {
+            col: 4,
+            row: 1,
+            ..Default::default()
+        },
+        edit_as,
+    };
+    let repin = |from, to| Op::SetChartAnchor {
+        sheet,
+        frame: frame.clone(),
+        part: part.clone(),
+        from,
+        to,
+    };
+    let options = CalculationOptions::default();
+    assert!(
+        workbook
+            .apply_ops(vec![repin(before, anchor)], options)
+            .unwrap()
+            .applied
+    );
+    let resize = Op::SetRowHeight {
+        sheet,
+        row: 0,
+        height: Some(5.0),
+    };
+    let redundant = repin(anchor, anchor);
+    assert!(
+        workbook
+            .apply_ops(vec![redundant.clone(), resize], options)
+            .unwrap()
+            .applied
+    );
+    let current = workbook.sheet(sheet).unwrap();
+    assert_eq!(current.row_heights.get(&0), Some(&5.0));
+    assert_eq!(current.charts[0].anchor, anchor);
+    assert!(
+        !workbook
+            .apply_ops(vec![redundant], options)
+            .unwrap()
+            .applied
+    );
+}
+
 /// `SetChartAnchor` accepts exactly what a save can write back, and each
 /// refusal says which part of the anchor the writer could not carry.
 #[test]

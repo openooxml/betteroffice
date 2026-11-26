@@ -31,8 +31,8 @@ pub(crate) mod target;
 mod update_tests;
 
 use self::hidden_sizes::{
-    DimensionTransition, HiddenSizeHistory, HiddenSizeStep, HiddenSizes, ReplicaHiddenSizes,
-    derive_source_hidden_sizes, dimension_changes, with_shared_model,
+    AuthoredDimensions, HiddenSizes, LocalDimensions, adopt_authored_sizes,
+    derive_replica_hidden_sizes, derive_source_hidden_sizes, dimension_changes, with_shared_model,
 };
 use self::proposals::proposal_edit_is_stale;
 
@@ -510,7 +510,6 @@ pub struct Workbook {
     invalidated_text_sources: Option<BTreeSet<(usize, u32, u32)>>,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
-    hidden_sizes: ReplicaHiddenSizes,
     edited_since_open: bool,
     recalculated_since_open: bool,
     calculations_since_open: u64,
@@ -1096,7 +1095,7 @@ impl Workbook {
                     target.hidden_row_heights = source.hidden_row_heights.clone();
                 }
             } else {
-                derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, &model);
+                derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, Some(&model));
             }
             validate_model(&projected)?;
             (AuthoritySlot::built(authority), projected, Some(structure))
@@ -1148,7 +1147,6 @@ impl Workbook {
             invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
-            hidden_sizes: ReplicaHiddenSizes::default(),
             edited_since_open: false,
             recalculated_since_open: false,
             calculations_since_open: 0,
@@ -1433,12 +1431,7 @@ impl Workbook {
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = AuthoritySlot::built(candidate);
         self.preserved.resize(frozen.sheet_keys.len());
-        self.derive_replica_hidden_sizes(
-            &mut model,
-            &structure,
-            DimensionTransition::Incoming,
-            HiddenSizeHistory::None,
-        );
+        self.derive_replica_hidden_sizes(&mut model, &structure, None);
         self.install_model(model)?;
         self.rebase_sheet_positions(&frozen.sheet_keys, &structure.sheet_keys);
         self.invalidate_sheet_info();
@@ -1453,7 +1446,6 @@ impl Workbook {
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
-        self.hidden_sizes.truncate_history(0, 0);
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         self.authority.get_mut()?.clear_history();
@@ -1713,12 +1705,7 @@ impl Workbook {
             .get_mut()?
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
-        self.derive_replica_hidden_sizes(
-            &mut model,
-            &new_structure,
-            DimensionTransition::Remote(staged.dimensions),
-            HiddenSizeHistory::None,
-        );
+        self.derive_replica_hidden_sizes(&mut model, &new_structure, None);
         self.install_model(model)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -2999,8 +2986,7 @@ impl Workbook {
             && !drawings_move
             && self.with_staged_model(|baseline| *baseline == preview)
         {
-            if let WorkbookMode::Collaborative { structure } = &self.mode {
-                validate_committed_chart_geometry(&self.model, &ops)?;
+            if collaborative {
                 let dimensions = dimension_changes(&ops);
                 if !dimensions.is_empty() {
                     for &index in dimensions.keys() {
@@ -3016,11 +3002,12 @@ impl Workbook {
                         batch.apply(op)?;
                     }
                     for (index, changes) in dimensions {
-                        self.hidden_sizes.apply_no_op_sizes(
-                            &structure.sheet_keys[index],
+                        adopt_authored_sizes(
                             &mut self.model.sheets[index],
-                            HiddenSizes::take(&mut preview.sheets[index]),
-                            changes,
+                            AuthoredDimensions {
+                                sizes: HiddenSizes::take(&mut preview.sheets[index]),
+                                changes,
+                            },
                         );
                     }
                 }
@@ -3046,7 +3033,7 @@ impl Workbook {
             None,
         )?;
         if collaborative {
-            validate_committed_chart_geometry(&prepared.model, &prepared.ops)?;
+            validate_committed_chart_geometry(&self.model, &prepared.model, &prepared.ops)?;
         }
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
@@ -3278,18 +3265,12 @@ impl Workbook {
             authority.undo()
         };
         let outcome = match stepped {
-            Ok(history) => self.apply_collaborative_history(history, options, redo),
-            Err(AuthorityError::UndoRefused) => {
-                self.truncate_hidden_size_history();
-                return Err(Error::CollaborativeUndoRefused);
-            }
+            Ok(history) => self.apply_collaborative_history(history, options),
+            Err(AuthorityError::UndoRefused) => return Err(Error::CollaborativeUndoRefused),
             Err(error) => Err(authority_error(error)),
         };
         match outcome {
-            Ok(result) => {
-                self.truncate_hidden_size_history();
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(error) => {
                 self.authority
                     .get_mut()?
@@ -3304,7 +3285,6 @@ impl Workbook {
         &mut self,
         history: Option<HistoryUpdate>,
         options: CalculationOptions,
-        redo: bool,
     ) -> Result<MutationResult> {
         let Some(history) = history else {
             return Ok(MutationResult::default());
@@ -3321,21 +3301,7 @@ impl Workbook {
         let before = self.with_staged_model(WorkbookModel::clone);
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
-        let authority = self.built_authority();
-        let (undo_depth, redo_depth) = (authority.undo_depth(), authority.redo_depth());
-        let (from_depth, to_depth) = if redo {
-            (redo_depth, undo_depth)
-        } else {
-            (undo_depth, redo_depth)
-        };
-        let step = self.hidden_sizes.take_step(redo, from_depth);
-        self.derive_replica_hidden_sizes(
-            &mut restored,
-            &new_structure,
-            DimensionTransition::Incoming,
-            HiddenSizeHistory::Restore(&step, redo),
-        );
-        self.hidden_sizes.store_moved_step(redo, to_depth, step);
+        self.derive_replica_hidden_sizes(&mut restored, &new_structure, None);
         self.install_model(restored)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -4463,10 +4429,8 @@ impl Workbook {
             self.derive_replica_hidden_sizes(
                 &mut model,
                 &new_structure,
-                DimensionTransition::Local(staged.hidden_sizes),
-                HiddenSizeHistory::None,
+                Some(staged.hidden_sizes),
             );
-            self.truncate_hidden_size_history();
             self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
@@ -5547,25 +5511,15 @@ impl Workbook {
         &mut self,
         model: &mut WorkbookModel,
         next: &WorkbookStructure,
-        transition: DimensionTransition,
-        history: HiddenSizeHistory<'_>,
-    ) -> HiddenSizeStep {
+        authored: Option<LocalDimensions>,
+    ) {
         if let WorkbookMode::Collaborative { structure } = &self.mode {
-            self.hidden_sizes.reconcile(
+            derive_replica_hidden_sizes(
                 (model, &next.sheet_keys),
                 (&mut self.model, &structure.sheet_keys),
-                transition,
-                history,
-            )
-        } else {
-            HiddenSizeStep::new()
+                authored,
+            );
         }
-    }
-
-    fn truncate_hidden_size_history(&mut self) {
-        let authority = self.built_authority();
-        let (undo_depth, redo_depth) = (authority.undo_depth(), authority.redo_depth());
-        self.hidden_sizes.truncate_history(undo_depth, redo_depth);
     }
 }
 
@@ -6102,16 +6056,25 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
     Ok(())
 }
 
-fn validate_committed_chart_geometry(model: &WorkbookModel, ops: &[Op]) -> Result<()> {
+fn validate_committed_chart_geometry(
+    before: &WorkbookModel,
+    staged: &WorkbookModel,
+    ops: &[Op],
+) -> Result<()> {
     for op in ops {
         if let Op::SetChartAnchor { sheet, frame, .. } = op {
-            let sheet = require_sheet(model, *sheet)?;
+            let previous = before.sheet(*sheet).and_then(|sheet| {
+                sheet.charts.iter().find(|chart| chart.frame_id() == *frame)
+            });
+            let sheet = require_sheet(staged, *sheet)?;
             let chart = sheet
                 .charts
                 .iter()
                 .find(|chart| chart.frame_id() == *frame)
                 .ok_or_else(|| chart_frame_not_found(frame))?;
-            validate_chart_geometry(model, sheet, chart.anchor)?;
+            if previous.is_none_or(|previous| previous.anchor != chart.anchor) {
+                validate_chart_geometry(staged, sheet, chart.anchor)?;
+            }
         }
     }
     Ok(())
@@ -7664,7 +7627,7 @@ impl Workbook {
         retain_array_formulas(&model, &mut projected);
         let structure = if client_id.is_some() {
             let structure = authority.structure_oracle().map_err(authority_error)?;
-            derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, &model);
+            derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, Some(&model));
             Some(structure)
         } else {
             for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
@@ -7721,7 +7684,6 @@ impl Workbook {
             invalidated_text_sources: Some(BTreeSet::new()),
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
-            hidden_sizes: ReplicaHiddenSizes::default(),
             edited_since_open: false,
             recalculated_since_open: false,
             calculations_since_open: 0,
