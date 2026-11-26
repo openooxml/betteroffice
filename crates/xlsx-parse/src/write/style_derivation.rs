@@ -262,6 +262,7 @@ fn patch_font(source: &[u8], base: &Font, font: &Font) -> Result<Vec<u8>, ParseE
         ("sz", base.size_pt != font.size_pt),
         ("color", base.color != font.color),
         ("name", base.name != font.name),
+        ("scheme", base.scheme != font.scheme),
     ];
     template.render(
         changes

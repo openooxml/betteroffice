@@ -4,8 +4,8 @@
 use quick_xml::events::{BytesStart, Event};
 use xlsx_model::RunUnderline;
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, DifferentialFormat, Fill, Font, HAlign,
-    PatternType, Protection, SavedPlain, Stylesheet, Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, DifferentialFormat, Fill, Font, FontScheme,
+    HAlign, PatternType, Protection, SavedPlain, Stylesheet, Theme, VAlign, Xf,
 };
 
 use crate::xml::{attr, local_name, next_event, reader, xml_err};
@@ -83,6 +83,20 @@ pub(crate) fn legacy_style_readings(
                     readings.push(reading);
                 }
             }
+        }
+    }
+    let scheme_free_readings = std::iter::once(sheet)
+        .chain(legacy)
+        .chain(&readings)
+        .filter(|base| base.fonts.iter().any(|font| font.scheme.is_some()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for mut reading in scheme_free_readings {
+        for font in &mut reading.fonts {
+            font.scheme = None;
+        }
+        if !readings.contains(&reading) {
+            readings.push(reading);
         }
     }
     Ok(readings)
@@ -328,6 +342,13 @@ fn parse_style_pools(
                     if let Some(v) = attr(&e, b"val")? {
                         font.as_mut().unwrap().name = Some(crate::read::unescape_name(&v));
                     }
+                }
+                b"scheme" if font.is_some() => {
+                    font.as_mut().unwrap().scheme = match attr(&e, b"val")?.as_deref() {
+                        Some("major") => Some(FontScheme::Major),
+                        Some("minor") => Some(FontScheme::Minor),
+                        _ => None,
+                    };
                 }
                 b"color" if font.is_some() => {
                     font.as_mut().unwrap().color = parse_color(&e)?;

@@ -1,8 +1,8 @@
 use std::collections::LinkedList;
 
 use xlsx_model::styles::{
-    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, PatternType, Protection,
-    Theme, VAlign, Xf,
+    Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, FontScheme, HAlign, PatternType,
+    Protection, Theme, VAlign, Xf,
 };
 use xlsx_model::{
     AnchorCell, AutoFilter, ChartRefKind, ConditionalFormatRule, DifferentialFormat, RunUnderline,
@@ -1123,15 +1123,125 @@ struct_codec!(HiddenDimensions {
     col_widths,
     row_heights
 });
-struct_codec!(Font {
-    name,
-    size_pt,
-    bold,
-    italic,
-    underline,
-    strike,
-    color
-});
+struct FontFace(Option<String>, Option<FontScheme>);
+
+impl FontFace {
+    fn scheme(tag: u8) -> SnapshotResult<Option<FontScheme>> {
+        match tag >> 1 {
+            0 => Ok(None),
+            1 => Ok(Some(FontScheme::Major)),
+            2 => Ok(Some(FontScheme::Minor)),
+            _ => Err(SnapshotError::new("invalid snapshot font scheme")),
+        }
+    }
+
+    // The low bit keeps the released optional-name encoding when no scheme is bound.
+    fn write_fields(w: &mut Writer, name: Option<&str>, scheme: Option<FontScheme>) {
+        let bits = match scheme {
+            None => 0,
+            Some(FontScheme::Major) => 2,
+            Some(FontScheme::Minor) => 4,
+        };
+        w.u8(bits | u8::from(name.is_some()));
+        if let Some(name) = name {
+            w.str(name);
+        }
+    }
+}
+
+impl Codec for FontFace {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let tag = r.tag()?;
+        Self::scheme(tag)?;
+        if tag & 1 == 0 {
+            r.cost = r.cost.saturating_add(1);
+        } else {
+            let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+            child.value::<String>()?;
+            r.cost = r.cost.max(1usize.saturating_add(child.cost));
+            r.position = child.position;
+            r.complete = child.complete;
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(1 + String::decode_cost())
+    }
+
+    fn write(&self, w: &mut Writer) {
+        Self::write_fields(w, self.0.as_deref(), self.1);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        let tag = r.u8()?;
+        let scheme = Self::scheme(tag)?;
+        let name = (tag & 1 != 0).then(|| String::read(r)).transpose()?;
+        Ok(Self(name, scheme))
+    }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        let tag = r.atomic::<u8>()?;
+        let scheme = Self::scheme(tag)?;
+        let name = (tag & 1 != 0).then(|| r.value::<String>()).transpose()?;
+        Ok(Self(name, scheme))
+    }
+}
+
+struct WireFont {
+    face: FontFace,
+    size_pt: Option<f64>,
+    bold: bool,
+    italic: bool,
+    underline: RunUnderline,
+    strike: bool,
+    color: Option<Color>,
+}
+
+struct_codec!(WireFont { face, size_pt, bold, italic, underline, strike, color });
+
+impl From<WireFont> for Font {
+    fn from(wire: WireFont) -> Self {
+        Self {
+            name: wire.face.0,
+            scheme: wire.face.1,
+            size_pt: wire.size_pt,
+            bold: wire.bold,
+            italic: wire.italic,
+            underline: wire.underline,
+            strike: wire.strike,
+            color: wire.color,
+        }
+    }
+}
+
+impl Codec for Font {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        WireFont::preflight(r)
+    }
+
+    fn decode_cost() -> usize {
+        WireFont::decode_cost()
+    }
+
+    fn write(&self, w: &mut Writer) {
+        FontFace::write_fields(w, self.name.as_deref(), self.scheme);
+        self.size_pt.write(w);
+        self.bold.write(w);
+        self.italic.write(w);
+        self.underline.write(w);
+        self.strike.write(w);
+        self.color.write(w);
+    }
+
+    fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
+        WireFont::read(r).map(Into::into)
+    }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        WireFont::read_bounded(r).map(Into::into)
+    }
+}
 struct_codec!(BorderEdge { style, color });
 struct_codec!(Border {
     left,
@@ -4040,6 +4150,7 @@ mod tests {
         base.styles.fonts = vec![
             Font {
                 name: Some(String::new()),
+                scheme: None,
                 size_pt: Some(-0.0),
                 bold: true,
                 italic: false,

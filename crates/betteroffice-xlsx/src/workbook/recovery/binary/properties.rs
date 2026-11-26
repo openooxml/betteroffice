@@ -127,6 +127,7 @@ fn color() -> S<Color> {
 fn font() -> S<Font> {
     record!(Font {
         name: opt(text()),
+        scheme: Just(None),
         size_pt: opt(finite()),
         bold: any::<bool>(),
         italic: any::<bool>(),

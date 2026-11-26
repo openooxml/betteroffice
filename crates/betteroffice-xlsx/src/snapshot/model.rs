@@ -4,9 +4,11 @@ use std::ops::Bound::{Excluded, Unbounded};
 use xlsx_model::{
     Alignment, AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Border, BorderEdge, BorderStyle,
     Cell, CellRef, ChartAnchor, ChartRef, ChartRefKind, ColStyle, Color, DefinedName, Fill, Font,
-    FreezePane, HAlign, Hyperlink, PatternType, Protection, RunUnderline, Sheet, SheetChart,
+    FreezePane, HAlign, Hyperlink, PatternType, Protection, Sheet, SheetChart,
     SheetFormat, SheetId, Table, TableStyleElement, Theme, VAlign, Workbook, Xf,
 };
+#[cfg(test)]
+use xlsx_model::RunUnderline;
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
 use super::growth::Growth;
@@ -413,7 +415,7 @@ impl MetadataCursor {
             match self.phase {
                 NAME => write_name(w, &model.defined_names[self.index]),
                 STRING => w.str(&model.shared_strings[self.index]),
-                FONT => write_font(w, &model.styles.fonts[self.index]),
+                FONT => model.styles.fonts[self.index].write(w),
                 FILL => write_fill(w, &model.styles.fills[self.index]),
                 BORDER => write_border(w, &model.styles.borders[self.index]),
                 XF if tag == XF => write_released_xf(w, &model.styles.cell_xfs[self.index]),
@@ -1262,7 +1264,7 @@ impl ModelSnapshotBuilder {
             CONDITIONAL_FORMATS_V2 => self.adopt_conditional_formats(Codec::read(r)?)?,
             NAME => self.model.defined_names.push(read_name(r)?),
             STRING => self.model.shared_strings.push(r.str()?.to_owned()),
-            FONT => self.model.styles.fonts.push(read_font(r)?),
+            FONT => self.model.styles.fonts.push(Font::read(r)?),
             FILL => self.model.styles.fills.push(released(read_fill(r)?)?),
             FILL_V2 => self.model.styles.fills.push(read_fill(r)?),
             BORDER => self.model.styles.borders.push(released(read_border(r)?)?),
@@ -1810,37 +1812,6 @@ fn read_color(r: &mut Reader<'_>) -> SnapshotResult<Color> {
     })
 }
 
-fn write_font(w: &mut Writer, value: &Font) {
-    let Font {
-        name,
-        size_pt,
-        bold,
-        italic,
-        underline,
-        strike,
-        color,
-    } = value;
-    w.option(name.as_deref(), Writer::str);
-    w.option(*size_pt, Writer::f64);
-    w.bool(*bold);
-    w.bool(*italic);
-    write_underline(w, underline);
-    w.bool(*strike);
-    w.option(color.as_ref(), write_color);
-}
-
-fn read_font(r: &mut Reader<'_>) -> SnapshotResult<Font> {
-    Ok(Font {
-        name: r.option(|r| Ok(r.str()?.to_owned()))?,
-        size_pt: r.option(Reader::f64)?,
-        bold: r.bool()?,
-        italic: r.bool()?,
-        underline: read_underline(r)?,
-        strike: r.bool()?,
-        color: r.option(read_color)?,
-    })
-}
-
 fn write_fill(w: &mut Writer, value: &Fill) {
     match value {
         Fill::None => w.u8(0),
@@ -1927,15 +1898,6 @@ enum_codec!(write_valign, read_valign, VAlign, {
     Bottom => 2,
     Justify => 3,
     Distributed => 4,
-});
-
-// none and single keep the bytes of the boolean they replace.
-enum_codec!(write_underline, read_underline, RunUnderline, {
-    None => 0,
-    Single => 1,
-    Double => 2,
-    SingleAccounting => 3,
-    DoubleAccounting => 4,
 });
 
 enum_codec!(write_edit_as, read_edit_as, AnchorEditAs, {
@@ -3240,6 +3202,7 @@ mod tests {
         styles.fonts.extend([
             Font {
                 name: None,
+                scheme: None,
                 size_pt: None,
                 bold: false,
                 italic: false,
@@ -3249,6 +3212,7 @@ mod tests {
             },
             Font {
                 name: Some(String::new()),
+                scheme: None,
                 size_pt: Some(-0.0),
                 bold: true,
                 italic: true,
@@ -3258,6 +3222,7 @@ mod tests {
             },
             Font {
                 name: Some("Font".into()),
+                scheme: None,
                 size_pt: Some(11.25),
                 bold: true,
                 italic: false,

@@ -69,19 +69,27 @@ impl DifferentialFormat {
     }
 }
 
-/// a cell font. only the facets we render are modelled; unset fields inherit.
+/// A cell font; unset fields inherit.
 ///
 /// Serializes `underline` as a boolean; `underline_style` names a kind other than single.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(from = "FontFields")]
 pub struct Font {
     pub name: Option<String>,
+    pub scheme: Option<FontScheme>,
     pub size_pt: Option<f64>,
     pub bold: bool,
     pub italic: bool,
     pub underline: RunUnderline,
     pub strike: bool,
     pub color: Option<Color>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FontScheme {
+    Major,
+    Minor,
 }
 
 impl Font {
@@ -99,8 +107,12 @@ impl Serialize for Font {
         use serde::ser::SerializeStruct;
 
         let style = self.underline_style();
-        let mut state = serializer.serialize_struct("Font", 7 + usize::from(style.is_some()))?;
+        let fields = 7 + usize::from(style.is_some()) + usize::from(self.scheme.is_some());
+        let mut state = serializer.serialize_struct("Font", fields)?;
         state.serialize_field("name", &self.name)?;
+        if let Some(scheme) = self.scheme {
+            state.serialize_field("scheme", &scheme)?;
+        }
         state.serialize_field("size_pt", &self.size_pt)?;
         state.serialize_field("bold", &self.bold)?;
         state.serialize_field("italic", &self.italic)?;
@@ -118,6 +130,7 @@ impl Serialize for Font {
 #[derive(Deserialize)]
 struct FontFields {
     name: Option<String>,
+    scheme: Option<FontScheme>,
     size_pt: Option<f64>,
     bold: bool,
     italic: bool,
@@ -137,6 +150,7 @@ impl From<FontFields> for Font {
         };
         Font {
             name: fields.name,
+            scheme: fields.scheme,
             size_pt: fields.size_pt,
             bold: fields.bold,
             italic: fields.italic,
@@ -649,6 +663,7 @@ impl<'a> ColorKey<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FontKey<'a> {
     name: Option<&'a str>,
+    scheme: Option<FontScheme>,
     size_pt: Option<u64>,
     bold: bool,
     italic: bool,
@@ -661,6 +676,7 @@ impl<'a> FontKey<'a> {
     fn new(font: &'a Font) -> Option<Self> {
         Some(FontKey {
             name: font.name.as_deref(),
+            scheme: font.scheme,
             size_pt: match font.size_pt {
                 None => None,
                 Some(size) => Some(float_key(size)?),
@@ -996,6 +1012,7 @@ pub struct ResolvedFormat<'a> {
 
 const DEFAULT_FONT: Font = Font {
     name: None,
+    scheme: None,
     size_pt: None,
     bold: false,
     italic: false,
