@@ -82,6 +82,217 @@ fn lowercase_a1_and_case_insensitive_sheets_recalculate() {
 }
 
 #[test]
+fn indirect_a1_new_structured_references_keep_cached_values() {
+    for formula in [
+        r#"INDIRECT("Table1[@[Unit Price]]")"#,
+        r#"INDIRECT("Table1['#n]")"#,
+    ] {
+        let mut wb = workbook();
+        let at = CellRef::parse_a1("D4").unwrap();
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(formula.into()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(wb.value(SheetId(0), at), n(42.0), "{formula}");
+        assert_eq!(
+            graph.unevaluated_cells(),
+            vec![xlsx_calc::UnevaluatedCell {
+                sheet: SheetId(0),
+                cell: at,
+                functions: vec![],
+            }],
+            "{formula}"
+        );
+    }
+}
+
+fn check_indirect_recalculation(formula: &str, expected: CellValue, has_gap: bool) {
+    let mut wb = workbook();
+    let sheet = SheetId(0);
+    let at = CellRef::parse_a1("D4").unwrap();
+    wb.sheets[0].set_cell(
+        at,
+        Cell {
+            formula: Some(formula.into()),
+            value: n(42.0),
+            ..Cell::default()
+        },
+    );
+    let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+    assert_eq!(wb.value(sheet, at), expected, "{formula}");
+    let expected_gaps = if has_gap {
+        vec![xlsx_calc::UnevaluatedCell {
+            sheet,
+            cell: at,
+            functions: vec![],
+        }]
+    } else {
+        vec![]
+    };
+    assert_eq!(graph.unevaluated_cells(), expected_gaps, "{formula}");
+}
+
+#[test]
+fn indirect_release_a1_external_names_and_unquoted_references_have_handleable_gaps() {
+    for reference in [
+        "'[1]Data'!Rate",
+        "'[1]Data'!XFE1",
+        "[1]!Rate",
+        "[1]Data!A1",
+        "[1]Data:Other!A1",
+    ] {
+        check_indirect_recalculation(&format!(r#"INDIRECT("{reference}")"#), n(42.0), true);
+        check_indirect_recalculation(
+            &format!(r#"IFERROR(INDIRECT("{reference}"),0)"#),
+            n(0.0),
+            false,
+        );
+    }
+}
+
+#[test]
+fn indirect_release_r1c1_unquoted_external_qualifiers_return_ref_without_a_gap() {
+    for reference in ["[1]!R1C1", "[1]Data!R1C1", "[1]Data:Other!R1C1"] {
+        check_indirect_recalculation(
+            &format!(r#"INDIRECT("{reference}",FALSE)"#),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            false,
+        );
+    }
+}
+
+#[test]
+fn indirect_release_nested_this_row_range_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("Table1[@[Unit Price]]:Table1[@[Qty]]")"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_cell_to_nested_this_row_range_keeps_cache() {
+    check_indirect_recalculation(r#"INDIRECT("A1:Table1[@[Unit Price]]")"#, n(42.0), true);
+}
+
+#[test]
+fn indirect_release_escaped_table_column_range_keeps_cache() {
+    check_indirect_recalculation(r#"INDIRECT("Table1['#a]:Table1['#b]")"#, n(42.0), true);
+}
+
+#[test]
+fn indirect_release_nested_this_row_union_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("(Table1[@[Unit Price]],Table1[@[Qty]])")"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_path_plus_table_reference_returns_ref() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'C:\Books\Data.xlsx'!A1 + Table1[Col]")"#,
+        CellValue::Error {
+            value: ErrorValue::Ref,
+        },
+        false,
+    );
+}
+
+#[test]
+fn indirect_release_r1c1_external_sheet_span_keeps_cache() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'[Book.xlsx]Jan:Mar'!R1C1",FALSE)"#,
+        n(42.0),
+        true,
+    );
+}
+
+#[test]
+fn indirect_release_external_sheet_span_ref_error_returns_ref() {
+    check_indirect_recalculation(
+        r#"INDIRECT("'[Book.xlsx]Jan:Mar'!#REF!")"#,
+        CellValue::Error {
+            value: ErrorValue::Ref,
+        },
+        false,
+    );
+}
+
+#[test]
+fn spaced_a1_cell_ranges_recalculate_to_release_errors() {
+    let mut wb = workbook();
+    let mut data = Sheet::new("Sheet1");
+    set(&mut data, "A1", n(10.0));
+    set(&mut data, "B2", n(20.0));
+    wb.sheets.push(data);
+    set(&mut wb.sheets[0], "A1", n(10.0));
+    let cases = [
+        ("D4", "SUM(Sheet1!A1 : B2)"),
+        ("D5", r#"INDIRECT("A1 : B2")"#),
+    ];
+    for (address, formula) in cases {
+        wb.sheets[0].set_cell(
+            CellRef::parse_a1(address).unwrap(),
+            Cell {
+                formula: Some(formula.into()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+    }
+    let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+    for (address, formula) in cases {
+        assert_eq!(
+            wb.value(SheetId(0), CellRef::parse_a1(address).unwrap()),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            "{formula}"
+        );
+    }
+    assert!(graph.unevaluated_cells().is_empty());
+}
+
+#[test]
+fn indirect_a1_bracketed_workbook_path_non_references_recalculate_to_ref() {
+    let path = "D:/Books/[Data.xlsx]Sheet1";
+    for target in ["#REF!", "A1+1"] {
+        let mut wb = workbook();
+        let mut path_named_sheet = Sheet::new(path);
+        set(&mut path_named_sheet, "A1", n(73.0));
+        wb.sheets.push(path_named_sheet);
+        let at = CellRef::parse_a1("D4").unwrap();
+        let formula = format!(r#"INDIRECT("'{path}'!{target}")"#);
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(formula.clone()),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(
+            wb.value(SheetId(0), at),
+            CellValue::Error {
+                value: ErrorValue::Ref,
+            },
+            "{formula}"
+        );
+        assert!(graph.unevaluated_cells().is_empty(), "{formula}");
+    }
+}
+
+#[test]
 fn indirect_r1c1_absolute_and_relative_recalculate() {
     check(&[
         ("INDIRECT(Calculation_HIDE!S8,FALSE)", n(31.0)),
@@ -98,6 +309,38 @@ fn indirect_r1c1_absolute_and_relative_recalculate() {
         ("ROW(INDIRECT(\"RC\",FALSE))", n(4.0)),
         ("COLUMN(INDIRECT(\"R[-1]C[+2]\",FALSE))", n(5.0)),
     ]);
+}
+
+#[test]
+fn indirect_r1c1_bracketed_workbook_paths_keep_the_cache_for_valid_references() {
+    let ref_error = CellValue::Error {
+        value: ErrorValue::Ref,
+    };
+    for (reference, expected) in [
+        ("'D:/Books/[Data.xlsx]Sheet1'!R1C1", n(42.0)),
+        (r"'C:\Books\[1]Sheet1'!R1C1", n(42.0)),
+        ("'D:/Books/[Data.xlsx]Sheet1'!R0C1", ref_error.clone()),
+        ("'D:/Books/[Data.xlsx]Sheet1' !R1C1", ref_error.clone()),
+        ("'D:/Books/Data.xlsx'!R1C1", ref_error),
+    ] {
+        let mut wb = workbook();
+        let at = CellRef::parse_a1("D4").unwrap();
+        wb.sheets[0].set_cell(
+            at,
+            Cell {
+                formula: Some(format!(r#"INDIRECT("{reference}",FALSE)"#)),
+                value: n(42.0),
+                ..Cell::default()
+            },
+        );
+        let (graph, _) = rebuild_and_recalc_all(&mut wb, Some(46_000.0));
+        assert_eq!(wb.value(SheetId(0), at), expected, "{reference}");
+        assert_eq!(
+            graph.unevaluated_cells().is_empty(),
+            matches!(expected, CellValue::Error { .. }),
+            "{reference}"
+        );
+    }
 }
 
 #[test]

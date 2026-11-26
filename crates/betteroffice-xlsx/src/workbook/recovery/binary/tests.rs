@@ -405,6 +405,204 @@ fn every_op_has_a_fixed_tag_and_round_trips() {
     }
 }
 
+fn table_header_workbook() -> Workbook {
+    let mut data = Sheet::new("Data");
+    let mut report = Sheet::new("Report");
+    data.set_cell(
+        CellRef::new(0, 0),
+        CellState {
+            value: CellValue::Text {
+                value: "Amount".into(),
+            },
+            ..CellState::default()
+        }
+        .into(),
+    );
+    data.set_cell(
+        CellRef::new(1, 0),
+        CellState {
+            value: CellValue::Number { value: 4.0 },
+            ..CellState::default()
+        }
+        .into(),
+    );
+    for (sheet, at, formula) in [
+        (&mut data, CellRef::new(0, 1), "SUM(Sales[Amount])"),
+        (&mut report, CellRef::new(0, 0), "sum(Sales[Amount])+1"),
+    ] {
+        sheet.set_cell(
+            at,
+            CellState {
+                formula: Some(formula.into()),
+                ..CellState::default()
+            }
+            .into(),
+        );
+    }
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![data, report],
+        tables: vec![xlsx_model::Table {
+            name: "Sales".into(),
+            sheet: SheetId(0),
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 0)),
+            header_rows: 1,
+            totals_rows: 0,
+            columns: vec!["Amount".into()],
+            style: Vec::new(),
+        }],
+        defined_names: vec![DefinedName {
+            name: "Amounts".into(),
+            formula: "Sales[Amount]".into(),
+            local_sheet: None,
+            hidden: false,
+        }],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    workbook.recalculate_all(CalculationOptions::default());
+    workbook
+}
+
+fn rename_table_header(workbook: &mut Workbook, caption: &str) {
+    workbook
+        .edit_cell(
+            SheetId(0),
+            CellRef::new(0, 0),
+            caption,
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn table_header_checkpoint_uses_only_released_op_tags() {
+    let mut workbook = table_header_workbook();
+    rename_table_header(&mut workbook, "Net");
+    rename_table_header(&mut workbook, "Total");
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let bytes = workbook
+        .recovery_checkpoint_with_history(1, None, true)
+        .unwrap();
+
+    let mut payload = Reader::new(&bytes[41..]);
+    assert!(!payload.bool().unwrap());
+    let mut metadata = Reader::new(payload.bytes().unwrap());
+    assert_eq!(metadata.u8().unwrap(), 0);
+    let _ = String::read(&mut metadata).unwrap();
+    u64::read(&mut metadata).unwrap();
+    RecoveryHeader::read(&mut metadata).unwrap();
+    RecoveryCalculation::read(&mut metadata).unwrap();
+    Vec::<Proposal>::read(&mut metadata).unwrap();
+    u64::read(&mut metadata).unwrap();
+    Vec::<Option<RecoveryAxes>>::read(&mut metadata).unwrap();
+    assert_eq!(metadata.u8().unwrap(), 1);
+    assert_eq!(metadata.u8().unwrap(), 0);
+    assert_eq!(metadata.u8().unwrap(), 0);
+    for _ in 0..2 {
+        assert_eq!(metadata.var_usize().unwrap(), 1);
+        let mut tags = Vec::new();
+        for _ in 0..metadata.var_usize().unwrap() {
+            let tag = metadata.clone().u8().unwrap();
+            assert!(tag <= 44, "unreleased recovery op tag {tag}");
+            tags.push(tag);
+            Op::read(&mut metadata).unwrap();
+        }
+        assert_eq!(tags, [37, 0, 0, 0, 35]);
+    }
+
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+    assert!(
+        restored
+            .redo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(restored.model.tables[0].columns, ["Total"]);
+}
+
+#[test]
+fn table_header_undo_after_recovery_restores_header_caption_formulas_and_names() {
+    let mut workbook = table_header_workbook();
+    let before = workbook.model.clone();
+    rename_table_header(&mut workbook, "Net");
+    assert_eq!(workbook.model.tables[0].columns, ["Net"]);
+    let bytes = workbook
+        .recovery_checkpoint_with_history(1, None, true)
+        .unwrap();
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+    assert!(
+        restored
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    assert_eq!(restored.model.tables, before.tables);
+    assert_eq!(restored.model.defined_names, before.defined_names);
+    for (sheet, at) in [
+        (SheetId(0), CellRef::new(0, 0)),
+        (SheetId(0), CellRef::new(0, 1)),
+        (SheetId(1), CellRef::new(0, 0)),
+    ] {
+        assert_eq!(
+            current_cell_state(&restored.model, sheet, at),
+            current_cell_state(&before, sheet, at)
+        );
+    }
+    assert!(!restored.can_undo());
+}
+
+#[test]
+fn table_header_undo_after_recovery_restores_checkpoint_formula_without_retargeting_later_edits() {
+    use crate::{EditHistory, EditOperation, EditRequest, EditStep, RangeAddress, RangeTarget};
+
+    let edit_formula = |workbook: &mut Workbook, formula: &str| {
+        let edit = workbook
+            .apply_edits(&EditRequest {
+                expect_version: workbook.version(),
+                source: Default::default(),
+                history: EditHistory::None,
+                calculation: Default::default(),
+                steps: vec![EditStep::new(EditOperation::SetFormulas {
+                    target: RangeTarget {
+                        sheet_id: "sheet:0".into(),
+                        range: RangeAddress::A1 { a1: "B1".into() },
+                    },
+                    formulas: vec![vec![formula.into()]],
+                })],
+            })
+            .unwrap()
+            .unwrap();
+        assert!(edit.applied);
+    };
+    let mut workbook = table_header_workbook();
+    rename_table_header(&mut workbook, "Net");
+    edit_formula(&mut workbook, "SUM(Sales[Net])+10");
+    let bytes = workbook
+        .recovery_checkpoint_with_history(1, None, true)
+        .unwrap();
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+    let options = CalculationOptions::default();
+    assert!(restored.undo(options).unwrap().applied);
+    let at = CellRef::new(0, 1);
+    assert_eq!(
+        stored_formula(&restored.model, SheetId(0), at),
+        Some("SUM(Sales[Amount])+10")
+    );
+
+    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&bytes).unwrap();
+    edit_formula(&mut restored, "SUM(Sales[Net])+20");
+    assert_eq!(
+        stored_formula(&restored.model, SheetId(0), at),
+        Some("SUM(Sales[Net])+20")
+    );
+    assert!(restored.undo(options).unwrap().applied);
+    assert_eq!(
+        stored_formula(&restored.model, SheetId(0), at),
+        Some("SUM(Sales[Amount])+10"),
+        "undo restores the checkpoint inverse instead of retargeting the later +20 edit"
+    );
+}
+
 #[cfg(not(feature = "unstable-track-visibility"))]
 #[test]
 fn a_recovery_checkpoint_holding_a_visibility_range_is_refused() {
