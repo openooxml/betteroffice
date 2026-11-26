@@ -1,0 +1,10 @@
+import type { ProjectionAllowance } from './projectionParity.allowlist';
+
+export const storiesAux: readonly ProjectionAllowance[] = [
+  { kind: 'blockSdt', path: 'blocks[]', reason: 'Deferred block controls can be absent or retain their source stories.' },
+  { kind: 'headerFooterStory', path: 'blocks', reason: 'The deferred header/footer story can retain its source content.' },
+  { kind: 'noteStory', path: 'blocks', reason: 'The deferred note story can retain its source content.' },
+  { kind: 'noteStory', path: 'package.footnotes[].verbatimXml', reason: 'Note assembly can retain source XML.' },
+  { kind: 'noteStory', path: 'package.endnotes[].verbatimXml', reason: 'Note assembly can retain source XML.' },
+  { kind: 'sectionRanges', path: 'package.document.sections[].content', reason: 'Sections retain source ranges until section assembly lands.' },
+];
