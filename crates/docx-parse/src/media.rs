@@ -488,24 +488,6 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
     build_media_map_with_warnings(parts).0
 }
 
-pub(crate) fn build_save_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
-    let mut media = MediaMap::new();
-    for (path, _) in parts.iter().filter(|(path, _)| is_media_path(path)) {
-        let file = Arc::new(MediaFile {
-            path: path.clone(),
-            filename: Some(path.rsplit('/').next().unwrap_or(path).to_owned()),
-            mime_type: media_mime_type(path).to_owned(),
-            base64: String::new(),
-            data_url: String::new(),
-        });
-        media.insert(path.clone(), Arc::clone(&file));
-        if let Some(normalized) = path.strip_prefix("word/") {
-            media.insert(normalized.to_owned(), file);
-        }
-    }
-    media
-}
-
 /// Media map plus one warning per part that could not be transcoded for display.
 pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
@@ -515,10 +497,10 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         if !is_media_path(path) {
             continue;
         }
+        let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
         let (data, mime_type, warning) =
             display_form(data, media_mime_type(path), path, &mut budget);
         warnings.extend(warning);
-        let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
         let file = Arc::new(MediaFile {
@@ -551,45 +533,32 @@ pub fn resolve_image_data(
         return ResolvedImageData::default();
     }
     let target = &relationship.target;
+    let normalized = normalize_media_path(target);
     let filename = target.rsplit('/').next().map(str::to_owned);
-    if let Some(file) = media.and_then(|media| find_relationship_media(media, target)) {
-        return ResolvedImageData {
-            src: Some(if file.data_url.is_empty() {
-                file.base64.clone()
-            } else {
-                file.data_url.clone()
-            }),
-            mime_type: Some(file.mime_type.clone()),
-            filename,
-        };
+    if let Some(media) = media {
+        for candidate in [
+            normalized,
+            target.trim_start_matches('/').to_owned(),
+            format!("word/{}", target.trim_start_matches('/')),
+        ] {
+            if let Some(file) = find_case_insensitive(media, &candidate) {
+                return ResolvedImageData {
+                    src: Some(if file.data_url.is_empty() {
+                        file.base64.clone()
+                    } else {
+                        file.data_url.clone()
+                    }),
+                    mime_type: Some(file.mime_type.clone()),
+                    filename,
+                };
+            }
+        }
     }
     ResolvedImageData {
         src: None,
         mime_type: Some(media_mime_type(target).to_owned()),
         filename,
     }
-}
-
-pub(crate) fn comparison_image_bytes<'a>(
-    relationship_id: &str,
-    relationships: Option<&RelationshipMap>,
-    media: Option<&MediaMap>,
-    parts: &'a [(String, Vec<u8>)],
-) -> Option<&'a [u8]> {
-    let target = &relationships?.get(relationship_id)?.target;
-    let file = find_relationship_media(media?, target)?;
-    crate::s8::find_part(parts, &file.path).map(|(_, bytes)| bytes)
-}
-
-fn find_relationship_media<'a>(media: &'a MediaMap, target: &str) -> Option<&'a MediaFile> {
-    let relative = target.trim_start_matches('/');
-    [
-        normalize_media_path(target),
-        relative.to_owned(),
-        format!("word/{relative}"),
-    ]
-    .into_iter()
-    .find_map(|candidate| find_case_insensitive(media, &candidate))
 }
 
 /// Whether [`display_form`] replaces a part whose bytes start with `prefix`.
@@ -793,7 +762,7 @@ fn is_browser_image(data: &[u8]) -> bool {
 }
 
 #[cfg(feature = "tiff")]
-pub(crate) fn is_tiff(data: &[u8]) -> bool {
+fn is_tiff(data: &[u8]) -> bool {
     matches!(data.first_chunk::<4>(), Some(b"II\x2a\x00" | b"MM\x00\x2a"))
 }
 

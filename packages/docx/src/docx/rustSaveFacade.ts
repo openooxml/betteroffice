@@ -96,95 +96,6 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-function modelSaveFields(document: Document) {
-  const pkg = document.package;
-  return {
-    document: pkg.document,
-    headerEntries: [...(pkg.headers ?? [])],
-    footerEntries: [...(pkg.footers ?? [])],
-    footnotes: pkg.footnotes,
-    endnotes: pkg.endnotes,
-    footnoteSeparators: pkg.footnoteSeparators,
-    endnoteSeparators: pkg.endnoteSeparators,
-    relationshipEntries: [...(pkg.relationships ?? [])],
-    numbering: pkg.numbering,
-  };
-}
-
-const NO_BINDING_CHANGES = 'DOCX_SAVE_BINDINGS 0';
-const WHOLE_MODEL_WARNING = 'DOCX_WHOLE_MODEL_WRITE ';
-
-const parsedModels = new WeakMap<Document, {
-  body: string;
-  fingerprint: string;
-  sourceDigest: string;
-  saveWarnings: readonly string[];
-}>();
-
-function bodySaveFields({ content, finalSectionProperties, customRootBindings }: Document['package']['document']) {
-  return { content, finalSectionProperties, customRootBindings };
-}
-
-function saveTreeFingerprint(value: unknown): string {
-  const body = (value as { document?: unknown } | null | undefined)?.document;
-  assertSafeSaveTree(value, 'save', undefined, body);
-  const hash = new Uint32Array([0x811c9dc5, 0x243f6a88, 0xb7e15162, 0x9e3779b9]);
-  const add = (word: number): void => {
-    hash[0] = Math.imul(hash[0]! ^ word, 0x01000193);
-    hash[1] = Math.imul(hash[1]! ^ word, 0x85ebca77);
-    hash[2] = Math.imul(hash[2]! ^ word, 0xc2b2ae3d);
-    hash[3] = Math.imul(hash[3]! ^ word, 0x27d4eb2f);
-  };
-  const addString = (text: string): void => {
-    add(text.length);
-    for (let index = 0; index < text.length; index += 1) add(text.charCodeAt(index));
-  };
-  const visit = (field: unknown): void => {
-    if (Array.isArray(field)) {
-      add(1);
-      add(field.length);
-      for (const child of field) visit(child);
-    } else if (field !== null && typeof field === 'object') {
-      add(2);
-      const object = field as Record<string, unknown>;
-      const linkedImage = object.type === 'image' && typeof object.rId === 'string' && object.rId !== '';
-      const linkedWatermark = object.kind === 'picture' && typeof object.mediaPath === 'string' && object.mediaPath !== '';
-      const keys = Object.keys(object).filter(key => key !== 'sourceOrdinal' && object[key] !== undefined &&
-        !(key === 'sections' && object === body) && !(key === 'src' && linkedImage) &&
-        !(key === 'dataUrl' && linkedWatermark)).sort();
-      add(keys.length);
-      for (const key of keys) {
-        addString(key);
-        visit(object[key]);
-      }
-    } else {
-      add(3);
-      addString(typeof field);
-      addString(String(field));
-    }
-  };
-  visit(value);
-  return Array.from(hash, word => word.toString(16).padStart(8, '0')).join('');
-}
-
-export function rememberParsedModel(document: Document, sourceDigest: string, saveWarnings: readonly string[]): void {
-  const fields = modelSaveFields(document);
-  parsedModels.set(document, {
-    body: saveTreeFingerprint(bodySaveFields(fields.document)),
-    fingerprint: saveTreeFingerprint(fields),
-    sourceDigest,
-    saveWarnings,
-  });
-}
-
-function parsedModelUnchanged(
-  document: Document,
-  fields = modelSaveFields(document)
-): ReturnType<typeof parsedModels.get> {
-  const baseline = parsedModels.get(document);
-  return baseline && baseline.fingerprint === saveTreeFingerprint(fields) ? baseline : undefined;
-}
-
 /** Encode the public Document through the inverse allowlisted package wire. */
 export async function writeDocumentWithRust(
   document: Document,
@@ -194,10 +105,8 @@ export async function writeDocumentWithRust(
   determinism?: RustSaveDeterminism,
   paragraphIds?: RustParagraphIds,
   skipMutations = false,
-  yieldSave?: () => Promise<void>,
-  modelMode?: 'fresh'
+  yieldSave?: () => Promise<void>
 ): Promise<RustSaveResult> {
-  const guarded = modelMode !== 'fresh' && paragraphIds === undefined && selective === undefined;
   await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   if (yieldSave) await yieldSave();
   for (const part of paragraphIds?.splicedParts ?? []) {
@@ -208,62 +117,31 @@ export async function writeDocumentWithRust(
       );
     }
   }
-  const saveOptions = {
-    updateModifiedDate: options.updateModifiedDate ?? true,
-    ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),
-  };
-  const baseline = guarded ? parsedModelUnchanged(document) : undefined;
-  if (baseline) {
-    const fixed = determinism ?? { seed: baseline.sourceDigest, now: new Date().toISOString() };
-    validateDeterminism(fixed);
-    const request = {
-      determinism: fixed,
-      options: saveOptions,
-      unchangedSourceSha256: baseline.sourceDigest,
-    };
-    try {
-      const { bytes, warnings } = writeDocxS13WithWarningsWire(
-        JSON.stringify(request), new Uint8Array(originalBuffer)
-      );
-      engineProgress();
-      return {
-        buffer: exactArrayBuffer(bytes),
-        determinism: fixed,
-        warnings: [
-          ...(document.warnings ?? []),
-          ...baseline.saveWarnings,
-          ...warnings.filter(warning => warning !== NO_BINDING_CHANGES),
-        ],
-      };
-    } catch (error) {
-      if (String(error).replace(/^Error: /, '') !== 'DOCX_SOURCE_CHANGED') throw error;
-    }
-  }
-  const fixed = determinism ?? {
-    seed: await sha256Hex(new Uint8Array(originalBuffer)),
-    now: new Date().toISOString(),
-  };
+  const fixed =
+    determinism ??
+    ({
+      seed: await sha256Hex(new Uint8Array(originalBuffer)),
+      now: new Date().toISOString(),
+    } satisfies RustSaveDeterminism);
   validateDeterminism(fixed);
   if (yieldSave) await yieldSave();
-  const fields = modelSaveFields(document);
-  const parsed = guarded ? parsedModels.get(document) : undefined;
-  const unchangedBody = parsed && parsed.sourceDigest === fixed.seed &&
-    parsed.body === saveTreeFingerprint(bodySaveFields(fields.document));
+
+  const pkg = document.package;
   const request = {
-    ...fields,
-    ...(unchangedBody ? { unchangedBodySha256: fixed.seed } : {}),
-    ...(modelMode === 'fresh' ? { freshPackage: true } : {}),
-    ...(guarded ? { reportBindings: true } : {}),
     determinism: fixed,
-    ...(!guarded && {
-      headerEntries: headerFooterSaveEntries(document.package.headers),
-      footerEntries: headerFooterSaveEntries(document.package.footers),
-      footnotes: fields.footnotes ?? [],
-      endnotes: fields.endnotes ?? [],
-      footnoteSeparators: fields.footnoteSeparators ?? [],
-      endnoteSeparators: fields.endnoteSeparators ?? [],
-    }),
-    options: saveOptions,
+    document: pkg.document,
+    headerEntries: headerFooterSaveEntries(pkg.headers),
+    footerEntries: headerFooterSaveEntries(pkg.footers),
+    footnotes: pkg.footnotes ?? [],
+    endnotes: pkg.endnotes ?? [],
+    footnoteSeparators: pkg.footnoteSeparators ?? [],
+    endnoteSeparators: pkg.endnoteSeparators ?? [],
+    relationshipEntries: [...(pkg.relationships?.entries() ?? [])],
+    ...(pkg.numbering === undefined ? {} : { numbering: pkg.numbering }),
+    options: {
+      updateModifiedDate: options.updateModifiedDate ?? true,
+      ...(options.modifiedBy === undefined ? {} : { modifiedBy: options.modifiedBy }),
+    },
     ...(selective === undefined
       ? {}
       : {
@@ -286,47 +164,28 @@ export async function writeDocumentWithRust(
   engineProgress();
   const buffer = exactArrayBuffer(bytes);
   if (yieldSave) await yieldSave();
-  const unchangedBindings = warnings.includes(NO_BINDING_CHANGES);
-  if (!selective && !skipMutations && !unchangedBindings) {
-    const guardedWrite = guarded && !warnings.some(warning => warning.startsWith(WHOLE_MODEL_WARNING));
-    applyRustSaveMutations(document, originalBuffer, buffer, guardedWrite || modelMode === 'fresh');
-  }
-  return {
-    buffer,
-    determinism: fixed,
-    warnings: [...(document.warnings ?? []), ...warnings.filter(warning => warning !== NO_BINDING_CHANGES)],
-  };
+  if (!selective && !skipMutations) applyRustSaveMutations(document, originalBuffer, buffer);
+  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */
 function applyRustSaveMutations(
   document: Document,
   originalBuffer: ArrayBuffer,
-  savedBuffer: ArrayBuffer,
-  productSave: boolean
+  savedBuffer: ArrayBuffer
 ): void {
   const originalParts = unzipContainer(new Uint8Array(originalBuffer));
   const savedParts = unzipContainer(new Uint8Array(savedBuffer));
-  const indexParts = (parts: typeof originalParts) => productSave
-    ? Object.fromEntries(Object.entries(parts).map(([path, bytes]) => [path.toLowerCase(), bytes]))
-    : parts;
-  const originalByPath = indexParts(originalParts);
-  const savedByPath = indexParts(savedParts);
-  const relPath = (path: string) => productSave ? path.toLowerCase() : path;
-  const readAttribute = productSave ? relationshipAttribute : legacyRelationshipAttribute;
-  const findRelationship = (xml: string, id: string | undefined): string | undefined =>
-    id ? relationshipTags(xml).find((tag) => readAttribute(tag, 'Id') === id) : undefined;
 
   for (const part of collectParts(document)) {
-    const path = relPath(part.relsPath);
-    const originalRelationships = partText(originalByPath[path]) ?? '';
-    const savedRelationships = partText(savedByPath[path]) ?? '';
+    const originalRelationships = partText(originalParts[part.relsPath]) ?? '';
+    const savedRelationships = partText(savedParts[part.relsPath]) ?? '';
     const originalIds = new Set(
-      relationshipTags(originalRelationships).map((tag) => readAttribute(tag, 'Id'))
+      relationshipTags(originalRelationships).map((tag) => relationshipAttribute(tag, 'Id'))
     );
     const newImageIds = relationshipTags(savedRelationships)
-      .filter((tag) => readAttribute(tag, 'Type')?.endsWith('/image'))
-      .map((tag) => readAttribute(tag, 'Id'))
+      .filter((tag) => relationshipAttribute(tag, 'Type')?.endsWith('/image'))
+      .map((tag) => relationshipAttribute(tag, 'Id'))
       .filter((id): id is string => !!id && !originalIds.has(id));
     const images = collectNewImages(part.blocks);
     if (images.length > newImageIds.length) {
@@ -341,18 +200,18 @@ function applyRustSaveMutations(
 
     const savedHyperlinks = relationshipTags(savedRelationships).filter(
       (tag) =>
-        readAttribute(tag, 'Type')?.endsWith('/hyperlink') &&
-        readAttribute(tag, 'TargetMode') === 'External'
+        relationshipAttribute(tag, 'Type')?.endsWith('/hyperlink') &&
+        relationshipAttribute(tag, 'TargetMode') === 'External'
     );
     for (const hyperlink of collectExternalHyperlinks(part.blocks)) {
       if (!hyperlink.href) {
-        if (!findRelationship(savedRelationships, hyperlink.rId)) hyperlink.rId = undefined;
+        if (!relationshipForId(savedRelationships, hyperlink.rId)) hyperlink.rId = undefined;
         continue;
       }
       const match = savedHyperlinks.find(
-        (tag) => decodeXmlEntities(readAttribute(tag, 'Target') ?? '') === hyperlink.href
+        (tag) => decodeXmlEntities(relationshipAttribute(tag, 'Target') ?? '') === hyperlink.href
       );
-      const id = match && readAttribute(match, 'Id');
+      const id = match && relationshipAttribute(match, 'Id');
       if (id) hyperlink.rId = id;
     }
   }
@@ -367,15 +226,15 @@ function applyRustSaveMutations(
     if (!owner?.target) continue;
     const filename = headerFooterFilename(owner.target).replace(/^word\//, '');
     const relsPath = `word/_rels/${filename}.rels`;
-    const savedRelationships = partText(savedByPath[relPath(relsPath)]) ?? '';
-    if (findRelationship(savedRelationships, watermark.relId)) continue;
+    const savedRelationships = partText(savedParts[relsPath]) ?? '';
+    if (relationshipForId(savedRelationships, watermark.relId)) continue;
     const mediaFilename = watermark.mediaPath?.split('/').pop();
     const match = relationshipTags(savedRelationships).find((tag) => {
-      if (!readAttribute(tag, 'Type')?.endsWith('/image')) return false;
-      const target = readAttribute(tag, 'Target')?.split('/').pop();
+      if (!relationshipAttribute(tag, 'Type')?.endsWith('/image')) return false;
+      const target = relationshipAttribute(tag, 'Target')?.split('/').pop();
       return mediaFilename ? target === mediaFilename : true;
     });
-    const id = match && readAttribute(match, 'Id');
+    const id = match && relationshipAttribute(match, 'Id');
     if (id) watermark.relId = id;
   }
 }
@@ -456,11 +315,12 @@ function relationshipTags(xml: string): string[] {
 }
 
 function relationshipAttribute(tag: string, name: string): string | undefined {
-  return tag.match(new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`))?.[2];
+  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
 }
 
-function legacyRelationshipAttribute(tag: string, name: string): string | undefined {
-  return tag.match(new RegExp(`\\b${name}="([^"]*)"`))?.[1];
+function relationshipForId(xml: string, id: string | undefined): string | undefined {
+  if (!id) return undefined;
+  return relationshipTags(xml).find((tag) => relationshipAttribute(tag, 'Id') === id);
 }
 
 function decodeXmlEntities(value: string): string {
@@ -488,12 +348,7 @@ function validateDeterminism(value: RustSaveDeterminism): void {
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /** @internal */
-export function assertSafeSaveTree(
-  value: unknown,
-  path: string,
-  active = new WeakSet<object>(),
-  body?: unknown
-): void {
+export function assertSafeSaveTree(value: unknown, path: string, active = new WeakSet<object>()): void {
   const segments: Array<string | number> = [];
   const currentPath = (): string => {
     let result = path;
@@ -516,7 +371,6 @@ export function assertSafeSaveTree(
       }
     } else {
       for (const key of Object.keys(value)) {
-        if (key === 'sections' && value === body) continue;
         if (FORBIDDEN_KEYS.has(key)) throw new TypeError(`${currentPath()} contains forbidden key ${key}`);
         segments.push(key);
         visit((value as Record<string, unknown>)[key]);

@@ -11,6 +11,7 @@
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
 import type { RawDocxContent } from './unzip';
+import { modelMatchesSource, modelPartsRewrittenWarning } from './modelSave';
 import { writeDocumentWithRust } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
 import { unzipContainer } from './wasm';
@@ -51,7 +52,7 @@ export interface RepackOptions {
 
 /** Repack a public Document through the Rust package writer. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
-  return (await repackDocxWithWarnings(doc, options)).buffer;
+  return (await repackModel(doc, options, false)).buffer;
 }
 
 export interface RepackResult {
@@ -64,6 +65,30 @@ export async function repackDocxWithWarnings(
   doc: Document,
   options: RepackOptions = {}
 ): Promise<RepackResult> {
+  return repackModel(doc, options, true);
+}
+
+async function repackModel(
+  doc: Document,
+  options: RepackOptions,
+  includeWarnings: boolean
+): Promise<RepackResult> {
+  const source = doc.originalBuffer;
+  if (!source) return repackDocxModelWrite(doc, options);
+  if (await modelMatchesSource(doc, source)) {
+    const buffer = await saveUnchangedModel(source, options);
+    if (buffer) return { buffer, warnings: [...(doc.warnings ?? [])] };
+  }
+  const result = await repackDocxModelWrite(doc, options);
+  if (includeWarnings) result.warnings.push(modelPartsRewrittenWarning(source, result.buffer));
+  return result;
+}
+
+/** @internal */
+export async function repackDocxModelWrite(
+  doc: Document,
+  options: RepackOptions = {}
+): Promise<RepackResult> {
   if (!doc.originalBuffer) {
     throw new Error(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
@@ -71,6 +96,27 @@ export async function repackDocxWithWarnings(
   }
   const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
   return { buffer: result.buffer, warnings: result.warnings };
+}
+
+async function saveUnchangedModel(
+  source: ArrayBuffer,
+  options: RepackOptions
+): Promise<ArrayBuffer | undefined> {
+  const updateModifiedDate = options.updateModifiedDate ?? true;
+  const modifiedBy = options.modifiedBy;
+  if (typeof updateModifiedDate !== 'boolean' ||
+      (modifiedBy !== undefined && typeof modifiedBy !== 'string')) return undefined;
+  if (!updateModifiedDate && !modifiedBy) return source.slice(0);
+  try {
+    const parts = loadParts(source);
+    const core = partText(parts.get('docProps/core.xml'));
+    if (core === undefined) return source.slice(0);
+    const updated = updateCoreProperties(core, { updateModifiedDate, modifiedBy });
+    if (updated === core) return source.slice(0);
+    return await applyUpdatesToZip(parts, new Map([['docProps/core.xml', updated]]));
+  } catch {
+    return undefined;
+  }
 }
 
 export async function repackDocxFromRaw(
@@ -268,10 +314,8 @@ export function isDocxBuffer(buffer: ArrayBuffer): boolean {
 }
 
 export async function createDocx(doc: Document): Promise<ArrayBuffer> {
-  if (doc.originalBuffer) return repackDocx(doc);
   const originalBuffer = await createEmptyDocx();
-  return (await writeDocumentWithRust({ ...doc, originalBuffer }, originalBuffer, {},
-    undefined, undefined, undefined, false, undefined, 'fresh')).buffer;
+  return (await repackDocxModelWrite({ ...doc, originalBuffer })).buffer;
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

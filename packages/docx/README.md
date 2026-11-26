@@ -13,23 +13,18 @@ No peer dependencies. `@betteroffice/fonts` is installed with it as a dependency
 
 ## Usage
 
-Open a DOCX in an editing session and save it. Session saves patch changed paragraphs in place where possible.
+Parse a DOCX and save it. An unchanged model saves as the original package with only the modified date updated (byte for byte with `updateModifiedDate: false`); to keep unchanged content while editing, use `createYrsSession`, `seedFromDocx` and `saveYrsDocx`.
 
 ```ts
 import { readFile, writeFile } from 'node:fs/promises';
-import { createYrsSession, saveYrsDocx } from '@betteroffice/docx/yrs';
+import { parseDocx, repackDocx } from '@betteroffice/docx';
 
-const session = await createYrsSession();
-try {
-  session.openDocx(await readFile('input.docx'), true);
-  const { bytes } = await saveYrsDocx(session);
-  await writeFile('output.docx', bytes);
-} finally {
-  session.destroy();
-}
+const document = await parseDocx(await readFile('input.docx'));
+// document.package.document.content: the body's paragraphs and tables
+// document.package also holds styles, numbering, theme, media, headers and footers
+const bytes = await repackDocx(document);
+await writeFile('output.docx', new Uint8Array(bytes));
 ```
-
-For document-model workflows, `parseDocx` followed by `repackDocx` uses the same save engine. The body paragraphs and tables are in `document.package.document.content`.
 
 ## Entry points
 
@@ -37,7 +32,7 @@ For document-model workflows, `parseDocx` followed by `repackDocx` uses the same
 | --- | --- |
 | `parseDocx` | Read an `ArrayBuffer`, `Uint8Array`, `Blob`, or `File` into a document model. |
 | `repackDocx`, `repackDocxWithWarnings` | Save a parsed model against its original package; the latter also returns save warnings. |
-| `createDocx` | Write a document model, preserving its original package when present. |
+| `createDocx` | Write a new document model without an original package. |
 | `decodeFontFace(bytes, { codec, dict?, maxOutput? })` | Asynchronously decode a packed font with the engine into `{ font, payload? }` ArrayBuffers; rejects on invalid options or decode errors without retrying another decoder. |
 | `createYrsSession` (from `@betteroffice/docx/yrs`) | Asynchronously create a CRDT editing session. |
 | `saveYrsDocx` (from `@betteroffice/docx/yrs`) | Save a session opened from DOCX bytes, returning bytes and persisted paragraph anchors. |

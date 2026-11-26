@@ -16,9 +16,7 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{
-    MediaFile, MediaScan, MediaTable, build_media_map_with_warnings, build_save_media_map,
-};
+use crate::media::{MediaFile, MediaScan, MediaTable, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -204,43 +202,9 @@ pub fn parse_docx_s9_wire_parts_with_limits(
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
-    let envelope = parse_docx_s9_wire_from_parts(data, &parts, options, limits)?;
+    let envelope = parse_s9_package(&parts, data, options, limits, None, None)?
+        .expect("a whole body is never refused");
     Ok((envelope, parts))
-}
-
-#[doc(hidden)]
-pub fn parse_docx_s9_wire_from_parts(
-    data: &[u8],
-    parts: &[(String, Vec<u8>)],
-    options: S9ParseOptions,
-    limits: &ParseLimits,
-) -> Result<S9WireEnvelope, ParseError> {
-    Ok(parse_s9_package(parts, data, options, limits, None, None)?
-        .expect("a whole body is never refused"))
-}
-
-pub(crate) fn parse_save_source(
-    data: &[u8],
-    parts: &[(String, Vec<u8>)],
-    options: S9ParseOptions,
-    limits: &ParseLimits,
-    skip_body: bool,
-) -> Result<(String, S9PackageWire), ParseError> {
-    let document_path =
-        crate::relationships::office_document_path(parts, &mut ParseBudget::new(limits))?;
-    let (envelope, _) = parse_s9_package_impl(
-        parts,
-        data,
-        options,
-        limits,
-        None,
-        None,
-        true,
-        None,
-        ParsePurpose::SaveComparison { skip_body },
-    )?
-    .expect("a whole body is never refused");
-    Ok((document_path, envelope.document.package))
 }
 
 /// [`parse_docx_s9_wire_parts_with_limits`] leaving the media in the package:
@@ -347,7 +311,6 @@ pub fn parse_docx_s9_preview_from_parts_with_budget(
         None,
         true,
         paragraph_budget,
-        ParsePurpose::Read,
     )
 }
 
@@ -384,7 +347,6 @@ pub fn parse_docx_s9_preview_from_parts_full_dom_with_budget(
         None,
         false,
         paragraph_budget,
-        ParsePurpose::Read,
     )
 }
 
@@ -425,7 +387,6 @@ pub fn parse_docx_s9_preview_with_media_table_with_budget(
         Some(table),
         true,
         paragraph_budget,
-        ParsePurpose::Read,
     )
 }
 
@@ -448,7 +409,6 @@ fn parse_s9_package(
         media_table,
         true,
         None,
-        ParsePurpose::Read,
     )
     .map(|preview| preview.map(|(envelope, _)| envelope))
 }
@@ -471,12 +431,6 @@ fn validate_main_root(name: &str, namespace: Option<&str>, path: &str) -> Result
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum ParsePurpose {
-    Read,
-    SaveComparison { skip_body: bool },
-}
-
 fn parse_s9_package_impl(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
@@ -486,9 +440,7 @@ fn parse_s9_package_impl(
     media_table: Option<&MediaTable>,
     prefix_preview: bool,
     paragraph_budget: Option<usize>,
-    purpose: ParsePurpose,
 ) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
-    let save_comparison = matches!(purpose, ParsePurpose::SaveComparison { .. });
     if media_table.is_some() && options.include_canonical {
         return Err(ParseError::Canonical(
             "a canonical envelope needs the media inflated".to_owned(),
@@ -497,8 +449,6 @@ fn parse_s9_package_impl(
     let mut budget = ParseBudget::new(limits);
     if let Some(table) = media_table {
         budget.read_media_from(table);
-    } else if save_comparison {
-        budget.compare_media_from(parts);
     }
     if options.source_ordinals {
         budget.record_source_ordinals();
@@ -551,7 +501,6 @@ fn parse_s9_package_impl(
     };
     let (media, media_warnings) = match media_table {
         Some(table) => (table.media_map(), table.warnings().to_vec()),
-        None if save_comparison => (build_save_media_map(parts), Vec::new()),
         None => build_media_map_with_warnings(parts),
     };
     let all_xml: IndexMap<_, _> = parts
@@ -571,19 +520,8 @@ fn parse_s9_package_impl(
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
     let document_part = find_part(parts, &document_path);
-    let mut warnings = if save_comparison {
-        Vec::new()
-    } else {
-        crate::package_integrity::package_warnings(parts, media_table, limits)
-    };
+    let mut warnings = crate::package_integrity::package_warnings(parts, media_table, limits);
     let (mut body, budget_stopped) = match document_part {
-        Some((_, xml))
-            if matches!(purpose, ParsePurpose::SaveComparison { skip_body: true })
-                && std::str::from_utf8(xml)
-                    .is_ok_and(|xml| !xml.contains("textId") && !xml.contains('\0')) =>
-        {
-            (DocumentBody::default(), false)
-        }
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
                 .filter(|_| prefix_preview)
@@ -677,7 +615,6 @@ fn parse_s9_package_impl(
                                 media_table,
                                 false,
                                 paragraph_budget,
-                                purpose,
                             );
                         }
                         (body, budget_stopped)
@@ -856,7 +793,6 @@ fn parse_s9_package_impl(
             relationship_entries: relationships.into_iter().collect(),
             media_entries: match media_table {
                 Some(_) => Vec::new(),
-                None if save_comparison => Vec::new(),
                 None => media.into_iter().collect(),
             },
             chart_entries: charts.into_iter().collect(),
@@ -886,9 +822,7 @@ fn parse_s9_package_impl(
     };
     let embedded_font_parts = parts
         .iter()
-        .filter(|(path, _)| {
-            !save_comparison && path.to_ascii_lowercase().starts_with("word/fonts/")
-        })
+        .filter(|(path, _)| path.to_ascii_lowercase().starts_with("word/fonts/"))
         .map(|(path, bytes)| BinaryPartWire {
             path: path.clone(),
             base64: base64::engine::general_purpose::STANDARD.encode(bytes),

@@ -329,43 +329,6 @@ pub fn parse_docx_s8(data: &[u8]) -> Result<String, JsValue> {
 }
 
 pub fn parse_docx_s9_json(data: &[u8], options_json: &str) -> Result<String, String> {
-    if options_json.contains("\"reportSourceDigest\"") {
-        use serde::Serialize;
-        use sha2::{Digest, Sha256};
-
-        #[derive(Serialize)]
-        #[serde(rename_all = "camelCase")]
-        struct SourceEnvelope {
-            #[serde(flatten)]
-            envelope: s9::S9WireEnvelope,
-            source_digest: String,
-            save_warnings: Vec<String>,
-        }
-
-        let mut fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(options_json).map_err(|error| error.to_string())?;
-        if fields.remove("reportSourceDigest") != Some(serde_json::Value::Bool(true)) {
-            return Err("reportSourceDigest must be true".to_owned());
-        }
-        let mut options: S9ParseOptions =
-            serde_json::from_value(fields.into()).map_err(|error| error.to_string())?;
-        let source_digest = format!("{:x}", Sha256::digest(data));
-        options
-            .determinism_seed
-            .get_or_insert_with(|| source_digest.clone());
-        let (envelope, parts) =
-            s9::parse_docx_s9_wire_parts_with_limits(data, options, &xml::ParseLimits::default())
-                .map_err(|error| error.to_string())?;
-        let save_warnings =
-            serializer::s13::parsed_save_warnings(&envelope.document.package, &parts)
-                .map_err(|error| error.to_string())?;
-        return serde_json::to_string(&SourceEnvelope {
-            envelope,
-            source_digest,
-            save_warnings,
-        })
-        .map_err(|error| error.to_string());
-    }
     let options = if options_json.is_empty() {
         S9ParseOptions::default()
     } else {
@@ -440,7 +403,7 @@ pub fn write_docx_s13_json(request_json: &str, original_docx: &[u8]) -> Result<V
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn write_docx_s13_wasm(request_json: &str, original_docx: &[u8]) -> Result<Vec<u8>, JsValue> {
-    write_docx_s13_wire_json(request_json, original_docx).map_err(js_error)
+    write_docx_s13_json(request_json, original_docx).map_err(js_error)
 }
 
 pub fn write_docx_s13_with_warnings_json(
@@ -450,31 +413,7 @@ pub fn write_docx_s13_with_warnings_json(
     let request = serde_json::from_str(request_json).map_err(|error| error.to_string())?;
     let (bytes, warnings) =
         write_docx_s13_with_warnings(request, original_docx).map_err(|error| error.to_string())?;
-    frame_save_warnings(bytes, &warnings)
-}
-
-#[doc(hidden)]
-pub fn write_docx_s13_wire_json(
-    request_json: &str,
-    original_docx: &[u8],
-) -> Result<Vec<u8>, String> {
-    serializer::model_save::write_json(request_json, original_docx, None).map(|(bytes, _)| bytes)
-}
-
-#[doc(hidden)]
-pub fn write_docx_s13_wire_with_warnings_json(
-    request_json: &str,
-    original_docx: &[u8],
-) -> Result<Vec<u8>, String> {
-    let mut wire = Vec::new();
-    let (bytes, mut report) =
-        serializer::model_save::write_json(request_json, original_docx, Some(&mut wire))?;
-    report.warnings.extend(wire);
-    frame_save_warnings(bytes, &report.warnings)
-}
-
-fn frame_save_warnings(bytes: Vec<u8>, warnings: &[String]) -> Result<Vec<u8>, String> {
-    let warnings = serde_json::to_vec(warnings).map_err(|error| error.to_string())?;
+    let warnings = serde_json::to_vec(&warnings).map_err(|error| error.to_string())?;
     let mut framed = (warnings.len() as u64).to_le_bytes().to_vec();
     framed.extend_from_slice(&warnings);
     framed.extend_from_slice(&bytes);
@@ -489,7 +428,7 @@ pub fn write_docx_s13_wasm_with_warnings(
     request_json: &str,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, JsValue> {
-    write_docx_s13_wire_with_warnings_json(request_json, original_docx).map_err(js_error)
+    write_docx_s13_with_warnings_json(request_json, original_docx).map_err(js_error)
 }
 
 #[cfg(feature = "tiff")]

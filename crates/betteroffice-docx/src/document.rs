@@ -35,12 +35,10 @@ use docx_parse::s9::{
     S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions, S9SectionWire,
     S9WireEnvelope,
 };
-use docx_parse::serializer::model_save::{WHOLE_MODEL_WARNING, write_model_with_body_policy};
 use docx_parse::serializer::paragraph_ids::{S13TouchedPart, S13WholePart};
-use docx_parse::serializer::s13::save_core_only;
 use docx_parse::serializer::{
     S13ParagraphId, S13ParagraphIds, S13PatchedPart, S13SaveOptions, S13SaveReport, S13SaveRequest,
-    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism,
+    S13SpliceAnchor, S13SplicedPart, SerializerDeterminism, write_docx_s13_parts_with_report,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -51,6 +49,8 @@ use crate::{
     DocumentModel, DocumentStructure, Error, KeptUnchanged, LayoutResult, OpenOptions, Result,
     SaveOptions, SaveReport,
 };
+
+mod model_save;
 
 /// The product worker's save seed caps (`residentEngineWorker.ts`).
 const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
@@ -576,39 +576,48 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
-        let unstamped = !options.update_modified_date && options.modified_by.is_none();
-        if self.dirty == Dirty::Clean && unstamped {
-            SerializerDeterminism {
-                seed: self.seed.clone(),
-                now: options.now,
-            }
-            .validate()?;
-            return Ok(save_report(
-                self.source.to_vec(),
-                &mut S13SaveReport::default(),
-            ));
+        if self.dirty == Dirty::ModelChanged {
+            return self.save_model_report(options, false).map(|(report, _)| report);
         }
-        self.save_report_with_warnings_and_options(options)
-            .map(|(report, _)| report)
-    }
-
-    /// Returns the save report and non-fatal warnings.
-    pub fn save_report_with_warnings(&self) -> Result<(SaveReport, Vec<String>)> {
-        self.save_report_with_warnings_and_options(SaveOptions::default())
-    }
-
-    /// Returns the save report and non-fatal warnings using the supplied options.
-    pub fn save_report_with_warnings_and_options(
-        &self,
-        options: SaveOptions,
-    ) -> Result<(SaveReport, Vec<String>)> {
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
         };
+        if self.dirty == Dirty::Clean
+            && !options.update_modified_date
+            && options.modified_by.is_none()
+        {
+            determinism.validate()?;
+            return Ok(SaveReport {
+                bytes: self.source.clone(),
+                kept_unchanged: None,
+                structure_dropped: None,
+                whole_model_write: false,
+            });
+        }
         let paragraph_ids = self.session_save_plan()?;
-        let rewrite_body = self.dirty == Dirty::LoggedEdits && paragraph_ids.is_none();
-        let request = S13SaveRequest {
+        let whole_model_write = paragraph_ids.is_none();
+        let request = self.save_request(
+            determinism,
+            options.update_modified_date,
+            options.modified_by,
+            paragraph_ids,
+        );
+        #[cfg(test)]
+        session_save_tests::count_package_write();
+        let (bytes, report) =
+            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
+        Ok(save_report(bytes, report, whole_model_write))
+    }
+
+    fn save_request(
+        &self,
+        determinism: SerializerDeterminism,
+        update_modified_date: bool,
+        modified_by: Option<String>,
+        paragraph_ids: Option<S13ParagraphIds>,
+    ) -> S13SaveRequest {
+        S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
@@ -620,38 +629,18 @@ impl Document {
             relationship_entries: self.model.relationships.clone(),
             numbering: Some(self.model.numbering.clone()),
             options: S13SaveOptions {
-                update_modified_date: options.update_modified_date,
-                modified_by: options.modified_by,
+                update_modified_date,
+                modified_by,
             },
             selective: None,
             paragraph_ids,
-        };
-        let (bytes, report) = if self.dirty == Dirty::Clean
-            && let Ok(path) = docx_parse::relationships::office_document_path(
-                &self.original_parts,
-                &mut docx_parse::xml::ParseBudget::new(&self.parse_limits),
-            ) {
-            save_core_only(&request, &path, &self.original_parts, &self.source)?
-        } else {
-            #[cfg(test)]
-            session_save_tests::count_package_write();
-            write_model_with_body_policy(
-                request,
-                &self.source,
-                &self.original_parts,
-                &self.parse_limits,
-                rewrite_body,
-            )?
-        };
-        let mut report = report;
-        let saved = save_report(bytes, &mut report);
-        Ok((saved, report.warnings))
+        }
     }
 
     /// The editing session's paragraph save plan for the current model, as the
-    /// product's session save writes it.
+    /// product's session save writes it; `None` saves the whole model.
     fn session_save_plan(&self) -> Result<Option<S13ParagraphIds>> {
-        if self.dirty != Dirty::LoggedEdits {
+        if self.dirty == Dirty::ModelChanged {
             return Ok(None);
         }
         let Some(baseline) = &self.session_baseline else {
@@ -1405,23 +1394,20 @@ fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
 }
 
-fn save_report(bytes: Vec<u8>, report: &mut S13SaveReport) -> SaveReport {
+fn save_report(bytes: Vec<u8>, report: S13SaveReport, whole_model_write: bool) -> SaveReport {
     let structure = report
         .kept_unchanged
         .values()
         .fold(0u32, |sum, count| sum.saturating_add(*count));
     SaveReport {
         bytes,
-        whole_model_write: report
-            .warnings
-            .iter()
-            .any(|warning| warning.starts_with(WHOLE_MODEL_WARNING)),
         kept_unchanged: (structure > 0).then_some(KeptUnchanged {
             structure,
-            paragraphs: std::mem::take(&mut report.kept_paragraphs),
+            paragraphs: report.kept_paragraphs,
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
-            .then(|| std::mem::take(&mut report.structure_dropped)),
+            .then_some(report.structure_dropped),
+        whole_model_write,
     }
 }
 
@@ -1456,7 +1442,7 @@ mod save_report_tests {
     fn kept_counts_of_every_part_are_summed_and_paragraphs_keep_their_order() {
         let report = save_report(
             vec![1, 2, 3],
-            &mut S13SaveReport {
+            S13SaveReport {
                 warnings: vec!["ignored".to_owned()],
                 kept_unchanged: BTreeMap::from([
                     ("word/document.xml".to_owned(), 3),
@@ -1469,6 +1455,7 @@ mod save_report_tests {
                 ],
                 structure_dropped: vec![dropped("word/footer1.xml"), dropped("word/document.xml")],
             },
+            false,
         );
         assert_eq!(report.bytes, [1, 2, 3]);
         let kept_unchanged = report.kept_unchanged.expect("kept is reported");
@@ -1499,10 +1486,11 @@ mod save_report_tests {
     fn nothing_kept_or_dropped_is_none() {
         let report = save_report(
             Vec::new(),
-            &mut S13SaveReport {
+            S13SaveReport {
                 kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
                 ..S13SaveReport::default()
             },
+            false,
         );
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
@@ -1545,8 +1533,7 @@ fn has_floating_zones(
 mod session_save_tests {
     use super::{
         Document, EditCtx, InlineNode, Locator, Paragraph, ParagraphContent, SessionEdit,
-        WHOLE_MODEL_WARNING, find_paragraph_mut, get_paragraph_text, replace_plain_run,
-        replace_section_paragraphs,
+        find_paragraph_mut, get_paragraph_text, replace_plain_run, replace_section_paragraphs,
     };
 
     use std::cell::{Cell, RefCell};
@@ -1770,97 +1757,23 @@ mod session_save_tests {
     #[test]
     fn an_unedited_save_writes_every_source_entry_as_it_is() {
         let source = package(&source());
-        let mut document = Document::open(&source).unwrap();
-        document.model_mut();
-        let (report, warnings) = document.save_report_with_warnings().unwrap();
-        assert_eq!(report.bytes, source);
-        assert!(warnings.is_empty());
-        assert!(!report.whole_model_write);
-    }
-
-    #[test]
-    fn model_mut_borrow_without_change_keeps_the_source_parts() {
-        let mut document = open();
-        document.model_mut();
-        let saved = ooxml_opc::unzip_parts(&document.save().unwrap()).unwrap();
-        assert_eq!(saved, document.original_parts);
-    }
-
-    #[test]
-    fn model_mut_saves_a_body_edit_and_keeps_other_parts() {
-        let mut parts = ooxml_opc::unzip_parts(&package(&source())).unwrap();
-        let header = "word/header1.xml";
-        let types = String::from_utf8(parts[0].1.clone()).unwrap().replace(
-            "</Types>",
-            r#"<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#,
+        let saved = Document::open(&source).unwrap().save().unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&saved).unwrap(),
+            ooxml_opc::unzip_parts(&source).unwrap()
         );
-        parts[0].1 = types.into_bytes();
-        parts.push((
-            "word/_rels/document.xml.rels".to_owned(),
-            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>"#.to_vec(),
-        ));
-        parts.push((
-            header.to_owned(),
-            format!(
-                "<w:hdr {NAMESPACES}>{}</w:hdr>",
-                paragraph("0000000F", &run("Header"))
-            )
-            .into_bytes(),
-        ));
-        let source = ooxml_opc::rezip_parts(&parts).unwrap();
+        assert_eq!(saved, source);
+    }
+
+    #[test]
+    fn model_mut_borrow_without_change_returns_source_bytes() {
+        let source = package(&source());
         let mut document = Document::open(&source).unwrap();
-        change_model(&mut document, "0000000B", |paragraph| {
-            replace_plain_run(paragraph, "Charlie by model".to_owned(), None);
+        document.model_mut();
+        let counts = counted(|| {
+            assert_eq!(document.save().unwrap(), source);
         });
-
-        let saved = document.save().unwrap();
-        let reopened = Document::open(&saved).unwrap();
-        assert_eq!(
-            get_paragraph_text(reopened.paragraphs()[1]),
-            "Charlie by model"
-        );
-        let other_parts = |parts: Vec<(String, Vec<u8>)>| {
-            parts
-                .into_iter()
-                .filter(|(path, _)| path != "word/document.xml")
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            other_parts(ooxml_opc::unzip_parts(&saved).unwrap()),
-            other_parts(parts)
-        );
-    }
-
-    #[test]
-    fn a_guard_parse_budget_failure_falls_back_to_the_model_writer() {
-        let mut parts = ooxml_opc::unzip_parts(&package(&source())).unwrap();
-        let numbering = format!(
-            "<w:numbering {NAMESPACES}><w:abstractNum w:abstractNumId=\"0\"/></w:numbering>"
-        );
-        parts.push(("word/numbering.xml".to_owned(), numbering.into_bytes()));
-        let source = ooxml_opc::rezip_parts(&parts).unwrap();
-        let mut document = Document::open(&source).unwrap();
-        document
-            .replace_paragraph_text("0000000B", "Budget edit")
-            .unwrap();
-        document.model_mut();
-        document.parse_limits.max_xml_bytes = 128;
-        let (report, warnings) = document.save_report_with_warnings().unwrap();
-        assert!(report.whole_model_write);
-        assert!(report.kept_unchanged.is_none());
-        assert!(report.structure_dropped.is_none());
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.starts_with(WHOLE_MODEL_WARNING))
-        );
-        let saved = ooxml_opc::unzip_parts(&report.bytes).unwrap();
-        assert!(saved.contains(parts.last().unwrap()));
-        let reopened = Document::open(&report.bytes).unwrap();
-        assert_eq!(
-            get_paragraph_text(reopened.paragraph("0000000B").unwrap()),
-            "Budget edit"
-        );
+        assert_eq!(counts, (0, 0));
     }
 
     #[test]

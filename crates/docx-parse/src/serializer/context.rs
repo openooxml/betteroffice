@@ -52,7 +52,7 @@ pub struct DroppedStructure {
 /// A save's diagnostics: the text warnings and the typed values the save reports.
 #[derive(Clone, Debug, Default)]
 pub struct S13SaveReport {
-    /// Text diagnostics, including the legacy strings for supplied save plans.
+    /// Every diagnostic as text, as [`super::write_docx_s13_with_warnings`] returns them.
     pub warnings: Vec<String>,
     /// Paragraphs kept as their source bytes, counted per part.
     pub kept_unchanged: BTreeMap<String, u32>,
@@ -370,50 +370,47 @@ impl SerializerContext {
 
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
-        self.take_report(true).warnings
-    }
-
-    fn write_wire_diagnostics(&self, wire: &mut Vec<String>) {
         if !self.kept_unchanged.is_empty() {
-            wire.push(format!(
+            let counts = std::mem::take(&mut self.kept_unchanged);
+            self.warn(format!(
                 "DOCX_KEPT_UNCHANGED structure {}",
-                serde_json::to_string(&self.kept_unchanged)
-                    .expect("string keys and integer counts")
+                serde_json::to_string(&counts).expect("string keys and integer counts")
             ));
         }
         if !self.structure_dropped.is_empty() {
-            wire.push(format!(
+            let dropped = std::mem::take(&mut self.structure_dropped);
+            self.warn(format!(
                 "DOCX_STRUCTURE_DROPPED {}",
-                serde_json::to_string(&self.structure_dropped).expect("strings and integers")
+                serde_json::to_string(&dropped).expect("strings and integers")
             ));
         }
         if !self.kept_paragraphs.is_empty() {
-            wire.push(format!(
+            let paragraphs = std::mem::take(&mut self.kept_paragraphs);
+            self.warn(format!(
                 "DOCX_KEPT_PARAGRAPHS {}",
-                serde_json::to_string(&self.kept_paragraphs).expect("strings and integers")
+                serde_json::to_string(&paragraphs).expect("strings and integers")
             ));
         }
         if !self.paragraph_replace_counts.is_empty() {
-            wire.push(format!(
+            let counts = std::mem::take(&mut self.paragraph_replace_counts);
+            self.warn(format!(
                 "DOCX_MINIMAL_PATCH replace counts {}",
-                serde_json::to_string(&self.paragraph_replace_counts)
-                    .expect("string keys and integer counts")
+                serde_json::to_string(&counts).expect("string keys and integer counts")
             ));
         }
+        std::mem::take(&mut self.warnings)
     }
 
     /// Drains the diagnostics recorded so far, typed beside their text.
-    pub(crate) fn take_report(&mut self, legacy_diagnostics: bool) -> S13SaveReport {
-        let mut warnings = std::mem::take(&mut self.warnings);
-        if legacy_diagnostics {
-            self.write_wire_diagnostics(&mut warnings);
-        }
-        self.paragraph_replace_counts.clear();
+    pub(crate) fn take_report(&mut self) -> S13SaveReport {
+        let kept_unchanged = self.kept_unchanged.clone();
+        let kept_paragraphs = self.kept_paragraphs.clone();
+        let structure_dropped = self.structure_dropped.clone();
         S13SaveReport {
-            warnings,
-            kept_unchanged: std::mem::take(&mut self.kept_unchanged),
-            kept_paragraphs: std::mem::take(&mut self.kept_paragraphs),
-            structure_dropped: std::mem::take(&mut self.structure_dropped),
+            warnings: self.take_warnings(),
+            kept_unchanged,
+            kept_paragraphs,
+            structure_dropped,
         }
     }
 

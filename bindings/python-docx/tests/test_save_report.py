@@ -37,23 +37,12 @@ def report_bytes() -> bytes:
         f'{_paragraph("0000000D", "Delta.")}'
         '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>'
     )
-    core = (
-        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"'
-        ' xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-        '<dcterms:modified xsi:type="dcterms:W3CDTF">2020-01-01T00:00:00Z</dcterms:modified>'
-        "</cp:coreProperties>"
-    )
-    return _package({**PARTS, "word/document.xml": document, "docProps/core.xml": core})
+    return _package({**PARTS, "word/document.xml": document})
 
 
 def _main_part(package: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(package)) as archive:
         return archive.read("word/document.xml").decode()
-
-
-def _parts(package: bytes) -> dict[str, bytes]:
-    with zipfile.ZipFile(io.BytesIO(package)) as archive:
-        return {name: archive.read(name) for name in archive.namelist()}
 
 
 def _report(document: Document, **options: object):
@@ -67,15 +56,7 @@ def test_an_unedited_save_reports_nothing_kept_or_dropped(report_bytes: bytes) -
     assert report.kept_unchanged is None
     assert report.structure_dropped is None
     assert report.whole_model_write is False
-    assert report.bytes == report_bytes
-
-    stamped = Document.open(report_bytes).save(
-        update_modified_date=True, now="2026-01-02T03:04:05.000Z"
-    )
-    before, after = _parts(report_bytes), _parts(stamped)
-    assert before.keys() == after.keys()
-    assert [name for name in before if before[name] != after[name]] == ["docProps/core.xml"]
-    assert b"2026-01-02T03:04:05.000Z" in after["docProps/core.xml"]
+    assert report.bytes == Document.open(report_bytes).save()
 
 
 def test_one_edited_paragraph_reports_nothing_and_keeps_the_smart_tag(
@@ -92,25 +73,14 @@ def test_one_edited_paragraph_reports_nothing_and_keeps_the_smart_tag(
     assert SMART_TAG_PARAGRAPH in saved
 
 
-def test_a_model_fallback_writes_the_edit_with_a_save_plan(report_bytes: bytes) -> None:
+def test_a_whole_write_without_a_save_plan_says_so(report_bytes: bytes) -> None:
     document = Document.open(report_bytes)
     document.replace_text("0000000E", "X")
     report = _report(document)
     assert report.kept_unchanged is None
-    assert report.whole_model_write is False
-    assert report.structure_dropped is not None
-    assert [(part.part, part.dropped) for part in report.structure_dropped] == [
-        ("word/document.xml", ["w:smartTag"])
-    ]
-    assert any(
-        warning.startswith("DOCX_PART_REWRITTEN word/document.xml ")
-        for warning in report.warnings
-    )
+    assert report.whole_model_write is True
+    assert report.structure_dropped is None
     assert ">X<" in _main_part(report.bytes)
-    assert Document.open(report.bytes).paragraph("0000000E").text == "X"
-    before, after = _parts(report_bytes), _parts(report.bytes)
-    assert before.keys() == after.keys()
-    assert [name for name in before if before[name] != after[name]] == ["word/document.xml"]
 
 
 STRUCTURE_DROPPED_BODY = (

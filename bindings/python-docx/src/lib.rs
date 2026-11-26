@@ -969,9 +969,6 @@ impl PyPng {
 #[pyclass(module = "betteroffice_docx", name = "SaveReport", frozen)]
 pub struct PySaveReport {
     data: Vec<u8>,
-    /// Non-fatal save diagnostics.
-    #[pyo3(get)]
-    warnings: Vec<String>,
     #[pyo3(get)]
     kept_unchanged: Option<PyKeptUnchanged>,
     /// Structure the save dropped from the body, header, footer and note parts it wrote whole,
@@ -979,16 +976,16 @@ pub struct PySaveReport {
     /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     #[pyo3(get)]
     structure_dropped: Option<Vec<PyDroppedStructure>>,
-    /// The save fell back to writing stories from the model without a verified part plan.
+    /// The save had no session plan and wrote the document's stories from the model:
+    /// structure the model does not carry may be gone and is not itemised in `structure_dropped`.
     #[pyo3(get)]
     whole_model_write: bool,
 }
 
 impl PySaveReport {
-    fn from_core(report: SaveReport, warnings: Vec<String>) -> Self {
+    fn from_core(report: SaveReport) -> Self {
         Self {
             data: report.bytes,
-            warnings,
             kept_unchanged: report.kept_unchanged.map(PyKeptUnchanged::from_core),
             structure_dropped: report.structure_dropped.map(|structures| {
                 structures
@@ -1688,10 +1685,10 @@ impl PyDocument {
         modified_by: Option<String>,
     ) -> PyResult<PySaveReport> {
         let options = self.save_options(now, update_modified_date, modified_by);
-        let (report, warnings) = py
-            .detach(|| self.inner.save_report_with_warnings_and_options(options))
+        let report = py
+            .detach(|| self.inner.save_report_with_options(options))
             .map_err(map_error)?;
-        Ok(PySaveReport::from_core(report, warnings))
+        Ok(PySaveReport::from_core(report))
     }
 
     #[pyo3(signature = (path, *, now = None, update_modified_date = false, modified_by = None))]

@@ -163,29 +163,8 @@ pub fn office_document_path(
     parts: &[(String, Vec<u8>)],
     budget: &mut ParseBudget<'_>,
 ) -> Result<String, ParseError> {
-    document_path(parts, budget, true)
-}
-
-fn document_path(
-    parts: &[(String, Vec<u8>)],
-    budget: &mut ParseBudget<'_>,
-    ignore_case: bool,
-) -> Result<String, ParseError> {
-    let find_part = |expected: &str| {
-        parts.iter().find(|(path, _)| {
-            if ignore_case {
-                path.eq_ignore_ascii_case(expected)
-            } else {
-                path == expected
-            }
-        })
-    };
-    let default_path = || {
-        find_part("word/document.xml")
-            .map_or_else(|| "word/document.xml".to_owned(), |(path, _)| path.clone())
-    };
-    let Some((path, xml)) = find_part("_rels/.rels") else {
-        return Ok(default_path());
+    let Some((path, xml)) = parts.iter().find(|(path, _)| path == "_rels/.rels") else {
+        return Ok("word/document.xml".to_owned());
     };
     let relationships = parse_relationships(xml, path, budget)?;
     let Some(relationship) = relationships.values().find(|relationship| {
@@ -193,30 +172,21 @@ fn document_path(
             || relationship.relationship_type
                 == "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"
     }) else {
-        return Ok(default_path());
+        return Ok("word/document.xml".to_owned());
     };
-    let RelationshipTarget::Internal(target) =
-        resolve_relationship_target(if ignore_case { "_rels/.rels" } else { path }, relationship)?
+    let RelationshipTarget::Internal(target) = resolve_relationship_target(path, relationship)?
     else {
         return Err(ParseError::Relationship {
-            part: path.to_owned(),
+            part: path.clone(),
             message: "officeDocument target must be internal".to_owned(),
         });
     };
-    find_part(&target)
-        .map(|(path, _)| path.clone())
-        .ok_or_else(|| {
-            ParseError::Container(format!(
-                "not a Word document: main document part is missing: {target}"
-            ))
-        })
-}
-
-pub(crate) fn office_document_path_exact(
-    parts: &[(String, Vec<u8>)],
-    budget: &mut ParseBudget<'_>,
-) -> Result<String, ParseError> {
-    document_path(parts, budget, false)
+    if !parts.iter().any(|(path, _)| path == &target) {
+        return Err(ParseError::Container(format!(
+            "not a Word document: main document part is missing: {target}"
+        )));
+    }
+    Ok(target)
 }
 
 pub(crate) fn relationship_part_path(part: &str) -> String {

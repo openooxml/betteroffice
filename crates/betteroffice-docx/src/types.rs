@@ -73,7 +73,8 @@ pub struct SaveReport {
     /// part by part; comment parts are not checked. `None` means none was found only when
     /// `whole_model_write` is false; when it is true, `None` means this was not computed.
     pub structure_dropped: Option<Vec<DroppedStructure>>,
-    /// The save fell back to writing stories from the model without a verified part plan.
+    /// The save had no session plan and wrote the document's stories from the model:
+    /// structure the model does not carry may be gone and is not itemised in `structure_dropped`.
     pub whole_model_write: bool,
 }
 

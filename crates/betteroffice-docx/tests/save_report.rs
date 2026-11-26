@@ -1,4 +1,4 @@
-use betteroffice_docx::{Document, DroppedStructure, SaveOptions, SaveReport, get_paragraph_text};
+use betteroffice_docx::{Document, DroppedStructure, SaveOptions, SaveReport};
 
 const DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n";
 const NAMESPACES: &str = r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14""#;
@@ -88,6 +88,20 @@ fn assert_nothing_reported(report: &SaveReport) {
     assert!(!report.whole_model_write);
 }
 
+fn assert_whole_model_write(report: &SaveReport) {
+    assert!(report.whole_model_write);
+    assert!(
+        report.kept_unchanged.is_none(),
+        "{:?}",
+        report.kept_unchanged
+    );
+    assert!(
+        report.structure_dropped.is_none(),
+        "{:?}",
+        report.structure_dropped
+    );
+}
+
 #[test]
 fn an_unedited_save_reports_nothing_kept_or_dropped() {
     let source = source();
@@ -139,33 +153,13 @@ fn one_edited_paragraph_with_options_reports_the_bytes_save_with_options_writes(
     assert_nothing_reported(&report);
 }
 
-fn assert_smart_tag_dropped(report: &SaveReport) {
-    assert!(report.kept_unchanged.is_none());
-    assert!(!report.whole_model_write);
-    let dropped = report
-        .structure_dropped
-        .as_ref()
-        .expect("smart tag loss is reported");
-    assert_eq!(dropped.len(), 1);
-    assert_eq!(dropped[0].part, MAIN);
-    assert_eq!(dropped[0].dropped, ["w:smartTag"]);
-    assert!(dropped[0].paragraphs.iter().any(|paragraph| {
-        paragraph.para_id == "0000000B" && paragraph.dropped == ["w:smartTag"]
-    }));
-}
-
 #[test]
-fn a_model_fallback_writes_the_edit_with_a_save_plan() {
+fn a_whole_write_without_a_save_plan_says_so() {
     let mut document = open();
     document.replace_paragraph_text("0000000E", "X").unwrap();
     let report = report_of(&document);
-    assert_smart_tag_dropped(&report);
+    assert_whole_model_write(&report);
     assert!(saved_main_part(&report.bytes).contains(">X<"));
-    let reopened = Document::open(&report.bytes).unwrap();
-    assert_eq!(
-        get_paragraph_text(reopened.paragraph("0000000E").unwrap()),
-        "X"
-    );
 }
 
 #[test]
@@ -179,17 +173,10 @@ fn a_model_edit_that_drops_a_smart_tag_does_not_report_nothing_dropped() {
     let saved = saved_main_part(&report.bytes);
     assert!(saved.contains("Delta edited."), "{saved}");
     assert!(!saved.contains("<w:smartTag"), "{saved}");
-    assert_smart_tag_dropped(&report);
-    let (_, warnings) = document.save_report_with_warnings().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.starts_with("DOCX_PART_REWRITTEN word/document.xml "))
-    );
-    assert!(
-        !warnings
-            .iter()
-            .any(|warning| warning.starts_with("DOCX_STRUCTURE_DROPPED "))
+        report.whole_model_write || report.structure_dropped.is_some(),
+        "the save dropped w:smartTag and reported nothing dropped: {:?}",
+        report.structure_dropped
     );
 }
 
@@ -204,7 +191,7 @@ fn a_whole_write_with_options_reports_the_bytes_save_with_options_writes() {
     };
     let report = document.save_report_with_options(options.clone()).unwrap();
     assert_eq!(report.bytes, document.save_with_options(options).unwrap());
-    assert_smart_tag_dropped(&report);
+    assert_whole_model_write(&report);
 }
 
 /// A body whose text edit to 0000000D leaves it out of the save plan, written whole.

@@ -96,7 +96,6 @@ pub struct ParseBudget<'a> {
     comments: usize,
     source_ordinals: bool,
     media: Option<&'a crate::media::MediaTable>,
-    comparison_media: Option<&'a [(String, Vec<u8>)]>,
     media_error: Option<String>,
     group_text_box_bytes: usize,
     group_text_box_depth: usize,
@@ -124,7 +123,6 @@ impl<'a> ParseBudget<'a> {
             comments: 0,
             source_ordinals: false,
             media: None,
-            comparison_media: None,
             media_error: None,
             group_text_box_bytes: 0,
             group_text_box_depth: 0,
@@ -143,14 +141,6 @@ impl<'a> ParseBudget<'a> {
     /// The table `media:{n}` image sources name, when parsing with one.
     pub(crate) fn media_table(&self) -> Option<&'a crate::media::MediaTable> {
         self.media
-    }
-
-    pub(crate) fn compare_media_from(&mut self, parts: &'a [(String, Vec<u8>)]) {
-        self.comparison_media = Some(parts);
-    }
-
-    pub(crate) fn comparison_media(&self) -> Option<&'a [(String, Vec<u8>)]> {
-        self.comparison_media
     }
 
     /// Fails the parse with the first media part that could not be read.
