@@ -10771,82 +10771,8 @@ fn moving_refuses_an_absolute_anchor_and_an_unknown_frame() {
     );
 }
 
-#[test]
-fn collaborative_chart_repin_uses_the_authored_height_restored_by_unhide() {
-    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
-    let worksheet = "xl/worksheets/sheet1.xml";
-    let xml = test_part_text(&parts, worksheet).replace(
-        r#"<row r="1">"#,
-        r#"<row r="1" ht="5" customHeight="1" hidden="1">"#,
-    );
-    set_test_part(&mut parts, worksheet, xml.into_bytes());
-    let mut workbook =
-        Workbook::open_collaborative(&ooxml_opc::rezip_parts(&parts).unwrap(), 830).unwrap();
-    let sheet_id = SheetId(0);
-    let sheet = workbook.sheet(sheet_id).unwrap();
-    assert_eq!(sheet.format.default_row_height_pt, Some(15.0));
-    assert!(sheet.row_hidden(0));
-    let chart = &sheet.charts[0];
-    let before = chart.anchor;
-    let ChartAnchor::TwoCell { edit_as, .. } = before else {
-        panic!("expected a two-cell anchor");
-    };
-    let repin = Op::SetChartAnchor {
-        sheet: sheet_id,
-        frame: chart.frame_id(),
-        part: chart.part.clone(),
-        from: before,
-        to: ChartAnchor::TwoCell {
-            from: AnchorCell {
-                row_off: 95_250,
-                ..Default::default()
-            },
-            to: AnchorCell {
-                col: 4,
-                row: 1,
-                ..Default::default()
-            },
-            edit_as,
-        },
-    };
-    let version = workbook.version();
-    let state = workbook.encode_state_as_update_v1();
-    let error = workbook
-        .apply_ops(
-            vec![
-                Op::SetRowVisibility {
-                    sheet: sheet_id,
-                    row: 0,
-                    hidden: false,
-                },
-                repin,
-            ],
-            CalculationOptions::default(),
-        )
-        .unwrap_err();
-    assert!(
-        matches!(&error, Error::InvalidOperation(message) if message.contains("corners are inverted")),
-        "{error:?}"
-    );
-    let sheet = workbook.sheet(sheet_id).unwrap();
-    assert_eq!(sheet.charts[0].anchor, before);
-    assert!(sheet.row_hidden(0));
-    assert_eq!(workbook.version(), version);
-    assert_eq!(workbook.encode_state_as_update_v1(), state);
-}
-
-#[test]
-fn collaborative_redundant_chart_repin_skips_geometry_validation() {
-    let mut workbook = Workbook::open_collaborative(&charted_fixture(), 830).unwrap();
-    let sheet = SheetId(0);
-    let chart = &workbook.sheet(sheet).unwrap().charts[0];
-    let before = chart.anchor;
-    let ChartAnchor::TwoCell { edit_as, .. } = before else {
-        panic!("expected a two-cell anchor");
-    };
-    let frame = chart.frame_id();
-    let part = chart.part.clone();
-    let anchor = ChartAnchor::TwoCell {
+fn first_row_chart_anchor() -> ChartAnchor {
+    ChartAnchor::TwoCell {
         from: AnchorCell {
             row_off: 95_250,
             ..Default::default()
@@ -10856,43 +10782,150 @@ fn collaborative_redundant_chart_repin_skips_geometry_validation() {
             row: 1,
             ..Default::default()
         },
-        edit_as,
-    };
-    let repin = |from, to| Op::SetChartAnchor {
+        edit_as: AnchorEditAs::OneCell,
+    }
+}
+
+fn chart_repin_op(workbook: &Workbook, to: ChartAnchor) -> Op {
+    let sheet = SheetId(0);
+    let chart = &workbook.sheet(sheet).unwrap().charts[0];
+    Op::SetChartAnchor {
         sheet,
-        frame: frame.clone(),
-        part: part.clone(),
-        from,
+        frame: chart.frame_id(),
+        part: chart.part.clone(),
+        from: chart.anchor,
         to,
-    };
+    }
+}
+
+fn assert_inverted_chart_repin_refused(
+    workbook: &mut Workbook,
+    ops: Vec<Op>,
+    committed_anchor: ChartAnchor,
+) {
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+    assert!(!sheet.row_hidden(0));
+    assert_eq!(sheet.charts[0].anchor, committed_anchor);
+    let version = workbook.version();
+    let error = workbook
+        .apply_ops(ops, CalculationOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message == "anchor corners are inverted or coincident"),
+        "{error:?}"
+    );
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+    assert_eq!(sheet.charts[0].anchor, committed_anchor);
+    assert_eq!(workbook.version(), version);
+}
+
+#[test]
+fn chart_repin_before_row_shrink_applies_in_both_modes() {
+    let bytes = charted_fixture();
+    let anchor = first_row_chart_anchor();
+    for mut workbook in [
+        Workbook::open(&bytes).unwrap(),
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let sheet_id = SheetId(0);
+        let sheet = workbook.sheet(sheet_id).unwrap();
+        assert_eq!(sheet.format.default_row_height_pt, Some(15.0));
+        assert_eq!(sheet.row_heights.get(&0), None);
+        assert_ne!(sheet.charts[0].anchor, anchor);
+        let version = workbook.version();
+        let (nonce, counter) = version.as_str().rsplit_once('-').unwrap();
+        let next_counter = counter.parse::<u64>().unwrap() + 1;
+        let repin = chart_repin_op(&workbook, anchor);
+        let result = workbook
+            .apply_ops(
+                vec![
+                    repin,
+                    Op::SetRowHeight {
+                        sheet: sheet_id,
+                        row: 0,
+                        height: Some(5.0),
+                    },
+                ],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert!(result.applied);
+        assert_eq!(
+            workbook.version().as_str(),
+            format!("{nonce}-{next_counter}")
+        );
+        let sheet = workbook.sheet(sheet_id).unwrap();
+        assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+        assert_eq!(sheet.charts[0].anchor, anchor);
+        let geometry = GridGeometry::new(sheet, &workbook.model().styles);
+        assert_eq!(
+            resolve_chart_anchor(anchor, &geometry, 0, 0).unwrap_err(),
+            xlsx_render::AnchorError::InvertedCorners
+        );
+    }
+}
+
+#[test]
+fn inverted_chart_repin_before_row_growth_is_refused_in_both_modes() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let worksheet = "xl/worksheets/sheet1.xml";
+    let xml = test_part_text(&parts, worksheet).replace(
+        r#"<row r="1">"#,
+        r#"<row r="1" ht="5" customHeight="1">"#,
+    );
+    set_test_part(&mut parts, worksheet, xml.into_bytes());
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let standalone = Workbook::open(&bytes).unwrap();
+    let committed_anchor = standalone.sheet(SheetId(0)).unwrap().charts[0].anchor;
+    for mut workbook in [
+        standalone,
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let repin = chart_repin_op(&workbook, first_row_chart_anchor());
+        assert_inverted_chart_repin_refused(
+            &mut workbook,
+            vec![
+                repin,
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(15.0),
+                },
+            ],
+            committed_anchor,
+        );
+    }
+}
+
+#[test]
+fn redundant_inverted_chart_repin_is_refused_in_both_modes() {
+    let bytes = charted_fixture();
+    let anchor = first_row_chart_anchor();
     let options = CalculationOptions::default();
-    assert!(
-        workbook
-            .apply_ops(vec![repin(before, anchor)], options)
-            .unwrap()
-            .applied
-    );
-    let resize = Op::SetRowHeight {
-        sheet,
-        row: 0,
-        height: Some(5.0),
-    };
-    let redundant = repin(anchor, anchor);
-    assert!(
-        workbook
-            .apply_ops(vec![redundant.clone(), resize], options)
-            .unwrap()
-            .applied
-    );
-    let current = workbook.sheet(sheet).unwrap();
-    assert_eq!(current.row_heights.get(&0), Some(&5.0));
-    assert_eq!(current.charts[0].anchor, anchor);
-    assert!(
-        !workbook
-            .apply_ops(vec![redundant], options)
-            .unwrap()
-            .applied
-    );
+    for mut workbook in [
+        Workbook::open(&bytes).unwrap(),
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let repin = chart_repin_op(&workbook, anchor);
+        assert!(workbook.apply_ops(vec![repin], options).unwrap().applied);
+        assert!(
+            workbook
+                .apply_ops(
+                    vec![Op::SetRowHeight {
+                        sheet: SheetId(0),
+                        row: 0,
+                        height: Some(5.0),
+                    }],
+                    options,
+                )
+                .unwrap()
+                .applied
+        );
+        let redundant = chart_repin_op(&workbook, anchor);
+        assert_inverted_chart_repin_refused(&mut workbook, vec![redundant], anchor);
+    }
 }
 
 /// `SetChartAnchor` accepts exactly what a save can write back, and each

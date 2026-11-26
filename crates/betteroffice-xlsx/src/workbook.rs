@@ -2934,9 +2934,6 @@ impl Workbook {
             self.ensure_move_keeps_inline_text(&origins, op)?;
             self.ensure_table_header_write(staged, &origins, op)?;
             validate_op(staged, op)?;
-            if !collaborative && let Op::SetChartAnchor { sheet, to, .. } = op {
-                validate_chart_geometry(staged, require_sheet(staged, *sheet)?, *to)?;
-            }
             validate_insert_capacity(staged, op)?;
             batch.apply_with_inverse(op, |inverse| {
                 rewrote_table_names |= matches!(op, Op::SetCell { .. })
@@ -3062,9 +3059,6 @@ impl Workbook {
             CommitHistory::Separate,
             None,
         )?;
-        if collaborative {
-            validate_committed_chart_geometry(&self.model, &prepared.model, &prepared.ops)?;
-        }
         let inputs = CalculationInputs::of(&self.model, &reached);
         let scope = scope.confirmed(&inputs, &prepared.model);
         let update = self.commit_prepared(prepared)?;
@@ -6254,6 +6248,8 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             // to as well: anything it accepts that they refuse would be
             // published and dropped, taking the rest of the session with it.
             validate_intrinsic_anchor(*to)?;
+            resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref, &model.styles), 0, 0)
+                .map_err(|error| Error::InvalidOperation(error.to_string()))?;
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
             require_sheet(model, *sheet)?;
@@ -6310,40 +6306,6 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             ));
         }
     }
-    Ok(())
-}
-
-fn validate_committed_chart_geometry(
-    before: &WorkbookModel,
-    staged: &WorkbookModel,
-    ops: &[Op],
-) -> Result<()> {
-    for op in ops {
-        if let Op::SetChartAnchor { sheet, frame, .. } = op {
-            let previous = before
-                .sheet(*sheet)
-                .and_then(|sheet| sheet.charts.iter().find(|chart| chart.frame_id() == *frame));
-            let sheet = require_sheet(staged, *sheet)?;
-            let chart = sheet
-                .charts
-                .iter()
-                .find(|chart| chart.frame_id() == *frame)
-                .ok_or_else(|| chart_frame_not_found(frame))?;
-            if previous.is_none_or(|previous| previous.anchor != chart.anchor) {
-                validate_chart_geometry(staged, sheet, chart.anchor)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_chart_geometry(
-    model: &WorkbookModel,
-    sheet: &Sheet,
-    anchor: ChartAnchor,
-) -> Result<()> {
-    resolve_chart_anchor(anchor, &GridGeometry::new(sheet, &model.styles), 0, 0)
-        .map_err(|error| Error::InvalidOperation(error.to_string()))?;
     Ok(())
 }
 
