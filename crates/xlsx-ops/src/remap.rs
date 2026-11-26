@@ -1977,7 +1977,10 @@ pub(crate) fn remove_table_references(
                     && !matches!(
                         tokens.get(at + 1).map(|next| &next.kind),
                         Some(TokKind::LParen)
-                    ) => token.end,
+                    ) =>
+            {
+                token.end
+            }
             TokKind::ThreeDRef { first, last }
                 if !text[token.start..].starts_with('\'')
                     && drops(first)
@@ -2790,7 +2793,11 @@ mod tests {
     #[test]
     fn structured_references_to_a_dropped_table_become_ref() {
         let dropped = ["Amounts".to_owned()];
-        let sheets = ["Amounts".to_owned(), "Data".to_owned(), "Data two".to_owned()];
+        let sheets = [
+            "Amounts".to_owned(),
+            "Data".to_owned(),
+            "Data two".to_owned(),
+        ];
         for (source, expected) in [
             ("SUM(Amounts[Amt])", Some("SUM(#REF!)")),
             ("SUM(amounts[[#This Row],[Amt]])*2", Some("SUM(#REF!)*2")),

@@ -1106,7 +1106,10 @@ mod tests {
         ] {
             let tokens = lex_for_rewrite(source).unwrap();
             assert_eq!(
-                tokens.into_iter().map(|token| token.kind).collect::<Vec<_>>(),
+                tokens
+                    .into_iter()
+                    .map(|token| token.kind)
+                    .collect::<Vec<_>>(),
                 [
                     TokKind::Ident(first.into()),
                     TokKind::Colon,
@@ -1127,7 +1130,8 @@ mod tests {
             sheet: None,
             table,
             spec,
-        } = &tokens[0].kind else {
+        } = &tokens[0].kind
+        else {
             panic!("expected a table reference");
         };
         assert_eq!(table, "Sales");
@@ -1320,7 +1324,14 @@ mod tests {
             "Sheet1:Sheet2! A1",
         ] {
             assert_eq!(
-                rewrite_table_column(&format!("{reference}+Table1[Old]"), "Table1", "Data", false, "Old", "New"),
+                rewrite_table_column(
+                    &format!("{reference}+Table1[Old]"),
+                    "Table1",
+                    "Data",
+                    false,
+                    "Old",
+                    "New"
+                ),
                 Ok(Some(format!("{reference}+Table1[New]")))
             );
         }

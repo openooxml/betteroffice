@@ -299,9 +299,11 @@ impl Parser<'_> {
             TokKind::RowRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::RowRange { sheet, range }))
             }
-            TokKind::TableRef { sheet: None, table, spec } if !table.is_empty() => {
-                Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
-            }
+            TokKind::TableRef {
+                sheet: None,
+                table,
+                spec,
+            } if !table.is_empty() => Ok(ParsedExpr::leaf(Expr::TableRef { table, spec })),
             TokKind::TableRef { sheet: Some(_), .. } => Err(ParseError::new(
                 pos,
                 "sheet-qualified structured references are unsupported",
@@ -316,9 +318,10 @@ impl Parser<'_> {
             TokKind::ExternalRef(_) => {
                 Err(ParseError::new(pos, "external references are unsupported"))
             }
-            TokKind::Intersection => {
-                Err(ParseError::new(pos, "reference intersection is unsupported"))
-            }
+            TokKind::Intersection => Err(ParseError::new(
+                pos,
+                "reference intersection is unsupported",
+            )),
             TokKind::LParen => {
                 let start = self.here();
                 let inner = self.expr_bp(0, depth + 1)?;
