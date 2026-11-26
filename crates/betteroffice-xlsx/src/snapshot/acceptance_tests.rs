@@ -3,7 +3,7 @@ use crate::{
     EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent, Viewport,
     WorkbookModel, XlsxExportOptions,
 };
-use xlsx_model::CellRange;
+use xlsx_model::{CellProvider, CellRange};
 use xlsx_ops::{CellState, Op};
 
 use super::*;
@@ -3072,7 +3072,9 @@ fn two_sheet_wrapper_source(choice: &str, fallback: &str) -> Vec<u8> {
             },
         );
     }
-    model.sheets.extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
+    model
+        .sheets
+        .extend([sheet, xlsx_model::Sheet::new("Sheet2")]);
     let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
     let (_, xml) = parts
         .iter_mut()
@@ -3155,8 +3157,7 @@ fn deferred_edits_refuse_a_wrapped_cache_changed_by_earlier_recalculation() {
 
 #[test]
 fn deferred_style_edits_recheck_a_wrapped_sheet_with_an_edited_filter() {
-    let bytes =
-        two_sheet_wrapper_source(r#"<c r="A1"><v>1</v></c>"#, r#"<c r="B1"><v>2</v></c>"#);
+    let bytes = two_sheet_wrapper_source(r#"<c r="A1"><v>1</v></c>"#, r#"<c r="B1"><v>2</v></c>"#);
     let original = Workbook::open(&bytes).unwrap();
     let mut workbook = hydrate(&original, budgets()[2]);
     let filter_range = CellRange::parse_a1("A1:B2").unwrap();

@@ -1939,11 +1939,8 @@ impl Workbook {
             .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
         let package = package.materialize()?;
         let facts = xlsx_parse::PackageFacts::from_package(package);
-        let mut deferred = PackageSlot::deferred(
-            source.clone(),
-            facts,
-            &package.original_workbook().styles,
-        );
+        let mut deferred =
+            PackageSlot::deferred(source.clone(), facts, &package.original_workbook().styles);
         deferred
             .record_unchecked_calculation(&self.preserved.origins, &self.last_calculation.changed);
         self.source_package = Some(deferred);
@@ -2706,8 +2703,10 @@ impl Workbook {
             None,
         )?;
         let styles_changed = prepared.model.styles != self.model.styles;
-        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet), styles_changed)?
-        {
+        if self.needs_cell_alternate_preview(
+            touched.iter().map(|(sheet, ..)| *sheet),
+            styles_changed,
+        )? {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, true)?;
             self.publish(update);
@@ -3727,8 +3726,10 @@ impl Workbook {
             None,
         )?;
         let styles_changed = prepared.model.styles != self.model.styles;
-        if self.needs_cell_alternate_preview(touched.iter().map(|(sheet, ..)| *sheet), styles_changed)?
-        {
+        if self.needs_cell_alternate_preview(
+            touched.iter().map(|(sheet, ..)| *sheet),
+            styles_changed,
+        )? {
             let (mutation, update) =
                 self.commit_precalculated_cells(prepared, &touched, options, false)?;
             self.proposals.remove(id);
@@ -4724,14 +4725,19 @@ impl Workbook {
                         .flatten()
                         .any(|axes| !axes.is_identity()));
             let styles_changed = model.styles != self.model.styles;
-            let changed_origins = origins.iter().zip(&model.sheets).filter_map(|(&origin, sheet)| {
-                let origin = origin?;
-                (package.sheet_may_have_alternate_content(origin)
-                    && (all_sheets_may_change
-                        || package.sheet_needs_alternate_validation(origin, styles_changed)
-                        || before_by_origin.get(&origin).copied() != Some(sheet)))
-                .then_some(origin)
-            });
+            let changed_origins =
+                origins
+                    .iter()
+                    .zip(&model.sheets)
+                    .filter_map(|(&origin, sheet)| {
+                        let origin = origin?;
+                        (package.sheet_may_have_alternate_content(origin)
+                            && (all_sheets_may_change
+                                || package
+                                    .sheet_needs_alternate_validation(origin, styles_changed)
+                                || before_by_origin.get(&origin).copied() != Some(sheet)))
+                        .then_some(origin)
+                    });
             package.validate_alternate_content(
                 model,
                 origins,
