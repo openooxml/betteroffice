@@ -8,7 +8,7 @@ use ooxml_diff::{DiffKind, DiffLimits, LimitFallback, diff_tokens};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::paragraph::{good, non_null, same, same_option, set};
+use super::paragraph::{good, same_option, set};
 use super::{Attrs, ProjectionContext, ProjectionError, StoryState, decode, json_value};
 
 const ON_OFF: &[&str] = &[

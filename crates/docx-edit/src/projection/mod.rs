@@ -10,7 +10,7 @@ use yrs::{Any, ReadTxn, Transact, Transaction};
 
 use crate::identity::{SourceIndex, SourcePackage};
 use crate::seed::RunInheritance;
-use crate::{EditError, EditingDoc, ParagraphProperties, SegmentContent, StorySegment};
+use crate::{EditError, EditingDoc, ParagraphProperties, StorySegment};
 
 mod fields_dispatch;
 mod marker_index;
