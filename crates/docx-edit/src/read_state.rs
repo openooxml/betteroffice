@@ -65,12 +65,7 @@ impl ValueAgg {
     }
 }
 
-fn fold_selection_font(
-    family: &mut ValueAgg,
-    chunk: &crate::ops::Chunk,
-    from: u32,
-    to: u32,
-) {
+fn fold_selection_font(family: &mut ValueAgg, chunk: &crate::ops::Chunk, from: u32, to: u32) {
     if matches!(family, ValueAgg::Mixed) {
         return;
     }

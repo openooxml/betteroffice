@@ -726,8 +726,7 @@ fn saved_run_fonts(bytes: &[u8], ordinal: usize) -> Vec<(String, docx_parse::xml
         &mut docx_parse::ParseBudget::new(&limits),
     )
     .unwrap();
-    xml
-        .root()
+    xml.root()
         .unwrap()
         .child("w", "body")
         .unwrap()
@@ -737,11 +736,7 @@ fn saved_run_fonts(bytes: &[u8], ordinal: usize) -> Vec<(String, docx_parse::xml
         .children_named("w", "r")
         .map(|run| {
             let text = run.child("w", "t").unwrap().text_content();
-            let fonts = run
-                .child("w", "rPr")
-                .unwrap()
-                .child("w", "rFonts")
-                .unwrap();
+            let fonts = run.child("w", "rPr").unwrap().child("w", "rFonts").unwrap();
             (text, fonts.clone())
         })
         .collect()
@@ -941,10 +936,7 @@ fn east_asian_font_pick_survives_reopen_and_keeps_untouched_paragraph_bytes() {
 fn font_family_delta_ignores_extra_members() {
     let bytes = package(&font_run("中文", "Calibri", ""));
     let saved = save_font_pick(&bytes, 0, 0, 2, r#"{"fontFamily":{"ascii":"Arial"}}"#);
-    assert_font_slots(
-        &saved_run_fonts(&saved, 0),
-        &[("中文", "Arial", "Arial")],
-    );
+    assert_font_slots(&saved_run_fonts(&saved, 0), &[("中文", "Arial", "Arial")]);
     let expected = document_xml(&saved);
     for delta in [
         r#"{"fontFamily":{"ascii":"Arial","eastAsia":null}}"#,

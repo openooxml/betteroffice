@@ -269,7 +269,9 @@ fn an_east_asian_font_pick_survives_reopen_and_an_untouched_save() {
     let reopened_xml = slide_xml(&reopened.save().unwrap());
     assert_eq!(
         runs(&reopened_xml),
-        [r#"<a:rPr><a:latin typeface="Microsoft YaHei"/><a:ea typeface="Microsoft YaHei"/></a:rPr><a:t>中文</a:t>"#]
+        [
+            r#"<a:rPr><a:latin typeface="Microsoft YaHei"/><a:ea typeface="Microsoft YaHei"/></a:rPr><a:t>中文</a:t>"#
+        ]
     );
     assert_eq!(reopened_xml, saved_xml);
 }
@@ -331,9 +333,11 @@ fn replayed_font_picks_keep_the_existing_story_and_package_attributes() {
     assert!(!package.contains("SimSun"));
     assert!(!package.contains("eastAsianFontFamily"));
     drop(txn);
-    assert!(!serde_json::to_string(&session.snapshot().unwrap())
-        .unwrap()
-        .contains("eastAsianFontFamily"));
+    assert!(
+        !serde_json::to_string(&session.snapshot().unwrap())
+            .unwrap()
+            .contains("eastAsianFontFamily")
+    );
 }
 
 #[test]

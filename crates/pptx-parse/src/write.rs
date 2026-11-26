@@ -3188,16 +3188,14 @@ fn span_elements(
                 ..*segment
             };
             let intact = offset == range_start && offset + length == range.end;
-            let element = if intact
-                && source.local_name() == "r"
-                && segment_matches(source, &piece, theme)
-            {
-                source.clone()
-            } else if range.field && intact {
-                field_element(source, &piece, theme, prefixes)
-            } else {
-                segment_element(&piece, source.child("rPr"), theme, prefixes)
-            };
+            let element =
+                if intact && source.local_name() == "r" && segment_matches(source, &piece, theme) {
+                    source.clone()
+                } else if range.field && intact {
+                    field_element(source, &piece, theme, prefixes)
+                } else {
+                    segment_element(&piece, source.child("rPr"), theme, prefixes)
+                };
             let previous = output.last_mut().and_then(|node| match node {
                 XmlNode::Element(previous)
                     if last_source == Some(range.source)
@@ -3512,7 +3510,13 @@ fn segment_properties(
             .iter()
             .any(|script| script.starts_with("cjk-"))
     {
-        apply_font_typeface(&mut properties, "ea", family, &POST_LATIN_ELEMENTS[1..], prefixes);
+        apply_font_typeface(
+            &mut properties,
+            "ea",
+            family,
+            &POST_LATIN_ELEMENTS[1..],
+            prefixes,
+        );
     }
     Some(properties)
 }
@@ -3715,8 +3719,7 @@ fn apply_font_typeface(
 ) {
     if let Some(font) = base.child_mut(name) {
         if font.attribute("typeface") != Some(family) {
-            font
-                .attributes
+            font.attributes
                 .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
             font.set_attribute("typeface", family);
         }

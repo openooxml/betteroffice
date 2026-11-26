@@ -195,7 +195,11 @@ pub(crate) fn merge_font_family(previous: Option<&Any>, patch: &Any, east_asian:
         Some(Any::Map(fonts)) => fonts.as_ref().clone(),
         _ => HashMap::new(),
     };
-    fonts.extend(patch.iter().map(|(key, value)| (key.clone(), value.clone())));
+    fonts.extend(
+        patch
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     fonts.remove("asciiTheme");
     fonts.remove("hAnsiTheme");
 
@@ -224,7 +228,11 @@ pub(crate) fn has_east_asian_font_pick_text(text: &str) -> bool {
     !text.is_ascii() && font_pick_characters(text).any(|(_, east_asian)| east_asian)
 }
 
-fn font_pick_segments(text: &str, from: u32, to: u32) -> impl Iterator<Item = (u32, u32, bool)> + '_ {
+fn font_pick_segments(
+    text: &str,
+    from: u32,
+    to: u32,
+) -> impl Iterator<Item = (u32, u32, bool)> + '_ {
     let selected = font_pick_text(text, from, to);
     let ascii = selected.is_ascii();
     let mut characters = font_pick_characters(selected).peekable();
@@ -1261,14 +1269,15 @@ fn chunk_format_pieces<'a>(
     (start, end): (u32, u32),
 ) -> impl Iterator<Item = (u32, u32, Attrs)> + 'a {
     let text = if merge_font { text } else { "" };
-    font_pick_segments(text, start - chunk_start, end - chunk_start)
-        .map(move |(from, to, east_asian)| {
+    font_pick_segments(text, start - chunk_start, end - chunk_start).map(
+        move |(from, to, east_asian)| {
             let mut attrs = patch.clone();
             if merge_font && let Some(fonts) = attrs.get_mut("fontFamily") {
                 *fonts = merge_font_family(previous_fonts, fonts, east_asian);
             }
             (chunk_start + from, chunk_start + to, attrs)
-        })
+        },
+    )
 }
 
 fn push_format_retain(
@@ -1379,7 +1388,13 @@ enum RunDelta<'a> {
 
 impl RunDelta<'_> {
     fn merges_font(self) -> bool {
-        matches!(self, Self::Set { merge_font: true, .. })
+        matches!(
+            self,
+            Self::Set {
+                merge_font: true,
+                ..
+            }
+        )
     }
 }
 
@@ -2026,9 +2041,7 @@ impl EditingDoc {
                 formatted.push((at, len, attrs.clone()));
             }
         }
-        revision_ids.extend(self.apply_run_formats(
-            txn, ctx, &text, child, formatted, merge_font,
-        )?);
+        revision_ids.extend(self.apply_run_formats(txn, ctx, &text, child, formatted, merge_font)?);
         let len = text.len(txn);
         for (nested, _) in block_free_spans(&text, txn, 0, len, true).1 {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &nested, delta, keeper)?);
@@ -2064,9 +2077,8 @@ impl EditingDoc {
             let mut revision_ids = Vec::new();
             for (at, len, attrs) in spans {
                 let span = StoryRange::new(story_id.to_owned(), at, at + len);
-                revision_ids.extend(self.suggest_run_format(
-                    txn, ctx, story, &span, &attrs, merge_font,
-                )?);
+                revision_ids
+                    .extend(self.suggest_run_format(txn, ctx, story, &span, &attrs, merge_font)?);
             }
             return Ok(revision_ids);
         }
@@ -2085,7 +2097,8 @@ impl EditingDoc {
                     let start = chunk.start.max(at);
                     let end = chunk.end.min(at + len);
                     let mut patch = attrs.clone();
-                    let previous = |key: &str| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key));
+                    let previous =
+                        |key: &str| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key));
                     merge_chunk_language(&mut patch, previous("language"), chunk.text.is_some());
                     for (from, to, patch) in chunk_format_pieces(
                         patch,

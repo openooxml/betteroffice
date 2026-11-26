@@ -1015,7 +1015,10 @@ fn explicit_font_drops_theme_scheme() {
     assert!(bold.contains(scheme), "C1 font: {bold}");
     let resized = cell_font_xml(&saved, "D1");
     assert!(resized.contains(r#"<sz val="17"/>"#), "D1 font: {resized}");
-    assert!(resized.contains("<scheme val='major'/>"), "D1 font: {resized}");
+    assert!(
+        resized.contains("<scheme val='major'/>"),
+        "D1 font: {resized}"
+    );
     let colored = cell_font_xml(&saved, "E1");
     assert!(
         colored.contains(r#"<color rgb="FF123456"/>"#),
