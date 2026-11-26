@@ -1103,6 +1103,32 @@ fn inside_or_outside_aligned_cell_text_box_keeps_the_cell_stack_origin() {
 }
 
 #[test]
+fn cell_text_box_in_a_column_clipped_table_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let package = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replacen(
+            "</w:sectPr>",
+            r#"<w:cols w:num="2" w:space="360" w:equalWidth="0"><w:col w:w="3600" w:space="360"/><w:col w:w="5400"/></w:cols></w:sectPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&package, true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert!(table["width"].as_f64().unwrap() < 520.0);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
 fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
     let drawing = cell_anchor_box(
         "<wp:posOffset>914400</wp:posOffset>",

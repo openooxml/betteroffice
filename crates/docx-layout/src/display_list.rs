@@ -12050,11 +12050,13 @@ impl TablePaintPlan {
         &self,
         frag: &TableFragmentIn,
         block: &TableBlockIn,
+        measure: &TableExtentIn,
         g: &GridCell,
         frame: &CellContentFrame,
         nested: bool,
     ) -> bool {
         !nested
+            && frag.width >= table_total_width(measure)
             && !self.is_header_row(block, g.row_index)
             && frag.cell_window(g).is_none()
             && frag.cell_row_cuts(g) == (false, false)
@@ -12576,7 +12578,7 @@ fn emit_table_fragment_inner(
         };
         if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
-            let place_cell_shapes = plan.places_cell_shapes(frag, block, g, &frame, nested);
+            let place_cell_shapes = plan.places_cell_shapes(frag, block, measure, g, &frame, nested);
             emit_cell_content(
                 prims,
                 cell,
@@ -13875,7 +13877,7 @@ fn visit_table_fragment(
         let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
         let continuation =
             inherited.1 || !paint.selectable || (row_split && g.row_index == frag.row_start);
-        let shapes = if plan.places_cell_shapes(frag, block, g, &frame, !path.is_empty()) {
+        let shapes = if plan.places_cell_shapes(frag, block, measure, g, &frame, !path.is_empty()) {
             cell_floating_shapes(cell, cell_measure, &frame, paint.selectable)
         } else {
             Vec::new()
