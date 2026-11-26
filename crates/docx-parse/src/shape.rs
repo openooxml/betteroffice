@@ -996,6 +996,14 @@ pub(crate) fn parse_text_body_properties(element: &XmlElement) -> ShapeTextBodyP
 }
 
 pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
+    parse_drawing_shape(drawing, false)
+}
+
+pub fn shape_with_rendered_connectors(drawing: &XmlElement) -> Option<Shape> {
+    parse_drawing_shape(drawing, true)
+}
+
+fn parse_drawing_shape(drawing: &XmlElement, render_connectors: bool) -> Option<Shape> {
     let container = drawing
         .child_elements()
         .find(|value| matches!(value.name.as_str(), "wp:inline" | "wp:anchor"))?;
@@ -1009,9 +1017,16 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
     })?;
     let mut scene = None;
     let mut shape = if is_scene_shape(root.local_name()) {
-        parse_shape(root)
+        let mut shape = parse_shape(root);
+        if render_connectors {
+            render_connector_path(&mut shape, root);
+        }
+        shape
     } else {
-        let parsed = parse_drawing_scene_tree(root);
+        let (mut parsed, sources) = parse_drawing_scene_with_sources(root);
+        if render_connectors {
+            render_scene_connector_paths(parsed.root.as_deref_mut(), &mut sources.into_iter());
+        }
         let legacy = scene_node_to_legacy(parsed.root.as_ref()?, 0);
         scene = Some(parsed);
         *legacy?
@@ -1081,6 +1096,31 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
         shape.scene = Some(Box::new(scene))
     }
     Some(shape)
+}
+
+fn render_connector_path(shape: &mut Shape, source: &XmlElement) {
+    if let Some(path) = direct_child(Some(source), "spPr")
+        .and_then(crate::drawingml::connector_path_for_rendering)
+    {
+        shape.geometry_path = Some(path);
+    }
+}
+
+pub(crate) fn render_scene_connector_paths<'a>(
+    node: Option<&mut DrawingSceneNode>,
+    sources: &mut impl Iterator<Item = &'a XmlElement>,
+) {
+    let Some(node) = node else {
+        return;
+    };
+    if let Some(shape) = node.shape.as_deref_mut()
+        && let Some(source) = sources.next()
+    {
+        render_connector_path(shape, source);
+    }
+    for child in node.children.iter_mut().flatten() {
+        render_scene_connector_paths(Some(child), sources);
+    }
 }
 
 pub fn is_shape_drawing(drawing: &XmlElement) -> bool {
@@ -1745,7 +1785,9 @@ fn render_scene_shape(
     let mut shape = if local == "pic" {
         Box::new(parse_picture_shape(element))
     } else if is_scene_shape(local) {
-        Box::new(parse_shape(element))
+        let mut shape = Box::new(parse_shape(element));
+        render_connector_path(&mut shape, element);
+        shape
     } else {
         return None;
     };

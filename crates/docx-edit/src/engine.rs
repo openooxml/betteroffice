@@ -9314,6 +9314,7 @@ impl EngineSession {
                 .font_theme
                 .clone()
                 .or_else(|| crate::bridge::source_font_theme(&self.doc)),
+            group_pictures: crate::bridge::group_picture_sources(&self.doc, render_env),
             ..render_env.clone()
         };
         let render_env = &sourced_env;

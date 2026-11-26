@@ -957,21 +957,9 @@ fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
                 x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
             }
             Primitive::Shape(shape) => {
-                if shape.attrs.inline_shape_atom != Some(true) {
-                    return false;
-                }
-                if shape.attrs.doc_start.is_none() {
-                    return false;
-                }
-                let (sx, sy) = (
-                    shape.x.as_f64().unwrap_or(0.0),
-                    shape.y.as_f64().unwrap_or(0.0),
-                );
-                let (sw, sh) = (
-                    shape.w.as_f64().unwrap_or(0.0),
-                    shape.h.as_f64().unwrap_or(0.0),
-                );
-                x >= sx && x <= sx + sw && y >= sy && y <= sy + sh
+                shape.attrs.doc_start.is_some()
+                    && shape_can_hit(shape)
+                    && shape_contains_point(shape, x, y)
             }
             _ => false,
         })
@@ -980,6 +968,125 @@ fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
             Primitive::Shape(shape) => shape.attrs.doc_start.is_some(),
             _ => false,
         })
+}
+
+fn is_connector(shape: &ShapePrimitive) -> bool {
+    shape
+        .attrs
+        .image_shape_type
+        .as_deref()
+        .is_some_and(ooxml_drawingml::is_corrected_connector_preset)
+}
+
+fn shape_can_hit(shape: &ShapePrimitive) -> bool {
+    shape.attrs.inline_shape_atom == Some(true) || is_connector(shape)
+}
+
+fn shape_contains_point(shape: &ShapePrimitive, x: f64, y: f64) -> bool {
+    let px = |number: &Number| number.as_f64().unwrap_or(0.0);
+    let (sx, sy, w, h) = (px(&shape.x), px(&shape.y), px(&shape.w), px(&shape.h));
+    if !is_connector(shape) {
+        return x >= sx && x <= sx + w && y >= sy && y <= sy + h;
+    }
+    if let Some(clip) = shape
+        .attrs
+        .clip_group
+        .as_ref()
+        .and_then(|group| group.clip.as_ref())
+    {
+        let (left, top) = (clip.x.as_ref().map_or(0.0, px), clip.y.as_ref().map_or(0.0, px));
+        let (width, height) = (clip.w.as_ref().map_or(0.0, px), clip.h.as_ref().map_or(0.0, px));
+        if x < left || x > left + width || y < top || y > top + height {
+            return false;
+        }
+    }
+    let Some(stroke) = &shape.stroke else {
+        return false;
+    };
+    let tolerance = (px(&stroke.width) / 2.0).max(3.0);
+    let (cx, cy) = (sx + w / 2.0, sy + h / 2.0);
+    let (mut dx, mut dy) = (x - cx, y - cy);
+    if let Some(transform) = &shape.transform {
+        let degrees = transform.rotation.as_ref().map_or(0.0, px);
+        let (sin, cos) = crate::fmath::sin_cos(degrees.to_radians());
+        (dx, dy) = (dx * cos + dy * sin, dy * cos - dx * sin);
+        if transform.flip_h {
+            dx = -dx;
+        }
+        if transform.flip_v {
+            dy = -dy;
+        }
+    }
+    let point = (cx + dx, cy + dy);
+    let mut previous = (sx, sy);
+    for command in &shape.geometry_path {
+        let (end, hit) = match command {
+            ShapePathCommand::Move { x, y } => ((px(x), px(y)), false),
+            ShapePathCommand::Line { x, y } => {
+                let end = (px(x), px(y));
+                (
+                    end,
+                    segment_distance_squared(point, previous, end) <= tolerance * tolerance,
+                )
+            }
+            ShapePathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                let end = (px(x), px(y));
+                let curve = [previous, (px(cp1x), px(cp1y)), (px(cp2x), px(cp2y)), end];
+                (end, cubic_stroke_contains(curve, point, tolerance, 0))
+            }
+            _ => return x >= sx && x <= sx + w && y >= sy && y <= sy + h,
+        };
+        if hit {
+            return true;
+        }
+        previous = end;
+    }
+    false
+}
+
+fn segment_distance_squared((x, y): (f64, f64), (ax, ay): (f64, f64), (bx, by): (f64, f64)) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let length_squared = dx * dx + dy * dy;
+    let t = if length_squared > 0.0 {
+        (((x - ax) * dx + (y - ay) * dy) / length_squared).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (x - ax - t * dx).powi(2) + (y - ay - t * dy).powi(2)
+}
+
+fn cubic_stroke_contains(
+    [a, b, c, d]: [(f64, f64); 4],
+    point: (f64, f64),
+    tolerance: f64,
+    depth: u8,
+) -> bool {
+    let (x, y) = point;
+    if x < a.0.min(b.0).min(c.0).min(d.0) - tolerance
+        || x > a.0.max(b.0).max(c.0).max(d.0) + tolerance
+        || y < a.1.min(b.1).min(c.1).min(d.1) - tolerance
+        || y > a.1.max(b.1).max(c.1).max(d.1) + tolerance
+    {
+        return false;
+    }
+    if depth == 12
+        || segment_distance_squared(b, a, d).max(segment_distance_squared(c, a, d)) <= 0.25
+    {
+        return segment_distance_squared(point, a, d) <= tolerance * tolerance;
+    }
+    let midpoint = |(x, y): (f64, f64), (u, v): (f64, f64)| ((x + u) / 2.0, (y + v) / 2.0);
+    let (ab, bc, cd) = (midpoint(a, b), midpoint(b, c), midpoint(c, d));
+    let (abc, bcd) = (midpoint(ab, bc), midpoint(bc, cd));
+    let middle = midpoint(abc, bcd);
+    cubic_stroke_contains([a, ab, abc, middle], point, tolerance, depth + 1)
+        || cubic_stroke_contains([middle, bcd, cd, d], point, tolerance, depth + 1)
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
@@ -1040,21 +1147,13 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                 }
             }
             Primitive::Shape(shape) => {
-                if shape.attrs.inline_shape_atom != Some(true) {
+                if !shape_can_hit(shape) {
                     continue;
                 }
                 let Some(ds) = shape.attrs.doc_start else {
                     continue;
                 };
-                let (sx, sy) = (
-                    shape.x.as_f64().unwrap_or(0.0),
-                    shape.y.as_f64().unwrap_or(0.0),
-                );
-                let (sw, sh) = (
-                    shape.w.as_f64().unwrap_or(0.0),
-                    shape.h.as_f64().unwrap_or(0.0),
-                );
-                if x >= sx && x <= sx + sw && y >= sy && y <= sy + sh {
+                if shape_contains_point(shape, x, y) {
                     return PointResolution {
                         pos: Some(ds),
                         target,
@@ -1289,6 +1388,11 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
         || transparent(attrs.primitive_opacity.as_ref())
     {
         return false;
+    }
+    if let Primitive::Shape(shape) = primitive
+        && is_connector(shape)
+    {
+        return shape_contains_point(shape, x, y);
     }
     let paints = match primitive {
         Primitive::Text(text) => !js_blank(&text.text) && !text_fill_none(attrs),

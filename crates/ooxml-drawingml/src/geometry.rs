@@ -1120,6 +1120,65 @@ fn orient(direction: &str, x: f64, y: f64) -> (f64, f64) {
     }
 }
 
+pub fn is_corrected_connector_preset(shape_type: &str) -> bool {
+    matches!(
+        shape_type,
+        "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5" | "curvedConnector2"
+    )
+}
+
+pub fn legacy_connector_path(
+    shape_type: &str,
+    adjustments: &HashMap<String, f64>,
+) -> Option<Vec<GeometryPathCommand>> {
+    let adjustment = adjustments.get("adj1").copied();
+    Some(match shape_type {
+        "bentConnector2" => legacy_bent_connector(2, adjustment),
+        "bentConnector3" => legacy_bent_connector(3, adjustment),
+        "bentConnector4" => legacy_bent_connector(4, adjustment),
+        "bentConnector5" => legacy_bent_connector(5, adjustment),
+        "curvedConnector2" => vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            GeometryPathCommand::Cubic {
+                cp1x: 0.5,
+                cp1y: 0.0,
+                cp2x: 0.5,
+                cp2y: 1.0,
+                x: 1.0,
+                y: 1.0,
+            },
+        ],
+        _ => return None,
+    })
+}
+
+fn legacy_bent_connector(segments: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let bend = clamp_fraction(adjustment, 0.5);
+    if segments <= 2 {
+        return vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            GeometryPathCommand::Line { x: bend, y: 0.0 },
+            GeometryPathCommand::Line { x: bend, y: 1.0 },
+            GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+        ];
+    }
+    let mut commands = vec![GeometryPathCommand::Move { x: 0.0, y: 0.0 }];
+    for i in 1..segments {
+        let fraction = i as f64 / segments as f64;
+        let (x, y) = if i % 2 == 1 {
+            (
+                if i == 1 { bend } else { fraction },
+                (i - 1) as f64 / segments as f64,
+            )
+        } else {
+            ((i - 1) as f64 / segments as f64, fraction)
+        };
+        commands.push(GeometryPathCommand::Line { x, y });
+    }
+    commands.push(GeometryPathCommand::Line { x: 1.0, y: 1.0 });
+    commands
+}
+
 fn bent_connector(segments: usize, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
     let adj = |name: &str| {
         unpinned(adjustments.get(name).copied(), 0.5)

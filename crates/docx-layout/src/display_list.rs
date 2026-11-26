@@ -2610,7 +2610,6 @@ pub(crate) struct ShapeBlockIn {
     sdt_groups: Vec<SdtGroupIn>,
     pub(crate) id: Value,
     #[serde(default)]
-    #[allow(dead_code)]
     shape_type: Option<String>,
     #[serde(default)]
     geometry_path: Vec<ShapePathCommand>,
@@ -10586,6 +10585,11 @@ fn emit_shape_fragment_with_clip(
     attrs.effects = block.effects.clone();
     attrs.effect_extent = block.effect_extent.clone().map(Box::new);
     attrs.drawing_scene = block.scene.clone().map(Box::new);
+    attrs.image_shape_type = block
+        .shape_type
+        .as_deref()
+        .filter(|name| ooxml_drawingml::is_corrected_connector_preset(name))
+        .map(str::to_owned);
     attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
 
     let decorative = block.decorative.unwrap_or_else(|| {

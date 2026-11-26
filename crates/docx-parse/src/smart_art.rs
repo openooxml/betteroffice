@@ -13,7 +13,8 @@ use crate::relationships::{
 use crate::scalars::ColorValue;
 use crate::shape::{
     DrawingScene, DrawingSceneNode, Shape, ShapeOffset, ShapeTextBody,
-    parse_drawing_scene_with_sources, placed_scene_node, resolve_shape_fill_pictures,
+    parse_drawing_scene_with_sources, placed_scene_node, render_scene_connector_paths,
+    resolve_shape_fill_pictures,
 };
 use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 
@@ -53,6 +54,34 @@ pub fn parse_smart_art_from_drawing(
     context: Option<&mut SmartArtContext>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<Option<Shape>, ParseError> {
+    parse_smart_art(drawing, relationships, media, context, budget, false)
+}
+
+pub fn smart_art_for_rendering(
+    drawing: &XmlElement,
+    relationships: &RelationshipMap,
+    media: &MediaMap,
+    context: &mut SmartArtContext,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Option<Shape>, ParseError> {
+    parse_smart_art(
+        drawing,
+        Some(relationships),
+        Some(media),
+        Some(context),
+        budget,
+        true,
+    )
+}
+
+fn parse_smart_art(
+    drawing: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    media: Option<&MediaMap>,
+    context: Option<&mut SmartArtContext>,
+    budget: &mut ParseBudget<'_>,
+    render_connectors: bool,
+) -> Result<Option<Shape>, ParseError> {
     let (Some(relationships), Some(context)) = (relationships, context) else {
         return Ok(None);
     };
@@ -88,8 +117,13 @@ pub fn parse_smart_art_from_drawing(
             (Some(data), Some(colors)) => style_text_colors(data, colors, drawing_xml, budget),
             _ => HashMap::new(),
         };
-        let parsed =
-            parse_styled_drawing_scene(drawing_xml, "SmartArt drawing", &text_colors, budget)?;
+        let parsed = parse_styled_drawing_scene(
+            drawing_xml,
+            "SmartArt drawing",
+            &text_colors,
+            budget,
+            render_connectors,
+        )?;
         if !parsed.shapes.is_empty() {
             let mut shape = diagram_group(size, parsed.shapes, parsed.scene);
             if memchr::memmem::find(drawing_xml, b"blip").is_some() {
@@ -97,11 +131,18 @@ pub fn parse_smart_art_from_drawing(
                 let own = drawing_relationships(&path, context, budget);
                 resolve_shape_fill_pictures(&mut shape, own, media);
             }
-            retain_drawing_source(&mut shape, drawing);
+            if render_connectors {
+                apply_frame_metadata(&mut shape, drawing);
+            } else {
+                retain_drawing_source(&mut shape, drawing);
+            }
             return Ok(Some(shape));
         }
     }
 
+    if render_connectors {
+        return Ok(None);
+    }
     let data_xml = data_path
         .as_deref()
         .and_then(|path| context.parts.get(path))
@@ -251,7 +292,7 @@ pub fn parse_diagram_drawing_scene(
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<DiagramDrawing, ParseError> {
-    parse_styled_drawing_scene(xml, part, &HashMap::new(), budget)
+    parse_styled_drawing_scene(xml, part, &HashMap::new(), budget, false)
 }
 
 fn parse_styled_drawing_scene(
@@ -259,6 +300,7 @@ fn parse_styled_drawing_scene(
     part: &str,
     text_colors: &HashMap<String, ColorValue>,
     budget: &mut ParseBudget<'_>,
+    render_connectors: bool,
 ) -> Result<DiagramDrawing, ParseError> {
     let document = parse_xml(xml, part, budget)?;
     let Some(root) = document.root() else {
@@ -273,6 +315,9 @@ fn parse_styled_drawing_scene(
         root.child_by_local_name("spTree").unwrap_or(root)
     };
     let (mut scene, sources) = parse_drawing_scene_with_sources(source);
+    if render_connectors {
+        render_scene_connector_paths(scene.root.as_deref_mut(), &mut sources.iter().copied());
+    }
     let mut shapes = Vec::new();
     if let Some(frame) = collect_scene_shapes(
         scene.root.as_mut(),
