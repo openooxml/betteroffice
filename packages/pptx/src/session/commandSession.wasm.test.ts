@@ -23,6 +23,31 @@ function compileRequests(worker: WasmTestWorker) {
   return worker.requests.filter((message) => message.kind === 'wasm-compile');
 }
 
+test.each([
+  ['by default', undefined, () => {}, true],
+  ['with missing page capabilities', true, undefined, false],
+] as const)('the session sends the resolved sliced-font mode %s', async (_, slicedFonts, createImageBitmap, expected) => {
+  const globals = { navigator: { userAgent: 'Chrome/149.0' }, OffscreenCanvas: class {}, createImageBitmap,
+    HTMLCanvasElement: class { transferControlToOffscreen() {} } };
+  const originals = Object.entries(globals).map(([key, value]) => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    return [key, original] as const;
+  });
+  const h = factory();
+  const session = h.client.createPptxWorkerSession(new Uint8Array(), { defaultFonts: false, slicedFonts });
+  try {
+    await session.ready;
+    expect(input(h.workers[0]!).slicedFonts === true).toBe(expected);
+  } finally {
+    await session.dispose();
+    for (const [key, original] of originals) {
+      if (original) Object.defineProperty(globalThis, key, original);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+});
+
 describe.skipIf(engineKind === 'native')('peerless session wasm reuse', () => {
   test('compiles before payload copying and open, then reuses the advertised module after disposal', async () => {
     const h = factory();

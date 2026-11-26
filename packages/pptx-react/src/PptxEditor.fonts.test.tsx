@@ -44,6 +44,21 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+function setWorkerRendering(userAgent: string) {
+  for (const [target, property, value] of [
+    [globalThis, 'navigator', { userAgent }],
+    [globalThis, 'createImageBitmap', () => {}],
+    [HTMLCanvasElement.prototype, 'transferControlToOffscreen', () => {}],
+  ] as const) {
+    const original = Object.getOwnPropertyDescriptor(target, property);
+    Object.defineProperty(target, property, { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(target, property, original);
+      else Reflect.deleteProperty(target, property);
+    });
+  }
+}
+
 async function mount(fonts: PptxAsyncEditorProps['fonts'], options: Partial<PptxAsyncEditorProps> = {}) {
   const file = await deck();
   const ready = mock((_api: PptxAsyncEditorApi) => {});
@@ -56,9 +71,11 @@ test('bundled descriptors wait for the prepared decoder and open with byte faces
   const pending = deferred<ArrayBuffer>();
   load.mockReturnValue(pending.promise);
   const boldItalic = { ...face, weight: 700 as const, style: 'italic' as const };
-  const { view, file, ready } = await mount([{ face: boldItalic, baseUrl }], { loadingIndicator: 'Loading fonts' });
+  const { view, file, ready } = await mount([{ face: boldItalic, baseUrl }], {
+    loadingIndicator: 'Loading fonts', experimentalSlicedFonts: false,
+  });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
-  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: false, activeSlideIndex: 0 });
+  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: false, activeSlideIndex: 0, slicedFonts: false });
   expect(load).toHaveBeenCalledWith(boldItalic, { baseUrl }, { decoder });
   expect(load.mock.calls.every((call) => call[2]?.decoder === decoder && !('retain' in call[2]!))).toBe(true);
   expect(opener).not.toHaveBeenCalled();
@@ -112,9 +129,26 @@ test('mixed byte and bundled faces preserve both in input order', async () => {
 });
 
 test('the prepared decoder gets the default fonts and opening slide the editor will use', async () => {
+  setWorkerRendering('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15');
   const { ready, file } = await mount([{ face, baseUrl }], { defaultFonts: undefined, initialSlide: 3 });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
-  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 2 });
+  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 2, slicedFonts: false });
+  expect(opener).toHaveBeenCalledWith(file, expect.objectContaining({ slicedFonts: false }));
+});
+
+test.each(['slice option', 'default fonts'] as const)('changing the %s refreshes preparation for the same file', async (option) => {
+  setWorkerRendering('Chrome/149.0');
+  const { view, props, ready, file } = await mount([{ face, baseUrl }], { defaultFonts: true, experimentalSlicedFonts: true });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
+  expect(prepare).toHaveBeenNthCalledWith(1, file, { defaultFonts: true, activeSlideIndex: 0, slicedFonts: true });
+  const next = option === 'slice option' ? { experimentalSlicedFonts: false } : { defaultFonts: false };
+  await act(async () => { view.rerender(<PptxEditor {...props} {...next} />); });
+  await waitFor(() => expect(prepare).toHaveBeenNthCalledWith(2, file, {
+    defaultFonts: option === 'default fonts' ? false : true,
+    activeSlideIndex: 0,
+    slicedFonts: option === 'slice option' ? false : true,
+  }), MOUNTED);
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(2), MOUNTED);
 });
 
 test('metric-compatible descriptors open as the font they substitute', async () => {
@@ -165,13 +199,13 @@ test('changing the file releases the old worker and ignores its pending fonts', 
   load.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
   const secondRelease = mock(() => {});
   prepare.mockReturnValueOnce({ decoder, release, take }).mockReturnValueOnce({ decoder, release: secondRelease, take });
-  const { view, props, ready, file } = await mount([{ face, baseUrl }]);
+  const { view, props, ready, file } = await mount([{ face, baseUrl }], { experimentalSlicedFonts: false });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
   const nextFile = file.slice();
   await act(async () => { view.rerender(<PptxEditor {...props} file={nextFile} />); });
   await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
   expect(release).toHaveBeenCalledTimes(1);
-  expect(prepare).toHaveBeenNthCalledWith(2, nextFile, { defaultFonts: false, activeSlideIndex: 0 });
+  expect(prepare).toHaveBeenNthCalledWith(2, nextFile, { defaultFonts: false, activeSlideIndex: 0, slicedFonts: false });
   await act(async () => { first.resolve(fontBytes.slice().buffer as ArrayBuffer); });
   expect(opener).not.toHaveBeenCalled();
   await act(async () => { second.resolve(fontBytes.slice().buffer as ArrayBuffer); });
@@ -204,13 +238,27 @@ test('two editors on one file each release their own handle, so unmounting one k
 });
 
 test('an in-thread editor releases the prepared worker after decoding', async () => {
+  setWorkerRendering('Chrome/149.0');
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   restorers.push(() => warn.mockRestore());
-  const { ready } = await mount([{ face, baseUrl }], { experimentalWorkerOpen: false });
+  const { ready, file } = await mount([{ face, baseUrl }], { experimentalWorkerOpen: false, experimentalSlicedFonts: true, defaultFonts: undefined });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1), MOUNTED);
+  expect(prepare).toHaveBeenCalledWith(file, { defaultFonts: undefined, activeSlideIndex: 0, slicedFonts: false });
   expect(load).toHaveBeenCalledWith(face, { baseUrl }, { decoder });
   expect(release).toHaveBeenCalledTimes(1);
   expect(opener).not.toHaveBeenCalled();
+});
+
+test('the legacy editor prepares its worker with whole faces', async () => {
+  setWorkerRendering('Chrome/149.0');
+  load.mockReturnValue(new Promise<ArrayBuffer>(() => {}));
+  const file = await deck();
+  const view = render(<PptxEditor file={file} fonts={[{ face, baseUrl }]} legacySyncApi />);
+  try {
+    await waitFor(() => expect(prepare).toHaveBeenCalledWith(file, {
+      defaultFonts: undefined, activeSlideIndex: 0, slicedFonts: false,
+    }));
+  } finally { view.unmount(); }
 });
 
 test('a failed session open releases the prepared font worker', async () => {

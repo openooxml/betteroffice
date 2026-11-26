@@ -1,8 +1,10 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { createSessionClient, requestWasmCompile } from '../../../../shared/office-session/client';
 import { rpcFontDecoder, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import { createSessionWorker } from './sessionWorker';
+import { fontMode, getOrCreatePreparedFontWorker, takePreparedPresentationFontWorker } from './preparedFontWorkers';
 import { shipsWasmAsset } from '../wasm/asset';
 import type { PresentationCommandMethods } from './commandProtocol';
 
@@ -15,7 +17,6 @@ interface PreparedFontWorker {
   take(): Worker;
 }
 
-const preparedWorkers = new WeakMap<object, ReturnType<typeof createPreparedFontWorker>>();
 const Registry = (globalThis as unknown as {
   FinalizationRegistry?: new (cleanup: (release: () => void) => void) => {
     register(target: object, release: () => void, token: object): void;
@@ -33,13 +34,14 @@ const abandonedWorkers = Registry ? new Registry(release => release()) : undefin
  */
 export function preparePresentationFontDecoder(source: Uint8Array | ArrayBuffer,
   options: { defaultFonts?: boolean; activeSlideIndex?: number; slicedFonts?: boolean } = {}): PreparedFontWorker {
-  let owner = preparedWorkers.get(source);
-  if (!owner || owner.retired()) {
-    owner = createPreparedFontWorker();
-    preparedWorkers.set(source, owner);
-    if (options.defaultFonts !== false) owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, options.slicedFonts === true);
-  }
-  return owner.handle();
+  const mode = fontMode(options.defaultFonts, shouldSlicePresentationFonts(options.slicedFonts));
+  return getOrCreatePreparedFontWorker(source, mode, () => {
+    const owner = createPreparedFontWorker();
+    if (mode !== 'disabled') {
+      owner.prefetchCoverage(source, options.activeSlideIndex ?? 0, mode === 'sliced');
+    }
+    return owner;
+  }).handle();
 }
 
 function createPreparedFontWorker() {
@@ -96,7 +98,8 @@ function createPreparedFontWorker() {
     prefetchCoverage(source: Uint8Array | ArrayBuffer, activeSlideIndex: number, sliced: boolean): void {
       const fontCdn = getFontCdnConfiguration();
       void import('./coverageScan').then((scan) => scan.activeSlideCoverageScripts(source, activeSlideIndex)).then((scripts) => {
-        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args: fontCdn ? [scripts, sliced, fontCdn] : sliced ? [scripts, true] : [scripts] }, []);
+        const args = fontCdn ? [scripts, sliced, fontCdn] : [scripts, sliced];
+        if (scripts.length) connection.post({ protocol: 1, kind: 'call', id: UNTRACKED_CALL_ID, method: 'prefetchCoverageFonts', args }, []);
       }).catch(() => {});
     },
     /** A holder's own handle: the worker stops once every handle is released, or collected after its decodes. */
@@ -134,9 +137,5 @@ function createPreparedFontWorker() {
 
 /** The prepared worker for `source`, unless another editor still holds it; that editor's fonts keep loading. */
 export function takePresentationFontWorker(source: Uint8Array | ArrayBuffer): Worker | undefined {
-  const owner = preparedWorkers.get(source);
-  if (!owner || owner.retired()) { preparedWorkers.delete(source); return undefined; }
-  if (owner.shared()) return undefined;
-  preparedWorkers.delete(source);
-  return owner.take();
+  return takePreparedPresentationFontWorker(source, fontMode());
 }

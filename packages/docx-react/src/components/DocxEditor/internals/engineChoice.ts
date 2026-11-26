@@ -1,33 +1,18 @@
 import { useEffect, useMemo, useState } from 'react';
+import { missingWorkerRenderCapabilities, type WorkerRenderCapability } from '../../../../../../shared/office-session/render/workerCapabilities';
 import type { DocxEditorProps } from '../../DocxEditor';
 import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 
-type WorkerCapability =
-  | 'Worker'
-  | 'OffscreenCanvas'
-  | 'HTMLCanvasElement.prototype.transferControlToOffscreen'
-  | 'createImageBitmap';
 type EngineProps = Pick<
   DocxEditorProps,
   'experimentalWorkerOpen' | 'mediaTokens' | 'collaboration' | 'document' | 'documentBuffer' | 'readOnly' | 'mode'
 >;
 
 const warned = new Set<string>();
-let missingCapabilitiesOverride: readonly WorkerCapability[] | null = null;
+let missingCapabilitiesOverride: readonly WorkerRenderCapability[] | null = null;
 
-function missingCapabilities(): readonly WorkerCapability[] {
-  if (missingCapabilitiesOverride !== null) return missingCapabilitiesOverride;
-  const missing: WorkerCapability[] = [];
-  if (typeof Worker !== 'function') missing.push('Worker');
-  if (typeof OffscreenCanvas !== 'function') missing.push('OffscreenCanvas');
-  if (
-    typeof HTMLCanvasElement !== 'function' ||
-    typeof HTMLCanvasElement.prototype.transferControlToOffscreen !== 'function'
-  ) {
-    missing.push('HTMLCanvasElement.prototype.transferControlToOffscreen');
-  }
-  if (typeof createImageBitmap !== 'function') missing.push('createImageBitmap');
-  return missing;
+function missingCapabilities(): readonly WorkerRenderCapability[] {
+  return missingCapabilitiesOverride ?? missingWorkerRenderCapabilities();
 }
 
 function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: string[] } {
@@ -54,7 +39,7 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
   return { workerOpen: warnings.length === 0, warnings };
 }
 
-function capabilityWarning(missing: readonly WorkerCapability[]) {
+function capabilityWarning(missing: readonly WorkerRenderCapability[]) {
   return `[DocxEditor] Using the in-thread engine because these browser features are unavailable: ${missing.join(', ')}; use a browser with these features for the worker-owned editor.`;
 }
 
@@ -114,7 +99,7 @@ export function useEditorEngineChoice(props: EngineProps): boolean {
   return choice.workerOpen;
 }
 
-export function setMissingWorkerCapabilitiesForTests(missing: readonly WorkerCapability[] | null): void {
+export function setMissingWorkerCapabilitiesForTests(missing: readonly WorkerRenderCapability[] | null): void {
   missingCapabilitiesOverride = missing;
 }
 
