@@ -2884,6 +2884,14 @@ fn structured_field_result(field_value: &Value) -> Option<&[Value]> {
         .map(Vec::as_slice)
 }
 
+fn field_result_runs(field_value: &Value, projected: bool) -> &[Value] {
+    if projected {
+        structured_field_result(field_value).unwrap_or(&[])
+    } else {
+        flat_field_result(field_value)
+    }
+}
+
 pub(crate) fn field_result_formatting(field_value: &Value) -> Option<&Value> {
     field_formatting_from_runs(field_value, flat_field_result(field_value))
 }
@@ -2927,26 +2935,31 @@ enum CachedResultScope {
     Nested,
 }
 
-fn cached_result_fragments<'a>(
-    field_value: &'a Value,
-    runs: &'a [Value],
+fn cached_result_text(
+    field_value: &Value,
+    runs: &[Value],
     style_formatting: Option<&Value>,
-    styles: &StyleResolver,
+    styles: Option<&StyleResolver>,
     projected: bool,
-) -> Option<Vec<&'a str>> {
-    let inline = structured_field_result(field_value)?;
+    show_hidden_text: bool,
+) -> (String, bool) {
+    let owner_runs = runs
+        .iter()
+        .filter(|run| string(field(Some(run), "type")) == Some("run"));
+    let cached_text: String = owner_runs.clone().flat_map(cached_run_texts).collect();
+    let has_cached_result = !cached_text.is_empty();
+    let Some(inline) = structured_field_result(field_value) else {
+        return (cached_text, has_cached_result);
+    };
     let default_character = styles
-        .default_style("character")
+        .and_then(|styles| styles.default_style("character"))
         .and_then(|style| field(Some(style), "rPr"));
     let default_run = default_character
         .and_then(|formatting| merge_style_run_formatting(style_formatting, Some(formatting)));
     let style_formatting = default_run.as_ref().or(style_formatting);
     let flattened_complex_result =
         !projected && string(field(Some(field_value), "type")) == Some("complexField");
-    let mut owner_runs = runs
-        .iter()
-        .filter(|run| string(field(Some(run), "type")) == Some("run"))
-        .peekable();
+    let mut owner_runs = owner_runs.peekable();
     let mut pending: Vec<_> = inline
         .iter()
         .rev()
@@ -2966,11 +2979,15 @@ fn cached_result_fragments<'a>(
         let (children, child_scope) = match kind {
             Some("run") => {
                 if scope == CachedResultScope::Nested {
-                    let formatting =
-                        styles.run_formatting(style_formatting, field(Some(node), "formatting"));
-                    if boolean(field(formatting.as_ref(), "hidden")) != Some(true) {
-                        fragments.extend(cached_run_texts(node));
+                    if !show_hidden_text {
+                        let direct = field(Some(node), "formatting");
+                        let formatting = styles
+                            .and_then(|styles| styles.run_formatting(style_formatting, direct));
+                        if boolean(field(formatting.as_ref().or(direct), "hidden")) == Some(true) {
+                            continue;
+                        }
                     }
+                    fragments.extend(cached_run_texts(node));
                 } else if matches!(
                     scope,
                     CachedResultScope::Owner | CachedResultScope::OwnerHyperlink
@@ -3027,8 +3044,29 @@ fn cached_result_fragments<'a>(
                 .map(|child| (child, child_scope)),
         );
     }
-    fragments.extend(owner_runs.flat_map(cached_run_texts));
-    has_nested_result.then_some(fragments)
+    let display_text = if has_nested_result {
+        fragments.extend(owner_runs.flat_map(cached_run_texts));
+        fragments.into_iter().collect()
+    } else {
+        cached_text
+    };
+    (display_text, has_cached_result)
+}
+
+pub(crate) fn field_display_text(
+    field_value: &Value,
+    show_hidden_text: bool,
+    projected_children: bool,
+) -> String {
+    cached_result_text(
+        field_value,
+        field_result_runs(field_value, projected_children),
+        None,
+        None,
+        projected_children,
+        show_hidden_text,
+    )
+    .0
 }
 
 fn field_payload(
@@ -3048,22 +3086,15 @@ fn field_payload_with_projection(
     projected: bool,
 ) -> (JsonObject, Vec<Mark>) {
     let kind = string(field(Some(field_value), "type")).unwrap_or_default();
-    let runs = if projected {
-        structured_field_result(field_value).unwrap_or(&[])
-    } else {
-        flat_field_result(field_value)
-    };
-    let cached_text: String = runs
-        .iter()
-        .filter(|child| string(field(Some(child), "type")) == Some("run"))
-        .flat_map(cached_run_texts)
-        .collect();
-    let has_cached_result = !cached_text.is_empty();
-    let display_text: String =
-        match cached_result_fragments(field_value, runs, style_formatting, styles, projected) {
-            Some(fragments) => fragments.into_iter().collect(),
-            None => cached_text,
-        };
+    let runs = field_result_runs(field_value, projected);
+    let (display_text, has_cached_result) = cached_result_text(
+        field_value,
+        runs,
+        style_formatting,
+        Some(styles),
+        projected,
+        false,
+    );
     let formatting = field_formatting_from_runs(field_value, runs);
     let merged = merge_text_formatting(style_formatting, formatting);
     (
@@ -9747,6 +9778,81 @@ mod tests {
     }
 
     #[test]
+    fn hidden_nested_field_results_stay_hidden() {
+        let hidden = json!({"type":"run", "formatting":{"hidden":true},
+            "content":[{"type":"text","text":"Hidden"}]});
+        let styles = StyleResolver::new(None);
+        for instruction in ["AUTOTEXTLIST", "QUOTE"] {
+            let inner = json!({"type":"complexField", "instruction":instruction,
+                "fieldResult":[hidden.clone()]});
+            for (result, seeded, has_cached_result, visible, shown) in [
+                (
+                    vec![run("Before "), inner.clone(), run(" After")],
+                    "Before  After",
+                    true,
+                    "Before  After",
+                    "Before Hidden After",
+                ),
+                (vec![inner], "", false, "", "Hidden"),
+                (
+                    vec![
+                        run("Visible"),
+                        json!({"type":"complexField", "instruction":instruction,
+                    "formatting":{"hidden":true}, "fieldResult":[run("Hidden")]}),
+                    ],
+                    "VisibleHidden",
+                    true,
+                    "VisibleHidden",
+                    "VisibleHidden",
+                ),
+                (
+                    vec![hidden.clone(), run("Visible")],
+                    "HiddenVisible",
+                    true,
+                    "",
+                    "HiddenVisible",
+                ),
+                (vec![hidden.clone()], "Hidden", true, "", "Hidden"),
+            ] {
+                let outer = json!({"type":"complexField", "instruction":instruction,
+                    "fieldResult":result, "structuredResult":{"inline":result}});
+                let (payload, _) = field_payload(&outer, None, &styles, &BTreeMap::new());
+                assert_eq!(payload["displayText"], json!(seeded));
+                assert_eq!(payload["hasCachedResult"], json!(has_cached_result));
+                assert_eq!(field_display_text(&outer, false, false), seeded);
+                assert_eq!(field_display_text(&outer, true, false), shown);
+                let document = seed_body(&[json!({"type":"paragraph","content":[outer]})]);
+                for show_hidden_text in [false, true] {
+                    let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                        &document,
+                        "body",
+                        &crate::bridge::RenderEnv {
+                            show_hidden_text,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let actual: String = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            docx_layout::types::LayoutBlock::Paragraph(paragraph) => {
+                                Some(&paragraph.runs)
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                        .filter_map(|run| match run {
+                            docx_layout::types::Run::Field(field) => field.fallback.as_deref(),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(actual, if show_hidden_text { shown } else { visible });
+                }
+            }
+        }
+    }
+
+    #[test]
     fn numeric_field_detection_preserves_formulas_and_named_fields() {
         assert!(numeric_field_instruction(" 123 "));
         for instruction in ["", "= 0", "QUOTE 0", "PAGE", "CustomField", "123abc"] {
@@ -9769,6 +9875,28 @@ mod tests {
         assert_eq!(units[0].attrs["hidden"], json!(true));
         assert_eq!(payload["displayText"], json!("Hidden"));
         assert_eq!(payload["hasCachedResult"], json!(true));
+    }
+
+    #[test]
+    fn a_field_without_nested_fields_keeps_its_first_run_formatting_when_hidden() {
+        let mut hidden = run("Hidden");
+        hidden["formatting"] = json!({"hidden":true});
+        let mut visible = run("Visible");
+        visible["formatting"] = json!({"bold":true});
+        let result = json!([hidden, visible]);
+        let owner = json!({
+            "type":"complexField", "fieldType":"QUOTE", "instruction":"QUOTE",
+            "fieldCode":[], "fieldResult":result, "structuredResult":{"inline":result}
+        });
+        let styles = StyleResolver::new(None);
+        let units =
+            paragraph_units(&json!({"content":[owner]}), &styles, None, &BTreeMap::new()).units;
+        let UnitContent::Embed { payload, .. } = &units[0].content else {
+            panic!("expected field embed");
+        };
+        assert_eq!(units[0].attrs.get("hidden"), Some(&json!(true)));
+        assert!(!units[0].attrs.contains_key("bold"));
+        assert_eq!(payload["displayText"], json!("HiddenVisible"));
     }
 
     #[test]

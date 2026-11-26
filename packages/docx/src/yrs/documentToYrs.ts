@@ -676,7 +676,7 @@ function cachedResultFragments(
     }
   };
   const ownerResult = projected
-    ? inline.filter((child) => child.type !== 'hyperlink' && child.type !== 'simpleField')
+    ? inline.filter((child) => child?.type !== 'hyperlink' && child?.type !== 'simpleField')
     : inline;
   push(ownerResult, 'owner');
   while (pending.length > 0) {
@@ -893,16 +893,18 @@ function fieldToUnits(
     const field = fieldPayload(value, styleFormatting, styleResolver);
     return [embedUnit('field', field.payload, field.marks)];
   }
-  const result = value.structuredResult?.inline ?? [];
-  const code = value.structuredCode?.inline ?? [];
+  const result = value.structuredResult?.inline;
+  const code = value.structuredCode?.inline;
+  const resultChildren = Array.isArray(result) ? result : [];
+  const codeChildren = Array.isArray(code) ? code : [];
   const projectedChildren = [
-    ...code.map((child, index) => ({ child, index: -index - 1 })),
-    ...result.map((child, index) => ({ child, index })),
+    ...codeChildren.map((child, index) => ({ child, index: -index - 1 })),
+    ...resultChildren.map((child, index) => ({ child, index })),
   ];
   const units: InlineUnit[] = [];
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
-    if (child.type !== 'hyperlink' && child.type !== 'simpleField') return;
+    if (child?.type !== 'hyperlink' && child?.type !== 'simpleField') return;
     opaqueSequences.push(
       ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
     );
@@ -917,7 +919,7 @@ function fieldToUnits(
     units.push(...projected);
   });
   const sequenceSource = children.length > 0 && sequenceName(value.instruction ?? '') === undefined
-    ? { ...value, fieldResult: result.filter((child): child is Run => child.type === 'run') }
+    ? { ...value, fieldResult: resultChildren.filter((child): child is Run => child?.type === 'run') }
     : value;
   opaqueSequences.push(...nestedSequenceNames(sequenceSource));
   const field = fieldPayload(

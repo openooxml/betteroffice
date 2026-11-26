@@ -253,9 +253,49 @@ describe('DOCX engine seeding', () => {
           segment.kind === 'text' ? [segment.text] : []
         );
         expect(links.join('')).toBe('Link');
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          expect(sequenceRuns(blocks).flatMap((run) => run.kind === 'field' ? [run.fallback] : [])).toEqual([
+            'Before Sincerely, After', 'Simple', 'Before Sincerely, After',
+          ]);
+        }
       }
     } finally {
       for (const session of seeded.sessions) session.destroy();
+    }
+  });
+
+  it.each(['AUTOTEXTLIST', 'QUOTE'])('keeps hidden nested %s results out of visible cached text', async (instruction) => {
+    const field = (result: string) => `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> ${instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const hidden = field(textRunXml('Hidden', true));
+    const structuralHidden = field(textRunXml('Hidden')).replace('<w:r><w:fldChar', '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar');
+    const bytes = sequencePackage([
+      field(textRunXml('Before ') + hidden + textRunXml(' After')),
+      field(hidden),
+      field(textRunXml('Hidden', true) + textRunXml('Visible')),
+      field(textRunXml('Hidden', true)),
+      field(textRunXml('Visible') + structuralHidden),
+    ].map((result) => `<w:p>${result}</w:p>`).join(''));
+    const { sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of sessions) {
+        const payloads = session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field' ? [segment.payload] : []
+        );
+        expect(payloads.map((payload) => payload.displayText)).toEqual([
+          'Before  After', '', 'HiddenVisible', 'Hidden', 'VisibleHidden',
+        ]);
+        expect(payloads.map((payload) => payload.hasCachedResult)).toEqual([true, false, true, true, true]);
+        for (const showHiddenText of [false, true]) {
+          const blocks = session.yrsBlocksForStory('body', { showHiddenText }) as LayoutBlock[];
+          const results = sequenceRuns(blocks).flatMap((run) => run.kind === 'field' ? [run.fallback] : []);
+          expect(results).toEqual(showHiddenText
+            ? ['Before Hidden After', 'Hidden', 'HiddenVisible', 'Hidden', 'VisibleHidden']
+            : ['Before  After', '', 'VisibleHidden']);
+        }
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
     }
   });
 
@@ -311,6 +351,31 @@ describe('DOCX engine seeding', () => {
         expect(fields).toHaveLength(1);
         expect(fields[0]).toMatchObject({ attributes: { hidden: true } });
         expect(fields[0]).toMatchObject({ payload: { displayText: 'Hidden', hasCachedResult: true } });
+      }
+    } finally {
+      for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('keeps the first run formatting when the first run is hidden and the field has no nested fields', async () => {
+    const bytes = sequencePackage([
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>',
+      '<w:r><w:instrText> QUOTE </w:instrText></w:r>',
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>',
+      '<w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r>',
+      '<w:r><w:rPr><w:b/></w:rPr><w:t>Visible</w:t></w:r>',
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+    ].join(''));
+    const { engine, projected, sessions } = await seedSequenceSessions(bytes);
+    try {
+      for (const session of [engine, projected]) {
+        const fields = session.storySegments('body').filter((segment) =>
+          segment.kind === 'embed' && segment.embedKind === 'field'
+        );
+        expect(fields).toHaveLength(1);
+        expect(fields[0]).toMatchObject({ attributes: { hidden: true } });
+        expect(fields[0]).not.toHaveProperty('attributes.bold');
+        expect(fields[0]).toMatchObject({ payload: { displayText: 'HiddenVisible' } });
       }
     } finally {
       for (const session of sessions) session.destroy();
