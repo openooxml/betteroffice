@@ -914,7 +914,10 @@ fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchange
     assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
     assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 4.0 + 16.0);
     let clip = &shape["clipGroup"]["clip"];
-    assert_eq!(clip["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
+    assert_eq!(
+        clip["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
     assert_eq!(clip["w"].as_f64(), Some(360.0));
     let shape_index = primitives.iter().position(|item| item == shape).unwrap();
     assert!(shape_index > text_run_index(primitives, "Cell tail"));
@@ -1172,7 +1175,10 @@ fn nested_table_text_box_keeps_the_cell_stack_origin() {
         shape["x"].as_f64(),
         Some(start_x(text_run(primitives, "Nested anchor")))
     );
-    assert_eq!(shape["y"].as_f64(), cell_anchor_table(&layout).0["y"].as_f64());
+    assert_eq!(
+        shape["y"].as_f64(),
+        cell_anchor_table(&layout).0["y"].as_f64()
+    );
 }
 
 #[test]
@@ -1198,11 +1204,9 @@ fn cell_text_box_before_lowered_inline_box_keeps_the_cell_stack_origin() {
         .iter()
         .find(|primitive| primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(64.0))
         .unwrap();
-    assert!(
-        primitives.iter().any(|primitive| {
-            primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(32.0)
-        })
-    );
+    assert!(primitives.iter().any(|primitive| {
+        primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(32.0)
+    }));
     let (table, _) = cell_anchor_table(&layout);
     assert_eq!(
         shape["x"].as_f64(),
@@ -1285,7 +1289,10 @@ fn repeating_header_text_box_keeps_the_cell_stack_origin_on_each_page() {
     assert!(pages.len() > 1);
     for (index, page) in pages.iter().enumerate() {
         let fragment = cell_anchor_fragment(&layout["layout"]["pages"][index]);
-        assert_eq!(fragment["headerRowCount"].as_f64(), (index > 0).then_some(1.0));
+        assert_eq!(
+            fragment["headerRowCount"].as_f64(),
+            (index > 0).then_some(1.0)
+        );
         let primitives = page["primitives"].as_array().unwrap();
         assert_cell_text_box_at_fragment_origin(primitives, fragment);
     }
@@ -1312,8 +1319,14 @@ fn header_after_a_body_row_keeps_the_cell_stack_origin() {
     let (table, _) = cell_anchor_table(&layout);
     assert_eq!(shape["cell"]["row"].as_u64(), Some(1));
     assert_eq!(shape["cell"]["isHeader"].as_bool(), Some(true));
-    assert_eq!(shape["x"].as_f64(), Some(table["x"].as_f64().unwrap() + 160.0));
-    assert_eq!(shape["y"].as_f64(), Some(table["y"].as_f64().unwrap() + 20.0));
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(
+        shape["y"].as_f64(),
+        Some(table["y"].as_f64().unwrap() + 20.0)
+    );
 }
 
 #[test]

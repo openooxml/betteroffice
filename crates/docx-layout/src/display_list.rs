@@ -12578,7 +12578,8 @@ fn emit_table_fragment_inner(
         };
         if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
-            let place_cell_shapes = plan.places_cell_shapes(frag, block, measure, g, &frame, nested);
+            let place_cell_shapes =
+                plan.places_cell_shapes(frag, block, measure, g, &frame, nested);
             emit_cell_content(
                 prims,
                 cell,
@@ -13013,7 +13014,9 @@ fn cell_floating_shapes<'a>(
                 index,
                 block: shape,
                 fragment,
-                behind: shape.behind_doc.or_else(|| position.and_then(|p| p.behind_doc))
+                behind: shape
+                    .behind_doc
+                    .or_else(|| position.and_then(|p| p.behind_doc))
                     == Some(true)
                     || wrap == Some("behind"),
             });
@@ -13953,7 +13956,9 @@ fn visit_table_fragment(
                     };
                     let (y, height) = shapes
                         .next_if(|shape| shape.index == index)
-                        .map_or((y, height), |shape| (shape.fragment.y, shape.fragment.height));
+                        .map_or((y, height), |shape| {
+                            (shape.fragment.y, shape.fragment.height)
+                        });
                     shown(y, height).map(|_| ShownPart::Whole)
                 }
             };
