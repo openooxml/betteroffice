@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use docx_parse::serializer::{SectionEdit, SectionEdits};
 use docx_parse::{BlockContent, DocumentBody, Paragraph, SectionProperties};
 use serde::Serialize;
+#[cfg(any(test, feature = "wasm"))]
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -31,6 +32,7 @@ pub(crate) struct SectionPlan {
 #[derive(Debug)]
 pub(crate) struct SectionPlanError(pub(crate) &'static str);
 
+#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn from_json_any_depth<T: DeserializeOwned>(json: &str) -> serde_json::Result<T> {
     let mut de = serde_json::Deserializer::from_str(json);
     de.disable_recursion_limit();
