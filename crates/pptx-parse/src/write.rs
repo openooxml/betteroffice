@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 use ooxml_drawingml::{
-    ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
-    resolve_theme_font_ref,
+    ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme,
+    resolve_color_value_to_hex_with_theme, resolve_theme_font_ref,
 };
 
 use crate::PptxError;
@@ -4912,10 +4912,9 @@ mod tests {
             let source = format!(
                 r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr><a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t></a:r></a:p>"#
             );
-            for (family, east_asia) in [
-                (resolved, "SimSun"),
-                ("Microsoft YaHei", "Microsoft YaHei"),
-            ] {
+            for (family, east_asia) in
+                [(resolved, "SimSun"), ("Microsoft YaHei", "Microsoft YaHei")]
+            {
                 let xml = rebuilt_paragraph_with_theme(
                     source.as_bytes(),
                     &[
@@ -4936,10 +4935,12 @@ mod tests {
                     ],
                     Some(&theme),
                 );
-                let original =
-                    format!(r#"<a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t>"#);
-                let appended =
-                    format!(r#"<a:latin typeface="{family}"/><a:ea typeface="{east_asia}"/></a:rPr><a:t>中</a:t>"#);
+                let original = format!(
+                    r#"<a:latin typeface="{token}"/><a:ea typeface="SimSun"/></a:rPr><a:t>x</a:t>"#
+                );
+                let appended = format!(
+                    r#"<a:latin typeface="{family}"/><a:ea typeface="{east_asia}"/></a:rPr><a:t>中</a:t>"#
+                );
                 assert!(xml.contains(&original), "{xml}");
                 assert!(xml.contains(&appended), "{xml}");
             }

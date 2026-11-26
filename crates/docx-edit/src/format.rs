@@ -1961,7 +1961,8 @@ impl EditingDoc {
             end,
             key,
             style,
-        } in paragraphs {
+        } in paragraphs
+        {
             let attrs = paragraph_delta(delta, child, style.as_deref(), || {
                 clearing_attrs_in(&chunks, start, end)
             })?;

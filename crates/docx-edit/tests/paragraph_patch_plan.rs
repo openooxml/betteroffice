@@ -632,7 +632,11 @@ fn font_session(bytes: &[u8]) -> EditSessionCore {
     session
 }
 
-fn set_live_east_asian_font_hint(session: &EditSessionCore, len: u32, mut fonts: serde_json::Value) {
+fn set_live_east_asian_font_hint(
+    session: &EditSessionCore,
+    len: u32,
+    mut fonts: serde_json::Value,
+) {
     fonts["hint"] = json!("eastAsia");
     session
         .format_range(
