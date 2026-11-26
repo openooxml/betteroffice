@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::block::{BlockContent, story_block_elements};
 use crate::inline::{InlineNode, RunContent, parse_run};
@@ -240,7 +240,7 @@ fn project_paragraphs(
     source: &[(Vec<u32>, &XmlElement)],
     model: &[BlockContent],
     paragraphs: &[Option<SourceParagraph<'_>>],
-    removed: &[u32],
+    removed: &HashSet<u32>,
 ) -> Vec<Option<usize>> {
     let ordinal = unique(model.iter().map(|block| paragraph(block)?.source_ordinal));
     let ids = unique(
@@ -260,7 +260,7 @@ fn project_paragraphs(
             }
         })
     }).collect();
-    let mut used: BTreeSet<_> = matches.iter().flatten().copied().collect();
+    let mut used: HashSet<_> = matches.iter().flatten().copied().collect();
     if source.len() != model.len() {
         let source_text = unique(paragraphs.iter().map(|p| p.as_ref().map(|p| &p.text).filter(|text| !text.is_empty())));
         let texts: Vec<_> = model.iter().map(|block| paragraph(block).map(visible_text)).collect();
@@ -489,20 +489,35 @@ impl FieldSpans {
         let mut paragraphs: Vec<_> = source.iter().enumerate().map(|(index, (_, element))| {
             (element.name == "w:p").then(|| SourceParagraph::read(index, element))
         }).collect();
-        let matches = project_paragraphs(&source, model, &paragraphs, removed);
+        if !paragraphs.iter().flatten().any(|entry| {
+            matches!(entry.openings.as_slice(), [opening] if opening.direct && opening.separated)
+        }) {
+            return Self::default();
+        }
+        let removed: HashSet<_> = removed.iter().copied().collect();
+        let matches = project_paragraphs(&source, model, &paragraphs, &removed);
+        let mut following = vec![None; matches.len()];
+        let mut next = None;
+        for (index, &matched) in matches.iter().enumerate().rev() {
+            following[index] = next;
+            next = matched.or(next);
+        }
+        let model_groups: Vec<_> = model.iter().scan(0usize, |group, block| {
+            *group += usize::from(paragraph(block).is_none());
+            Some(*group)
+        }).collect();
         let mut plan = Self::default();
         let mut pending = None;
         for (end, entry) in paragraphs.iter_mut().enumerate() {
             let Some(entry) = entry else {
-                if !matches!(source[end].1.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd") {
-                    pending = None;
-                }
+                pending = None;
                 continue;
             };
             if !entry.closings.is_empty() {
                 if let (Some(opening), [Some(closing)]) = (pending.take(), entry.closings.as_slice()) {
                     let deleted = source[end].1.paragraph_ordinal.is_some_and(|id| removed.contains(&id));
-                    plan.pair(opening, closing, end, &entry.text, model, &matches, &source, deleted, &selected);
+                    let next = following[end].or_else(|| (end + 1 == matches.len()).then_some(model.len()));
+                    plan.pair(opening, closing, end, &entry.text, model, &matches, &source, deleted, next, &model_groups, &selected);
                 }
             }
             if !entry.openings.is_empty() {
@@ -529,6 +544,8 @@ impl FieldSpans {
         matches: &[Option<usize>],
         source: &[(Vec<u32>, &XmlElement)],
         deleted: bool,
+        next: Option<usize>,
+        model_groups: &[usize],
         selected: &impl Fn(usize, &Paragraph) -> bool,
     ) {
         let Some(owner) = matches[opening.block] else { return };
@@ -539,25 +556,27 @@ impl FieldSpans {
                     && [field.structured_code.as_ref(), field.structured_result.as_ref()]
                         .into_iter().flatten().any(|part| part.spans_paragraphs())))
         else { return };
-        let (target, removed) = match matches[end] {
-            Some(target) if target > owner => (target, false),
+        let (target_source, target, removed) = match matches[end] {
+            Some(target) if target > owner => (end, target, false),
             Some(_) => return,
             None if closing.standalone() => {
-                let Some(next) = matches[end + 1..].iter().flatten().next().copied()
-                    .or_else(|| (end + 1 == matches.len()).then_some(model.len()))
-                else { return };
-                let Some(target) = matches[opening.block..end].iter().flatten().copied().last()
-                    .filter(|&block| block >= owner && block < next)
+                let Some(next) = next else { return };
+                let Some((index, target)) = matches[opening.block..end].iter().enumerate().rev()
+                    .find_map(|(index, matched)| Some((opening.block + index, (*matched)?)))
+                    .filter(|&(_, block)| block >= owner && block < next)
                 else { return };
                 if (!deleted && target + 1 != next)
                     || matches[opening.block..end].iter().flatten().any(|&block| block > target)
                 {
                     return;
                 }
-                (target, true)
+                (index, target, true)
             }
             None => return,
         };
+        if model_groups[owner] != model_groups[target] {
+            return;
+        }
         let Some(closer) = paragraph(&model[target]) else { return };
         let writes_opener = selected(opening.block, opener);
         let writes_closer = selected(end, closer);
@@ -571,9 +590,7 @@ impl FieldSpans {
                 return;
             }
             entry.closing = Some(content);
-            if removed && let Some(ordinal) = closer.source_ordinal.or_else(|| {
-                matches.iter().position(|&block| block == Some(target)).and_then(|index| source[index].1.paragraph_ordinal)
-            }) {
+            if removed && let Some(ordinal) = closer.source_ordinal.or(source[target_source].1.paragraph_ordinal) {
                 self.carried.insert(ordinal);
             }
         }

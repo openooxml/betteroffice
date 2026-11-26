@@ -8,8 +8,8 @@ use crate::formatting::{
 };
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
-    MathEquation, Run, RunContent, SdtProperties, SimpleField, StructuredFieldContent,
-    field_run_digest, field_runs, inline_holds_field,
+    MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
+    inline_holds_field,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -49,6 +49,7 @@ pub fn serialize_paragraph(
 ) -> Result<String, ParseError> {
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let enclosing = std::mem::take(&mut context.direction);
+    let spanning = std::mem::take(&mut context.in_spanning_result);
     let plan = context.field_spans.paragraphs.get(&paragraph_key(paragraph)).cloned();
     let result = serialize_paragraph_inner(
         paragraph,
@@ -57,6 +58,7 @@ pub fn serialize_paragraph(
         context,
     );
     context.direction = enclosing;
+    context.in_spanning_result = spanning;
     context.leave_paragraph();
     result.map(
         |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
@@ -275,12 +277,11 @@ fn paragraph_content_zero_width(content: &ParagraphContent) -> bool {
     }
 }
 
-/// Whether a node is written inside a content control and inside a tracked change, which decides
-/// the children a hyperlink there writes.
 #[derive(Clone, Copy)]
 struct Within {
     control: bool,
     revision: bool,
+    spanning_result: bool,
 }
 
 impl Within {
@@ -288,6 +289,7 @@ impl Within {
         Self {
             control: context.in_control,
             revision: context.in_revision,
+            spanning_result: context.in_spanning_result,
         }
     }
 }
@@ -295,7 +297,7 @@ impl Within {
 /// Whether a hyperlink written `within` writes its child `child`.
 fn link_writes(child: &InlineNode, within: Within) -> bool {
     match child {
-        _ if within.control && within.revision => true,
+        _ if within.spanning_result || (within.control && within.revision) => true,
         InlineNode::Run(_)
         | InlineNode::BookmarkStart(_)
         | InlineNode::BookmarkEnd(_)
@@ -307,7 +309,7 @@ fn link_writes(child: &InlineNode, within: Within) -> bool {
 
 /// The children a hyperlink written `within` writes, in order.
 fn written_link_children(hyperlink: &Hyperlink, within: Within) -> Vec<&InlineNode> {
-    let expanded = within.control && within.revision;
+    let expanded = within.spanning_result || (within.control && within.revision);
     let nested = hyperlink.structured_children.as_ref().filter(|children| {
         expanded
             || children
@@ -950,10 +952,6 @@ fn serialize_complex_field_with_end(
     end_later: bool,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let writes_nodes = |part: &&StructuredFieldContent| {
-        !part.spans_paragraphs()
-            || (end_later && part.inline.as_deref().is_some_and(inline_holds_field))
-    };
     let shared = complex_field_direction_scopes(field);
     if let Some(source) = field.source_run_xml.as_deref()
         && !end_later
@@ -1005,7 +1003,7 @@ fn serialize_complex_field_with_end(
     let code_nodes = field
         .structured_code
         .as_ref()
-        .filter(writes_nodes)
+        .filter(|content| !content.spans_paragraphs())
         .and_then(|content| content.inline.as_deref())
         .filter(|nodes| nodes.iter().any(|node| !matches!(node, InlineNode::Run(_))));
     let in_place = code_nodes.filter(|nodes| {
@@ -1060,18 +1058,20 @@ fn serialize_complex_field_with_end(
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
-    let structured = field
-        .structured_result
-        .as_ref()
-        .filter(writes_nodes)
-        .and_then(|content| content.inline.as_ref());
-    if let Some(nodes) = structured {
-        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
-        for (index, node) in nodes.iter().enumerate() {
+    if let Some((nodes, spanning)) = written_field_result(field, end_later) {
+        let within = Within {
+            spanning_result: spanning || context.in_spanning_result,
+            ..Within::of(context)
+        };
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), within);
+        let previous = std::mem::replace(&mut context.in_spanning_result, within.spanning_result);
+        let result = nodes.iter().enumerate().try_for_each(|(index, node)| {
             upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
-        }
+            Ok::<_, ParseError>(())
+        });
+        context.in_spanning_result = previous;
+        result?;
     } else {
         let mut bookmarks = field_result_bookmarks(field).into_iter().peekable();
         for (index, run) in field.field_result.iter().enumerate() {
@@ -1099,6 +1099,28 @@ fn serialize_complex_field_with_end(
         output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
     }
     Ok(output)
+}
+
+fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[InlineNode], bool)> {
+    let part = field.structured_result.as_ref()?;
+    let nodes = part.inline.as_deref()?;
+    if !part.spans_paragraphs() {
+        return Some((nodes, false));
+    }
+    let runs = |node: &&InlineNode| matches!(node, InlineNode::Run(_));
+    (end_later
+        && nodes.iter().flat_map(field_runs).eq(&field.field_result)
+        && (field.field_type == "TOC" || !inline_holds_field(nodes))
+        && nodes.iter().all(|node| match node {
+            InlineNode::Hyperlink(link) => {
+                link.structured_children.as_ref().is_none_or(|children| {
+                    children.iter().filter(runs).eq(link.children.iter().filter(runs))
+                })
+            }
+            _ => true,
+        })
+        && !super::splice::spanning_result_has_unprojected_comments(nodes))
+    .then_some((nodes, true))
 }
 
 pub fn serialize_inline_sdt(

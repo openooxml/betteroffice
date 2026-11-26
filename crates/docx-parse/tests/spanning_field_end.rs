@@ -464,6 +464,49 @@ fn toc_ending_in_its_own_paragraph_saves() {
     assert_matrix("TB", TOC_EDITS);
 }
 
+#[test]
+fn spanning_results_keep_links_without_page_numbers() -> Result<(), Box<dyn Error>> {
+    let label = text_run("ENTRYONE");
+    let control = format!(
+        "<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt>",
+        text_run("Control")
+    );
+    let math = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#;
+    let simple = r#"<w:fldSimple w:instr="AUTHOR"><w:r><w:t>Author</w:t></w:r></w:fldSimple>"#;
+    for (code, suffix) in [
+        ("QUOTE", String::new()),
+        (r"TOC \h", String::new()),
+        (r"TOC \h", format!("{control}{math}{simple}")),
+    ] {
+        let entry = format!(r#"<w:hyperlink w:anchor="_Toc1">{label}{suffix}</w:hyperlink>"#);
+        let source = package(&[
+            paragraph(0, &(field_start(code) + &entry)),
+            paragraph(1, &field_char("end")),
+        ].concat())?;
+        for route in [
+            WriteRoute::Whole,
+            WriteRoute::SourceParagraphs,
+            WriteRoute::ChangedParaIds,
+        ] {
+            let saved = save(&source, Edit::Text("ENTRYONE"), route)?;
+            let xml = document_xml(&saved)?;
+            assert_eq!(inspect(&xml).fields[0].end, Some(1), "{xml}");
+            let link = xml
+                .split_once(r#"<w:hyperlink w:anchor="_Toc1">"#)
+                .unwrap()
+                .1;
+            let link = link.split_once("</w:hyperlink>").unwrap().0;
+            assert!(link.contains(">ENTRYONE edited<"), "{link}");
+            if !suffix.is_empty() {
+                for element in ["<w:sdt>", "<m:oMath", "<w:fldSimple"] {
+                    assert!(link.contains(element), "{link}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn assert_matrix(scenario: &str, edits: &[(&str, Edit)]) {
     for &(name, edit) in edits {
         let routes: &[_] = if matches!(edit, Edit::Paragraph(_)) {

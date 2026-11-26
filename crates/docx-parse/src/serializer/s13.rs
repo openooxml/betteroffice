@@ -502,8 +502,9 @@ pub fn write_docx_s13_parts_with_report(
                     &request.document.content,
                     &[],
                     |_, paragraph| {
-                        emitted_paragraph_id(paragraph)
-                            .is_some_and(|id| selective.changed_para_ids.iter().any(|changed| changed == id))
+                        emitted_paragraph_id(paragraph).is_some_and(|id| {
+                            changed.as_ref().is_some_and(|ids| ids.contains(id))
+                        })
                     },
                 );
                 context.begin_form_data_tokens(&original);
