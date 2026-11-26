@@ -13,7 +13,7 @@ import { createInProcessPair } from '../../../../shared/office-session/testing/i
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
 import { engineKind } from '../wasm/enginePng';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
-import { decodeFontFace, initWasm } from '../wasm/loader';
+import { decodeFontFace, initWasm, openPresentation } from '../wasm/loader';
 import { PptxDocument, PptxRenderer } from '../wasm/engine';
 import { defaultFontLayout, releaseDefaultFontLayout } from '../wasm/enginePngFonts';
 import type { SlideDisplayList } from '../types';
@@ -23,6 +23,7 @@ import { commandFontProvider } from './commandDefaultFonts';
 import { createPresentationSessionHost } from './host';
 import type { PresentationCommandClient, PresentationCommandOpenOptions } from './commandProtocol';
 import * as sessionWorker from './sessionWorker';
+import { createPptxWorkerRenderer } from './workerRender';
 
 // Match main's measured WASM PNG behavior with the optional pack absent.
 const EXPORT_WITH_ABSENT_PACK: 'draws' | 'font-unavailable' = 'draws';
@@ -120,7 +121,7 @@ afterEach(async () => {
   for (const restore of restorers.splice(0).reverse()) restore();
 });
 
-function stubPngCanvas(encoded: BlobPart = 'png') {
+function stubPngCanvas(encoded: BlobPart = 'png', installed?: (family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) => void) {
   const painted = mock((_text: string) => {});
   class Canvas {
     getContext() {
@@ -130,9 +131,13 @@ function stubPngCanvas(encoded: BlobPart = 'png') {
     }
     async convertToBlob() { return new Blob([encoded], { type: 'image/png' }); }
   }
-  class Face { async load() { return this; } }
+  class Face {
+    constructor(family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) { installed?.(family, bytes, descriptors); }
+    async load() { return this; }
+  }
   const globals = { document: undefined, OffscreenCanvas: Canvas, FontFace: Face, fonts: new Set(),
-    navigator: { userAgent: 'Chrome/149.0' } };
+    navigator: { userAgent: 'Chrome/149.0' },
+    ...(installed && { createImageBitmap: async () => { throw new Error('No slide images'); } }) };
   for (const [key, value] of Object.entries(globals)) {
     const previous = Object.getOwnPropertyDescriptor(globalThis, key);
     Object.defineProperty(globalThis, key, { configurable: true, value });
@@ -818,6 +823,48 @@ test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their P
   }
   expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, family);
 });
+
+for (const family of ['Arial', 'Simplified Arabic', 'Traditional Arabic', 'Noto Naskh Arabic', 'Noto Sans Arabic']) {
+  standaloneWasmTest(`${family} uses the same bold italic Arabic face in the editor and both PNG paths`, async () => {
+    const sans = family === 'Noto Sans Arabic';
+    const editorFamily = family === 'Arial' ? 'Noto Naskh Arabic' : family;
+    const face = fonts.resolveBundledFamilyFace(sans ? 'Noto Sans Arabic' : 'Noto Naskh Arabic', sans, false)!;
+    const expected = await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true });
+    const bytes = await deck([family], 'مرحبا', 'b="1" i="1"');
+    const descriptors = { weight: sans ? '700' : '400', style: 'normal' };
+    const editorFaces: { family: string; descriptors: FontFaceDescriptors }[] = [];
+    const pngFaces: FontFaceDescriptors[] = [];
+    const digest = (bytes: ArrayBuffer) => createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
+    const expectedDigest = digest(expected);
+    stubPngCanvas('png', (installedFamily, bytes, traits) => {
+      if (digest(bytes) !== expectedDigest) return;
+      if (installedFamily.startsWith('bo-pptx-png-')) pngFaces.push(traits);
+      else editorFaces.push({ family: installedFamily, descriptors: traits });
+    });
+    const port = new MessageChannel();
+    const renderer = createPptxWorkerRenderer(port.port1);
+    port.port1.onmessage!(new MessageEvent('message', { data: { kind: 'view', scale: 1, dpr: 1 } }));
+    const handle = openPresentation(bytes);
+    try {
+      const client = await createPresentationCommandClient(bytes, Object.assign({ ...options }, {
+        [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { renderer.defaultFonts(faces); },
+      }), connection().transport);
+      clients.push(client);
+      await client.renderPng!({ slide: 0 });
+      await handle.renderPng({ slide: 0 });
+      const editor = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+      const runs = editor.primitives.filter((primitive) => primitive.kind === 'textBox')
+        .flatMap((box) => box.lines.flatMap((line) => line.runs));
+      expect(runs).toContainEqual(expect.objectContaining({ fontFamily: editorFamily, bold: true, italic: true }));
+      expect(editorFaces).toEqual([{ family: editorFamily, descriptors }]);
+      expect(pngFaces).toEqual([descriptors, descriptors]);
+    } finally {
+      handle.dispose();
+      renderer.dispose();
+      port.port2.close();
+    }
+  });
+}
 
 test('wrong script face bytes keep the browser font', async () => {
   const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;

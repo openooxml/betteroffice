@@ -800,7 +800,7 @@ test('default font plumbing stays out of all package entries', async () => {
   }
 });
 
-test('Arabic in bold italic Arial installs the shared Naskh face once at the requested style', async () => {
+test('Arabic in bold italic Arial registers the shared regular Naskh face once', async () => {
   const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, (script, bold, italic) =>
     script === 'arabic' && !bold && !italic ? async () => arabic : undefined);
@@ -818,8 +818,8 @@ test('Arabic in bold italic Arial installs the shared Naskh face once at the req
       ['arabic', true, true, 'Arial'], ['arabic', false, false, 'Arial'],
       ['arabic', true, true, 'Unknown Family'], ['arabic', false, false, 'Unknown Family'],
     ]);
-    const style: DefaultFontLanding = { family: 'Noto Naskh Arabic', bold: true, italic: true, kind: 'coverage', ownWeight: true };
-    expect(results.flat()).toMatchObject([style]);
+    const style: DefaultFontLanding = { family: 'Noto Naskh Arabic', bold: false, italic: false, kind: 'coverage' };
+    expect(results.flat()).toEqual([style]);
     expect(install).toHaveBeenCalledTimes(1);
     expect(install.mock.calls[0][0]).toEqual([{ ...style, bytes: arabic }]);
     expect(register).toHaveBeenCalledTimes(1);
@@ -832,20 +832,7 @@ test('Arabic in bold italic Arial installs the shared Naskh face once at the req
 const preferredArabicStyles = ['Simplified Arabic', 'Traditional Arabic'].flatMap((family) =>
   [[true, false], [false, true], [true, true]].map(([bold, italic]): [string, boolean, boolean] => [family, bold, italic]));
 
-test('a named Noto Sans Arabic run keeps its own face in bold italic', async () => {
-  const sans = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Bold.ttf', import.meta.url))).buffer;
-  const source = provider(() => undefined, () => async () => sans);
-  source.resolveLastResort.mockReturnValue(async () => bytes);
-  const install = mock(async (faces: readonly DefaultFontFace[]) => faces);
-  const requested = { family: 'Noto Sans Arabic', bold: true, italic: true };
-  const manager = createCommandDefaultFonts([], () => [{ ...requested, scripts: ['arabic'] }], () => {}, () => {}, install);
-  try {
-    await manager.load();
-    expect(install).toHaveBeenCalledWith([{ ...requested, bytes: sans, ownWeight: true }]);
-  } finally { manager.dispose(); }
-});
-
-test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s, italic: %s)', async (family, bold, italic) => {
+test.each(preferredArabicStyles)('%s lets the browser synthesize missing styles (bold: %s, italic: %s)', async (family, bold, italic) => {
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const source = provider(() => undefined, () => async () => naskh);
   source.resolveLastResort.mockReturnValue(async () => bytes);
@@ -853,8 +840,8 @@ test.each(preferredArabicStyles)('%s uses the requested browser style (bold: %s,
   const primary = { family, bold, italic };
   const manager = createCommandDefaultFonts([], () => [{ ...primary, scripts: ['arabic'] }], () => {}, () => {}, install);
   try {
-    expect(await manager.load()).toContainEqual({ ...primary, ownWeight: true });
-    expect(install).toHaveBeenCalledWith([{ ...primary, bytes: naskh, ownWeight: true }]);
+    expect(await manager.load()).toContainEqual(primary);
+    expect(install).toHaveBeenCalledWith([{ ...primary, bytes: naskh, face: { bold: false, italic: false } }]);
   } finally { manager.dispose(); }
 });
 
