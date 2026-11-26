@@ -253,11 +253,11 @@ test('editor PNG exports use a private, range-limited copy of the same script fa
     allowScriptPaint.resolve();
     await png;
 
-    const scriptStyles = [
+    const loadedStyles = scriptLoads.mock.calls.map(([{ family, weight, style }]) => [family, weight, style] as const);
+    const scriptStyles: typeof loadedStyles = [
       ['Noto Sans Arabic', 700, 'normal'], ['Noto Sans Hebrew', 400, 'normal'],
       ['Noto Sans Thai', 400, 'normal'], ['Noto Sans Thai', 700, 'normal'],
     ];
-    const loadedStyles = scriptLoads.mock.calls.map(([{ family, weight, style }]) => [family, weight, style]);
     expect(loadedStyles.slice(0, scriptStyles.length).sort()).toEqual(scriptStyles);
     expect(loadedStyles.slice(scriptStyles.length).sort()).toEqual(scriptStyles);
     const released = remove.mock.calls.map(([face]) => face);
