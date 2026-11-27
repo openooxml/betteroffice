@@ -1077,6 +1077,21 @@ fn styled_document(body: &str) -> Vec<u8> {
     ]).unwrap()
 }
 
+/// Each paragraph of `story` with whether the edits recorded the splices applied to it and
+/// whether they left it unproven.
+fn proven(doc: &EditingDoc, story: &str) -> Vec<(String, bool, bool)> {
+    let proof = doc.provenance_snapshot();
+    doc.paragraphs(story)
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| {
+            let key = paragraph.para_id;
+            let (recorded, unproven) = (proof.has_records(&key), proof.unproven(&key));
+            (key, recorded, unproven)
+        })
+        .collect()
+}
+
 #[test]
 fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
     use crate::Position;
@@ -1134,6 +1149,7 @@ fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
         json!({"language": {"lang": "de-DE", "eastAsia": null}}),
         json!({"highlight": "yellow", "bold": null}),
     ];
+    let mut from_records = 0;
     for story in ["body", cell.as_str()] {
         // Typing reaches a story through a paragraph and an offset in it, so up to the last
         // paragraph mark, never past it.
@@ -1205,6 +1221,16 @@ fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
                         let place =
                             format!("{story} {start}..{end} {text:?} {delta:?} indexed={indexed}");
                         assert_eq!(marked, typed, "{place}");
+                        let state = proven(actual.doc(), story);
+                        assert_eq!(state, proven(expected.doc(), story), "{place}");
+                        if state.iter().any(|(_, recorded, _)| *recorded) {
+                            from_records += 1;
+                        }
+                        assert_eq!(
+                            actual.doc().paragraph_save_plan_from_records(),
+                            expected.doc().paragraph_save_plan_from_records(),
+                            "{place}"
+                        );
                         for story in [story, "body"] {
                             assert_eq!(
                                 actual.doc().story_segments(story).unwrap(),
@@ -1217,6 +1243,10 @@ fn typing_with_caret_marks_leaves_what_typing_then_formatting_leaves() {
             }
         }
     }
+    assert!(
+        from_records > 0,
+        "typing with marks records the splices it applied"
+    );
     // Typed bold, the key stays plain in the paragraph format_range keeps and turns bold in
     // the next one.
     let bold = parse_inline_format_delta(json!({"bold": true}).as_object().unwrap()).unwrap();
