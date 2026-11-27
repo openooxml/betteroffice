@@ -589,7 +589,9 @@ fn is_plain(content: &RunContent) -> bool {
 }
 
 fn hyperlink_children(link: &Hyperlink) -> &[InlineNode] {
-    link.structured_children.as_deref().unwrap_or(&link.children)
+    link.structured_children
+        .as_deref()
+        .unwrap_or(&link.children)
 }
 
 fn has_tracked_content(content: &[InlineNode]) -> bool {
@@ -1089,7 +1091,9 @@ mod tests {
     fn restores_run_boundaries_with_nested_null_mark_fields() {
         let boundary = OriginalBoundary {
             text: "A".to_owned(),
-            marks_key: Some(r#"underline:{"style":"single","color":{"rgb":"FF0000","theme":null}}"#.to_owned()),
+            marks_key: Some(
+                r#"underline:{"style":"single","color":{"rgb":"FF0000","theme":null}}"#.to_owned(),
+            ),
             formatting: None,
             breaks: None,
             note_marks: None,

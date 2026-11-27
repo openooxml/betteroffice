@@ -762,7 +762,8 @@ impl StoryRevisions {
                                         && !story_is_removed(txn, story)
                                 });
                                 if live {
-                                    let members = self.live_projection_roots
+                                    let members = self
+                                        .live_projection_roots
                                         .entry(root.to_owned())
                                         .or_default();
                                     if members.is_empty() {

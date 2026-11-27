@@ -702,7 +702,9 @@ fn root_id(id: &str) -> bool {
 
 fn validate_root(id: &str) -> Result<(), ProjectionError> {
     if !root_id(id) {
-        return Err(ProjectionError::InvalidInput(format!("{id} is not a root story")));
+        return Err(ProjectionError::InvalidInput(format!(
+            "{id} is not a root story"
+        )));
     }
     Ok(())
 }
@@ -885,7 +887,9 @@ impl EditingDoc {
             let source = cache.source(self)?;
             for (id, members) in &self.story_revisions.lock().unwrap().live_projection_roots {
                 if members.contains(id.as_str())
-                    && !input.host.replaces_auxiliary(source.roots().get(id).copied(), id)
+                    && !input
+                        .host
+                        .replaces_auxiliary(source.roots().get(id).copied(), id)
                 {
                     roots
                         .entry(id.clone())
@@ -901,7 +905,12 @@ impl EditingDoc {
                 projections.insert(id, projection);
             }
         }
-        assemble_stories(&mut document, &projections, &aliases, input.host.sections.is_some())?;
+        assemble_stories(
+            &mut document,
+            &projections,
+            &aliases,
+            input.host.sections.is_some(),
+        )?;
         let mut side_tables = StoryProjection::default();
         for projection in projections.values() {
             side_tables.append_side_tables(projection);
@@ -936,8 +945,11 @@ impl EditingDoc {
         let mut override_blocks = None;
         let mut retained = false;
         if id != "body" {
-            let candidates = std::iter::once(id)
-                .chain(group.iter().flat_map(|ids| ids[1..].iter().map(String::as_str)));
+            let candidates = std::iter::once(id).chain(
+                group
+                    .iter()
+                    .flat_map(|ids| ids[1..].iter().map(String::as_str)),
+            );
             for candidate in candidates {
                 let root = source.roots().get(candidate).copied();
                 override_blocks = input.host.auxiliary_blocks(candidate, root);
@@ -954,7 +966,9 @@ impl EditingDoc {
             && override_blocks.is_none()
             && (crate::story_text(&txn, id).is_none()
                 || (id != "body"
-                    && input.host.replaces_auxiliary(source.roots().get(id).copied(), id)))
+                    && input
+                        .host
+                        .replaces_auxiliary(source.roots().get(id).copied(), id)))
         {
             return Err(ProjectionError::StoryRead {
                 story_id: story_id.to_owned(),
@@ -1172,8 +1186,9 @@ fn projection_input_json(input_json: &str) -> Result<ProjectionInput, Projection
                     key == "type" && matches!(value, OrderedValue::String(kind) if kind == "rawXml")
                 });
                 if raw_xml {
-                    entries
-                        .retain(|(key, _)| matches!(key.as_str(), "type" | "xml" | "sourceOrdinal"));
+                    entries.retain(|(key, _)| {
+                        matches!(key.as_str(), "type" | "xml" | "sourceOrdinal")
+                    });
                 }
                 pending.extend(entries.iter_mut().map(|(_, child)| (child, depth + 1)));
             }
@@ -1201,9 +1216,13 @@ fn assemble_stories(
     }
     if override_sections {
         let len = package.document.content.len();
-        if package.document.sections.iter().flatten().any(|section| {
-            section.content_start > section.content_end || section.content_end > len
-        }) {
+        if package
+            .document
+            .sections
+            .iter()
+            .flatten()
+            .any(|section| section.content_start > section.content_end || section.content_end > len)
+        {
             return Err(ProjectionError::InvalidInput(
                 "host.sections has an invalid content range".to_owned(),
             ));
@@ -1239,24 +1258,50 @@ fn auxiliary_roots(
     package: &S9PackageWire,
 ) -> impl Iterator<Item = (String, SourceRoot, &[BlockContent])> {
     let furniture = [
-        (&package.header_entries, SourceRoot::Header as fn(usize) -> SourceRoot),
-        (&package.footer_entries, SourceRoot::Footer as fn(usize) -> SourceRoot),
+        (
+            &package.header_entries,
+            SourceRoot::Header as fn(usize) -> SourceRoot,
+        ),
+        (
+            &package.footer_entries,
+            SourceRoot::Footer as fn(usize) -> SourceRoot,
+        ),
     ]
     .into_iter()
     .flat_map(|(entries, kind)| {
-        entries.iter().flatten().enumerate().map(move |(index, (id, part))| {
-            (format!("hf:{id}"), kind(index), part.content.as_slice())
-        })
+        entries
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(move |(index, (id, part))| {
+                (format!("hf:{id}"), kind(index), part.content.as_slice())
+            })
     });
     let notes = [
-        ("fn", &package.footnotes, SourceRoot::Footnote as fn(usize) -> SourceRoot),
-        ("en", &package.endnotes, SourceRoot::Endnote as fn(usize) -> SourceRoot),
+        (
+            "fn",
+            &package.footnotes,
+            SourceRoot::Footnote as fn(usize) -> SourceRoot,
+        ),
+        (
+            "en",
+            &package.endnotes,
+            SourceRoot::Endnote as fn(usize) -> SourceRoot,
+        ),
     ]
     .into_iter()
     .flat_map(|(prefix, entries, kind)| {
-        entries.iter().flatten().enumerate().map(move |(index, note)| {
-            (format!("{prefix}:{}", note.id), kind(index), note.content.as_slice())
-        })
+        entries
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(move |(index, note)| {
+                (
+                    format!("{prefix}:{}", note.id),
+                    kind(index),
+                    note.content.as_slice(),
+                )
+            })
     });
     furniture.chain(notes)
 }
@@ -1360,7 +1405,10 @@ fn apply_host_metadata(document: &mut S9DocumentWire, host: &ProjectionHostMetad
         package.document.sections.clone_from(sections);
     }
     if let Some(properties) = &host.final_section_properties {
-        package.document.final_section_properties.clone_from(properties);
+        package
+            .document
+            .final_section_properties
+            .clone_from(properties);
     }
 }
 
@@ -1394,9 +1442,11 @@ mod tests {
             })
             .unwrap();
         assert!(output.document.package.header_entries.is_some());
-        assert!(output.deferred.iter().any(|entry| {
-            entry.story_id == "hf:header" && entry.kind == "headerFooterStory"
-        }));
+        assert!(
+            output.deferred.iter().any(|entry| {
+                entry.story_id == "hf:header" && entry.kind == "headerFooterStory"
+            })
+        );
     }
 
     #[test]
@@ -1409,10 +1459,19 @@ mod tests {
             ..ProjectionInput::default()
         };
         let full = doc.project_document(&ProjectionInput::default()).unwrap();
-        assert!(full.deferred.iter().any(|entry| entry.story_id == "hf:extra"));
+        assert!(
+            full.deferred
+                .iter()
+                .any(|entry| entry.story_id == "hf:extra")
+        );
         doc.delete_story("hf:extra").unwrap();
         let partial = doc.project_document(&input).unwrap();
-        assert!(!partial.deferred.iter().any(|entry| entry.story_id == "hf:extra"));
+        assert!(
+            !partial
+                .deferred
+                .iter()
+                .any(|entry| entry.story_id == "hf:extra")
+        );
     }
 
     #[test]
@@ -1423,16 +1482,22 @@ mod tests {
             .unwrap();
         let wire: Value = serde_json::from_str(&wire).unwrap();
         assert!(wire["document"]["package"].get("headerEntries").is_none());
-        assert!(!wire["deferred"].as_array().unwrap().iter().any(|entry| {
-            entry["storyId"] == "hf:header"
-        }));
+        assert!(
+            !wire["deferred"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["storyId"] == "hf:header" })
+        );
     }
 
     #[test]
     fn rejects_unsupported_host_media_urls() {
         let doc = seeded_header();
         let error = doc
-            .project_document_json(r#"{"host":{"mediaUrls":{"media:0":"data:image/png;base64,AA=="}}}"#)
+            .project_document_json(
+                r#"{"host":{"mediaUrls":{"media:0":"data:image/png;base64,AA=="}}}"#,
+            )
             .unwrap_err();
         assert!(matches!(
             error,
@@ -1520,9 +1585,13 @@ mod tests {
     fn projects_valid_comment_anchors_beside_malformed_ones() {
         let doc = seeded_header();
         let input = ProjectionInput::default();
-        assert!(!doc.project_story("body", &input).unwrap().deferred.iter().any(|entry| {
-            entry.kind == "commentRanges"
-        }));
+        assert!(
+            !doc.project_story("body", &input)
+                .unwrap()
+                .deferred
+                .iter()
+                .any(|entry| { entry.kind == "commentRanges" })
+        );
         {
             let mut txn = doc.doc.transact_mut();
             let body = crate::story_text(&txn, "body").unwrap();
@@ -1531,11 +1600,19 @@ mod tests {
             let anchor = crate::anchor_value("body", &start, &end);
             let comments = txn.get_map(crate::COMMENTS).unwrap();
             let comment = comments.insert(&mut txn, "live", MapPrelim::default());
-            comment.insert(&mut txn, "anchors", Any::Array(Arc::from([anchor, Any::Null])));
+            comment.insert(
+                &mut txn,
+                "anchors",
+                Any::Array(Arc::from([anchor, Any::Null])),
+            );
         }
-        assert!(doc.project_story("body", &input).unwrap().deferred.iter().any(|entry| {
-            entry.kind == "commentRanges"
-        }));
+        assert!(
+            doc.project_story("body", &input)
+                .unwrap()
+                .deferred
+                .iter()
+                .any(|entry| { entry.kind == "commentRanges" })
+        );
     }
 
     #[test]
