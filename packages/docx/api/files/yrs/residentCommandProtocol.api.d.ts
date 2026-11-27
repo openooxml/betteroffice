@@ -182,14 +182,42 @@ export interface DocxEchoDamageDependency {
     /** The echoed line's runs and decorations, which the background leaves out. */
     omittedPrimitiveIds: readonly string[];
 }
+/** @internal One face of an echoed line that mixes fonts. */
+export interface DocxEchoGlyphFace {
+    /** Key of the glyph set this face's characters shape with. */
+    glyphSet: string;
+    fontId: number;
+    /** Face measurement takes line metrics from for these characters; see `DocxEchoGlyphLine.faces`. */
+    metrics: number;
+}
 /**
  * @internal The echoed line as the engine places it: one cluster per character, shaped through
  * one glyph set, at pen positions `round3(x + sum of advances)`.
  */
 export interface DocxEchoGlyphLine {
-    /** Key of the glyph set the line shapes with. */
+    /** Key of the glyph set the line shapes with (the first face's, when the line mixes fonts). */
     glyphSet: string;
     fontId: number;
+    /**
+     * The faces of a line whose characters take more than one font, or that resolve typed
+     * characters through the engine's font routing. The line keeps its height only while it holds
+     * exactly the line metrics faces it had; each character advances by its own face's glyph set.
+     */
+    faces?: readonly DocxEchoGlyphFace[];
+    /** Index into `faces` of each code point of the context text. */
+    charFaces?: readonly number[];
+    /** Index into `faces` of `next`, where it takes one of the line's faces (and may shape with the last character). */
+    nextFace?: number;
+    /** Characters typing may add, by the index into `faces` of the face each one takes. */
+    typed?: readonly string[];
+    /** UTF-16 span of the context text in the run typing goes into; typing elsewhere declines. */
+    typedRun?: readonly [start: number, end: number];
+    /** Extra advance after every character, in px as measurement adds it (an f32). */
+    letterSpacing?: number;
+    /** The f32 font size in px the glyph sets shape at, which auto-spacing sizes its gaps with. */
+    shapingSize?: number;
+    /** East Asian auto-spacing the paragraph turns off: bit 1 against Latin letters, bit 2 against digits. */
+    autoSpaceOff?: number;
     size: number;
     color: string;
     x: number;
@@ -208,10 +236,28 @@ export interface DocxEchoGlyphLine {
     /** Repainted region in device pixels, and the scale pages raster at. */
     device: DocxEchoRect;
     pixelRatio: number;
+    /** The table cell clip the engine paints the line's text inside, in page px, as its clip group names it. */
+    clip?: {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+    };
 }
 /** @internal Shaping facts of one font at one size, indexed by `alphabet`; see `echo_glyph_set_json`. */
 export interface DocxEchoGlyphSet {
     key: string;
+    /**
+     * The set this one grows: `alphabet` continues its alphabet, `kerning` and `unsafePairs` are
+     * the pairs the new characters add, and `outlines` the glyphs it lacked. The receiver drops a
+     * set whose base it does not hold.
+     */
+    extends?: string;
+    /**
+     * The set this whole one was built in place of, for the same font, size, kerning and language:
+     * the receiver drops it once no installed context names it.
+     */
+    replaces?: string;
     fontId: number;
     alphabet: string;
     horizontal: number;

@@ -11,7 +11,9 @@ use skrifa::raw::TableProvider;
 use skrifa::raw::tables::os2::SelectionFlags;
 use skrifa::{FontRef, MetadataProvider};
 
-use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics, runs_at_own_widths};
+use crate::family_metrics::{
+    FamilyMetrics, family_advance, family_cluster_advance, family_metrics, runs_at_own_widths,
+};
 use crate::shape::ShapedGlyph;
 
 const MAX_SHAPE_CACHE_ENTRIES: usize = 4_096;
@@ -864,6 +866,29 @@ impl FontStore {
         first.map_or(id, |(index, _)| FontId(index as u32))
     }
 
+    /// Whether `a` and `b` shape `ch` alike: one font's bytes at one horizontal pitch,
+    /// giving `ch` the same width from whichever named width table each carries. Views of one
+    /// face that differ only in line metrics, such as a substitute for another family that
+    /// measurement reaches through a second `w:rFonts` slot, shape and paint it the same.
+    pub fn shapes_alike(&self, a: FontId, b: FontId, ch: char) -> bool {
+        if a == b {
+            return true;
+        }
+        let (Ok(first), Ok(second)) = (self.entry(a), self.entry(b)) else {
+            return false;
+        };
+        let cluster = ch.to_string();
+        let width = |entry: &FontEntry| {
+            entry
+                .widths
+                .and_then(|widths| family_cluster_advance(widths, &cluster))
+        };
+        // a view keeps the em of the bytes it views
+        self.byte_owner(a).ok() == self.byte_owner(b).ok()
+            && first.advance_scale == second.advance_scale
+            && width(first) == width(second)
+    }
+
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
     /// rejected bytes skrifa accepted.
     pub(crate) fn shaping_face(
@@ -1361,6 +1386,44 @@ mod tests {
         assert_eq!(store.canonical_face(other), other);
         let unknown = FontId::from_u32(u32::MAX);
         assert_eq!(store.canonical_face(unknown), unknown);
+    }
+
+    #[test]
+    fn views_of_one_face_shape_alike_where_only_line_metrics_differ() {
+        let mut store = FontStore::new();
+        let owner = store.register_slice(LIBERATION_SANS).unwrap();
+        let units_per_em = store.metrics(owner).unwrap().units_per_em;
+        let requested = |advance_scale| RequestedLineMetrics {
+            units_per_em,
+            hhea_ascender: 1900,
+            hhea_descender: -600,
+            hhea_line_gap: 0,
+            east_asian: true,
+            advance_scale,
+        };
+        let taller = store.register_substitute(owner, requested(1.0)).unwrap();
+        let wider = store.register_substitute(owner, requested(1.1)).unwrap();
+        assert!(store.metrics(taller).unwrap() != store.metrics(owner).unwrap());
+        assert!(store.shapes_alike(owner, owner, 'a'));
+        assert!(store.shapes_alike(owner, taller, 'a') && store.shapes_alike(taller, owner, 'a'));
+        assert!(!store.shapes_alike(owner, wider, 'a'));
+        // a named width table moves the characters it lists, and no others
+        let mincho = store.register_named_substitute(owner, "MS Mincho").unwrap();
+        let widths = store
+            .family_widths(mincho)
+            .unwrap()
+            .expect("MS Mincho widths");
+        assert!(family_cluster_advance(widths, "a").is_some());
+        assert!(family_cluster_advance(widths, "가").is_none());
+        assert_eq!(store.advance_scale(mincho).unwrap(), 1.0);
+        assert!(!store.shapes_alike(owner, mincho, 'a'));
+        assert!(store.shapes_alike(owner, mincho, '가'));
+        // another font's bytes, or no font, never shape alike
+        let mut padded = LIBERATION_SANS.to_vec();
+        padded.push(0);
+        let other = store.register(padded).unwrap();
+        assert!(!store.shapes_alike(owner, other, 'a'));
+        assert!(!store.shapes_alike(owner, FontId::from_u32(u32::MAX), 'a'));
     }
 
     #[test]

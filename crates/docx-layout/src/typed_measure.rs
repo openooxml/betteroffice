@@ -163,7 +163,7 @@ fn finite(value: f64) -> Option<f32> {
     value.is_finite().then_some(value as f32)
 }
 
-fn defaults_in(defaults: &Value) -> Option<DefaultsIn> {
+pub(crate) fn defaults_in(defaults: &Value) -> Option<DefaultsIn> {
     DefaultsIn::deserialize(defaults).ok()
 }
 
@@ -271,6 +271,11 @@ fn run_in(run: &Run) -> Option<RunIn> {
         }
         Run::Unsupported => Some(bare_run("unsupported")),
     }
+}
+
+/// A text run of formatting `fmt` as measurement reads it.
+pub(crate) fn measured_text_run(fmt: &RunFormatting) -> RunIn {
+    formatted_run("text", fmt)
 }
 
 fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {

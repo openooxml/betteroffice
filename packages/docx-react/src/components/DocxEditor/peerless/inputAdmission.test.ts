@@ -226,6 +226,32 @@ test('covered fences re-enable echo with unacked text', async () => {
   h.admission.dispose();
 });
 
+test('text sent without echo keeps later text from echoing until a context covers it', async () => {
+  const h = lane();
+  const preview = h.echoPainter.preview;
+  // the painter cannot draw 'x' (it would wrap, say)
+  h.echoPainter.preview = (intent) =>
+    'text' in intent.payload && intent.payload.text === 'x' ? undefined : preview(intent);
+  const insert = (text: string) => admitIntent(h.admission, { kind: 'insertText', payload: { text } });
+  expect(insert('a')).toMatchObject({ echoEnabled: true });
+  expect(insert('x')).toMatchObject({ echoEnabled: false });
+  // a frame through 'a' brings a context that lacks the pending 'x'; 'b' is then sent without echo too
+  h.present(1);
+  expect(insert('b')).toMatchObject({ echoEnabled: false });
+  h.present(2);
+  expect(insert('c')).toMatchObject({ echoEnabled: false });
+  // echo comes back once a context holds everything sent without it
+  h.present(4);
+  expect(insert('d')).toMatchObject({ echoEnabled: true });
+  // text that does not apply leaves nothing for a context to cover
+  expect(insert('x')).toMatchObject({ echoEnabled: false });
+  const refused = h.submitted.at(-1)!;
+  refused.settle({ status: 'refused', seq: refused.ticket.seq, reason: 'invalid-selection' });
+  await refused.ticket.ack;
+  expect(insert('e')).toMatchObject({ echoEnabled: true });
+  h.admission.dispose();
+});
+
 test('a throwing post-fence submission preserves echo for acknowledged text', async () => {
   const h = lane();
   admitIntent(h.admission, { kind: 'navigate', payload: { unit: 'character', direction: 'forward', extend: false } });

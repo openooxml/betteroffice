@@ -178,6 +178,9 @@ struct PlainWorkerMeasurement {
 
 #[derive(Debug)]
 struct ResidentRegionState {
+    /// The measurement configuration of `request_json`, which the typing echo resolves the
+    /// faces of typed characters through.
+    measurement: Rc<docx_layout::measure_blocks::MeasurementConfig>,
     request_json: String,
     /// [`layout_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
@@ -2887,12 +2890,74 @@ fn windowed_full_build_pages(
     )
 }
 
+/// The display position of `offset` in the paragraph `para_id`, in table cells too. The body's
+/// own blocks come first: a caret in a long, table-heavy body would otherwise walk every cell of
+/// the tables before its paragraph on each key.
 fn resident_paragraph_position(input: &LayoutInput, para_id: &str, offset: u32) -> Option<i64> {
-    let start = input.measured.iter().find_map(|measured| {
-        let (id, start) = paragraph_identity(&measured.block)?;
+    fn own(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+        let (id, start) = paragraph_identity(block)?;
         (block_key(id) == para_id).then_some(start?)
-    })?;
+    }
+    fn in_cells(block: &LayoutBlock, para_id: &str) -> Option<f64> {
+        let LayoutBlock::Table(table) = block else {
+            return None;
+        };
+        table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.blocks)
+            .find_map(|nested| {
+                #[cfg(test)]
+                CELL_BLOCKS_WALKED.with(|walked| walked.set(walked.get() + 1));
+                own(nested, para_id).or_else(|| in_cells(nested, para_id))
+            })
+    }
+    let start = input
+        .measured
+        .iter()
+        .find_map(|measured| own(&measured.block, para_id))
+        .or_else(|| {
+            input
+                .measured
+                .iter()
+                .find_map(|measured| in_cells(&measured.block, para_id))
+        })?;
     paragraph_offset_position(start, offset)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Table cell blocks the resident caret looked through for its paragraph.
+    static CELL_BLOCKS_WALKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `story` is the body or a table cell in it, however deeply nested
+/// (`body:t0:r1c2:t0:r0c0`), a cell an edit minted with its client suffix too (`body:t0:r0c1~1`):
+/// the stories whose paragraphs take the body's display positions.
+pub(crate) fn body_or_body_cell_story(story: &str) -> bool {
+    fn number(rest: &str) -> Option<&str> {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (digits > 0).then(|| &rest[digits..])
+    }
+    let Some(mut rest) = story.strip_prefix("body") else {
+        return false;
+    };
+    while !rest.is_empty() {
+        for tag in [":t", ":r", "c"] {
+            let Some(after) = rest.strip_prefix(tag).and_then(number) else {
+                return false;
+            };
+            rest = after;
+        }
+        if let Some(client) = rest.strip_prefix('~') {
+            let Some(after) = number(client) else {
+                return false;
+            };
+            rest = after;
+        }
+    }
+    true
 }
 
 /// The display positions every block lowered from the paragraph `para_id` spans,
@@ -8597,7 +8662,9 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measurement = Rc::new(measurement);
         self.regions.replace(Some(ResidentRegionState {
+            measurement: Rc::clone(&measurement),
             request_json: input_json,
             request_fingerprint,
             region_request_fingerprint: None,
@@ -8608,7 +8675,7 @@ impl EngineSession {
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
-                measurement: Rc::new(measurement),
+                measurement,
                 measurement_fingerprint,
                 fonts,
                 regional,
@@ -9192,7 +9259,9 @@ impl EngineSession {
             measured_font_dependencies,
             resident_body.then_some(&measurement.font_chains),
         );
+        let measurement = Rc::new(measurement);
         self.regions.replace(Some(ResidentRegionState {
+            measurement: Rc::clone(&measurement),
             request_json: input_json,
             request_fingerprint,
             region_request_fingerprint,
@@ -9203,7 +9272,7 @@ impl EngineSession {
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
-                measurement: Rc::new(measurement),
+                measurement,
                 measurement_fingerprint,
                 fonts,
                 regional,
@@ -12496,6 +12565,124 @@ impl EngineSession {
             &mut || {},
         )
         .map(|(resident, list)| (list, resident.unreadable().to_vec()))
+    }
+
+    /// The faces the typing echo needs for the line from display position `line_start` to
+    /// `line_end` of the paragraph whose laid-out text run holds `position` (a glyph's
+    /// `docStart`, table cells included), as [`docx_layout::echo_character_faces`] gives them:
+    /// `faces` for each character of `alphabet` typed into that run, with the run's display
+    /// positions (`run`) and shaping languages, and `line` for each character the paragraph's
+    /// text runs hold from `line_start` to `line_end`, in their own runs (`null` for a position
+    /// no text run holds): `{"faces":[[display,measured,metrics,eastAsian],…],"line":[…],
+    /// "run":[start,end],"latin":…,"eastAsia":…}`.
+    /// `None` before a region pass or where no text run holds `position`.
+    pub fn echo_faces_json(
+        &self,
+        position: f64,
+        alphabet: &str,
+        line_start: f64,
+        line_end: f64,
+    ) -> Option<String> {
+        fn paragraph(
+            block: &LayoutBlock,
+            position: f64,
+        ) -> Option<&docx_layout::types::ParagraphBlock> {
+            match block {
+                LayoutBlock::Table(table) => table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .flat_map(|cell| &cell.blocks)
+                    .find_map(|nested| paragraph(nested, position)),
+                LayoutBlock::Paragraph(paragraph)
+                    if paragraph.runs.iter().any(|run| holds(run, position)) =>
+                {
+                    Some(paragraph)
+                }
+                _ => None,
+            }
+        }
+        fn holds(run: &docx_layout::types::Run, position: f64) -> bool {
+            matches!(run, docx_layout::types::Run::Text(text)
+                if text.pm_start.is_some_and(|start| start <= position)
+                    && text.pm_end.is_some_and(|end| position < end))
+        }
+        let measurement = Rc::clone(&self.regions.borrow().as_ref()?.measurement);
+        let pagination = self.pagination.borrow();
+        let paragraph = pagination
+            .input
+            .as_ref()?
+            .measured
+            .iter()
+            .find_map(|measured| paragraph(&measured.block, position))?;
+        let display = self.display.borrow();
+        let chains = display.resident_input.as_ref()?.font_chains();
+        let span = (line_end - line_start).max(0.0);
+        if !span.is_finite() || span > f64::from(u16::MAX) {
+            return None;
+        }
+        let mut line = vec![None; span as usize];
+        let mut typed = None;
+        docx_layout::with_measure_fonts_ref(|store| {
+            for run in &paragraph.runs {
+                let docx_layout::types::Run::Text(text) = run else {
+                    continue;
+                };
+                let Some(start) = text.pm_start else { continue };
+                if holds(run, position) {
+                    typed = Some((
+                        docx_layout::echo_character_faces(
+                            store,
+                            chains,
+                            &measurement,
+                            &text.fmt,
+                            alphabet,
+                        ),
+                        text.fmt.language.as_ref(),
+                        [start, text.pm_end.unwrap_or(start)],
+                    ));
+                }
+                // text runs hold one position per UTF-16 unit
+                let mut at = start;
+                let chars: String = text
+                    .text
+                    .chars()
+                    .filter(|ch| {
+                        let inside = at >= line_start && at < line_end;
+                        at += ch.len_utf16() as f64;
+                        inside
+                    })
+                    .collect();
+                if chars.is_empty() {
+                    continue;
+                }
+                let faces = docx_layout::echo_character_faces(
+                    store,
+                    chains,
+                    &measurement,
+                    &text.fmt,
+                    &chars,
+                );
+                let mut at = start.max(line_start);
+                for (ch, face) in chars.chars().zip(faces) {
+                    if let Some(slot) = line.get_mut((at - line_start) as usize) {
+                        *slot = Some(face);
+                    }
+                    at += ch.len_utf16() as f64;
+                }
+            }
+        });
+        let (faces, language, typed_run) = typed?;
+        Some(
+            serde_json::json!({
+                "faces": faces,
+                "line": line,
+                "run": typed_run,
+                "latin": language.and_then(|language| language.latin.as_deref()),
+                "eastAsia": language.and_then(|language| language.east_asia.as_deref()),
+            })
+            .to_string(),
+        )
     }
 
     pub fn resident_caret_snapshot(
@@ -28902,6 +29089,352 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             ("word/document.xml".to_owned(), document.into_bytes()),
         ])
         .expect("zip the fixture")
+    }
+
+    #[test]
+    fn body_cell_stories_are_the_body_and_its_table_cells_however_nested() {
+        for story in [
+            "body",
+            "body:t0:r1c2",
+            "body:t0:r0c0:t3:r12c4",
+            "body:t0:r0c1~1",
+            "body:t0:r1c0~12:t0:r0c0~12",
+        ] {
+            assert!(body_or_body_cell_story(story), "{story}");
+        }
+        for story in [
+            "",
+            "bodyx",
+            "body:",
+            "body:t0",
+            "body:t0:r1",
+            "body:t0:r1c",
+            "body:tx:r0c0",
+            "body:t0:r0c0:sdt1",
+            "body~1",
+            "body:t0~1:r0c0",
+            "body:t0:r0c0~",
+            "body:t0:r0c0~x",
+            "body:t0:r0c0~1~2",
+            "fn:1:t0:r0c0",
+            "header1:t0:r0c0",
+        ] {
+            assert!(!body_or_body_cell_story(story), "{story}");
+        }
+    }
+
+    #[test]
+    fn the_resident_caret_finds_a_paragraph_in_a_table_cell() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
+        let body = r#"<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>ABCDE</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
+        let engine = EngineSession::new(9492);
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", body)).unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 600, "h": 800},
+                "margins": {"top": 40, "right": 40, "bottom": 40, "left": 40,
+                    "header": 10, "footer": 10}
+            }]},
+            "renderEnv": {}
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([latin]),
+                )
+            })
+            .collect();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+            "authoritativeShaping": true,
+        });
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        engine
+            .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
+            .unwrap();
+        let (para_id, before, after) = {
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            let cell = measured
+                .iter()
+                .find_map(|measured| match &measured.block {
+                    LayoutBlock::Table(table) => {
+                        paragraph_identity(&table.rows[0].cells[0].blocks[0])
+                            .map(|(id, _)| block_key(id).into_owned())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let id = |block: &LayoutBlock| {
+                paragraph_identity(block).map(|(id, _)| block_key(id).into_owned())
+            };
+            let after = id(&measured.last().unwrap().block).unwrap();
+            (cell, id(&measured[0].block).unwrap(), after)
+        };
+        // how many table cell blocks the caret looked through
+        let caret = |para_id: &str, offset| {
+            let walked = CELL_BLOCKS_WALKED.with(std::cell::Cell::get);
+            let rect = engine
+                .resident_caret_snapshot(Some((para_id, offset)))
+                .unwrap()
+                .caret_rect
+                .expect("a caret rect");
+            (rect, CELL_BLOCKS_WALKED.with(std::cell::Cell::get) - walked)
+        };
+        let ((start, walked), (inside, _)) = (caret(&para_id, 0), caret(&para_id, 2));
+        let ((above, above_walked), (below, below_walked)) = (caret(&before, 0), caret(&after, 0));
+        assert_eq!((start.page_index, inside.page_index), (0, 0));
+        assert_eq!(inside.y, start.y);
+        assert!(inside.x > start.x + 1.0, "{} after {}", inside.x, start.x);
+        assert!(
+            start.y > above.y && below.y > start.y,
+            "the cell line {} sits between the body lines {} and {}",
+            start.y,
+            above.y,
+            below.y
+        );
+        assert!(walked > 0);
+        // a body paragraph past a table does not look through its cells
+        assert_eq!((above_walked, below_walked), (0, 0));
+    }
+
+    #[test]
+    fn echo_faces_name_the_face_each_painted_glyph_run_was_drawn_with() {
+        const NOTO_KR: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/NotoSansKR-Subset.otf");
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let latin = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
+        let hangul = docx_layout::register_measure_font_bytes(NOTO_KR).unwrap();
+        // a substitute for Dotum: the Hangul face with Dotum's line metrics, at its own pitch
+        let dotum = docx_layout::register_substitute_measure_font_id(hangul, "돋움").unwrap();
+        assert_ne!(dotum, hangul);
+        let run = |properties: &str, text: &str| {
+            format!(
+                r#"<w:p><w:r><w:rPr>{properties}</w:rPr><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let korean = r#"<w:rFonts w:eastAsia="Noto Sans KR"/>"#;
+        let cell = run(
+            &format!(r#"{korean}<w:spacing w:val="-4"/>"#),
+            "Cell 표 시간",
+        );
+        let body = [
+            run(korean, "Hello 가나다 world"),
+            run(
+                r#"<w:rFonts w:ascii="Noto Sans KR" w:hAnsi="Noto Sans KR" w:eastAsia="Noto Sans KR"/>"#,
+                "한국 Korea",
+            ),
+            format!(
+                r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>{cell}</w:tc></w:tr></w:tbl>"#
+            ),
+            run(&format!("<w:b/>{korean}"), "강 Bold"),
+            // the measured East Asian chain cannot draw Hangul; the display chain falls back
+            run(r#"<w:rFonts w:eastAsia="Latin Only"/>"#, "Plain 문"),
+            // measured through the Dotum view, drawn with the face it views
+            run(r#"<w:rFonts w:eastAsia="돋움"/>"#, "Wide 가"),
+            r#"<w:p><w:pPr><w:autoSpaceDE w:val="0"/></w:pPr><w:r><w:t>Off</w:t></w:r></w:p>"#
+                .to_owned(),
+        ]
+        .concat();
+        // run languages reach layout through styles; a run's own w:lang is not seeded
+        let bytes = docx_bytes(
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:rPr><w:lang w:val="en-US" w:eastAsia="ko-KR"/></w:rPr></w:style>"#,
+            &body,
+        );
+        let engine = EngineSession::new(9491);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 600, "h": 800},
+                "margins": {"top": 40, "right": 40, "bottom": 40, "left": 40,
+                    "header": 10, "footer": 10}
+            }]},
+            "renderEnv": {}
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                let key = requirement["key"].as_str().unwrap();
+                // bold Liberation Sans draws with the Hangul face, which also covers ASCII
+                let chain = match key {
+                    "liberation sans|1|0" => json!([hangul, latin]),
+                    _ if key.starts_with("noto sans kr|") => json!([hangul, latin]),
+                    _ if key.starts_with("latin only|") => json!([latin]),
+                    _ if key.starts_with("돋움|") => json!([dotum, latin]),
+                    _ => json!([latin, hangul]),
+                };
+                (key.to_owned(), chain)
+            })
+            .collect();
+        assert!(
+            chains.contains_key("latin only|0|0")
+                && chains.contains_key("liberation sans|1|0")
+                && chains.contains_key("돋움|0|0"),
+            "{chains:?}"
+        );
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+            "authoritativeShaping": true,
+        });
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        engine
+            .build_display_list_frame(&json!({"fontChains": chains}).to_string(), 0)
+            .unwrap();
+        let mut auto_space_off = Vec::new();
+        let runs: Vec<(String, u32, i64, bool)> = engine
+            .with_display_list(|list| {
+                list.pages
+                    .iter()
+                    .flat_map(|page| &page.primitives)
+                    .filter_map(|primitive| match primitive {
+                        docx_layout::display_list::Primitive::GlyphRun(run) => {
+                            auto_space_off
+                                .push((run.text.clone(), run.echo.as_ref()?.auto_space_off));
+                            Some((
+                                run.text.clone(),
+                                run.font_id,
+                                run.attrs.doc_start?,
+                                run.attrs.cell.is_some(),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap();
+        // the echo spaces East Asian text against Latin letters only where the paragraph does
+        let off: Vec<_> = auto_space_off
+            .iter()
+            .filter(|(_, bits)| *bits != 0)
+            .collect();
+        assert_eq!(
+            off.iter()
+                .map(|(text, bits)| (text.as_str(), *bits))
+                .collect::<Vec<_>>(),
+            [("O", 1), ("f", 1), ("f", 1)]
+        );
+        let mut seen = String::new();
+        let mut differing = 0;
+        let mut viewed = 0;
+        for (text, font, start, in_cell) in &runs {
+            let end = *start as f64 + text.encode_utf16().count() as f64;
+            let answer: serde_json::Value = serde_json::from_str(
+                &engine
+                    .echo_faces_json(*start as f64, text, *start as f64, end)
+                    .unwrap(),
+            )
+            .unwrap();
+            let faces = answer["faces"].as_array().unwrap();
+            assert_eq!(faces.len(), text.chars().count(), "{text:?}");
+            // a run's own characters have the faces they would take typed into it
+            assert_eq!(&answer["line"], &answer["faces"], "{text:?}");
+            for (ch, face) in text.chars().zip(faces) {
+                assert_eq!(face[0], json!(font), "display face of {ch:?} in {text:?}");
+                // the view shapes as the face it views, so it is named by it; its line metrics stay
+                if face[2] == json!(dotum) {
+                    viewed += 1;
+                    assert_eq!(
+                        (ch, face),
+                        ('가', &json!([hangul, hangul, dotum, 1])),
+                        "{text:?}"
+                    );
+                }
+                assert!(
+                    face[1].is_u64() && face[2].is_u64(),
+                    "{ch:?} in {text:?}: {face}"
+                );
+                if face[0] != face[1] {
+                    differing += 1;
+                    assert_eq!(
+                        (ch, face[1].clone()),
+                        ('문', json!(latin)),
+                        "only the Latin Only run's Hangul measures with another face"
+                    );
+                }
+            }
+            // letter spacing places the cell's line cluster by cluster, one run per character
+            if *in_cell {
+                assert!("Cell 표 시간".contains(text.as_str()), "{text:?}");
+            }
+            seen.push_str(text);
+        }
+        assert_eq!((differing, viewed), (1, 1));
+        for expected in [
+            "Hello",
+            "가나다",
+            "한국",
+            "Korea",
+            "표",
+            "시간",
+            "강",
+            "Bold",
+            "문",
+        ] {
+            assert!(
+                seen.contains(expected),
+                "{expected} was not painted as glyphs"
+            );
+        }
+        assert!(runs.iter().any(|(_, _, _, in_cell)| *in_cell));
+        assert!(
+            runs.iter()
+                .any(|(text, font, ..)| text == "B" && *font == hangul),
+            "bold Latin draws through the bold chain"
+        );
+        let hello = runs
+            .iter()
+            .find(|(text, ..)| text.starts_with('H'))
+            .unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &engine
+                .echo_faces_json(hello.2 as f64, "a가", hello.2 as f64, hello.2 as f64 + 17.0)
+                .unwrap(),
+        )
+        .unwrap();
+        // the whole first paragraph, then two positions past its mark
+        let line = first["line"].as_array().unwrap();
+        assert_eq!(line.len(), 17);
+        assert!(line[..15].iter().all(serde_json::Value::is_array));
+        assert!(line[15..].iter().all(serde_json::Value::is_null));
+        assert_eq!(line[6], json!([hangul, hangul, hangul, 1]));
+        assert_eq!(line[5], json!([latin, latin, latin, 0]));
+        assert_eq!(first["run"], json!([hello.2 as f64, hello.2 as f64 + 15.0]));
+        assert_eq!(
+            (&first["latin"], &first["eastAsia"]),
+            (&json!("en-US"), &json!("ko-KR"))
+        );
+        assert_eq!(
+            first["faces"],
+            json!([[latin, latin, latin, 0], [hangul, hangul, hangul, 1]]),
+            "typed Hangul measures, and takes line metrics, from the East Asian chain"
+        );
+        assert!(engine.echo_faces_json(-1.0, "a", 0.0, 1.0).is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import type { EchoEntry } from '../../../../../../shared/office-session/commands/types';
 import { drawGlyphRunPrimitive, GlyphCache, type GlyphRunPrimitive } from '@betteroffice/docx/layout/render';
 import {
-  indexEchoGlyphSet, leadingWordWidth, placeEchoLine, type EchoGlyphIndex,
+  indexEchoGlyphSet, leadingWordWidth, placeEchoFaceGlyphs, placeEchoLine, type EchoGlyphIndex,
 } from '@betteroffice/docx/worker';
 import type {
   DocxCommandEchoContext,
@@ -14,8 +14,10 @@ import { releaseBitmap, retainBitmap } from './bitmapOwnership';
 import { decodeCommandFrameDeltas } from './frameDeltas';
 import type { PeerlessTextIntent } from './inputEvents';
 
-type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache };
-type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoLine>>; cache: GlyphCache };
+type GlyphSetEntry = { glyphs: EchoGlyphIndex; cache: GlyphCache; set: DocxEchoGlyphSet };
+type EchoLayout = { placement: NonNullable<ReturnType<typeof placeEchoLine>>; cache: GlyphCache;
+  /** Face of each placed glyph and each face's set, for a line that mixes fonts. */
+  faces?: { charFaces: readonly number[]; sets: readonly GlyphSetEntry[] } };
 
 /** @internal Display-only drafts retain counts of original admissions after merging. */
 export interface PeerlessEchoIntent {
@@ -69,16 +71,32 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   let paintedRect: { x: number; y: number; width: number; height: number } | undefined;
   let draft: EchoDraft | undefined;
   let baseline: { context: DocxCommandEchoContext; set: GlyphSetEntry; end: number } | undefined;
-  let prepared: { context: DocxCommandEchoContext; set: GlyphSetEntry; text: string; value: EchoLayout } | undefined;
+  let prepared: { context: DocxCommandEchoContext; set: GlyphSetEntry; text: string; faces: string; value: EchoLayout } | undefined;
+  /** The line metrics faces the context's line holds, which an edit must keep for the line height to hold. */
+  let lineMetrics: string | undefined;
   let coverage = -1;
   const owner = {};
   const glyphSets = new Map<string, GlyphSetEntry>();
+  /** Sets a grown or rebuilt set replaced, kept until no installed context names them. */
+  const superseded = new Set<string>();
   const requested = new Set<string>();
 
   function receiveGlyphSets(sets: readonly DocxEchoGlyphSet[] | undefined): void {
-    for (const set of sets ?? []) {
-      glyphSets.set(set.key, { glyphs: indexEchoGlyphSet(set), cache: new GlyphCache({ provider: (fontId, glyphId) => {
-        const outline = fontId === set.fontId ? set.outlines[glyphId] : undefined;
+    for (const incoming of sets ?? []) {
+      let set: DocxEchoGlyphSet = incoming;
+      if (incoming.extends !== undefined) {
+        const base = glyphSets.get(incoming.extends)?.set;
+        // without the set it grows, a context naming it asks for the whole set again
+        if (!base) continue;
+        const { extends: grown, ...rest } = incoming;
+        set = { ...rest, kerning: [...base.kerning, ...incoming.kerning],
+          unsafePairs: [...base.unsafePairs, ...incoming.unsafePairs], outlines: { ...base.outlines, ...incoming.outlines } };
+        superseded.add(grown);
+      }
+      if (incoming.replaces !== undefined && incoming.replaces !== incoming.key) superseded.add(incoming.replaces);
+      const outlines = set.outlines;
+      glyphSets.set(set.key, { set, glyphs: indexEchoGlyphSet(set), cache: new GlyphCache({ provider: (fontId, glyphId) => {
+        const outline = fontId === set.fontId ? outlines[glyphId] : undefined;
         if (outline === undefined) throw new Error('Echo glyph outline is unavailable');
         return outline;
       } }) });
@@ -115,39 +133,76 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       rect: { x, y: template.y, width: template.width, height: template.height } };
   }
 
-  function contextGlyphSet(next: DocxCommandEchoContext) {
-    const key = next.glyphs?.glyphSet;
-    if (key === undefined) return undefined;
-    const set = glyphSets.get(key);
-    if (!set && !requested.has(key)) {
-      requested.add(key);
-      options.requestFullFrame?.();
+  /** The glyph set of each face the context's line draws with; undefined until every one arrived. */
+  function contextGlyphSets(next: DocxCommandEchoContext): GlyphSetEntry[] | undefined {
+    const line = next.glyphs;
+    if (!line) return undefined;
+    const sets: GlyphSetEntry[] = [];
+    for (const key of line.faces?.map((face) => face.glyphSet) ?? [line.glyphSet]) {
+      const set = glyphSets.get(key);
+      if (!set && !requested.has(key)) {
+        requested.add(key);
+        options.requestFullFrame?.();
+      }
+      if (!set) return undefined;
+      sets.push(set);
     }
-    return set;
+    return sets;
+  }
+
+  function contextGlyphSet(next: DocxCommandEchoContext) {
+    return contextGlyphSets(next)?.[0];
+  }
+
+  /** Places `text` whose code points take `faces` on the context's line. */
+  function place(next: DocxCommandEchoContext, sets: readonly GlyphSetEntry[], text: string, faces: readonly number[] | undefined) {
+    const line = next.glyphs!;
+    if (!line.faces) return placeEchoLine(sets[0]!.glyphs, text, line.next, line.x, line.center);
+    if (!faces || line.shapingSize === undefined) return undefined;
+    return placeEchoFaceGlyphs({ sets: sets.map((set) => set.glyphs), charFaces: faces,
+      ...(line.nextFace === undefined ? {} : { nextFace: line.nextFace }),
+      ...(line.letterSpacing === undefined ? {} : { letterSpacing: line.letterSpacing }),
+      ...(line.autoSpaceOff === undefined ? {} : { autoSpaceOff: line.autoSpaceOff }),
+      size: line.shapingSize }, text, line.next, line.x);
   }
 
   function currentEnd(next: DocxCommandEchoContext, set: GlyphSetEntry): number | undefined {
     if (baseline?.context === next && baseline.set === set) return baseline.end;
-    const line = next.glyphs;
-    const placement = line && placeEchoLine(set.glyphs, next.text, line.next, line.x, line.center);
+    const sets = contextGlyphSets(next);
+    const placement = next.glyphs && sets && place(next, sets, next.text, next.glyphs.charFaces);
     if (!placement) return undefined;
     baseline = { context: next, set, end: placement.end };
     return placement.end;
   }
 
-  /** The draft line exactly as the engine will place it, or undefined when that cannot be known here. */
-  function layout(text: string): EchoLayout | undefined {
+  function metricsOf(faces: readonly number[]): string | undefined {
     const line = context?.glyphs;
-    const set = context && contextGlyphSet(context);
-    if (!context || !line || !set) return undefined;
+    if (!line?.faces) return undefined;
+    return [...new Set(faces.map((face) => line.faces![face]!.metrics))].sort((a, b) => a - b).join(',');
+  }
+
+  /** The draft line exactly as the engine will place it, or undefined when that cannot be known here. */
+  function layout(text: string, faces?: readonly number[]): EchoLayout | undefined {
+    const line = context?.glyphs;
+    const sets = context && contextGlyphSets(context);
+    const set = sets?.[0];
+    if (!context || !line || !sets || !set) return undefined;
     if (!text && line.canEmpty === false) return undefined;
     if (line.center !== undefined && text.endsWith(' ')) return undefined;
     // the first glyph of a continuation line shapes and kerns with the end of the line above
     if (line.previousSlack !== undefined && text[0] !== context.text[0]) return undefined;
+    // a line wrapped inside a word rewraps as the word grows or shrinks; one wrapped between East
+    // Asian characters keeps its break only while its last character stays (a break after it may not be)
     if (line.next && (text.match(/ *$/)?.[0] !== context.text.match(/ *$/)?.[0] ||
-      !text.endsWith(' ') && !line.next.startsWith(' '))) return undefined;
-    if (prepared?.context === context && prepared.set === set && prepared.text === text) return prepared.value;
-    const placement = placeEchoLine(set.glyphs, text, line.next, line.x, line.center);
+      !text.endsWith(' ') && !line.next.startsWith(' ') &&
+      (/^[A-Za-z0-9]/.test(line.next) || [...text].at(-1) !== [...context.text].at(-1)))) return undefined;
+    // the line keeps its height only while it holds the line metrics faces it had
+    if (line.faces && (!faces || metricsOf(faces) !== lineMetrics)) return undefined;
+    const faceKey = faces?.join(',') ?? '';
+    if (prepared?.context === context && prepared.set === set && prepared.text === text && prepared.faces === faceKey) {
+      return prepared.value;
+    }
+    const placement = place(context, sets, text, faces);
     const current = currentEnd(context, set);
     if (!placement || current === undefined) return undefined;
     if (placement.end > current && placement.end > line.right - 1) return undefined;
@@ -156,9 +211,14 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     if (ink > line.right - 1) return undefined;
     if (placement.end < current && line.nextWord !== undefined && line.nextWord <= line.right - placement.end + 1) return undefined;
     if (line.previousSlack !== undefined && leadingWordWidth(text, placement.advances) <= line.previousSlack + 1) return undefined;
-    try { for (const id of placement.glyphIds) set.cache.get(line.fontId, id); } catch { return undefined; }
-    const value = { placement, cache: set.cache };
-    prepared = { context, set, text, value };
+    try {
+      placement.glyphIds.forEach((id, index) => {
+        const face = faces?.[index] ?? 0;
+        sets[face]!.cache.get(line.faces?.[face]?.fontId ?? line.fontId, id);
+      });
+    } catch { return undefined; }
+    const value: EchoLayout = { placement, cache: set.cache, ...(line.faces && faces ? { faces: { charFaces: faces, sets } } : {}) };
+    prepared = { context, set, text, faces: faceKey, value };
     return value;
   }
 
@@ -216,6 +276,13 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
     baseline = undefined;
     prepared = undefined;
     draft = next ? contextDraft(next) : undefined;
+    lineMetrics = draft?.faces ? metricsOf(draft.faces) : undefined;
+    const named = new Set(next?.glyphs?.faces?.map((face) => face.glyphSet) ?? [next?.glyphs?.glyphSet]);
+    for (const key of superseded) {
+      if (named.has(key)) continue;
+      glyphSets.delete(key);
+      superseded.delete(key);
+    }
     disabled = !next || next.shaping !== 'simple-ltr' || next.serializedBytes > 16 * 1024 ||
       echoEncoder.encode(JSON.stringify(next)).byteLength > 16 * 1024 || !contextGlyphSet(next);
     originalIntents = 0;
@@ -272,8 +339,8 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       disable('unsupported');
       return undefined;
     }
-    const next = draft && applyIntent(draft, intent);
-    if (!next || !layout(next.text)) {
+    const next = draft && applyIntent(draft, intent, context.glyphs);
+    if (!next || !layout(next.text, next.faces)) {
       disable('unsupported');
       return undefined;
     }
@@ -305,13 +372,13 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak' || entry.value.contextFrameEpoch > context.frameEpoch) {
         disable('unsupported'); return;
       }
-      const next = applyIntent(draft, intent);
+      const next = applyIntent(draft, intent, context.glyphs);
       if (!next) { disable('unsupported'); return; }
       draft = next;
       if (echoEncoder.encode(draft.text).byteLength > 16 * 1024) { disable('context-cap'); return; }
     }
     const line = context.glyphs;
-    const placed = line && layout(draft.text);
+    const placed = line && layout(draft.text, draft.faces);
     const damage = context.damage[0];
     if (!line || !placed || !damage || context.damage.length !== 1) { disable('unsupported'); return; }
     if (!restoreBackground(context.page, damage.backgroundId, damage.rect)) {
@@ -327,11 +394,24 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
       ctx.rect(line.device.x, line.device.y, line.device.width, line.device.height);
       ctx.clip();
       ctx.setTransform(line.pixelRatio, 0, 0, line.pixelRatio, 0, 0);
-      if (glyphs.glyphIds.length) {
-        const run: GlyphRunPrimitive = { kind: 'glyphRun', fontId: line.fontId, size: line.size, color: line.color,
-          text: draft.text, glyphs: glyphs.glyphIds.map((id, index) => ({ id, x: glyphs.xs[index]!, y: line.y,
-            cluster: 0, advance: glyphs.advances[index]! })) };
-        drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.cache });
+      // a table cell's text paints inside its clip, as the page raster clips it
+      if (line.clip) {
+        ctx.beginPath();
+        ctx.rect(line.clip.x, line.clip.y, line.clip.w, line.clip.h);
+        ctx.clip();
+      }
+      const chars = [...draft.text];
+      // one run per stretch of characters that take one face
+      for (let from = 0; from < glyphs.glyphIds.length;) {
+        const face = placed.faces?.charFaces[from] ?? 0;
+        let to = from + 1;
+        while (to < glyphs.glyphIds.length && (placed.faces?.charFaces[to] ?? 0) === face) to += 1;
+        const run: GlyphRunPrimitive = { kind: 'glyphRun', fontId: line.faces?.[face]?.fontId ?? line.fontId,
+          size: line.size, color: line.color, text: chars.slice(from, to).join(''),
+          glyphs: glyphs.glyphIds.slice(from, to).map((id, index) => ({ id, x: glyphs.xs[from + index]!, y: line.y,
+            cluster: 0, advance: glyphs.advances[from + index]! })) };
+        drawGlyphRunPrimitive(ctx, run, { glyphCache: placed.faces?.sets[face]?.cache ?? placed.cache });
+        from = to;
       }
     } finally { ctx.restore(); }
     const predicted = predictedCaret(pending, placed);
@@ -403,25 +483,40 @@ export function createEchoPainter(options: PeerlessEchoPainterOptions): Peerless
   };
 }
 
-type EchoDraft = { text: string; anchor: number; focus: number };
+/**
+ * The text a pending edit leaves on the echoed line. On a line that mixes fonts, `faces` holds each
+ * code point's face and `own` whether it sits in the run typing goes into (typed characters do).
+ */
+type EchoDraft = { text: string; anchor: number; focus: number; faces?: number[]; own?: boolean[] };
 
 function contextDraft(context: DocxCommandEchoContext): EchoDraft | undefined {
   const anchor = context.boundaries.find((boundary) => boundary.grapheme === context.selection.anchorGrapheme)?.utf16;
   const focus = context.boundaries.find((boundary) => boundary.grapheme === context.selection.focusGrapheme)?.utf16;
-  return anchor === undefined || focus === undefined ? undefined : { text: context.text, anchor, focus };
+  if (anchor === undefined || focus === undefined) return undefined;
+  const line = context.glyphs;
+  if (!line?.faces) return { text: context.text, anchor, focus };
+  const faces = line.charFaces ? [...line.charFaces] : [];
+  if (faces.length !== [...context.text].length) return undefined;
+  const own: boolean[] = [];
+  let utf16 = 0;
+  for (const point of context.text) {
+    own.push(line.typedRun !== undefined && utf16 >= line.typedRun[0] && utf16 < line.typedRun[1]);
+    utf16 += point.length;
+  }
+  return { text: context.text, anchor, focus, faces, own };
 }
 
-function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent): EchoDraft | undefined {
+function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent, line?: DocxCommandEchoContext['glyphs']): EchoDraft | undefined {
   if (intent.kind === 'paragraphBreak' || intent.kind === 'lineBreak') return undefined;
   let start = Math.min(draft.anchor, draft.focus);
   let end = Math.max(draft.anchor, draft.focus);
   let replacement = '';
+  const boundaries = [0];
+  for (const point of draft.text) boundaries.push(boundaries[boundaries.length - 1]! + point.length);
   if (intent.kind === 'insertText' || intent.kind === 'replaceSelection') {
     replacement = intent.payload.text;
     if (!simpleText(replacement)) return undefined;
   } else if (start === end) {
-    const boundaries = [0];
-    for (const point of draft.text) boundaries.push(boundaries[boundaries.length - 1]! + point.length);
     const index = boundaries.indexOf(start);
     const count = intent.payload.count ?? 1;
     if (index < 0 || !Number.isSafeInteger(count) || count < 0) return undefined;
@@ -434,7 +529,22 @@ function applyIntent(draft: EchoDraft, intent: PeerlessTextIntent): EchoDraft | 
     }
   }
   const text = draft.text.slice(0, start) + replacement + draft.text.slice(end);
-  return { text, anchor: start + replacement.length, focus: start + replacement.length };
+  const next: EchoDraft = { text, anchor: start + replacement.length, focus: start + replacement.length };
+  if (!draft.faces || !draft.own) return next;
+  // typed characters take the faces the engine routes them to in the run left of the caret
+  const from = boundaries.indexOf(start);
+  const to = boundaries.indexOf(end);
+  if (from < 0 || to < 0) return undefined;
+  const faces: number[] = [];
+  for (const char of replacement) {
+    const face = line?.typed?.findIndex((chars) => chars.includes(char)) ?? -1;
+    if (face < 0) return undefined;
+    faces.push(face);
+  }
+  if (faces.length && (from === 0 || !draft.own[from - 1])) return undefined;
+  next.faces = [...draft.faces.slice(0, from), ...faces, ...draft.faces.slice(to)];
+  next.own = [...draft.own.slice(0, from), ...faces.map(() => true), ...draft.own.slice(to)];
+  return next;
 }
 
 function simpleText(text: string): boolean {

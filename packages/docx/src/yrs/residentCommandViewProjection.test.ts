@@ -88,6 +88,27 @@ test('d2c_projection_reads_only_the_active_paragraph_and_caret_page', () => {
   expect(reads).toEqual([{ story: 'body', paraIds: ['p'], view: 'accepted' }]);
 });
 
+test('projection reads a paragraph of a body table cell, one an edit minted with its client suffix too', () => {
+  const read = (story: string) => {
+    const source = input();
+    const reads: unknown[] = [];
+    const readParagraphs = source.engine.proposalEngine.readParagraphs;
+    source.engine.proposalEngine.readParagraphs = (request) => {
+      reads.push(request);
+      return readParagraphs(request);
+    };
+    const at = { story, paraId: 'p', offset: 3 };
+    projectCommandEchoContext({ ...source, selection: { anchor: at, focus: at } });
+    return reads;
+  };
+  for (const story of ['body:t0:r0c1', 'body:t0:r0c1~1', 'body:t0:r1c0~12:t0:r0c0~12']) {
+    expect(read(story)).toEqual([{ story, paraIds: ['p'], view: 'accepted' }]);
+  }
+  for (const story of ['body:t0:r0c1~', 'body:t0:r0c1~x', 'body~1', 'header1:t0:r0c0', 'body:t0:r0c0:sdt1']) {
+    expect(read(story)).toEqual([]);
+  }
+});
+
 test('d2c_projection_reads_the_active_paragraph_from_its_segments_when_the_engine_has_them', () => {
   const source = input();
   const reads: unknown[] = [];
@@ -203,7 +224,9 @@ test('projection echoes a cluster-positioned line as one style run within the co
 });
 
 type GlyphLineOptions = { shiftX?: number; caretLine?: number; later?: DisplayPage['primitives'];
-  x?: number; advance?: number; kerned?: boolean; kerning?: number; right?: number; lines?: string[] };
+  x?: number; advance?: number; kerned?: boolean; kerning?: number; right?: number; lines?: string[];
+  /** Paint before the paragraph's runs, as a cell border or a list marker comes. */
+  under?: DisplayPage['primitives'] };
 
 function glyphLine(options: GlyphLineOptions = {}) {
   const lines = options.lines ?? ['ab ', 'cd'];
@@ -225,7 +248,7 @@ function glyphLine(options: GlyphLineOptions = {}) {
       doc += 1;
     });
   });
-  const primitives = [...runs, ...(options.later ?? [])];
+  const primitives = [...(options.under ?? []), ...runs, ...(options.later ?? [])];
   const page: DisplayPage = { pageIndex: 0, width: 816, height: 1056, primitives,
     contentBounds: { x: 96, y: 96, width: options.right === undefined ? 624 : options.right - 96, height: 864 } };
   const frame: RetainedFrame = { protocolVersion: 1, docEpoch: 1, layoutEpoch: 1, frameEpoch: 3,
@@ -271,8 +294,8 @@ test('glyph line reproduces the engine placement of a wrapped continuation line'
   const context = projectCommandEchoContext(source);
   expect(source.sets).toEqual([[1, Math.fround(960 / 72), false]]);
   expect(context?.glyphs).toEqual({ glyphSet: 'set', fontId: 1, size: 13.333, color: '#000000', x: 96, y: 140,
-    next: '', right: 720, previousSlack: 594, device: { x: 95, y: 129, width: 626, height: 15 }, pixelRatio: 1 });
-  expect(context?.damage[0]?.rect).toEqual({ x: 95, y: 129, width: 626, height: 15 });
+    next: '', right: 720, previousSlack: 594, device: { x: 95, y: 129, width: 625, height: 15 }, pixelRatio: 1 });
+  expect(context?.damage[0]?.rect).toEqual({ x: 95, y: 129, width: 625, height: 15 });
   expect(context?.damage[0]?.omittedPrimitiveIds).toEqual(['4', '5']);
   const first = projectCommandEchoContext(glyphLine({ caretLine: 0 }));
   expect(first?.glyphs).toMatchObject({ next: 'c', nextWord: 20, y: 120 });
@@ -489,6 +512,82 @@ test('a justified closing line counts the space the line breaker may squeeze out
   const slack = projectCommandEchoContext(source)?.glyphs?.previousSlack;
   expect(slack).toBeDefined();
   expect(30).toBeLessThanOrEqual(slack! + 1);
+});
+
+test('the echo band ends at the last pixel the line can ink, or past it where a glyph inks further', () => {
+  // typed glyphs advance to the right edge less a pixel, so the band ends with pixel 719
+  expect(projectCommandEchoContext(glyphLine())?.glyphs?.device).toEqual({ x: 95, y: 129, width: 625, height: 15 });
+  const ink = (xMax: number) => ({ upem: 1000, xMin: 0, xMax, yMin: -200, yMax: 700 });
+  const reaching = glyphLine();
+  // 'd' at 106 inks 46.8 em-thousandths of 13.333 px further, to 729.98
+  reaching.glyphs.glyphInk = (_, id) => id === 'd'.charCodeAt(0) ? ink(46_800) : ink(500);
+  expect(projectCommandEchoContext(reaching)?.glyphs?.device).toEqual({ x: 95, y: 129, width: 635, height: 15 });
+  // on a line ending at 116.8, 'd' advances to 116, past the 115.8 typed glyphs reach: a glyph whose
+  // ink is unknown may ink there, and one without ink inks nowhere
+  const short = (inkOfD: ReturnType<typeof ink> | null | undefined) => {
+    const source = glyphLine({ right: 116.8 });
+    source.glyphs.glyphInk = (_, id) => id === 'd'.charCodeAt(0) ? inkOfD : ink(500);
+    return projectCommandEchoContext(source)?.glyphs?.device.width;
+  };
+  expect(short(ink(500))).toBe(21);
+  expect(short(null)).toBe(21);
+  expect(short(undefined)).toBe(22);
+});
+
+test('echo declines a rule or fill under its band whose edge covers only part of a pixel there', () => {
+  // the band is x 95 to 720 and y 129 to 144; its background is rastered apart from the page
+  const rule = (x: number, y: number, w: number, h: number) => ({ kind: 'rect' as const, x, y, w, h, fill: '#000000' });
+  const echoes = (under: DisplayPage['primitives']) => projectCommandEchoContext(glyphLine({ under }))?.glyphs !== undefined;
+  expect(echoes([rule(300, 130, 20, 2)])).toBe(true);
+  expect(echoes([rule(300.5, 130, 20, 2)])).toBe(false);
+  expect(echoes([rule(300, 130, 20.5, 2)])).toBe(false);
+  expect(echoes([rule(300, 130.25, 20, 2)])).toBe(false);
+  expect(echoes([rule(300, 130, 20, 2.5)])).toBe(false);
+  // fractional edges outside the band, or on a rule clear of it, raster alike
+  expect(echoes([rule(80.5, 100.5, 700, 100)])).toBe(true);
+  expect(echoes([rule(300.5, 150, 20, 2)])).toBe(true);
+  expect(echoes([rule(300.5, 120.5, 20, 8.5)])).toBe(true);
+});
+
+test("echo types a list paragraph's first line beside its marker, which stays put", () => {
+  const marker = (x: number, y = 120) => ({ kind: 'glyphRun' as const, text: '•', size: 13.333, fontId: 1,
+    color: '#000000', listMarker: true, fallbackFont: '400 13.333px Calibri, sans-serif',
+    echo: { x: 96, right: 720, kern: false, primaryFont: true },
+    glyphs: [{ id: 8226, cluster: 0, x, y, advance: 10 }] });
+  expect(projectCommandEchoContext(glyphLine({ caretLine: 0, under: [marker(80)] }))?.glyphs).toBeDefined();
+  // a marker reaching where the line starts, or text like it on a later line, is not left alone
+  expect(projectCommandEchoContext(glyphLine({ caretLine: 0, under: [marker(90)] }))).toBeUndefined();
+  expect(projectCommandEchoContext(glyphLine({ under: [marker(80, 140)] }))).toBeUndefined();
+  // a centered line moves its marker with it
+  const centered = (under: DisplayPage['primitives']) =>
+    withEcho(glyphLine({ lines: ['abc'], x: 393, under }), (run) => run.listMarker ? {} : { centerWidth: 624 });
+  expect(projectCommandEchoContext(centered([]))?.glyphs).toBeDefined();
+  expect(projectCommandEchoContext(centered([marker(370)]))).toBeUndefined();
+});
+
+test('a justified line above that mixes faces counts each space at its own face width', () => {
+  // the caret line types through the engine's font routing; the line above spaces in a face 20 px wide
+  const routed = (spaceSize = 13.333) => {
+    const source = withEcho(glyphLine({ lines: ['a a ', 'cd'] }),
+      (_, index) => index < 4 ? { stretch: 30 } : { primaryFont: false });
+    const primitives = source.layout.frame.pages[0]!.page.primitives as GlyphRunPrimitive[];
+    for (const index of [1, 3]) Object.assign(primitives[index]!, { fontId: 2, size: spaceSize });
+    Object.assign(source.engine, {
+      echoFacesJson: (_position: number, alphabet: string, start: number, end: number) => JSON.stringify({
+        faces: [...alphabet].map(() => [1, 1, 1, 0]), line: Array.from({ length: end - start }, () => [1, 1, 1, 0]),
+        run: [5, 7], latin: null, eastAsia: null }),
+    });
+    const shared = source.glyphs.glyphSet.bind(source.glyphs);
+    source.glyphs.glyphSet = (fontId, size, kern, language, chars) => {
+      const set = shared(fontId, size, kern, language, chars)!;
+      return fontId === 2 ? { ...set, glyphs: { ...set.glyphs, advance: (units: number) => units * 0.02 } } : set;
+    };
+    return source;
+  };
+  // 594 px unstretched, a quarter of the two 20 px spaces the line breaker may squeeze, and the widest space
+  expect(projectCommandEchoContext(routed())?.glyphs?.previousSlack).toBe(624);
+  // a space size off the half point grid has no glyph set to measure it with
+  expect(projectCommandEchoContext(routed(13.4))).toBeUndefined();
 });
 
 test('echo accepts a line that ends a rounding hair past the content box', () => {

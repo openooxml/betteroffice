@@ -1201,24 +1201,84 @@ pub fn outline_glyph_json_resident(font_id: u32, glyph_id: u32) -> Result<String
     .map_err(|e| e.to_string())
 }
 
-/// [`ooxml_text::echo_glyph_set`] against the resident font store, as JSON.
+/// Which faces each character of `alphabet` typed into a text run of formatting `fmt` takes,
+/// as `[display, measured, metrics, east_asian]`: the face the display list shapes it with
+/// (from the display input's `display_chains`), the face measurement shapes it with and the
+/// face measurement takes its line metrics from (from `measurement`), and `1` where the
+/// character's font slot is the East Asian one, whose language both paths shape it with (`0`
+/// for the Latin language). Each is `None` where that path would not take the character as
+/// plain text. A measured face that shapes the character as the display face does (one font's
+/// bytes at one pitch, measured through another slot's family) is named by the display face.
+/// The typing echo places a character only where the display and measured faces agree.
+pub fn echo_character_faces(
+    store: &ooxml_text::FontStore,
+    display_chains: &std::collections::HashMap<String, Vec<u32>>,
+    measurement: &measure_blocks::MeasurementConfig,
+    fmt: &types::RunFormatting,
+    alphabet: &str,
+) -> Vec<[Option<u32>; 4]> {
+    let display = display_list::display_character_faces(
+        store,
+        display_chains,
+        fmt.font_family.as_deref(),
+        fmt.bold == Some(true),
+        fmt.italic == Some(true),
+        alphabet,
+    );
+    let measured = typed_measure::defaults_in(&measurement.defaults).and_then(|defaults| {
+        ooxml_text::measure::run_character_faces(
+            store,
+            ooxml_text::measure::FontChains::BTree(&measurement.font_chains),
+            &defaults,
+            &typed_measure::measured_text_run(fmt),
+            alphabet,
+        )
+    });
+    alphabet
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            let shown = display.as_ref().and_then(|faces| faces[index]);
+            let measured = measured.as_ref().and_then(|faces| faces[index]);
+            [
+                shown.map(ooxml_text::FontId::to_u32),
+                measured.map(|(face, ..)| {
+                    shown
+                        .filter(|&shown| store.shapes_alike(shown, face, ch))
+                        .unwrap_or(face)
+                        .to_u32()
+                }),
+                measured.map(|(_, metrics, _)| metrics.to_u32()),
+                measured.map(|(.., east_asian)| u32::from(east_asian)),
+            ]
+        })
+        .collect()
+}
+
+/// [`ooxml_text::echo_glyph_set_extending`] against the resident font store, as JSON: the
+/// pairs of characters of `alphabet` from `known` on, for a caller that holds the pairs of
+/// its first `known` characters (`0` for a whole set).
 pub fn echo_glyph_set_json(
     font_id: u32,
     size: f32,
     kern: bool,
+    language: Option<&str>,
     alphabet: &str,
+    known: usize,
 ) -> Result<String, String> {
     if !size.is_finite() || size <= 0.0 {
         return Err(format!("echo glyph size {size} is not positive"));
     }
     let alphabet: Vec<char> = alphabet.chars().collect();
     let set = with_measure_fonts(|store| {
-        ooxml_text::echo_glyph_set(
+        ooxml_text::echo_glyph_set_extending(
             &store.borrow(),
             ooxml_text::FontId::from_u32(font_id),
             size,
             kern,
+            language,
             &alphabet,
+            known,
         )
     })
     .map_err(|error| error.to_string())?;
@@ -1381,12 +1441,12 @@ mod tests {
     fn echo_glyph_set_json_reads_the_resident_font_store() {
         clear_measure_fonts();
         let font_id = register_measure_font_bytes(LIBERATION_SANS).expect("register fixture font");
-        let json = echo_glyph_set_json(font_id, 16.0, false, "Ax").expect("echo json");
+        let json = echo_glyph_set_json(font_id, 16.0, false, None, "Ax", 0).expect("echo json");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(v["glyphIds"][0], 36);
         assert_eq!(v["advances"].as_array().map(Vec::len), Some(2));
         assert!(v["horizontal"].as_f64().is_some_and(|value| value > 0.0));
-        assert!(echo_glyph_set_json(font_id, 0.0, false, "A").is_err());
+        assert!(echo_glyph_set_json(font_id, 0.0, false, None, "A", 0).is_err());
         clear_measure_fonts();
     }
 
