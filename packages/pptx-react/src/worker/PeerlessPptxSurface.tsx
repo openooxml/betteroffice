@@ -1,7 +1,7 @@
 import { usePluginGestures } from '../../../../shared/plugin-host/usePluginGestures';
 import { initialPptxZoom } from '../initialPptxZoom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { CSSProperties, RefObject } from 'react';
+import type { CSSProperties, PointerEvent, RefObject } from 'react';
 import { indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import type { Proposal, ShapeRect } from '@betteroffice/pptx';
 import { usePeerlessCommandBinding } from '../commands/usePeerlessCommandBinding';
@@ -193,6 +193,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
   usePluginGestures(editor);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
+  const capturedPointer = useRef<number | null>(null);
   const slideFrame = useRef<HTMLDivElement>(null);
   const { presentation, pending, failure } = usePeerlessPresentation(props, canvas);
   const chrome = pending ?? presentation;
@@ -263,6 +264,16 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     if (pictureOrigin.current) picker.current?.click();
   }, [presentation]);
   const shapes = usePeerlessShapeGestures(presentation?.store ?? null, { canvas, presentation });
+  const clearPressCursor = (stage: HTMLDivElement, pointerId: number) => {
+    if (pointerId !== capturedPointer.current) return;
+    stage.style.cursor = '';
+    capturedPointer.current = null;
+  };
+  const clearStalePressCursor = (event: PointerEvent<HTMLDivElement>) => {
+    const stage = event.currentTarget;
+    const pointerId = capturedPointer.current;
+    if (pointerId !== null && !stage.hasPointerCapture?.(pointerId)) clearPressCursor(stage, pointerId);
+  };
   useEffect(() => {
     if (canvas.current) canvas.current.style.cursor = insertion.tool !== 'select' ? 'crosshair' : 'default';
   }, [insertion.tool, review.diff]);
@@ -370,16 +381,45 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (!isKeyReleasedFromInput(event.nativeEvent)) peerlessHistoryKey(event, presentation.store);
           if (!event.defaultPrevented) navigatePeerlessSlide(event, presentation);
         }}
-        onPointerDown={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event); }}
+        onPointerDown={(event) => {
+          clearStalePressCursor(event);
+          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
+          const geometryCursor = insertion.tool === 'select' ? shapes.geometryCursor(event) : null;
+          const cursor = geometryCursor === null ? 'crosshair' : shapes.cursorAt(event, geometryCursor);
+          const overHandle = Boolean((event.target as HTMLElement).dataset?.pptxResize);
+          if (!insertion.onPointerDown(event) && !shapes.onPointerDown(event)) selection.onPointerDown(event);
+          if (!event.currentTarget.hasPointerCapture?.(event.pointerId)) return;
+          capturedPointer.current = event.pointerId;
+          event.currentTarget.style.cursor = cursor;
+          if (geometryCursor && !overHandle && canvas.current) canvas.current.style.cursor = geometryCursor;
+        }}
         onPointerMove={(event) => {
+          clearStalePressCursor(event);
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
           const cursor = insertion.tool === 'select' ? shapes.hoverCursor(event) : null;
           if (cursor && canvas.current) canvas.current.style.cursor = cursor;
           if (!insertion.onPointerMove(event) && !shapes.onPointerMove(event)) selection.onPointerMove(event);
         }}
-        onPointerUp={(event) => { if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event); }}
-        onPointerCancel={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event); }}
-        onLostPointerCapture={(event) => { if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return; insertion.onPointerCancel(event); if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event); }}>
+        onPointerLeave={clearStalePressCursor}
+        onPointerUp={(event) => {
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
+          if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event);
+        }}
+        onPointerCancel={(event) => {
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
+          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return;
+          insertion.onPointerCancel(event);
+          if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event);
+        }}
+        onLostPointerCapture={(event) => {
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
+          if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return;
+          insertion.onPointerCancel(event);
+          if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event);
+        }}>
         <div ref={slideFrame} style={styles.slideFrame}>
         <canvas ref={canvas} style={presentation && !empty && !failure ? styles.slideCanvas : styles.canvas} data-testid="pptx-slide-canvas"
           data-pptx-input-ready={presentation?.selectionEnabled && !failure ? 'true' : undefined} />
