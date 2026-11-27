@@ -12,6 +12,13 @@ import { defaultSheetFaces } from './enginePngFonts';
 
 const arabicFaces = BUNDLED_FONTS.filter((face) => face.script === 'arabic');
 
+test('Arabic in bold italic Arial uses Noto Naskh Arabic in PNG exports', async () => {
+  const font = { family: 'Arial', bold: true, italic: true };
+  const { fallbacks } = await defaultSheetFaces([{ font, scripts: textScripts('مرحبا') }]);
+  const arabic = fallbacks(font).filter((face) => arabicFaces.some((known) => known.family === face.family));
+  expect(arabic).toMatchObject([{ family: 'Noto Naskh Arabic', bold: false, italic: false }]);
+});
+
 for (const { family, bold, arabic } of cases) {
   test(`a ${family}${bold ? ' bold' : ''} cell falls back for Arabic to the face the native chain gives`, async () => {
     const font = { family, bold, italic: false };

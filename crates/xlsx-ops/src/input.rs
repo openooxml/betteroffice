@@ -1,8 +1,9 @@
 //! turning raw editor input into a `CellState`, classified the way excel does:
 //! leading `=` is a formula, leading `'` forces text, numbers/booleans coerce.
 
-use xlsx_calc::{EvalContext, evaluate, parse_formula, reads_other_workbook};
-use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, FormatCode, SheetId};
+use xlsx_calc::parser::parse_formula_for_cell;
+use xlsx_calc::{EvalContext, evaluate, reads_other_workbook};
+use xlsx_model::{CellProvider, CellValue, DateSystem, FormatCode, SheetId};
 
 use crate::op::CellState;
 
@@ -291,7 +292,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
             value: CellValue::Text { value },
             ..Default::default()
         },
-        ParsedInput::Formula(text) => match parse_formula(&text) {
+        ParsedInput::Formula(text) => match parse_formula_for_cell(&text, provider, sheet) {
             Ok(expr) if reads_other_workbook(&expr) => CellState {
                 formula: Some(text),
                 ..Default::default()
@@ -309,7 +310,7 @@ pub fn cell_state_for_input(input: &str, provider: &dyn CellProvider, sheet: She
                     ..Default::default()
                 }
             }
-            Err(_) if references_other_workbooks(&text) => CellState {
+            Err(_) if is_formula_source(&text) => CellState {
                 formula: Some(text),
                 ..Default::default()
             },
@@ -359,134 +360,9 @@ pub fn cell_state_from_parsed(input: &str, parsed: ParsedInput) -> CellState {
 }
 
 /// whether `source`, a formula without its leading `=`, is one a cell can store:
-/// it parses, or it parses once its references to other workbooks are read as
-/// local ones. the engine keeps whatever value such a formula last had, as it
-/// does for one read from a file, and never opens the other workbook.
+/// including formulas with indexed external references.
 pub fn is_formula_source(source: &str) -> bool {
-    parse_formula(source).is_ok() || references_other_workbooks(source)
-}
-
-fn references_other_workbooks(source: &str) -> bool {
-    without_workbook_indices(source).is_some_and(|local| parse_formula(&local).is_ok())
-}
-
-/// `source` without the external workbook index of each `[1]Sheet1!A1` or
-/// `[1]!Name` reference, the form Excel stores them in; `None` when it has none
-/// or a string, quoted name or structured reference in it is left open.
-fn without_workbook_indices(source: &str) -> Option<String> {
-    let mut local = String::with_capacity(source.len());
-    let mut found = false;
-    let mut rest = source;
-    while let Some(c) = rest.chars().next() {
-        let taken = match c {
-            '"' | '\'' => quoted_len(rest)?,
-            '[' if local.ends_with(is_name_char) => table_spec_len(rest)?,
-            '[' if !local.ends_with(']') => match workbook_index(rest) {
-                Some(index) => {
-                    found = true;
-                    rest = &rest[index..];
-                    continue;
-                }
-                None => 1,
-            },
-            _ => c.len_utf8(),
-        };
-        local.push_str(&rest[..taken]);
-        rest = &rest[taken..];
-    }
-    found.then_some(local)
-}
-
-/// the length of the `"..."` string or `'...'` name that opens `text`, where a
-/// doubled quote stands for one.
-fn quoted_len(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let quote = bytes[0];
-    let mut at = 1;
-    while at < bytes.len() {
-        if bytes[at] == quote {
-            if bytes.get(at + 1) != Some(&quote) {
-                return Some(at + 1);
-            }
-            at += 1;
-        }
-        at += 1;
-    }
-    None
-}
-
-/// the length of the `[...]` after a table name, read the way the formula
-/// lexer reads a structured reference: one item, or a list of `[item]`s.
-fn table_spec_len(text: &str) -> Option<usize> {
-    let whitespace = [' ', '\t', '\n', '\r'];
-    let inner = &text[1..];
-    if !inner.trim_start_matches(whitespace).starts_with('[') {
-        return Some(1 + table_item_len(inner)?);
-    }
-    let mut at = 1;
-    loop {
-        let rest = &text[at..];
-        let item = rest.trim_start_matches(whitespace);
-        at += rest.len() - item.len();
-        match item.chars().next()? {
-            '[' => at += 1 + table_item_len(&item[1..])?,
-            ',' | ':' => at += 1,
-            ']' => return Some(at + 1),
-            _ => return None,
-        }
-    }
-}
-
-/// the length of a structured reference item through its closing `]`; `'`
-/// escapes the character after it.
-fn table_item_len(text: &str) -> Option<usize> {
-    let mut chars = text.char_indices();
-    while let Some((at, c)) = chars.next() {
-        match c {
-            ']' => return Some(at + 1),
-            '\'' => {
-                chars.next()?;
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// the length of the `[n]` that opens `text` when a sheet name and `!` follow
-/// it, or of `[n]!` when a whole workbook-level name follows: one that is no
-/// cell reference and no sheet name before `!` or `:`.
-fn workbook_index(text: &str) -> Option<usize> {
-    let digits = text[1..].bytes().take_while(u8::is_ascii_digit).count();
-    let close = 1 + digits;
-    if digits == 0 || text.as_bytes().get(close) != Some(&b']') {
-        return None;
-    }
-    let after = &text[close + 1..];
-    let sheet: usize = after
-        .chars()
-        .take_while(|&c| is_name_char(c))
-        .map(char::len_utf8)
-        .sum();
-    if sheet > 0 {
-        return after[sheet..].starts_with('!').then_some(close + 1);
-    }
-    let name = after.strip_prefix('!')?;
-    if !name.starts_with(|c: char| c.is_alphabetic() || matches!(c, '_' | '\\')) {
-        return None;
-    }
-    let len: usize = name
-        .chars()
-        .take_while(|&c| is_name_char(c) || c == '\\')
-        .map(char::len_utf8)
-        .sum();
-    let (token, next) = name.split_at(len);
-    (!next.starts_with(['!', ':']) && CellRef::parse_a1(&token.to_ascii_uppercase()).is_err())
-        .then_some(close + 2)
-}
-
-fn is_name_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '.')
+    xlsx_calc::parser::is_formula_source(source)
 }
 
 #[cfg(test)]
@@ -546,6 +422,19 @@ mod tests {
             "A1[1]Sheet1!A1",
             "\"[1]Sheet1!A1",
             "SUM(",
+        ] {
+            assert!(!is_formula_source(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn formula_source_validation_preserves_the_add_in_call_syntax() {
+        assert!(is_formula_source("[1]!AddIn(1)"));
+        for source in [
+            "[1] !AddIn(1)",
+            "[1]! AddIn(1)",
+            "[1]!A$1(1)",
+            r"[1]!\AddIn(1)",
         ] {
             assert!(!is_formula_source(source), "{source}");
         }

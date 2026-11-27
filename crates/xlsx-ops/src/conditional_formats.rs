@@ -1,5 +1,6 @@
-use xlsx_calc::{parse_formula, parser::Expr};
+use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
 use crate::remap::formula_has_sheet_span;
@@ -111,7 +112,7 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 let affected = if rule
                     .formulas
                     .iter()
-                    .any(|formula| formula_has_sheet_span(formula))
+                    .any(|formula| formula_has_sheet_span(formula, wb))
                 {
                     true
                 } else if matches!(edit, Edit::Rename { .. }) {
@@ -119,7 +120,7 @@ fn ensure_allowed(wb: &Workbook, edit: Edit) -> Result<(), OpError> {
                 } else if let Some(ranges) = &ranges {
                     (owner == edit.sheet() && ranges.iter().any(|range| edit.affects(*range, true)))
                         || rule.formulas.iter().any(|formula| {
-                            parse_formula(formula).map_or(true, |expr| {
+                            parse_formula_for_rewrite(formula).map_or(true, |expr| {
                                 formula_affected(&expr, owner, &target.name, ranges, edit)
                             })
                         })
@@ -147,7 +148,7 @@ fn formula_affected(
 ) -> bool {
     let reference = |sheet: &Option<String>, range| {
         let matches = sheet.as_ref().map_or(owner == edit.sheet(), |name| {
-            name.to_lowercase() == target_name.to_lowercase()
+            !is_path_qualifier(name) && name.to_lowercase() == target_name.to_lowercase()
         });
         matches
             && ranges.iter().any(|application| {

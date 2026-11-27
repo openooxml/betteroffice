@@ -602,25 +602,21 @@ export function resolveBundledFamilyFace(
   );
 }
 
-/**
- * Requested Word families (lowercase) whose script text Word draws in a
- * style one bundled script face approximates better than the bucket's sans
- * default, keyed by script, naming that face's family. The face serves every
- * weight and style; the engine synthesizes what it lacks.
- */
 const REQUESTED_FAMILY_SCRIPT_FALLBACK: Record<string, Partial<Record<BundledFontScript, string>>> = {
   'simplified arabic': { arabic: 'Noto Naskh Arabic' },
   'traditional arabic': { arabic: 'Noto Naskh Arabic' },
+  'noto sans arabic': { arabic: 'Noto Sans Arabic' },
 };
 
-/**
- * Pick the bundled face that provides glyph coverage for a script bucket.
- * A requested `family` listed in `REQUESTED_FAMILY_SCRIPT_FALLBACK` for the
- * script gets that face's Regular whatever the style. Otherwise preference
- * order: exact (weight, style) -> same weight upright -> the script's
- * Regular -> the first face of the bucket. Ties resolve to the earlier
- * manifest entry, i.e. the sans face.
- */
+const DEFAULT_SCRIPT_FALLBACK_FAMILY: Partial<Record<BundledFontScript, string>> = {
+  arabic: 'Noto Naskh Arabic',
+};
+
+function scriptFallbackFaces(script: BundledFontScript, family = DEFAULT_SCRIPT_FALLBACK_FAMILY[script]): BundledFontFace[] {
+  return BUNDLED_FONTS.filter((face) => face.script === script && (family === undefined || face.family === family));
+}
+
+/** Pick the best available style of the bundled script fallback. */
 export function resolveScriptFallbackFace(
   script: BundledFontScript,
   bold: boolean,
@@ -629,11 +625,7 @@ export function resolveScriptFallbackFace(
 ): BundledFontFace | undefined {
   const preferred = family === undefined ? undefined
     : REQUESTED_FAMILY_SCRIPT_FALLBACK[family.trim().toLowerCase()]?.[script];
-  const faces = BUNDLED_FONTS.filter((f) => f.script === script);
-  if (preferred !== undefined) {
-    const face = faces.find((f) => f.family === preferred && f.weight === 400 && f.style === 'normal');
-    if (face !== undefined) return face;
-  }
+  const faces = scriptFallbackFaces(script, preferred);
   if (faces.length === 0) return undefined;
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';

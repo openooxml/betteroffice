@@ -11,19 +11,21 @@ import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../sh
 import type { FontCdnDiagnostic } from '../../../../shared/fontCdnDiagnostics';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import type { PptxPaintFont } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { engineKind } from '../wasm/enginePng';
 import { defaultFontInstaller, type DefaultFontFace, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
-import { decodeFontFace, initWasm } from '../wasm/loader';
+import { decodeFontFace, initWasm, openPresentation } from '../wasm/loader';
 import { PptxDocument, PptxRenderer } from '../wasm/engine';
 import { defaultFontLayout, releaseDefaultFontLayout } from '../wasm/enginePngFonts';
 import type { SlideDisplayList } from '../types';
+import { paintSlide } from '../render/canvas';
 import { openPresentationSession, type PresentationSession } from '../worker';
 import { createPresentationCommandClient, createSharedPresentationCommandClient } from './commandClient';
-import * as commandDefaultFonts from './commandDefaultFonts';
 import { commandFontProvider } from './commandDefaultFonts';
 import { createPresentationSessionHost } from './host';
 import type { PresentationCommandClient, PresentationCommandOpenOptions } from './commandProtocol';
 import * as sessionWorker from './sessionWorker';
+import { createPptxWorkerRenderer } from './workerRender';
 
 // Match main's measured WASM PNG behavior with the optional pack absent.
 const EXPORT_WITH_ABSENT_PACK: 'draws' | 'font-unavailable' = 'draws';
@@ -43,7 +45,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function deck(families = ['Calibri', 'Cambria'], text: string | readonly string[] = 'alpha', traits = '',
+async function deck(families = ['Calibri', 'Cambria'], text: string | readonly string[] = 'alpha', traits: string | readonly string[] = '',
   runFamilies?: readonly string[],
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -55,7 +57,7 @@ async function deck(families = ['Calibri', 'Cambria'], text: string | readonly s
   zip.file('ppt/_rels/presentation.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${families.map((_, index) => `<Relationship Id="rId${index + 1}" Type="${rel}/slide" Target="slides/slide${index + 1}.xml"/>`).join('')}</Relationships>`);
   for (const [index, family] of families.entries()) {
     const runs = (typeof text === 'string' ? [text] : text).map((value, run) =>
-      `<a:r><a:rPr sz="2400" ${traits}><a:latin typeface="${runFamilies?.[run] ?? family}"/></a:rPr><a:t>${value}</a:t></a:r>`).join('');
+      `<a:r><a:rPr sz="2400" ${typeof traits === 'string' ? traits : traits[run]}><a:latin typeface="${runFamilies?.[run] ?? family}"/></a:rPr><a:t>${value}</a:t></a:r>`).join('');
     zip.file(`ppt/slides/slide${index + 1}.xml`, `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100000" y="100000"/><a:ext cx="6000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p>${runs}</a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
   }
   return zip.generateAsync({ type: 'uint8array' });
@@ -121,24 +123,26 @@ afterEach(async () => {
   for (const restore of restorers.splice(0).reverse()) restore();
 });
 
-function enableArabicCoverage() {
-  const scripts = 'UNCOVERED_EDITOR_SCRIPTS' in commandDefaultFonts ? commandDefaultFonts.UNCOVERED_EDITOR_SCRIPTS : undefined;
-  if (scripts instanceof Set && scripts.delete('arabic')) restorers.push(() => { scripts.add('arabic'); });
-}
-
-function stubPngCanvas(encoded: BlobPart = 'png') {
+function stubPngCanvas(encoded: BlobPart = 'png', installed?: (family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) => void,
+  paint?: (text: string, font: string) => void) {
   const painted = mock((_text: string) => {});
   class Canvas {
     getContext() {
-      return new Proxy({ fillText: painted, measureText: (text: string) => ({ width: text.length }) }, {
+      const context = { font: '', fillText(text: string) { painted(text); paint?.(text, context.font); },
+        measureText: (text: string) => ({ width: text.length }) };
+      return new Proxy(context, {
         get: (context, property) => Reflect.get(context, property) ?? (() => {}),
       });
     }
     async convertToBlob() { return new Blob([encoded], { type: 'image/png' }); }
   }
-  class Face { async load() { return this; } }
+  class Face {
+    constructor(family: string, bytes: ArrayBuffer, descriptors: FontFaceDescriptors) { installed?.(family, bytes, descriptors); }
+    async load() { return this; }
+  }
   const globals = { document: undefined, OffscreenCanvas: Canvas, FontFace: Face, fonts: new Set(),
-    navigator: { userAgent: 'Chrome/149.0' } };
+    navigator: { userAgent: 'Chrome/149.0' },
+    ...(installed && { createImageBitmap: async () => { throw new Error('No slide images'); } }) };
   for (const [key, value] of Object.entries(globals)) {
     const previous = Object.getOwnPropertyDescriptor(globalThis, key);
     Object.defineProperty(globalThis, key, { configurable: true, value });
@@ -728,11 +732,10 @@ test('inserting script text loads coverage after the family attempt and repaints
   expect(runs.some((run) => /[\u3040-\u309f]/.test(run.text) && run.fontFamily === 'Noto Sans JP')).toBe(true);
 });
 
-test.each(['Arial', 'Simplified Arabic', 'Traditional Arabic'])('%s keeps Arabic in the browser while shaping Hebrew, Thai and Devanagari', async (family) => {
+test.each(['Arial', 'Simplified Arabic', 'Traditional Arabic'])('%s shapes Arabic beside Hebrew, Thai and Devanagari', async (family) => {
   const arial = family === 'Arial';
   const primary = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
-  const arabicFace = arial ? 'NotoSansArabic' : 'NotoNaskhArabic';
-  const arabic = new Uint8Array(await readFile(new URL(`../../../fonts/assets/${arabicFace}-Regular.ttf`, import.meta.url))).buffer;
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const hebrew = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansHebrew-Regular.ttf', import.meta.url))).buffer;
   const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
     { codec: 'zstd' })).font;
@@ -743,22 +746,21 @@ test.each(['Arial', 'Simplified Arabic', 'Traditional Arabic'])('%s keeps Arabic
   const manager = source(arial ? { [family]: async () => primary } : {}, (script) => loaders.get(script));
   manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
     resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => primary });
-  commandDefaultFonts.prefetchCoverageFaces(['arabic'], Promise.resolve(), () => commandFontProvider.load());
   const installed: DefaultFontFace[] = [];
   const client = await createPresentationCommandClient(await deck([family], ['وتين', ' שלום', ' ภาษาไทย', ' नमस्ते']), Object.assign({ ...options }, {
     [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { installed.push(...faces); },
   }), connection().transport);
   clients.push(client);
-  expect(manager.resolveScriptFallback.mock.calls.map(([script]) => script).sort()).toEqual(['devanagari', 'hebrew', 'thai']);
+  expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, family);
   expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
-    .toEqual(['Noto Sans Devanagari', 'Noto Sans Hebrew', 'Noto Sans Thai']);
-  expect(installed.filter((face) => face.kind !== 'coverage')).toEqual([{ family, bold: false, italic: false, bytes: primary }]);
+    .toEqual(expect.arrayContaining(['Noto Sans Devanagari', 'Noto Sans Hebrew', 'Noto Sans Thai']));
+  expect(installed.filter((face) => face.kind !== 'coverage')).toEqual([{ family, bold: false, italic: false, bytes: arial ? primary : arabic }]);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
     .flatMap((box) => box.lines.flatMap((line) => line.runs));
   const arabicRuns = runs.filter((run) => /[\u0600-\u06ff]/.test(run.text));
   expect(arabicRuns.length).toBeGreaterThan(0);
-  expect(arabicRuns.every((run) => run.fontFamily === family && run.fontId === 0xffffffff)).toBe(true);
+  expect(arabicRuns.every((run) => run.fontFamily === (arial ? 'Noto Naskh Arabic' : family) && run.fontId !== 0xffffffff)).toBe(true);
   for (const [script, fallback] of [
     [/[\u0590-\u05ff]/, 'Noto Sans Hebrew'], [/[\u0e00-\u0e7f]/, 'Noto Sans Thai'], [/[\u0900-\u097f]/, 'Noto Sans Devanagari'],
   ] as const) {
@@ -769,8 +771,7 @@ test.each(['Arial', 'Simplified Arabic', 'Traditional Arabic'])('%s keeps Arabic
 });
 
 test('Arabic and Thai runs in Arial load and use their script defaults', async () => {
-  enableArabicCoverage();
-  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
+  const arabic = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const thai = (await decodeFontFace(await readFile(new URL('../../../fonts-intl/assets/NotoSansThai-Regular.ttf.zst', import.meta.url)),
     { codec: 'zstd' })).font;
   const loaders = new Map([['arabic', async () => arabic], ['thai', async () => thai]]);
@@ -783,11 +784,11 @@ test('Arabic and Thai runs in Arial load and use their script defaults', async (
   expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, 'Arial');
   expect(manager.resolveScriptFallback).toHaveBeenCalledWith('thai', false, false);
   expect(installed.filter((face) => face.kind === 'coverage').map((face) => face.family).sort())
-    .toEqual(['Noto Sans Arabic', 'Noto Sans Thai']);
+    .toEqual(['Noto Naskh Arabic', 'Noto Sans Thai']);
   const list = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
   const runs = list.primitives.filter((primitive) => primitive.kind === 'textBox')
     .flatMap((box) => box.lines.flatMap((line) => line.runs));
-  for (const [script, family] of [[/[\u0600-\u06ff]/, 'Noto Sans Arabic'], [/[\u0e00-\u0e7f]/, 'Noto Sans Thai']] as const) {
+  for (const [script, family] of [[/[\u0600-\u06ff]/, 'Noto Naskh Arabic'], [/[\u0e00-\u0e7f]/, 'Noto Sans Thai']] as const) {
     const covered = runs.filter((run) => script.test(run.text));
     expect(covered.length).toBeGreaterThan(0);
     expect(covered.every((run) => run.fontFamily === family && run.fontId !== 0xffffffff)).toBe(true);
@@ -795,18 +796,12 @@ test('Arabic and Thai runs in Arial load and use their script defaults', async (
 });
 
 test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their PNG faces in either registration order', async (family) => {
-  enableArabicCoverage();
-  const sans = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoSansArabic-Regular.ttf', import.meta.url))).buffer;
   const naskh = new Uint8Array(await readFile(new URL('../../../fonts/assets/NotoNaskhArabic-Regular.ttf', import.meta.url))).buffer;
   const arial = fonts.resolveBundledFamilyFace('Arial', false, false)!;
   const arialBytes = await fonts.loadBundledFontBytes(arial, undefined, { decoder: decodeFontFace, strict: true });
   const lastResort = fonts.resolveLastResortChoice(family, false, false, 'powerpoint').face;
   const lastResortBytes = await fonts.loadBundledFontBytes(lastResort, undefined, { decoder: decodeFontFace, strict: true });
-  const manager = source({ Arial: async () => arialBytes }, (script, bold, italic, requested) => {
-    if (script !== 'arabic') return undefined;
-    const resolved = fonts.resolveScriptFallbackFace(script, bold, italic, requested);
-    return async () => resolved?.family === 'Noto Naskh Arabic' ? naskh : sans;
-  });
+  const manager = source({ Arial: async () => arialBytes }, (script) => script === 'arabic' ? async () => naskh : undefined);
   manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
     resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => lastResortBytes });
   const positioned = (list: SlideDisplayList) => list.primitives.filter((primitive) => primitive.kind === 'textBox')
@@ -823,7 +818,7 @@ test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their P
       const { slides } = JSON.parse(document.snapshotJson()) as { slides: Array<{ id: string }> };
       const png = await defaultFontLayout(document, slides[0].id, [], undefined);
       const expected = positioned(png.list);
-      expect(expected.map((run) => run.family).sort()).toEqual(['Noto Sans Arabic', family, lastResort.family].sort());
+      expect(expected.map((run) => run.family).sort()).toEqual(['Noto Naskh Arabic', family, lastResort.family].sort());
       const editor = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
       expect(positioned(editor)).toEqual(expected);
     } finally {
@@ -834,8 +829,114 @@ test.each(['Simplified Arabic', 'Traditional Arabic'])('%s and Arial use their P
   expect(manager.resolveScriptFallback).toHaveBeenCalledWith('arabic', false, false, family);
 });
 
+for (const family of ['Arial', 'Simplified Arabic', 'Traditional Arabic', 'Noto Naskh Arabic', 'Noto Sans Arabic']) {
+  standaloneWasmTest(`${family} uses the same bold italic Arabic face in the editor and both PNG paths`, async () => {
+    const sans = family === 'Noto Sans Arabic';
+    const editorFamily = family === 'Arial' ? 'Noto Naskh Arabic' : family;
+    const face = fonts.resolveBundledFamilyFace(sans ? 'Noto Sans Arabic' : 'Noto Naskh Arabic', sans, false)!;
+    const expected = await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true });
+    const bytes = await deck([family], 'مرحبا', 'b="1" i="1"');
+    const descriptors = { weight: sans ? '700' : '400', style: 'normal' };
+    const editorFaces: { family: string; descriptors: FontFaceDescriptors }[] = [];
+    const pngFaces: FontFaceDescriptors[] = [];
+    const digest = (bytes: ArrayBuffer) => createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
+    const expectedDigest = digest(expected);
+    stubPngCanvas('png', (installedFamily, bytes, traits) => {
+      if (digest(bytes) !== expectedDigest) return;
+      if (installedFamily.startsWith('bo-pptx-png-')) pngFaces.push(traits);
+      else editorFaces.push({ family: installedFamily, descriptors: traits });
+    });
+    const port = new MessageChannel();
+    const renderer = createPptxWorkerRenderer(port.port1);
+    port.port1.onmessage!(new MessageEvent('message', { data: { kind: 'view', scale: 1, dpr: 1 } }));
+    const handle = openPresentation(bytes);
+    try {
+      const client = await createPresentationCommandClient(bytes, Object.assign({ ...options }, {
+        [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { renderer.defaultFonts(faces); },
+      }), connection().transport);
+      clients.push(client);
+      await client.renderPng!({ slide: 0 });
+      await handle.renderPng({ slide: 0 });
+      const editor = JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+      const runs = editor.primitives.filter((primitive) => primitive.kind === 'textBox')
+        .flatMap((box) => box.lines.flatMap((line) => line.runs));
+      expect(runs).toContainEqual(expect.objectContaining({ fontFamily: editorFamily, bold: true, italic: true }));
+      expect(editorFaces).toEqual([{ family: editorFamily, descriptors }]);
+      expect(pngFaces).toEqual([descriptors, descriptors]);
+    } finally {
+      handle.dispose();
+      renderer.dispose();
+      port.port2.close();
+    }
+  });
+}
+
+for (const [latinFamily, arabicFamily, italic, separateSlides] of [
+  ['Simplified Arabic', 'Simplified Arabic', false, false],
+  ['Noto Sans Arabic', 'Noto Sans Arabic', true, true],
+  ['Noto Naskh Arabic', 'Arial', false, false],
+] as const) {
+  standaloneWasmTest(`${latinFamily} Latin leaves ${arabicFamily} Arabic paintable beside it`, async () => {
+    const bold = !italic;
+    const latinFace = fonts.resolveLastResortChoice(latinFamily, bold, italic, 'powerpoint').face;
+    const latin = await fonts.loadBundledFontBytes(latinFace, undefined, { decoder: decodeFontFace, strict: true });
+    const arabicFace = fonts.resolveScriptFallbackFace('arabic', true, true, arabicFamily)!;
+    const arabic = await fonts.loadBundledFontBytes(arabicFace, undefined, { decoder: decodeFontFace, strict: true });
+    const manager = source({}, (script) => script === 'arabic' ? async () => arabic : undefined);
+    manager.imported.mockResolvedValue({ resolve: manager.resolve, resolveFamily: () => undefined,
+      resolveScriptFallback: manager.resolveScriptFallback, resolveLastResort: () => async () => latin });
+    let bytes = await deck(separateSlides ? [latinFamily, arabicFamily] : [latinFamily],
+      separateSlides ? '2026' : ['2026', 'مرحبا'], [bold ? 'b="1"' : 'i="1"', 'b="1" i="1"'], [latinFamily, arabicFamily]);
+    if (separateSlides) {
+      const zip = await JSZip.loadAsync(bytes);
+      const path = 'ppt/slides/slide2.xml';
+      const slide = await zip.file(path)!.async('string');
+      zip.file(path, slide.replace('i="1"', 'b="1" i="1"').replace('2026', 'مرحبا'));
+      bytes = await zip.generateAsync({ type: 'uint8array' });
+    }
+    const installed: (Pick<PptxPaintFont, 'family' | 'descriptors'> & { digest: string })[] = [];
+    const drawn: { text: string; font: string }[] = [];
+    const digest = (bytes: ArrayBuffer) => createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
+    const latinDigest = digest(latin);
+    const arabicDigest = digest(arabic);
+    stubPngCanvas('png', (family, bytes, descriptors) => installed.push({ family, digest: digest(bytes), descriptors }),
+      (text, font) => drawn.push({ text, font }));
+    const port = new MessageChannel();
+    const renderer = createPptxWorkerRenderer(port.port1);
+    port.port1.onmessage!(new MessageEvent('message', { data: { kind: 'view', scale: 1, dpr: 1 } }));
+    try {
+      const client = await createPresentationCommandClient(bytes, Object.assign({ ...options }, {
+        [defaultFontInstaller]: async (faces: readonly DefaultFontFace[]) => { renderer.defaultFonts(faces); },
+      }), connection().transport);
+      clients.push(client);
+      const currentList = () => JSON.parse(new TextDecoder().decode(client.state.frame!.displayList)) as SlideDisplayList;
+      const latinList = currentList();
+      if (separateSlides) await client.dispatch({ kind: 'activateSlide', payload: { slideId: client.state.slides[1]!.id } });
+      const arabicList = currentList();
+      for (let tick = 0; tick < 50 && !installed.some((face) => face.digest === arabicDigest); tick++)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      const ctx = new OffscreenCanvas(960, 720).getContext('2d') as unknown as CanvasRenderingContext2D;
+      await paintSlide(ctx, latinList);
+      if (separateSlides) await paintSlide(ctx, arabicList);
+      const latinFont = drawn.find(({ text }) => /[0-9]/.test(text))?.font;
+      const arabicFont = drawn.find(({ text }) => /[\u0600-\u06ff]/.test(text))?.font;
+      const firstFamily = (font: string | undefined) => font?.match(/px (?:"([^"]*)"|([^,]+))/)?.slice(1).find(Boolean);
+      const latinCss = firstFamily(latinFont)!;
+      const arabicCss = firstFamily(arabicFont)!;
+      expect(installed).toContainEqual({ family: latinCss, digest: latinDigest,
+        descriptors: { weight: bold ? '700' : '400', style: italic ? 'italic' : 'normal' } });
+      expect(installed.filter((face) => face.family === arabicCss)).toEqual([{
+        family: arabicCss, digest: arabicDigest, descriptors: { weight: String(arabicFace.weight), style: 'normal' },
+      }]);
+      expect(arabicFont).toStartWith('italic bold ');
+    } finally {
+      renderer.dispose();
+      port.port2.close();
+    }
+  });
+}
+
 test('wrong script face bytes keep the browser font', async () => {
-  enableArabicCoverage();
   const carlito = new Uint8Array(await readFile(new URL('../../../fonts/assets/Carlito-Regular.ttf', import.meta.url))).buffer;
   const manager = source({ Calibri: async () => carlito }, () => async () => font);
   const wire = connection();

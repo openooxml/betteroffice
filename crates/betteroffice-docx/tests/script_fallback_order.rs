@@ -104,6 +104,25 @@ fn glyphs(result: &LayoutResult) -> Vec<(char, u32, u32, f64)> {
 }
 
 #[test]
+fn arabic_in_arial_layout_uses_naskh_glyphs() {
+    let document = Document::open(&common::sample_docx()).unwrap();
+    let draw = |family: &str| {
+        let result = document
+            .layout(input(
+                json!({"text": "مرحبا", "fontFamily": family, "fontSize": FONT_SIZE_PT}),
+            ))
+            .unwrap();
+        glyphs(&result)
+            .into_iter()
+            .map(|(_, _, glyph, _)| glyph)
+            .collect::<Vec<_>>()
+    };
+    let naskh = draw("Noto Naskh Arabic");
+    assert!(!naskh.is_empty());
+    assert_eq!(draw("Arial"), naskh);
+}
+
+#[test]
 fn a_family_without_a_bundled_face_keeps_its_own_line_box_and_latin_face_next_to_cjk_text() {
     let manager = FontManager::new(&FontSource::default(), FontLoading::default()).unwrap();
     let package = common::sample_docx();

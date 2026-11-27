@@ -299,6 +299,32 @@ def test_render_png(sample_bytes):
     assert len(png) == len(png.bytes)
 
 
+def test_arabic_in_arial_uses_naskh_in_png():
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+    x = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as package:
+        package.writestr("[Content_Types].xml", """<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+          <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+          <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+        </Types>""")
+        package.writestr("_rels/.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="doc" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        package.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="sheet" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        package.writestr("xl/workbook.xml", f'<workbook xmlns="{x}" xmlns:r="{rel}"><sheets><sheet name="Text" sheetId="1" r:id="sheet"/></sheets></workbook>')
+        package.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{x}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>مرحبا</t></is></c></row></sheetData></worksheet>')
+
+    def render(family: str) -> bytes:
+        workbook = bo.Workbook.open(output.getvalue())
+        workbook.set_style(0, "A1", font_family=family)
+        return workbook.render_png({"sheet": 0, "range": "A1"}).bytes
+
+    naskh = render("Noto Naskh Arabic")
+    assert naskh != render("Noto Sans Arabic")
+    assert render("Arial") == naskh
+
+
 def test_render_png_scale_changes_dimensions(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
     small = wb.render_png({"sheet": 0, "range": "A1:D12"}, scale=1.0)

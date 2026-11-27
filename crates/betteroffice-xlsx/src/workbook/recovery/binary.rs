@@ -710,6 +710,9 @@ impl Codec for Op {
                     .collect::<Vec<StyledTable>>()
                     .write(w);
             }
+            Self::RestoreTableColumn { .. } => {
+                unreachable!("table column history must use absolute recovery operations")
+            }
         }
     }
 
