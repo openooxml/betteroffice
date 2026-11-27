@@ -57,14 +57,15 @@ function hex([r, g, b]: Rgb): string {
   return '#' + [r, g, b].map((channel) => channel.toString(16).padStart(2, '0')).join('');
 }
 
-/** `estimate` is the best guess at the painted colour (a gradient's mean stop), `null` over an image. */
+/** `estimate` is the best guess at the painted colour, or `null` when unknown. */
 interface Fill { color: Rgb; solid: boolean; estimate: Rgb | null }
 
 function fillOf(paint: Paint | undefined, under: Fill): Fill | null {
   const color = paintColor(paint, under.color);
   if (!color || !paint) return null;
-  const opaque = paint.kind === 'solid' && (parseRgba(paint.color)?.[3] ?? 0) >= 1;
-  const estimate = paint.kind !== 'solid' ? color : under.estimate ? over(paint.color, under.estimate) : opaque ? color : null;
+  const opaque = paint.kind === 'solid' ? (parseRgba(paint.color)?.[3] ?? 0) >= 1
+    : paint.stops.every((stop) => (parseRgba(stop.color)?.[3] ?? 0) >= 1);
+  const estimate = opaque ? color : under.estimate && paintColor(paint, under.estimate);
   return { color, solid: paint.kind === 'solid' && (opaque || under.solid), estimate };
 }
 
@@ -101,8 +102,8 @@ function matching(color: Rgb): string {
  * Colours at a slide-space caret rect. `color` is the text colour at the caret
  * (its run, or the insertion colour on an empty line) when it reads against a
  * known solid fill, else black or white by that fill. `caret` is black or white
- * against the best estimate of the fill behind it, or, over an image, black for
- * dark text and white for light text.
+ * against the best estimate of the fill behind it. When the fill is unknown,
+ * it follows the text shade if known, or contrasts with the last known fill.
  */
 export function pptxCaretColors(list: SlideDisplayList | null | undefined, line: PositionedTextLine | null | undefined,
   position: number | null | undefined, caret: CommandRect | null | undefined,
@@ -136,19 +137,24 @@ const scratches = new WeakMap<Document, { canvas: HTMLCanvasElement; context: Ca
 /** Copies the region into a small read-optimised canvas, so the slide canvas itself is never read back. */
 const readThroughScratch: PixelRead = (source, left, top, width, height) => {
   const document = source.ownerDocument;
-  let scratch = scratches.get(document);
-  if (scratch === undefined) {
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d', { willReadFrequently: true });
-    scratch = context ? { canvas, context } : null;
-    scratches.set(document, scratch);
+  try {
+    let scratch = scratches.get(document);
+    if (scratch === undefined) {
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      scratch = context ? { canvas, context } : null;
+      scratches.set(document, scratch);
+    }
+    if (!scratch) return undefined;
+    if (scratch.canvas.width < width) scratch.canvas.width = width;
+    if (scratch.canvas.height < height) scratch.canvas.height = height;
+    scratch.context.clearRect(0, 0, width, height);
+    scratch.context.drawImage(source, left, top, width, height, 0, 0, width, height);
+    return scratch.context.getImageData(0, 0, width, height).data;
+  } catch (error) {
+    scratches.delete(document);
+    throw error;
   }
-  if (!scratch) return undefined;
-  if (scratch.canvas.width < width) scratch.canvas.width = width;
-  if (scratch.canvas.height < height) scratch.canvas.height = height;
-  scratch.context.clearRect(0, 0, width, height);
-  scratch.context.drawImage(source, left, top, width, height, 0, 0, width, height);
-  return scratch.context.getImageData(0, 0, width, height).data;
 };
 
 function ink(shade: number): string {
@@ -158,8 +164,8 @@ function ink(shade: number): string {
 /**
  * Black or white, whichever contrasts more with what `canvas` shows along a
  * caret bar from `from` to `to` (its centre line, in slide space): the median
- * luminance of the opaque pixels within half a slide pixel of that line, so
- * glyph edges next to the caret do not tip it. `null` when unreadable.
+ * luminance of opaque backing pixels whose centres are within half a slide
+ * pixel of the line or whose squares it crosses. `null` when unreadable.
  */
 export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
   list: Pick<SlideDisplayList, 'width' | 'height'> | null | undefined,
@@ -168,18 +174,28 @@ export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
   const sx = canvas.width / list.width;
   const sy = canvas.height / list.height;
   const [ax, ay, bx, by] = [from.x * sx, from.y * sy, to.x * sx, to.y * sy];
-  const reach = Math.max(0.5, 0.5 * Math.min(sx, sy));
-  const left = Math.max(0, Math.floor(Math.min(ax, bx) - reach));
-  const top = Math.max(0, Math.floor(Math.min(ay, by) - reach));
-  const width = Math.min(canvas.width, Math.ceil(Math.max(ax, bx) + reach)) - left;
-  const height = Math.min(canvas.height, Math.ceil(Math.max(ay, by) + reach)) - top;
+  const pixelDx = bx - ax;
+  const pixelDy = by - ay;
+  const pixelLength = Math.hypot(pixelDx, pixelDy);
+  const squareLimit = 0.5 * (Math.abs(pixelDx) + Math.abs(pixelDy));
+  const pixelReach = pixelLength ? squareLimit / pixelLength : 0.5;
+  const reachX = Math.max(pixelReach, 0.5 * sx);
+  const reachY = Math.max(pixelReach, 0.5 * sy);
+  const minX = Math.min(ax, bx);
+  const minY = Math.min(ay, by);
+  const maxX = Math.max(ax, bx);
+  const maxY = Math.max(ay, by);
+  const left = Math.max(0, Math.floor(minX - reachX));
+  const top = Math.max(0, Math.floor(minY - reachY));
+  const width = Math.min(canvas.width, Math.ceil(maxX + reachX)) - left;
+  const height = Math.min(canvas.height, Math.ceil(maxY + reachY)) - top;
   if (!(width > 0 && height > 0)) return null;
   let data: Uint8ClampedArray | undefined;
   try { data = read(canvas, left, top, width, height); } catch { return null; }
   if (!data || data.length < width * height * 4) return null;
-  const dx = bx - ax;
-  const dy = by - ay;
-  const length = dx * dx + dy * dy;
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSquared = dx * dx + dy * dy;
   const shades: number[] = [];
   for (let row = 0; row < height; row += 1) {
     for (let column = 0; column < width; column += 1) {
@@ -187,8 +203,14 @@ export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
       if (data[index + 3] !== 255) continue;
       const cx = left + column + 0.5;
       const cy = top + row + 0.5;
-      const t = length ? Math.min(1, Math.max(0, ((cx - ax) * dx + (cy - ay) * dy) / length)) : 0;
-      if (Math.hypot(cx - ax - t * dx, cy - ay - t * dy) > reach) continue;
+      const crosses = Math.max(minX - cx, cx - maxX, minY - cy, cy - maxY) <= 0.5
+        && Math.abs((cx - ax) * pixelDy - (cy - ay) * pixelDx) <= squareLimit;
+      if (!crosses) {
+        const x = (cx - ax) / sx;
+        const y = (cy - ay) / sy;
+        const t = lengthSquared ? Math.min(1, Math.max(0, (x * dx + y * dy) / lengthSquared)) : 0;
+        if (Math.hypot(x - t * dx, y - t * dy) > 0.5) continue;
+      }
       shades.push(luminance([data[index]!, data[index + 1]!, data[index + 2]!]));
     }
   }

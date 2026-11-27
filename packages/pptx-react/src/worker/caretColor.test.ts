@@ -106,6 +106,19 @@ test('a translucent fill over an image keeps the fill unknown', () => {
     .toEqual({ color: '#ffffff', caret: '#ffffff', background: '#202020' });
 });
 
+test('a gradient over an image only estimates the fill when all stops are opaque', () => {
+  const photo = { kind: 'image', objectId: 3, x: 100, y: 80, w: 300, h: 80 } as SlidePrimitive;
+  const dark = { kind: 'solid', color: '#101010' } satisfies Paint;
+  const opaque = { kind: 'gradient', gradientType: 'linear', stops: [{ position: 0, color: '#909090' }, { position: 1, color: '#000000' }] } satisfies Paint;
+  const translucent = { ...opaque, stops: [opaque.stops[0]!, { position: 1, color: '#00000020' }] };
+  const overPhoto = (fill: Paint) => slide([photo, { ...shape('#ffffff'), fill } as SlidePrimitive], dark);
+  const text = line({ start: 0, end: 5, color: '#000000' });
+  const photoInk = pptxCaretColors(slide([photo], dark), text, 2, caret).caret;
+  expect(photoInk).toBe('#000000');
+  expect(pptxCaretColors(overPhoto(translucent), text, 2, caret).caret).toBe(photoInk);
+  expect(pptxCaretColors(overPhoto(opaque), text, 2, caret).caret).toBe('#ffffff');
+});
+
 test('the caret is black or white against the fill, whatever the text colour', () => {
   const dark = { kind: 'solid', color: '#0b1f3a' } satisfies Paint;
   expect(pptxCaretColors(slide([]), line({ start: 0, end: 5, color: '#315efb' }), 2, caret).caret).toBe('#000000');
@@ -164,7 +177,22 @@ test('the painted caret is black or white by what is painted behind it, not by a
 test('a rotated caret reads the pixels along its own bar, not its bounding box', () => {
   const stripe = painted(960, 540, (x, y) => Math.abs(x - y) <= 1 ? [16, 16, 16, 255] : [255, 255, 255, 255]);
   expect(paintedCaretInk(stripe.canvas, list, { x: 100.5, y: 100.5 }, { x: 114.5, y: 114.5 }, stripe.read)).toBe('#ffffff');
-  expect(stripe.reads).toEqual([[100, 100, 15, 15]]);
+  expect(stripe.reads).toEqual([[99, 99, 17, 17]]);
+});
+
+test('a diagonal caret at half zoom samples crossed pixels and skips neighboring pixels', () => {
+  const stripe = painted(480, 270, (x, y) => {
+    if (x < 102 || x > 112) return [0, 0, 0, 0];
+    if (y === x + 1) return [16, 16, 16, 255];
+    if (y === x - 1 || (x === 107 && y === x)) return [255, 255, 255, 255];
+    return [0, 0, 0, 0];
+  });
+  expect(paintedCaretInk(stripe.canvas, list, { x: 201, y: 201.25 }, { x: 229, y: 229.25 }, stripe.read)).toBe('#ffffff');
+});
+
+test('the painted caret uses the exact contrast crossover', () => {
+  const grey = painted(960, 540, () => [0x77, 0x75, 0x75, 255]);
+  expect(paintedCaretInk(grey.canvas, list, ...bar(120), grey.read)).toBe('#000000');
 });
 
 test('unreadable pixels leave the caret to the estimate', () => {
@@ -193,4 +221,20 @@ test('the slide canvas is copied into a separate read-optimised canvas and never
   expect(paintedCaretInk(source, list, ...bar(140))).toBe('#000000');
   expect(calls).toEqual([['scratch', '2d', { willReadFrequently: true }],
     ['drawImage', source, 360, 298, 3, 64, 0, 0, 3, 64], ['drawImage', source, 420, 298, 3, 64, 0, 0, 3, 64]]);
+});
+
+test('a failed pixel read discards the scratch canvas for the next read', () => {
+  const context = {
+    clearRect: () => {},
+    drawImage: () => {},
+    getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+  };
+  const clean = { width: 0, height: 0, getContext: () => context };
+  const tainted = { ...clean, getContext: () => ({ ...context, getImageData: () => { throw new DOMException('tainted', 'SecurityError'); } }) };
+  const canvases = [tainted, clean];
+  let creations = 0;
+  const source = { width: 960, height: 540, ownerDocument: { createElement: () => canvases[creations++] } } as unknown as HTMLCanvasElement;
+  expect(paintedCaretInk(source, list, ...bar(120))).toBeNull();
+  expect(paintedCaretInk(source, list, ...bar(120))).toBe('#000000');
+  expect(creations).toBe(2);
 });
