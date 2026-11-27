@@ -143,3 +143,48 @@ test('a press resolves its cursor at the press point', async () => {
   expect(value.stage.style.cursor).toBe('move');
   act(() => { fireEvent.pointerUp(value.stage, body); });
 });
+
+test('right-clicking text leaves the stage cursor unset', async () => {
+  const value = await open();
+  const line = value.box.lines[0]!;
+  const word = value.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(value.canvas, { ...word, button: 2, buttons: 2 }); });
+  expect(value.stage.style.cursor).toBe('');
+});
+
+test('pressing empty slide space leaves the stage cursor unset', async () => {
+  const value = await open();
+  const empty = value.point(value.list.width - 2, value.list.height - 2);
+  act(() => { fireEvent.pointerDown(value.canvas, { ...empty, buttons: 1 }); });
+  expect(value.stage.setPointerCapture).not.toHaveBeenCalled();
+  expect(value.stage.style.cursor).toBe('');
+});
+
+test('another pointer leaves the captured press cursor in place', async () => {
+  const value = await open();
+  const line = value.box.lines[0]!;
+  const word = value.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(value.canvas, { ...word, buttons: 1 }); });
+  expect(value.stage.hasPointerCapture(7)).toBe(true);
+  expect(value.stage.style.cursor).toBe('text');
+  const second = { ...value.point(value.list.width - 2, value.list.height - 2), pointerId: 8, isPrimary: false };
+  act(() => { fireEvent.pointerDown(value.stage, { ...second, buttons: 1 }); });
+  expect(value.stage.style.cursor).toBe('text');
+  act(() => { fireEvent.pointerUp(value.stage, { ...second, buttons: 0 }); });
+  expect(value.stage.style.cursor).toBe('text');
+  act(() => { fireEvent.pointerUp(value.stage, { ...word, buttons: 0 }); });
+  expect(value.stage.style.cursor).toBe('');
+});
+
+test('a resize handle keeps the resize cursor off the canvas', async () => {
+  const value = await open();
+  await value.select();
+  const corner = value.point(value.box.x + value.box.w, value.box.y + value.box.h);
+  const handle = value.view.getByTestId('pptx-resize-se');
+  act(() => { fireEvent.pointerMove(handle, { ...corner, buttons: 0 }); });
+  expect(value.canvas.style.cursor).not.toContain('resize');
+  act(() => { fireEvent.pointerDown(handle, { ...corner, buttons: 1 }); });
+  expect(value.stage.style.cursor).toBe(resizeCursor('se'));
+  act(() => { fireEvent.pointerCancel(value.stage, { ...corner, buttons: 0 }); });
+  expect(value.canvas.style.cursor).not.toContain('resize');
+});
