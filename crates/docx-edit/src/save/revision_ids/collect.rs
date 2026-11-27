@@ -1017,7 +1017,11 @@ impl Visit for docx_parse::shape::ShapeTextBody {
 
 impl Visit for docx_parse::serializer::S13TablePatch {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        let Self { ordinal, before, after } = self;
+        let Self {
+            ordinal,
+            before,
+            after,
+        } = self;
         scalar(ordinal);
         collector.at("before", |collector| collector.model(before));
         collector.at("after", |collector| collector.model(after));

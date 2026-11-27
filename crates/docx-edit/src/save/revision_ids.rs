@@ -25,7 +25,7 @@ const HYPERLINK_FIELDS: [&str; 2] = ["children", "structuredChildren"];
 const STRUCTURED_FIELDS: [&str; 2] = ["inline", "blocks"];
 const FIELD_TREE_FIELDS: [&str; 3] = ["code", "result", "children"];
 const SCENE_NODE_FIELDS: [&str; 2] = ["shape", "children"];
-const NO_VIEWS: BTreeSet<String> = BTreeSet::new();
+static NO_VIEWS: BTreeSet<String> = BTreeSet::new();
 
 type FastMap<K, V> = HashMap<K, V, foldhash::fast::RandomState>;
 type FastSet<T> = HashSet<T, foldhash::fast::RandomState>;
@@ -757,9 +757,7 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
 
     fn shape(&mut self, shape: &'a mut Shape) {
         if let Some(model) = &mut shape.drawing_model {
-            self.at("drawingModel", |walker| {
-                walker.model(model, ModelKind::Any)
-            });
+            self.at("drawingModel", |walker| walker.model(model, ModelKind::Any));
         }
         if let Some(body) = &mut shape.text_body {
             self.at("textBody", |walker| {
