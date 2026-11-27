@@ -107,6 +107,18 @@ for (const [name, lines, point, position] of [
   });
 }
 
+test('overflowing table cell text past its cell selects the table', () => {
+  const source = list('ab', [line(0, 2, 60)]);
+  const cell = source.primitives[0] as TextBoxPrimitive;
+  cell.h = 20;
+  cell.overflow = true;
+  source.primitives = [{ kind: 'table', objectId: 2, shapeId: cell.shapeId,
+    x: 0, y: 0, w: 100, h: 100, name: 'Table', label: '', primitives: [cell] }];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 10, y: 70 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: cell.shapeId! });
+  }
+});
+
 test('top-level text box padding hit keeps shape selection', () => {
   const source = list('ab', [line(0, 2, 20)]);
   for (const index of [indexGeometry, indexHitGeometry]) {
