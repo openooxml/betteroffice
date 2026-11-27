@@ -10871,10 +10871,8 @@ fn chart_repin_before_row_shrink_applies_in_both_modes() {
 fn inverted_chart_repin_before_row_growth_is_refused_in_both_modes() {
     let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
     let worksheet = "xl/worksheets/sheet1.xml";
-    let xml = test_part_text(&parts, worksheet).replace(
-        r#"<row r="1">"#,
-        r#"<row r="1" ht="5" customHeight="1">"#,
-    );
+    let xml = test_part_text(&parts, worksheet)
+        .replace(r#"<row r="1">"#, r#"<row r="1" ht="5" customHeight="1">"#);
     set_test_part(&mut parts, worksheet, xml.into_bytes());
     let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     let standalone = Workbook::open(&bytes).unwrap();
