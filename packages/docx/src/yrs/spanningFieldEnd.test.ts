@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import JSZip from 'jszip';
 import { parseDocx } from '../docx';
 import { repackDocx } from '../docx/rezip';
@@ -75,11 +76,15 @@ function packageBytes(body: string): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-async function readDocument(bytes: Uint8Array | ArrayBuffer): Promise<string> {
+async function documentPart(bytes: Uint8Array | ArrayBuffer) {
   const zip = await JSZip.loadAsync(bytes);
   const part = zip.file(DOCUMENT_PART);
   if (!part) throw new Error('Missing word/document.xml');
-  return part.async('string');
+  return part;
+}
+
+async function readDocument(bytes: Uint8Array | ArrayBuffer): Promise<string> {
+  return (await documentPart(bytes)).async('string');
 }
 
 function decodeXmlText(text: string): string {
@@ -230,7 +235,7 @@ function inspect(xml: string) {
   return saved.story;
 }
 
-function reportSpanningSave(xml: string, expectedXml: string, caseName: string) {
+function spanningSaveMetrics(xml: string, expectedXml: string) {
   const actual = scanStory(xml);
   const expected = scanStory(expectedXml);
   const pageRefs = (fields: FieldSpan[]) => fields.flatMap(field => {
@@ -257,8 +262,13 @@ function reportSpanningSave(xml: string, expectedXml: string, caseName: string) 
     `begins=${actual.story.fields.length} ends=${actual.ends} instr=${instr} ` +
     `pageref=${kept}/${expectedRefs.length} endpara=${endPara} after=${outside ? 'outside' : 'inside'} ` +
     `markers=${actual.markers.join(',') || '-'}`;
-  console.log(`SPANDIFF session ${caseName} ${summary}`);
   return { actual, expected, summary };
+}
+
+function reportSpanningSave(xml: string, expectedXml: string, caseName: string) {
+  const metrics = spanningSaveMetrics(xml, expectedXml);
+  console.log(`SPANDIFF session ${caseName} ${metrics.summary}`);
+  return metrics;
 }
 
 function assertSpanningSave(xml: string, expectedXml: string, caseName: string): void {
@@ -593,6 +603,12 @@ test.each(WORD_TOC_CASES)('%s preserves field boundaries after session save (%s)
   await assertWordTocSave(toc, edit, `${shape.split(' ')[0]} ${name}`);
 }, 30_000);
 
+test('the TypeScript seeder makes the opening unlinked TOC title editable', async () => {
+  const toc = wordToc({ code: 'TOC \\o "1-3"', unlinked: true });
+  const edit: WordTocEdit = { kind: 'text', story: toc.story, marker: toc.titles[0]! };
+  await assertWordTocSave(toc, edit, 'projected W4 E1', 'projected');
+}, 30_000);
+
 interface MainState {
   shape: string;
   docx: string;
@@ -610,44 +626,73 @@ async function mainState(shape: string): Promise<MainState> {
   return state;
 }
 
+async function withMainState(
+  shape: string,
+  run: (session: YrsSession, source: Uint8Array) => Promise<void>,
+): Promise<void> {
+  const state = await mainState(shape);
+  const source = new Uint8Array(Buffer.from(state.docx, 'base64'));
+  const update = new Uint8Array(Buffer.from(state.update, 'base64'));
+  const session = await createYrsSession({ clientId: 0x1_5350_414e });
+  try {
+    session.openDocx(source, false);
+    session.loadState(update);
+    await run(session, source);
+  } finally {
+    session.destroy();
+  }
+}
+
+const MAIN_STATE_CASES = WORD_TOC_SHAPES.flatMap(([name, build]) => {
+  const shape = name.split(' ')[0]!;
+  const toc = build();
+  return WORD_TOC_EDITS.map(([label, plan]) => [shape, label.split(' ')[0]!, toc, plan(toc)] as const);
+});
+
+test.each(MAIN_STATE_CASES)('mainstate %s %s saves a released session', async (shape, name, toc, edit) => {
+  await withMainState(shape, async (session, source) => {
+    if (edit) applyWordTocEdit(session, edit);
+    const base = session.materializeDocx();
+    if (!base) throw new Error('Missing session source model');
+    const body = yrsToDocument(session, base).package.document;
+    const json = JSON.stringify(body, (_key, value: unknown) => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+      const record = value as Record<string, unknown>;
+      return Object.fromEntries(Object.keys(record).sort().map(key => [key, record[key]]));
+    });
+    const docHash = createHash('sha256').update(json).digest('hex');
+    const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
+    const xml = await (await documentPart(bytes)).async('uint8array');
+    const xmlHash = createHash('sha256').update(xml).digest('hex');
+    const sourceXml = await readDocument(source);
+    const expected = edit ? editedWordTocXml(toc, edit, sourceXml) : sourceXml;
+    const { summary } = spanningSaveMetrics(new TextDecoder().decode(xml), expected);
+    console.log(`MAINSTATEDIFF ${shape} ${name} doc=${docHash} xml=${xmlHash} ${summary}`);
+  });
+}, 30_000);
+
 const STORED_UNLINKED_NAMES = [
   ['a stored session keeps the comment after the first title', 'stored_unlinked_comment_after_first_title'],
   ['a stored session keeps the comment after editing the last title', 'stored_unlinked_comment_after_last_title_edit'],
   ['a stored session keeps the comment after editing the middle title', 'stored_unlinked_comment_after_middle_title_edit'],
 ] as const;
 
-const MAIN_STATE_CASES = WORD_TOC_SHAPES.flatMap(([name, build]) => {
-  const shape = name.split(' ')[0]!;
-  const toc = build();
-  return WORD_TOC_EDITS.slice(0, shape === 'W4' ? 3 : 2).map(([label, plan], index) => {
-    const editName = label.split(' ')[0]!;
-    const [title, caseName] = (shape === 'W4' ? STORED_UNLINKED_NAMES[index] : undefined) ?? [
-      `${shape} opens a session produced by main's code (${editName})`, `mainstate ${shape} ${editName}`,
-    ];
-    return [title, caseName, shape, editName, toc, plan(toc)!] as const;
-  });
-});
+const STORED_UNLINKED_CASES = MAIN_STATE_CASES.filter(([shape]) => shape === 'W4')
+  .slice(0, STORED_UNLINKED_NAMES.length).map(([shape, name, toc, edit], index) =>
+    [...STORED_UNLINKED_NAMES[index]!, shape, name, toc, edit!] as const);
 
-test.each(MAIN_STATE_CASES)('%s', async (_title, caseName, shape, name, toc, edit) => {
-  const state = await mainState(shape);
-  const source = new Uint8Array(Buffer.from(state.docx, 'base64'));
-  const update = new Uint8Array(Buffer.from(state.update, 'base64'));
-  const sourceXml = await readDocument(source);
-  const expected = shape === 'W4' && name === 'E1' ? sourceXml : editedWordTocXml(toc, edit, sourceXml);
-  const session = await createYrsSession();
-  try {
-    session.openDocx(source, false);
-    session.loadState(update);
+test.each(STORED_UNLINKED_CASES)('%s', async (_title, caseName, shape, name, toc, edit) => {
+  await withMainState(shape, async (session, source) => {
+    const sourceXml = await readDocument(source);
+    const expected = name === 'E1' ? sourceXml : editedWordTocXml(toc, edit, sourceXml);
     const applied = applyWordTocEdit(session, edit);
     const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
     assertSpanningSave(await readDocument(bytes), expected, caseName);
     expect(applied).toBe(true);
-    if (shape === 'W4' && name === 'E3') {
+    if (name === 'E3') {
       await expectMatchingUnlinkedProjection();
     }
-  } finally {
-    session.destroy();
-  }
+  });
 }, 30_000);
 
 async function expectMatchingUnlinkedProjection(): Promise<void> {
