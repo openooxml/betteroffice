@@ -86,7 +86,7 @@ function content(result: PptxReadResult): Content {
 
 function selection(story: PptxStoryText, anchor = 0, focus = anchor): PresentationCommandSelection {
   return { slideId: story.slideId, shapeId: story.shapeId, storyId: story.storyId,
-    anchor, focus, affinity: 'downstream' };
+    anchor, focus, affinity: 'downstream', canResize: true };
 }
 
 function insert(at: PresentationCommandSelection, text: string): PresentationCommandIntent {

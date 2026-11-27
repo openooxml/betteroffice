@@ -72,6 +72,8 @@ export interface PeerlessPresentation {
   pluginVisual(): PeerlessVisualSnapshot | null;
   subscribeVisual(listener: () => void): () => void;
   require(): void;
+  /** Resolves after a visible stage frame covers the command sequence. */
+  whenPaintedThrough(throughSeq: number): Promise<void>;
   fit(value: SlideFit): void;
   /** Rasters a slide ahead of its expected activation, such as a press on its thumbnail; a later request replaces it. */
   prerenderSlide?(slideId: string): void;
@@ -82,8 +84,6 @@ export interface PeerlessPresentation {
   settlePrerendered?(slideId: string): void;
   /** Prepares a main-thread paint's text in the worker's sliced faces. */
   readonly fontCoverage?: PaintFontCoverage & { readonly thumbnails: PaintFontCoverage };
-  /** Installs complete faces for the paints that do not prepare their text: present mode and proposal review. */
-  ensureWholeFonts?(): Promise<void>;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
@@ -122,8 +122,8 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
-    collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.experimentalSlicedFonts,
+    props.clientId, Boolean(collaboration), collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
@@ -165,6 +165,7 @@ export function usePeerlessPresentation(
     let queuedFrame: PeerlessConfirmedFrame | undefined;
     let visual: PeerlessVisualSnapshot | null = null;
     let prerenderPresented = false;
+    let rolledBackThroughSeq = -1;
     let cancelIdle: (() => void) | undefined;
     let draining = false;
     let changeSeq: number | undefined;
@@ -262,6 +263,17 @@ export function usePeerlessPresentation(
         require();
         const next = changed;
         if (hydrated()) return;
+        await next;
+      }
+    }
+
+    async function whenPaintedThrough(throughSeq: number): Promise<void> {
+      while (true) {
+        require();
+        const next = changed;
+        if (firstPainted && paintedView && paintedView.confirmed === queuedFrame &&
+          paintedView.presentedThroughSeq >= throughSeq) return;
+        if (rolledBackThroughSeq >= throughSeq) throw new Error('Slide paint was rolled back');
         await next;
       }
     }
@@ -488,6 +500,10 @@ export function usePeerlessPresentation(
             }, { commit: finish });
           },
           paintFrame,
+          onPaintRollback(throughSeq) {
+            rolledBackThroughSeq = Math.max(rolledBackThroughSeq, throughSeq);
+            signal();
+          },
           paintEcho: (view) => paintLocal(view),
           restoreLine: (view) => paintLocal(view, true),
           resync: () => framePainter?.resync?.(),
@@ -584,10 +600,6 @@ export function usePeerlessPresentation(
         if (fontCoverage) disposers.push(() => fontCoverage.dispose());
         run = {
           fontCoverage,
-          ensureWholeFonts: sliced?.createWholeFontInstaller(
-            async (have) => await client.wholeCoverageFonts?.(have) ?? [],
-            (faces) => installDefaultFonts(faces, installedFonts, current, warnFonts, (family) => !suppliedFamilies.has(family.trim().toLowerCase())),
-            (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual,
@@ -600,7 +612,7 @@ export function usePeerlessPresentation(
           get inputEnabled() { return inputEnabled(); },
           get hydrated() { return hydrated(); },
           get failure() { return fatal; },
-          require, setReadOnly,
+          require, whenPaintedThrough, setReadOnly,
           setChangeObserver(enabled) {
             if (!current() || observedChanges === enabled) return;
             observedChanges = enabled;
@@ -633,8 +645,8 @@ export function usePeerlessPresentation(
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
-              slicedFonts: callbacks.current.experimentalSlicedFonts,
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: props.defaultFonts,
+              slicedFonts: props.experimentalSlicedFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {

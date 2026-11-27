@@ -1,6 +1,9 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
-import { isClientMessage, isHostMessage } from '../../../../shared/office-session/protocol';
+import { withinTestBudget } from '../../../../shared/office-session/testing/loadBudget';
+import { isClientMessage, isHostMessage, type ClientMessage } from '../../../../shared/office-session/protocol';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
 import { defaultFontInstaller, type DefaultFontInstallation, type DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
 import * as progressive from '@betteroffice/fonts/progressive';
 import * as wasm from '../wasm/loader';
@@ -46,6 +49,9 @@ function connection(initial = ['active', 'target']) {
     ids = [...next]; version++; changed.resolve();
     return { applied: true, changedSlideIds: ids, deckSizeChanged: false, slideOrderChanged: true };
   };
+  const registerFont = (face: { family: string; bytes: Uint8Array | ArrayBuffer }) => {
+    registered.push(face.family); faces.push(face); return registered.length;
+  };
   const handle = {
     version: () => `v${version}`, onUpdate: () => () => {}, setUndoCaptureMode() {},
     readCommandContent: () => ({ ok: true, version: `v${version}`, slides: ids.map((id) => ({ id })), stories: [], sources: [] }),
@@ -53,7 +59,7 @@ function connection(initial = ['active', 'target']) {
     canUndo: () => true, canRedo: () => true, addUndoBoundary() {},
     historyStep: receipt, applyUpdate: receipt, deleteSlide: receipt,
     snapshot: () => ({ slides: ids.map((id) => ({ id, shapes: [] })) }),
-    registerFont: (face: { family: string; bytes: Uint8Array | ArrayBuffer }) => { registered.push(face.family); faces.push(face); return registered.length; },
+    registerFont, registerFallbackFont: registerFont,
     replaceExportFace: (family: string) => { replaced.push(family); },
     renderPng: async (_: unknown, options: { fonts?: { family: string }[] }) => {
       pngFonts.push(...(options.fonts ?? []).map((face) => face.family));
@@ -83,7 +89,7 @@ function connection(initial = ['active', 'target']) {
     messages.push(message); pair.host.post(message, transfer);
   } }, { initWasm: async () => {} });
   restorers.push(() => pair.client.close());
-  return { transport: pair.client, messages, registered, faces, replaced, pngFonts, changed: changed.promise, collect, layout, coverage,
+  return { transport: pair.client, messages, registered, faces, replaced, pngFonts, changed: changed.promise, collect, layout, coverage, provider,
     replace(value: string[]) { next = value; } };
 }
 
@@ -367,25 +373,28 @@ test('invalid default font options are refused', async () => {
     { session: 'fonts', incarnation: 'worker', fonts: [], defaultFonts: 'no' as unknown as boolean }, wire.transport)).rejects.toThrow();
 });
 
-function slicedCapableBrowser() {
+function setBrowser(userAgent: string) {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36' } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent } });
+  restorers.push(() => {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+}
+
+function slicedCapableBrowser() {
+  setBrowser(chromiumUserAgent);
   const open = spyOn(progressive, 'openSlicedFace').mockRejectedValue(new Error('Network disabled'));
   const load = Object.assign(async () => bytes, { slices: { ref: { format: 1, index: 'x', indexSha256: '' } } });
   spyOn(fontModule.commandFontProvider, 'load').mockResolvedValue({
     resolve: () => load, resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
     resolveLastResort: () => { throw new Error('Unexpected substitution'); },
   } as never);
-  restorers.push(() => {
-    open.mockRestore();
-    if (original) Object.defineProperty(globalThis, 'navigator', original);
-    else Reflect.deleteProperty(globalThis, 'navigator');
-  });
+  restorers.push(() => open.mockRestore());
   return open;
 }
 
-async function openWith(wire: ReturnType<typeof connection>, options: { slicedFonts?: boolean }) {
+async function openWith(wire: ReturnType<typeof connection>, options: { defaultFonts?: boolean; slicedFonts?: boolean }) {
   const sent: unknown[] = [];
   const client = await createPresentationCommandClient(Uint8Array.of(0), Object.assign({ session: 'fonts', incarnation: 'worker',
     fonts: [], ...options }, { [defaultFontInstaller]: async () => {} }),
@@ -394,6 +403,107 @@ async function openWith(wire: ReturnType<typeof connection>, options: { slicedFo
   await client.flush();
   return { client, sent };
 }
+
+test.each(['opened', 'disposed'] as const)('a delayed coverage prefetch stops when its worker has %s', async (state) => {
+  const wire = connection(['target']);
+  const started = deferred<void>();
+  const provider = deferred<Awaited<ReturnType<typeof fontModule.commandFontProvider.load>>>();
+  const load = mock(async () => bytes);
+  wire.provider.mockImplementation(() => { started.resolve(); return provider.promise; });
+  const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts', args: [['cjk-jp'], false] };
+  wire.transport.post(prefetch);
+  await withinTestBudget(started.promise, 'prepared font provider');
+  if (state === 'opened') await openWith(wire, { defaultFonts: false });
+  else {
+    wire.transport.post({ protocol: 1, kind: 'dispose' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  provider.resolve({
+    resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => load,
+    resolveLastResort: () => { throw new Error('Unexpected substitution'); },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(load).not.toHaveBeenCalled();
+});
+
+function namedFont(family: string): ArrayBuffer {
+  const font = new ArrayBuffer(46 + family.length * 2);
+  const view = new DataView(font);
+  view.setUint16(4, 1);
+  view.setUint32(12, 0x6e616d65);
+  view.setUint32(20, 28);
+  view.setUint32(24, font.byteLength - 28);
+  view.setUint16(30, 1);
+  view.setUint16(32, 18);
+  view.setUint16(34, 3);
+  view.setUint16(40, 1);
+  view.setUint16(42, family.length * 2);
+  for (let index = 0; index < family.length; index++) view.setUint16(46 + index * 2, family.charCodeAt(index));
+  return font;
+}
+
+const chromiumUserAgent = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36';
+const safariUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15';
+
+test.each([
+  ['Chromium with slices', chromiumUserAgent, true, true],
+  ['Chromium with opt-out', chromiumUserAgent, false, false],
+  ['Safari with slices requested', safariUserAgent, true, false],
+  ['a worker without page rendering capabilities', chromiumUserAgent, undefined, false],
+] as const)('prepared CJK coverage follows editor opening in %s', async (_, userAgent, slicedFonts, useSlices) => {
+  const wire = connection(['target']);
+  setBrowser(userAgent);
+  let canvasChecks = 0;
+  if (slicedFonts === undefined) {
+    const canvas = Object.getOwnPropertyDescriptor(globalThis, 'HTMLCanvasElement');
+    Object.defineProperty(globalThis, 'HTMLCanvasElement', { configurable: true, get() { canvasChecks++; return undefined; } });
+    restorers.push(() => {
+      if (canvas) Object.defineProperty(globalThis, 'HTMLCanvasElement', canvas);
+      else Reflect.deleteProperty(globalThis, 'HTMLCanvasElement');
+    });
+  }
+  const requested = deferred<void>();
+  const font = namedFont('Noto Sans SC');
+  const ensureText = mock(async (_text: string) => 2);
+  const load = Object.assign(mock(async () => { requested.resolve(); return font; }), {
+    slices: { ref: { format: 1, index: 'sc', indexSha256: '' } },
+  });
+  const open = spyOn(progressive, 'openSlicedFace').mockImplementation(async () => {
+    requested.resolve();
+    return { revision: 1, bytes: () => font.slice(0), ensureText, prefetch() {},
+      chunksOf: () => [], loadedChunks: () => new Set<number>() } as never;
+  });
+  restorers.push(() => open.mockRestore());
+  wire.collect.mockReturnValue([{ ...regular, scripts: ['cjk-sc'] }]);
+  wire.provider.mockResolvedValue({
+    resolve: () => undefined, resolveFamily: () => undefined, resolveScriptFallback: () => load as never,
+    resolveLastResort: () => undefined as never,
+  });
+  const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
+    args: slicedFonts === undefined ? [['cjk-sc']] : [['cjk-sc'], slicedFonts] };
+  wire.transport.post(prefetch);
+  await withinTestBudget(requested.promise, 'prepared CJK coverage');
+  const prefetched = open.mock.calls.length ? 'sliced' : 'whole';
+  const { client } = await openWith(wire, { slicedFonts });
+  expect(canvasChecks).toBe(0);
+  expect(wire.registered).toEqual(['Noto Sans SC']);
+  expect({
+    prefetched,
+    opened: client.state.slicedFamilies?.length ? 'sliced' : 'whole',
+  }).toEqual(useSlices ? { prefetched: 'sliced', opened: 'sliced' } : { prefetched: 'whole', opened: 'whole' });
+  if (useSlices) {
+    expect(client.state.slicedFamilies).toEqual(['Noto Sans SC']);
+    const read = await client.readCoverageFont!('Noto Sans SC', '汉字', null);
+    expect(read?.revision).toBe(2);
+    expect(new Uint8Array(read!.bytes!)).toEqual(new Uint8Array(font));
+    expect(ensureText).toHaveBeenCalledWith('汉字');
+    expect(load).not.toHaveBeenCalled();
+  } else {
+    expect(open).not.toHaveBeenCalled();
+    expect(load).toHaveBeenCalled();
+    expect(new Uint8Array(wire.faces[0]!.bytes)).toEqual(new Uint8Array(font));
+  }
+});
 
 test('a session that does not ask for sliced faces loads, registers and exports whole faces, with nothing new on the wire', async () => {
   const wire = connection(['target']);
@@ -408,6 +518,39 @@ test('a session that does not ask for sliced faces loads, registers and exports 
   expect(JSON.stringify([sent, wire.messages]).toLowerCase()).not.toContain('sliced');
   expect(JSON.stringify([sent, wire.messages])).not.toContain('CoverageFont');
 });
+
+for (const opening of ['explicit', 'unset'] as const) {
+  test(`opening a command editor with ${opening} CDN config invalidates the prefetched implicit provider`, async () => {
+    const previous = getFontCdnConfiguration();
+    const restore = withBrowserFontGlobals(false);
+    const implicit = { baseUrl: 'https://cdn.jsdelivr.net/npm/', timeoutMs: 10_000, implicit: true } as const;
+    const fontCdn = opening === 'explicit' ? { baseUrl: implicit.baseUrl, timeoutMs: implicit.timeoutMs } : undefined;
+    const wire = connection(['target']);
+    const prefetched = deferred<void>();
+    wire.provider.mockImplementation(async (configuration) => {
+      setFontCdnConfiguration(configuration);
+      prefetched.resolve();
+      return { resolve: () => async () => bytes, resolveFamily: () => undefined, resolveScriptFallback: () => undefined,
+        resolveLastResort: () => { throw new Error('Unexpected substitution'); } };
+    });
+    const prefetch: ClientMessage = { protocol: 1, kind: 'call', id: 99, method: 'prefetchCoverageFonts',
+      args: [['cjk-jp'], false, implicit] };
+    let client: PresentationCommandClient | undefined;
+    try {
+      wire.transport.post(prefetch);
+      await withinTestBudget(prefetched.promise, 'the implicit CDN prefetch');
+      client = await createPresentationCommandClient(Uint8Array.of(0),
+        { session: 'fonts', incarnation: 'worker', fontCdn, defaultFonts: opening === 'explicit' }, wire.transport);
+      expect(wire.provider.mock.calls.map(([configuration]) => configuration))
+        .toEqual(opening === 'explicit' ? [implicit, fontCdn] : [implicit]);
+      expect(getFontCdnConfiguration()).toEqual(fontCdn);
+    } finally {
+      await client?.dispose();
+      restore();
+      setFontCdnConfiguration(previous);
+    }
+  });
+}
 
 test('a session that asks for sliced faces tries them first', async () => {
   const wire = connection(['target']);

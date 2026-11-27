@@ -2035,8 +2035,6 @@
       "NotoSansHebrew-Bold.ttf.zst"
     ],
     "arabic": [
-      "NotoSansArabic-Regular.ttf.zst",
-      "NotoSansArabic-Bold.ttf.zst",
       "NotoNaskhArabic-Regular.ttf.zst"
     ],
     "thai": [
@@ -2150,6 +2148,9 @@
     },
     "traditional arabic": {
       "arabic": "NotoNaskhArabic-Regular.ttf.zst"
+    },
+    "noto sans arabic": {
+      "arabic": "NotoSansArabic-Regular.ttf.zst"
     }
   },
   "lastResortFamilies": {

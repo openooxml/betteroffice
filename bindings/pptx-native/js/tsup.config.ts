@@ -8,6 +8,7 @@ import { buildWorkerStubs } from '../../../scripts/worker-stub';
 
 const source = '../../../packages/pptx';
 const dist = '../dist';
+const external = ['node:*', '@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'];
 const browser = 'throw new Error("@betteroffice/pptx-native runs on Node.js, Bun and Deno; use @betteroffice/pptx in browsers");\n';
 
 export default defineConfig({
@@ -34,7 +35,7 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
-  external: ['@betteroffice/fonts', '@betteroffice/fonts-cjk', '@betteroffice/fonts-intl', '@betteroffice/fonts-latin', '#session-worker'],
+  external,
   esbuildPlugins: [
     packageBoundary(fileURLToPath(new URL(`${source}/`, import.meta.url))),
     nativeEnginePlugin('pptx'),
@@ -43,7 +44,7 @@ export default defineConfig({
     options.chunkNames = 'chunk-[hash]';
   },
   onSuccess: async () => {
-    await buildWorkerStubs('pptx', dist);
+    await buildWorkerStubs('pptx', dist, { plugins: [nativeEnginePlugin('pptx')], external: [...external, '@betteroffice/fonts/*'] });
     await rename(join(dist, 'pptxSessionWorker.node.js'), join(dist, 'pptxSessionWorker.node.mjs'));
     await writeFile(join(dist, 'package.json'), JSON.stringify({
       type: 'module',

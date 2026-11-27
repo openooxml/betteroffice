@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { MAX_UPDATE_BYTES, createResidentDocxCommandHooks } from './residentCommandActions';
 import { createResidentCollaboration, readResidentPresence } from './residentCollaboration';
 import { createYrsSession } from './index';
@@ -58,6 +58,28 @@ test('local updates drain in order, remote merges do not echo and duplicates are
     expect(a.buffer.drain()?.updates ?? []).toEqual([]);
     expect(await a.run('applyRemoteUpdate', { update: pushed.updates[0]!.slice(0) })).toMatchObject({ status: 'noop' });
     expect(texts(a.arm)).toEqual(texts(b.arm));
+  } finally { a.buffer.dispose(); b.buffer.dispose(); }
+}, TIMEOUT);
+
+test('a poisoned replica drains queued edits and merge inferences without reading the clock', async () => {
+  const a = await replica();
+  const b = await replica(a.arm.engine.encodeState(), 9102);
+  try {
+    const paraId = b.arm.engine.paragraphs('body')[0]!.paraId;
+    b.arm.engine.insertText({ story: 'body', paraId, offset: 4 }, 'B');
+    const update = b.buffer.drain()!.updates[0]!;
+    expect(await a.run('applyRemoteUpdate', { update })).toMatchObject({ status: 'applied' });
+    a.arm.engine.insertText({ story: 'body', paraId, offset: 0 }, 'A');
+
+    const vector = spyOn(a.arm.engine, 'encodeStateVector').mockImplementation(() => { throw new WebAssembly.RuntimeError('poisoned'); });
+    try {
+      const drained = a.buffer.drain(false)!;
+      expect(drained.clock).toBeUndefined();
+      expect(drained.updates.length).toBeGreaterThan(0);
+      expect(drained.inferences).toEqual([{ seq: expect.any(Number), insertion: { clientId: 9102, story: 'body', paraId, endOffset: 5 } }]);
+      expect(a.buffer.drain(false)).toBeUndefined();
+      expect(vector).not.toHaveBeenCalled();
+    } finally { vector.mockRestore(); }
   } finally { a.buffer.dispose(); b.buffer.dispose(); }
 }, TIMEOUT);
 

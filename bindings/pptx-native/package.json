@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/pptx-native",
-  "version": "0.5.1",
+  "version": "0.6.1",
   "private": true,
   "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js, Bun and Deno.",
   "main": "./dist/index.js",
@@ -54,7 +54,7 @@
     ]
   },
   "engines": {
-    "node": "^20.16.0 || >=22.3.0"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "artifacts": "napi artifacts",

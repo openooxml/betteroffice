@@ -2092,6 +2092,9 @@ describe('workbook commands', () => {
       ['resizeChart', 'chart xl/drawings/drawing1.xml#0 cannot be resized: a one-cell extent is not written back', 'chart'],
       ['applyOps', 'formula at sheet 0, B1 cannot be safely rewritten', 'other'],
       ['applyOps', 'defined name Dynamic cannot be safely rewritten', 'other'],
+      ['editCell', 'table header edit is unsupported: formulas are not supported in Excel table headers', 'table'],
+      ['editCells', 'table header edit is unsupported: cannot rename table Sales column Region: a reference in xl/tables/table1.xml cannot be safely rewritten', 'table'],
+      ['applyOps', 'table header edit is unsupported: table header edits are not supported in a shared session', 'table'],
       ['applyOps', 'cannot move sheet 0 tracks: merged range B4:D5 crosses the moved tracks', 'other'],
       ['applyOps', 'cannot move sheet 0 tracks: table Sales covers the moved tracks', 'table'],
       ['applyOps', 'cannot move sheet 1 tracks: the run or its destination is outside the worksheet', 'other'],
@@ -2121,6 +2124,45 @@ describe('workbook commands', () => {
       expect(refusal?.reason).toBe('unsupported');
       expect(refusal?.result).toBeUndefined();
     }
+  });
+
+  test('table header refusals keep the worker usable and preserve the batch failure code', async () => {
+    const zip = await JSZip.loadAsync(plainBytes);
+    const base = 'http://schemas.openxmlformats.org';
+    const rels = `${base}/officeDocument/2006/relationships`;
+    const main = `${base}/spreadsheetml/2006/main`;
+    const types = await zip.file('[Content_Types].xml')!.async('string');
+    zip.file('[Content_Types].xml', types.replace('</Types>',
+      '<Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>'));
+    const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+    zip.file('xl/worksheets/sheet1.xml', sheet
+      .replace('<c r="A1"><v>1</v></c>', '<c r="A1" t="inlineStr"><is><t>Region</t></is></c>')
+      .replace('</worksheet>', `<tableParts count="1"><tablePart xmlns:r="${rels}" r:id="rIdTable"/></tableParts></worksheet>`));
+    zip.file('xl/worksheets/_rels/sheet1.xml.rels',
+      `<Relationships xmlns="${base}/package/2006/relationships"><Relationship Id="rIdTable" Type="${rels}/table" Target="../tables/table1.xml"/></Relationships>`);
+    zip.file('xl/tables/table1.xml',
+      `<table xmlns="${main}" id="1" displayName="Sales" ref="A1:A2"><tableColumns count="1"><tableColumn id="1" name="Region"/></tableColumns></table>`);
+    const session = await createTestWorkbookSession(await zip.generateAsync({ type: 'uint8array' }));
+    try {
+      const expectVersion = session.confirmedBasis.version;
+      const message = 'table header edit is unsupported: formulas are not supported in Excel table headers';
+      const unsupported = { status: 'refused', reason: 'unsupported', committed: false,
+        result: { failure: { code: 'unsupported', cause: 'table', message } } };
+      expect(await session.submit(command(session, 1, 'editCell', { args: [0, 0, 0, '=1+1'] })))
+        .toMatchObject(unsupported);
+      expect(await session.submit(command(session, 2, 'applyOps', { args: [[{
+        type: 'setCell', sheet: 0, at: { row: 0, col: 0 },
+        cell: { value: { kind: 'empty' }, formula: '1+1', style: null },
+      }]] }))).toMatchObject(unsupported);
+      expect(await session.submit(command(session, 3, 'applyEdits', { args: [{
+        expectVersion, steps: [{ op: 'setCellInputs', target: selected, inputs: [['=1+1']] }],
+      }] }))).toMatchObject({ status: 'refused', reason: 'invalid-step', committed: false,
+        result: { failure: { code: 'invalid-step', message } } });
+      expect(session.confirmedBasis.version).toBe(expectVersion);
+      expect(session.failure).toBeUndefined();
+      expect(await session.submit(command(session, 4, 'editCell', { args: [0, 2, 0, '8'] })))
+        .toMatchObject({ status: 'applied', committed: true });
+    } finally { await session.dispose(); }
   });
 
   test('an unsupported column move is an ordinary structural refusal', async () => {

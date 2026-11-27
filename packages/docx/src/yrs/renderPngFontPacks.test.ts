@@ -1,7 +1,15 @@
-import { afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import * as fonts from '@betteroffice/fonts';
-import { configureDefaultFonts, resolveCompleteFontProvider } from '../layout/measure';
+import { LATIN_FONT_ASSET_URLS } from '../../../fonts-latin/src';
+import { BASE_LATIN_FONT_ASSET_URLS } from '../../../fonts/src/base-latin';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
+import { createFontRuntime } from '../../../fonts/src/fontRuntime';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { configureDefaultFonts, resolveCompleteFontProvider, resolveDefaultFontProvider } from '../layout/measure';
+import { getGoogleFontEquivalent } from '../utils/fontLoader';
+import { decodeFontFace } from '../wasm/fontDecoder';
 import { engineKind } from '../wasm/enginePng';
 import { createYrsSession, type YrsSession } from './index';
 import { ENGINES, preloadEngines, restoreBrowser, runsDocument, scriptDocument, stubBrowser, type TextRun } from './renderPngTestSupport';
@@ -37,6 +45,15 @@ function gateLatinFetches(serve: (file: string) => Promise<Response>): void {
 const latinBytes = (file: string) => new Response(readFileSync(new URL(file, LATIN_ASSETS)));
 const arabicFace = () => fonts.resolveScriptFallbackFace('arabic', false, false, 'Arial')!;
 const latinAndArabic: TextRun[] = [{ family: 'Arial', text: 'Plain text' }, { family: 'Arial', text: 'مرحبا بالعالم', rtl: true }];
+const gothicRun = { family: 'MS Gothic', text: 'Plain text', paragraphFamily: 'MS Gothic' };
+
+function mockFontsWithLatinPack() {
+  const runtime = createFontRuntime(async (pack) => ({
+    cdn: getFontCdnConfiguration(),
+    urls: pack === 'latin' ? LATIN_FONT_ASSET_URLS : pack === 'base' ? BASE_LATIN_FONT_ASSET_URLS : undefined,
+  }));
+  return spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+}
 
 beforeAll(preloadEngines);
 afterEach(() => {
@@ -63,6 +80,231 @@ async function rejection(work: Promise<unknown>): Promise<{ name?: string; code?
 
 for (const { kind } of ENGINES) {
   describe.skipIf(engineKind !== kind)(`renderPng font packs on the ${kind} engine`, () => {
+    test('DOCX PNG rejects an implicit Latin CDN failure after one request', async () => {
+      const canvas = stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+      const family = 'Calibri';
+      const face = fonts.resolveMetricCompatFace(family, false, false)!;
+      const requests: string[] = [];
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        if (String(input).includes('cdn.jsdelivr.net')) {
+          requests.push(String(input));
+          return new Response(null, { status: 404 });
+        }
+        return fontAssetResponse(input);
+      }) as typeof fetch;
+      try {
+        setFontCdnConfiguration(undefined);
+        const error = await rejection(exported([{ family, text: 'Plain text', paragraphFamily: family }]));
+        expect(error).toMatchObject({ name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('HTTP 404') });
+        expect(requests).toEqual([expect.stringContaining('/fonts-latin@')]);
+        expect(requests[0]).toEndWith(`/assets/${face.file}`);
+        expect(canvas.encoded).toBe(0);
+      } finally {
+        provider.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test('DOCX PNG draws as with an absent CJK pack after the editor family load hits a blocked default CDN', async () => {
+      const session = await createYrsSession();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const create = mockFontsWithLatinPack();
+      const requests: string[] = [];
+      const fetch = spyOnFontFetch(async (input) => {
+        if (String(input).startsWith('https://cdn.jsdelivr.net/')) {
+          requests.push(String(input));
+          throw new TypeError('Offline');
+        }
+        return fontAssetResponse(input);
+      });
+      try {
+        configureDefaultFonts({});
+        session.openDocx(runsDocument(gothicRun), true);
+        const absentPackDrawing = stubBrowser();
+        const absentPackContours = spyOn(Path2D.prototype, 'moveTo');
+        fonts.configureFontCdn({ baseUrl: false });
+        const absentPack = await session.renderPng({ page: 0 });
+        expect(absentPack.byteLength).toBeGreaterThan(0);
+        expect(absentPack.byteLength).toBeLessThan(1_000_000);
+        expect(requests).toEqual([]);
+
+        setFontCdnConfiguration(undefined);
+        const provider = await resolveDefaultFontProvider();
+        const family = getGoogleFontEquivalent(gothicRun.family);
+        const load = provider!.resolveFamily!(family, false, false)!;
+        await expect(load()).rejects.toMatchObject({
+          name: 'ImplicitFontCdnError', diagnostic: { pack: 'cjk', reason: 'cdn-unavailable' },
+        });
+        const { file } = fonts.resolveMetricCompatFace(gothicRun.family, false, false)!;
+        expect(requests).toEqual([expect.stringContaining('/fonts-cjk@')]);
+        expect(requests[0]).toEndWith(`/assets/${file}`);
+
+        const blockedCdnDrawing = stubBrowser();
+        const blockedCdnContours = spyOn(Path2D.prototype, 'moveTo');
+        await expect(session.renderPng({ page: 0 })).resolves.toEqual(absentPack);
+        expect(requests).toHaveLength(1);
+        if (kind === 'wasm') {
+          expect(absentPackContours).toHaveBeenCalled();
+          expect(blockedCdnContours.mock.calls).toEqual(absentPackContours.mock.calls);
+          expect(blockedCdnDrawing).toEqual(absentPackDrawing);
+        }
+      } finally {
+        session.destroy();
+        fetch.mockRestore();
+        create.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+        configureDefaultFonts({});
+      }
+    });
+
+    test('DOCX PNG rejects a failed CJK family load from an explicitly configured CDN', async () => {
+      stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const create = mockFontsWithLatinPack();
+      const baseUrl = 'https://docx-png-cjk.example/';
+      const fetch = spyOnFontFetch(async (input) => String(input).startsWith(baseUrl)
+        ? new Response(null, { status: 503 })
+        : fontAssetResponse(input));
+      try {
+        fonts.configureFontCdn({ baseUrl });
+        await expect(exported([gothicRun])).rejects.toMatchObject({
+          name: 'PngExportError',
+          code: 'font-unavailable',
+          message: expect.stringContaining('Noto Sans JP for MS Gothic could not load'),
+        });
+        const { file } = fonts.resolveMetricCompatFace(gothicRun.family, false, false)!;
+        expect(fetch.mock.calls.some(([input]) => {
+          const url = String(input);
+          return url.startsWith(`${baseUrl}cjk/`) && url.endsWith(`/${file}`);
+        })).toBe(true);
+      } finally {
+        fetch.mockRestore();
+        create.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test('DOCX PNG draws with supplied font bytes offline and rejects missing families', async () => {
+      const canvas = stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals();
+      const runtime = fontRuntimeWithoutPacks(new URL('https://docx-offline-export-base.example/'));
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+      const fetch = spyOnFontFetch(async (input) => {
+        if (String(input).includes('cdn.jsdelivr.net')) throw new TypeError('Offline');
+        return fontAssetResponse(input);
+      });
+      try {
+        setFontCdnConfiguration(undefined);
+        const bytes = new Uint8Array(readFileSync('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'));
+        const calibri = { family: 'Calibri', text: 'Total', paragraphFamily: 'Calibri' };
+        const arial = { family: 'Arial', text: 'Balance', paragraphFamily: 'Arial' };
+        const supplied = { fonts: [{ family: ' calibri ', bytes }] };
+        await expect(exported([calibri], supplied)).resolves.toBeInstanceOf(Uint8Array);
+        expect(fetch).not.toHaveBeenCalled();
+        if (kind === 'wasm') expect(canvas.fills).toBeGreaterThan(0);
+
+        await expect(exported([calibri])).rejects.toMatchObject({
+          code: 'font-unavailable', message: expect.stringContaining('Carlito for Calibri could not load'),
+        });
+        await expect(exported([calibri, arial], supplied)).rejects.toMatchObject({
+          code: 'font-unavailable', message: expect.stringContaining('Liberation Sans for Arial could not load'),
+        });
+      } finally {
+        fetch.mockRestore();
+        provider.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test.skipIf(kind !== 'wasm')('DOCX PNG draws Han glyphs with supplied Latin-only Arial', async () => {
+      const face = fonts.resolveMetricCompatFace('Arial', false, false)!;
+      const bytes = new Uint8Array(await fonts.loadBundledFontBytes(face, undefined, { decoder: decodeFontFace, strict: true }));
+      const run = { family: 'Arial', text: 'Ab 漢字 cd', paragraphFamily: 'Arial' };
+      stubBrowser();
+      const contours = spyOn(Path2D.prototype, 'moveTo');
+      try {
+        await exported([run]);
+        expect(contours).toHaveBeenCalled();
+        const expected = [...contours.mock.calls];
+        contours.mockClear();
+        await exported([run], { fonts: [{ family: 'Arial', bytes }] });
+        expect(contours.mock.calls).toEqual(expected);
+      } finally { contours.mockRestore(); }
+    });
+
+    test.each(['default', 'supplied'] as const)('DOCX PNG with absent optional packs and %s fonts', async (source) => {
+      stubBrowser();
+      const previous = getFontCdnConfiguration();
+      const runtime = fontRuntimeWithoutPacks(new URL('https://docx-headless-base.example/'));
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(runtime.createFontProvider);
+      const fetch = spyOnFontFetch(fontAssetResponse);
+      try {
+        setFontCdnConfiguration(undefined);
+        const calibri = { family: 'Calibri', text: 'Plain text', paragraphFamily: 'Calibri' };
+        if (source === 'supplied') {
+          const bytes = new Uint8Array(readFileSync('crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'));
+          const png = await exported([calibri], { fonts: [{ family: 'Calibri', bytes }] });
+          expect(png).toBeInstanceOf(Uint8Array);
+          expect(png.byteLength).toBeGreaterThan(0);
+          expect(fetch).not.toHaveBeenCalled();
+          return;
+        }
+        if (kind === 'native') {
+          const error = await rejection(exported([calibri]));
+          expect(error.name).toBe('PngExportError');
+          expect(error.code).toBe('font-unavailable');
+          expect(error.message).toContain('missing font chain for `calibri|0|0`');
+          expect(fetch).not.toHaveBeenCalled();
+          return;
+        }
+        const png = await exported([calibri]);
+        expect(png).toBeInstanceOf(Uint8Array);
+        expect(png.byteLength).toBeGreaterThan(0);
+        const base = fonts.BASE_LATIN_FONTS.find(({ weight, style }) => weight === 400 && style === 'normal')!;
+        expect(fetch.mock.calls.some(([url]) => String(url).endsWith(base.file))).toBe(true);
+      } finally {
+        fetch.mockRestore();
+        provider.mockRestore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
+    test('T14: DOCX PNG reuses the browser worker layout until its CDN configuration changes', async () => {
+      stubBrowser();
+      const session = await createYrsSession();
+      const previous = getFontCdnConfiguration();
+      const restore = withBrowserFontGlobals(false);
+      const provider = spyOn(fonts, 'createFontProvider').mockImplementation(fontRuntimeWithoutPacks().createFontProvider);
+      const fetch = spyOnFontFetch(fontAssetResponse);
+      try {
+        session.openDocx(runsDocument({ family: 'Calibri', text: 'Plain text' }), true);
+        fonts.configureFontCdn({ baseUrl: 'https://docx-png-first.example/' });
+        await session.renderPng({ page: 0 });
+        const providers = provider.mock.calls.length;
+        await session.renderPng({ page: 0 });
+        expect(provider).toHaveBeenCalledTimes(providers);
+        fonts.configureFontCdn({ baseUrl: 'https://docx-png-second.example/' });
+        await session.renderPng({ page: 0 });
+        expect(fetch.mock.calls.some(([url]) => String(url).startsWith('https://docx-png-second.example/'))).toBe(true);
+      } finally {
+        session.destroy();
+        fetch.mockRestore();
+        provider.mockRestore();
+        restore();
+        setFontCdnConfiguration(previous);
+      }
+    });
+
     test('an installed pack that cannot serve a face rejects the export naming the face and the family', async () => {
       stubBrowser();
       const face = fonts.resolveMetricCompatFace('Arial', false, false)!;

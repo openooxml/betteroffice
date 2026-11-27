@@ -652,6 +652,33 @@ pub(crate) fn parse_raw_op(value: &Value) -> EngineResult<RawOp> {
                 .ok_or_else(|| EngineError::message("removeComment requires a string \"id\""))?
                 .to_owned(),
         }),
+        "setRawMark" => {
+            let text = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        EngineError::message(format!("setRawMark requires a string {key:?}"))
+                    })
+            };
+            let assoc = match text("assoc")?.as_str() {
+                "after" => yrs::Assoc::After,
+                "before" => yrs::Assoc::Before,
+                _ => {
+                    return Err(EngineError::message(
+                        "setRawMark \"assoc\" is \"after\" or \"before\"",
+                    ));
+                }
+            };
+            Ok(RawOp::SetRawMark {
+                id: text("id")?,
+                at: u32_field("at")?,
+                assoc,
+                ordinal: u32_field("ordinal")?,
+                xml: text("xml")?,
+            })
+        }
         other => Err(EngineError::message(format!("unknown raw op {other:?}"))),
     }
 }

@@ -1,5 +1,7 @@
 import {
+  MAX_PASTE_FORMATTED_RUNS,
   clipboardFragmentHasPictures,
+  clipboardFragmentRunCount,
   validClipboardFragment,
   type DocxClipboardFragment,
   type DocxTableFragment,
@@ -7,11 +9,12 @@ import {
 import { clipboardFragmentHasFormatting, type PasteFormattingOption } from './clipboardFragmentTransforms';
 
 /**
- * @internal The Paste Options a paste offers: none unless it has formatting to choose about, text to keep and no
+ * @internal The Paste Options a paste offers: none unless it has formatting to choose about within the run limit, text to keep and no
  * pictures, and Keep Text Only only when its text-only fragment is one the worker accepts.
  */
 export function pasteOptionsOffered(fragment: DocxClipboardFragment): PasteFormattingOption[] {
-  if (clipboardFragmentHasPictures(fragment) || !clipboardFragmentHasFormatting(fragment)) return [];
+  if (clipboardFragmentHasPictures(fragment) || clipboardFragmentRunCount(fragment) > MAX_PASTE_FORMATTED_RUNS ||
+    !clipboardFragmentHasFormatting(fragment)) return [];
   const plain = clipboardFragmentPlainText(fragment);
   if (plain.trim() === '') return [];
   return validClipboardFragment(plainTextClipboardFragment(plain)) ? ['keep-source', 'merge', 'text-only'] : ['keep-source', 'merge'];

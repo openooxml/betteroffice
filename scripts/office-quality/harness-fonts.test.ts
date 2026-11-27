@@ -135,16 +135,15 @@ test('registers real bundled bold and italic files with their metadata', async (
   ]);
 });
 
-test('registers a script fallback with a real bundled bold file at 700', async () => {
+test('uses the bundled Naskh face for regular and bold Arabic', async () => {
   const harness = await loadHarness();
-  const faces = await harness.fallbackFontsFor(await deck('مرحبا'));
+  const faces = await harness.fallbackFontsFor(await deck('مرحبا', 'Arial'));
   expect(harness.registrations).toEqual([
-    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Regular.ttf.zst', weight: '400', style: 'normal' },
-    { family: 'Noto Sans Arabic', file: 'NotoSansArabic-Bold.ttf.zst', weight: '700', style: 'normal' },
+    { family: 'Noto Naskh Arabic', file: 'NotoNaskhArabic-Regular.ttf.zst', weight: '400', style: 'normal' },
   ]);
   expect(rendererFaces(faces)).toEqual([
-    { family: 'Noto Sans Arabic', bold: false, italic: false, file: 'NotoSansArabic-Regular.ttf.zst' },
-    { family: 'Noto Sans Arabic', bold: true, italic: false, file: 'NotoSansArabic-Bold.ttf.zst' },
+    { family: 'Noto Naskh Arabic', bold: false, italic: false, file: 'NotoNaskhArabic-Regular.ttf.zst' },
+    { family: 'Noto Naskh Arabic', bold: true, italic: false, file: 'NotoNaskhArabic-Regular.ttf.zst' },
   ]);
 });
 

@@ -68,6 +68,7 @@ impl EditingDoc {
             return Err("part is still referenced".to_owned());
         }
         let json = value.to_string();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let root = txn
             .get_map(PART_METADATA)

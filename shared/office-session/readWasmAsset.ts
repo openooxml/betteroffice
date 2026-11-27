@@ -16,14 +16,15 @@ function builtinModule<T>(name: string): T | undefined {
   }
 }
 
-export function readWasmSync(url: URL): Uint8Array | undefined {
+export function readWasmSync(url: URL, throwOnReadError = false): Uint8Array | undefined {
   if (url.protocol !== 'file:') return undefined;
   const fs = builtinModule<NodeFsLike>('node:fs');
   const nodeUrl = builtinModule<NodeUrlLike>('node:url');
   if (!fs || !nodeUrl) return undefined;
   try {
     return fs.readFileSync(nodeUrl.fileURLToPath(url.href));
-  } catch {
+  } catch (error) {
+    if (throwOnReadError) throw error;
     return undefined;
   }
 }

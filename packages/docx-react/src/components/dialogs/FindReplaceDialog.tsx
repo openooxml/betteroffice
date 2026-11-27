@@ -9,7 +9,7 @@
  * - useFindReplace.ts   — React hook for dialog state management
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, ChangeEvent } from 'react';
 import { useTranslation } from '../../i18n';
 
@@ -321,10 +321,12 @@ export function FindReplaceDialog({
   const [result, setResult] = useState<FindResult | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [replaceFocused, setReplaceFocused] = useState(false);
+  const [opened, setOpened] = useState(0);
 
   // Refs
   const searchInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
+  const focusReplaceRef = useRef(false);
   const onFindRef = useRef(onFind);
   const onHighlightMatchesRef = useRef(onHighlightMatches);
   const onClearHighlightsRef = useRef(onClearHighlights);
@@ -337,28 +339,38 @@ export function FindReplaceDialog({
   }, [onFind, onHighlightMatches, onClearHighlights]);
 
   // Sync with external result if provided
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (currentResult !== undefined) {
       setResult(currentResult);
     }
   }, [currentResult]);
 
   // Initialize when dialog opens
-  useEffect(() => {
-    if (isOpen) {
-      setSearchText(initialSearchText);
-      setReplaceText('');
-      setShowReplace(replaceMode);
-      setResult(null);
-
-      setTimeout(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      }, 100);
-    } else {
-      onClearHighlightsRef.current?.();
-    }
+  useLayoutEffect(() => {
+    focusReplaceRef.current = false;
+    if (!isOpen) return;
+    setSearchText(initialSearchText);
+    setReplaceText('');
+    setShowReplace(replaceMode);
+    setResult(null);
+    setOpened((count) => count + 1);
   }, [isOpen, initialSearchText, replaceMode]);
+
+  useLayoutEffect(() => {
+    if (!opened) return;
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [opened]);
+
+  useEffect(() => {
+    if (!isOpen) onClearHighlightsRef.current?.();
+  }, [isOpen, initialSearchText, replaceMode]);
+
+  useLayoutEffect(() => {
+    if (!focusReplaceRef.current) return;
+    focusReplaceRef.current = false;
+    if (showReplace) replaceInputRef.current?.focus();
+  }, [showReplace]);
 
   const clearSearchResult = useCallback(() => {
     setResult(null);
@@ -532,13 +544,8 @@ export function FindReplaceDialog({
   }, [searchText, replaceText, matchCase, matchWholeWord, onReplaceAll]);
 
   const toggleReplaceMode = useCallback(() => {
-    setShowReplace((prev) => {
-      const newValue = !prev;
-      if (newValue) {
-        setTimeout(() => replaceInputRef.current?.focus(), 100);
-      }
-      return newValue;
-    });
+    focusReplaceRef.current = true;
+    setShowReplace((prev) => !prev);
   }, []);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {

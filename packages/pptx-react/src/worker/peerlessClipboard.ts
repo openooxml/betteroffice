@@ -1,7 +1,21 @@
 import { PptxCommandAdmissionError } from '../commands/createPptxCommandStore';
-import type { PresentationCommandAck } from '@betteroffice/pptx/worker';
+import type {
+  PresentationCommandAck,
+  PresentationCommandSelected,
+  PresentationCommandSelection,
+} from '@betteroffice/pptx/worker';
 import { peerlessKnownState } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
+
+function sameSelection(
+  left: PresentationCommandSelection,
+  right: PresentationCommandSelected | null
+): boolean {
+  return right?.kind !== 'object' && left.slideId === right?.slideId &&
+    left.shapeId === right.shapeId && left.storyId === right.storyId &&
+    left.anchor === right.anchor && left.focus === right.focus &&
+    left.affinity === right.affinity && left.kind === right.kind;
+}
 
 export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean, strict = false): Promise<PresentationCommandAck | null> {
   run.require();
@@ -15,14 +29,13 @@ export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean,
     if (strict) throw new PptxCommandAdmissionError('target-changed');
     return null;
   }
-  const captured = JSON.stringify(selection);
   const read = (async () => {
     await run.store.fence();
     run.require();
     const result = (await run.client.read({ slideIds: [selection.slideId] })).result;
     run.require();
     if (!result.ok) throw new Error(result.failure.message);
-    if (captured !== JSON.stringify(run.store.getSnapshot().selection)) throw new PptxCommandAdmissionError('target-changed');
+    if (!sameSelection(selection, run.store.getSnapshot().selection)) throw new PptxCommandAdmissionError('target-changed');
     const story = result.stories.find((story) => story.storyId === selection.storyId && story.shapeId === selection.shapeId);
     if (!story) throw new PptxCommandAdmissionError('target-changed');
     return { text: story.text.slice(Math.min(selection.anchor, selection.focus), Math.max(selection.anchor, selection.focus)), version: result.version };
@@ -39,7 +52,7 @@ export async function peerlessClipboard(run: PeerlessPresentation, cut: boolean,
   await run.store.fence();
   run.require();
   if (run.store.getSnapshot().composition || !run.inputEnabled || !peerlessKnownState(run.store) || version !== run.client.state.version ||
-    captured !== JSON.stringify(run.store.getSnapshot().selection)) throw new PptxCommandAdmissionError('target-changed');
+    !sameSelection(selection, run.store.getSnapshot().selection)) throw new PptxCommandAdmissionError('target-changed');
   return run.store.dispatch({ kind: 'replaceText', payload: { at: { source: 'confirmed', selection },
     text: '', inputTime: performance.now(), undoGroup: 'cut' } });
 }
@@ -53,13 +66,12 @@ export async function peerlessPaste(run: PeerlessPresentation) {
   const selection = view.selection;
   if (!selection || selection.kind === 'object' || selection.kind === 'shape' || view.composition)
     throw new PptxCommandAdmissionError('target-changed');
-  const captured = JSON.stringify(selection);
   const version = run.client.state.version;
   const text = await navigator.clipboard.readText();
   await run.store.fence();
   run.require();
   if (run.store.getSnapshot().composition || !run.inputEnabled || !peerlessKnownState(run.store) ||
-    version !== run.client.state.version || captured !== JSON.stringify(run.store.getSnapshot().selection))
+    version !== run.client.state.version || !sameSelection(selection, run.store.getSnapshot().selection))
     throw new PptxCommandAdmissionError('target-changed');
   if (!text) return null;
   return run.store.dispatch({ kind: 'replaceText', payload: { at: { source: 'confirmed', selection },

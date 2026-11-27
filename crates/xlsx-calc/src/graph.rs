@@ -19,7 +19,7 @@ use xlsx_model::{
 
 use crate::TableSpec;
 use crate::deps::{offset_target, positional_argument, range_join_span, references};
-use crate::eval::{ParseCache, parse_cached};
+use crate::eval::{ParseCache, parse_cached, parse_definition_cached};
 use crate::functions::Func;
 use crate::parser::Expr;
 use crate::reference::table_rect;
@@ -84,7 +84,7 @@ pub struct DepGraph {
     /// formula cells the recalcs over this graph left unevaluated, with the
     /// uncomputable functions behind each, sorted; a recalc replaces the entry
     /// of every cell it evaluates.
-    unevaluated: std::sync::Mutex<BTreeMap<NodeKey, Vec<String>>>,
+    unevaluated: std::sync::Mutex<BTreeMap<NodeKey, Gap>>,
     /// the listed cells with no value of excel's to keep, with what a recalc
     /// wrote for them, so the next one writes them again. a cell holding
     /// anything else came from elsewhere, an undo or an op writing its value,
@@ -101,19 +101,25 @@ pub(crate) struct Answer {
     pub(crate) value: CellValue,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct Gap {
+    pub(crate) functions: Vec<String>,
+    pub(crate) iterative: bool,
+}
+
 /// a formula cell whose result an engine gap reached, or that reads a cell an
 /// uncomputable or unknown function left so. an uncomputable function's cell
 /// is never written, keeping excel's cached value or a blank. an unknown
 /// function's keeps excel's cached value too, but with none the engine's
-/// answer stands: `#NAME?`, or what a handler made of it. a gap of this engine
-/// alone keeps the cached value, or shows the computed error when the file
-/// stored none.
+/// answer stands: `#NAME?`, or what a handler made of it. iterative cycle
+/// members keep their values. other gaps keep the cached value or
+/// show the computed error when the file stored none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnevaluatedCell {
     pub sheet: SheetId,
     pub cell: CellRef,
     /// the uncomputable and unknown functions involved, sorted; empty when
-    /// only gaps of this engine were.
+    /// no uncomputable or unknown function was involved.
     pub functions: Vec<String>,
 }
 
@@ -122,15 +128,25 @@ pub struct UnevaluatedCell {
 /// one list per sheet otherwise.
 const BAND_ROWS: u32 = 16;
 const MAX_RANGE_BANDS: u32 = 16;
+/// columns per block of a [`ReaderIndex`]'s tall ranges. a tall range is
+/// filed under each of its columns when it spans at most `BLOCK_COLUMNS`,
+/// under each block its columns touch when it touches at most
+/// `MAX_TALL_BLOCKS`, and in one list per sheet otherwise.
+const BLOCK_COLUMNS: u32 = 16;
+const MAX_TALL_BLOCKS: u32 = 64;
 
 /// the reverse edges into one sheet by cell: single-cell reads by address,
-/// short ranges by the band they start in, tall ones in a list.
+/// short ranges by the band they start in, tall ones in a list, indexed by
+/// the columns or column blocks of all but the widest.
 pub(crate) struct ReaderIndex<'g> {
     graph: &'g DepGraph,
     sheet: SheetId,
     cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
     bands: HashMap<u32, Vec<(CellRange, NodeKey)>>,
     tall: Vec<(CellRange, NodeKey)>,
+    tall_columns: HashMap<ColId, Vec<usize>>,
+    tall_blocks: HashMap<u32, Vec<usize>>,
+    wide: Vec<usize>,
 }
 
 impl ReaderIndex<'_> {
@@ -149,8 +165,20 @@ impl ReaderIndex<'_> {
         let banded = (first..=band)
             .filter_map(|band| self.bands.get(&band))
             .flatten();
+        let mut candidates: Vec<usize> = [
+            self.tall_columns.get(&cell.col),
+            self.tall_blocks.get(&(cell.col / BLOCK_COLUMNS)),
+            Some(&self.wide),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
+        candidates.sort_unstable();
+        let tall = candidates.into_iter().map(|at| &self.tall[at]);
         let ranged = banded
-            .chain(&self.tall)
+            .chain(tall)
             .filter(|(range, _)| range.contains(target));
         let nodes = readers.copied().chain(ranged.map(|&(_, node)| node));
         out.extend(nodes.map(|node| (node.sheet, node.cell())));
@@ -381,10 +409,11 @@ impl DepGraph {
                             continue;
                         };
                         let defined = &self.defined_names[index];
+                        let owner = defined.local_sheet.unwrap_or(sheet);
                         if expanded.insert((sheet, index))
-                            && let Some(parsed) = parse_cached(asts, definition_source(defined))
+                            && let Some(parsed) = self.parse_definition(asts, owner, defined)
                         {
-                            bodies.push((defined.local_sheet.unwrap_or(sheet), parsed));
+                            bodies.push((owner, parsed));
                         }
                     }
                     Expr::FuncCall { func, args, .. } => {
@@ -563,6 +592,9 @@ impl DepGraph {
             cells: HashMap::new(),
             bands: HashMap::new(),
             tall: Vec::new(),
+            tall_columns: HashMap::new(),
+            tall_blocks: HashMap::new(),
+            wide: Vec::new(),
         };
         for &(range, node) in self.by_sheet.get(&sheet).into_iter().flatten() {
             let (first, last) = (range.start.row / BAND_ROWS, range.end.row / BAND_ROWS);
@@ -572,7 +604,23 @@ impl DepGraph {
             } else if last - first < MAX_RANGE_BANDS {
                 index.bands.entry(first).or_default().push((range, node));
             } else {
+                let at = index.tall.len();
                 index.tall.push((range, node));
+                let (first, last) = (
+                    range.start.col / BLOCK_COLUMNS,
+                    range.end.col / BLOCK_COLUMNS,
+                );
+                if range.end.col - range.start.col < BLOCK_COLUMNS {
+                    for col in range.start.col..=range.end.col {
+                        index.tall_columns.entry(col).or_default().push(at);
+                    }
+                } else if last - first < MAX_TALL_BLOCKS {
+                    for block in first..=last {
+                        index.tall_blocks.entry(block).or_default().push(at);
+                    }
+                } else {
+                    index.wide.push(at);
+                }
             }
         }
         index
@@ -595,10 +643,10 @@ impl DepGraph {
             .unwrap_or_else(|err| err.into_inner())
             .iter()
             .filter(|(key, _)| self.deps.contains_key(key))
-            .map(|(key, functions)| UnevaluatedCell {
+            .map(|(key, gap)| UnevaluatedCell {
                 sheet: key.sheet,
                 cell: key.cell(),
-                functions: functions.clone(),
+                functions: gap.functions.clone(),
             })
             .collect()
     }
@@ -619,7 +667,13 @@ impl DepGraph {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         for cell in cells {
-            unevaluated.insert(NodeKey::new(cell.sheet, cell.cell), cell.functions);
+            unevaluated.insert(
+                NodeKey::new(cell.sheet, cell.cell),
+                Gap {
+                    functions: cell.functions,
+                    iterative: false,
+                },
+            );
         }
     }
 
@@ -721,6 +775,14 @@ impl DepGraph {
         }
     }
 
+    pub(crate) fn is_iterative_gap(&self, sheet: SheetId, cell: CellRef) -> bool {
+        self.unevaluated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&NodeKey::new(sheet, cell))
+            .is_some_and(|gap| gap.iterative)
+    }
+
     /// the functions `cell` is held unevaluated with, if it is.
     pub(crate) fn unevaluated_functions(
         &self,
@@ -731,25 +793,18 @@ impl DepGraph {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .get(&NodeKey::new(sheet, cell))
-            .cloned()
+            .map(|gap| gap.functions.clone())
     }
 
-    /// records what one evaluation found: `Some` marks the cell unevaluated
-    /// with those functions, `None` clears it.
-    pub(crate) fn set_unevaluated(
-        &self,
-        sheet: SheetId,
-        cell: CellRef,
-        functions: Option<Vec<String>>,
-    ) {
+    pub(crate) fn set_unevaluated(&self, sheet: SheetId, cell: CellRef, gap: Option<Gap>) {
         let mut unevaluated = self
             .unevaluated
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let key = NodeKey::new(sheet, cell);
-        match functions {
-            Some(functions) => {
-                unevaluated.insert(key, functions);
+        match gap {
+            Some(gap) => {
+                unevaluated.insert(key, gap);
             }
             None => {
                 unevaluated.remove(&key);
@@ -835,6 +890,29 @@ impl DepGraph {
         &self.asts
     }
 
+    fn is_sheet_span(&self, owner: SheetId, first: &str, last: &str) -> bool {
+        self.names.contains_key(&first.to_lowercase())
+            && self.names.contains_key(&last.to_lowercase())
+            && self.defined_name(owner, first).is_none()
+    }
+
+    fn parse_formula(&self, owner: SheetId, source: &str) -> Option<Arc<Expr>> {
+        parse_cached(&self.asts, source, &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })
+    }
+
+    fn parse_definition(
+        &self,
+        asts: &ParseCache,
+        owner: SheetId,
+        defined: &DefinedName,
+    ) -> Option<Arc<Expr>> {
+        parse_definition_cached(asts, definition_source(defined), &|first, last| {
+            self.is_sheet_span(owner, first, last)
+        })
+    }
+
     /// the node's parsed ast; `None` when the cell carries no (parseable)
     /// formula.
     pub(crate) fn ast(&self, sheet: SheetId, cell: CellRef) -> Option<Arc<Expr>> {
@@ -845,7 +923,7 @@ impl DepGraph {
 
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Some(expr) = parse_cached(&self.asts, formula_source(src)) else {
+        let Some(expr) = self.parse_formula(key.sheet, formula_source(src)) else {
             return;
         };
         let edges = self.resolve_edges(key, &expr);
@@ -963,10 +1041,11 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             self.add_references(definition_sheet, &expression, out, seen);
             // a name's body reads structured references of its own
             self.add_table_references(node, &expression, out, seen);
@@ -1040,10 +1119,11 @@ impl DepGraph {
             if !expanded.insert((lookup_sheet, name.to_ascii_lowercase())) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             push_uncomputable_calls(definition_sheet, &expression, &mut found, &mut pending);
         }
         found.into_iter().collect()
@@ -1064,10 +1144,11 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Some(expression) = parse_cached(&self.asts, definition_source(defined)) else {
+            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
+            let Some(expression) = self.parse_definition(&self.asts, definition_sheet, defined)
+            else {
                 continue;
             };
-            let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             if push_volatile_name_uses(definition_sheet, &expression, &mut pending) {
                 return true;
             }

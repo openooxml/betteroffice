@@ -16,6 +16,7 @@ import type { InitInput } from './generated/pptx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import { packagedWasmError, packagedWasmInput } from '../../../../shared/office-session/readWasmAsset';
 import { copyDecodedFace, fontBytes, type FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 import { metafileImageBytes } from '../render/browserImage';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { releasePng, renderPng as renderEnginePng } from './enginePng';
@@ -499,6 +500,17 @@ export function presentationDisplayListJson(handle: PresentationHandle, slideInd
   return context.wasmCall(() => context.renderer.layoutSlideJson(context.doc, slideIndex));
 }
 
+/** @internal Renders one tentative shape rectangle without changing the presentation. */
+export function presentationShapeRectPreview(
+  handle: PresentationHandle, slideId: string, shapeId: string, rect: ShapeRect,
+): SlideDisplayList {
+  const context = presentationContexts.get(handle);
+  if (!context) throw new Error('Presentation shape preview is unavailable');
+  return context.jsonWasmCall(() => context.renderer.previewShapeRectJson(
+    context.doc, { slideId, shapeId, ...rect },
+  ));
+}
+
 export function isProposalsAvailable(): boolean {
   return typeof PptxDocument.prototype.proposeJson === 'function'
     && typeof PptxRenderer.prototype.layoutProposalSlideJson === 'function';
@@ -633,9 +645,10 @@ function openPresentationInternal(
     try { doc.free(); } catch {}
     throw peer ? peerError(error) : error;
   }
-  const exportFaces = new Map<number, PptxFontFace & { id: number; fallback?: boolean }>();
-  const keepFace = (id: number, face: PptxFontFace, fallback = false) => {
-    exportFaces.set(id, { id, family: face.family, bold: face.bold ?? false, italic: face.italic ?? false, bytes: face.bytes.slice(), fallback });
+  const exportFaces = new Map<number, PngFontFace & { id: number; fallback?: boolean }>();
+  const keepFace = (id: number, font: PngFontFace, fallback = false) => {
+    const { family, bold = false, italic = false, bytes, face } = font;
+    exportFaces.set(id, { id, family, bold, italic, bytes: bytes.slice(), fallback, ...(face && { face }) });
     return id;
   };
   if (!peer) {

@@ -103,11 +103,12 @@ pub use header_footer::{
     parse_related_header_footers, parse_related_header_footers_with_aliases, select_for_page,
 };
 pub use inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, FieldFormData, FieldSwitch, Hyperlink, InlineNode,
-    InlineSdt, MathEquation, ParsedFieldInstruction, Run, RunContent, RunProjection, SdtProperties,
-    SimpleField, StructuredFieldContent, StructuredFieldTree, field_run_digest, parse_bookmark_end,
-    parse_bookmark_start, parse_field_instruction, parse_field_type, parse_hyperlink,
-    parse_inline_container, parse_run, parse_sdt_properties, parse_simple_field, sanitize_href,
+    BookmarkEnd, BookmarkStart, ComplexField, DirectionKind, DirectionScope, FieldFormData,
+    FieldSwitch, Hyperlink, InlineNode, InlineSdt, MathEquation, ParsedFieldInstruction, Run,
+    RunContent, RunProjection, SdtProperties, SimpleField, StructuredFieldContent,
+    StructuredFieldTree, field_run_digest, parse_bookmark_end, parse_bookmark_start,
+    parse_field_instruction, parse_field_type, parse_hyperlink, parse_inline_container, parse_run,
+    parse_sdt_properties, parse_simple_field, sanitize_href,
 };
 pub use notes::{
     Note, NoteProperties, NoteSeparatorReference, parse_endnote_properties,

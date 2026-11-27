@@ -996,6 +996,26 @@ pub(crate) fn parse_text_body_properties(element: &XmlElement) -> ShapeTextBodyP
 }
 
 pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
+    parse_drawing_shape(drawing, false, None)
+}
+
+#[doc(hidden)]
+pub fn shape_with_rendered_connectors(drawing: &XmlElement) -> Option<Shape> {
+    parse_drawing_shape(drawing, true, None)
+}
+
+pub(crate) fn parse_shape_with_connector_guides(
+    drawing: &XmlElement,
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) -> Option<Shape> {
+    parse_drawing_shape(drawing, false, Some(guides))
+}
+
+fn parse_drawing_shape(
+    drawing: &XmlElement,
+    render_connectors: bool,
+    guides: Option<&mut crate::s9::PreviewConnectorGuides>,
+) -> Option<Shape> {
     let container = drawing
         .child_elements()
         .find(|value| matches!(value.name.as_str(), "wp:inline" | "wp:anchor"))?;
@@ -1009,9 +1029,20 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
     })?;
     let mut scene = None;
     let mut shape = if is_scene_shape(root.local_name()) {
-        parse_shape(root)
+        let mut shape = parse_shape(root);
+        if render_connectors {
+            render_connector_path(&mut shape, root);
+        } else if let Some(guides) = guides {
+            capture_connector_guides(root, &[], guides);
+        }
+        shape
     } else {
-        let parsed = parse_drawing_scene_tree(root);
+        let (mut parsed, sources) = parse_drawing_scene_with_sources(root);
+        if render_connectors {
+            render_scene_connector_paths(parsed.root.as_mut(), &mut sources.into_iter());
+        } else if let (Some(guides), Some(root)) = (guides, parsed.root.as_ref()) {
+            capture_scene_connector_guides(root, &mut sources.into_iter(), &mut Vec::new(), guides);
+        }
         let legacy = scene_node_to_legacy(parsed.root.as_ref()?, 0);
         scene = Some(parsed);
         *legacy?
@@ -1081,6 +1112,68 @@ pub fn parse_shape_from_drawing(drawing: &XmlElement) -> Option<Shape> {
         shape.scene = Some(Box::new(scene))
     }
     Some(shape)
+}
+
+pub(crate) fn capture_connector_guides(
+    source: &XmlElement,
+    indices: &[usize],
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) {
+    if let Some((preset, adjustments)) =
+        direct_child(Some(source), "spPr").and_then(crate::drawingml::connector_guides)
+    {
+        guides.push((indices.to_vec(), preset, adjustments));
+    }
+}
+
+fn capture_scene_connector_guides<'a>(
+    node: &DrawingSceneNode,
+    sources: &mut impl Iterator<Item = &'a XmlElement>,
+    indices: &mut Vec<usize>,
+    guides: &mut crate::s9::PreviewConnectorGuides,
+) {
+    if node.kind.as_deref() == Some("shape") {
+        if let Some(source) = sources.next() {
+            capture_connector_guides(source, indices, guides);
+        }
+        return;
+    }
+    for (index, child) in node
+        .children
+        .iter()
+        .flatten()
+        .filter(|child| matches!(child.kind.as_deref(), Some("shape" | "group" | "canvas")))
+        .enumerate()
+    {
+        indices.push(index);
+        capture_scene_connector_guides(child, sources, indices, guides);
+        indices.pop();
+    }
+}
+
+fn render_connector_path(shape: &mut Shape, source: &XmlElement) {
+    if let Some(path) =
+        direct_child(Some(source), "spPr").and_then(crate::drawingml::connector_path_for_rendering)
+    {
+        shape.geometry_path = Some(path);
+    }
+}
+
+pub(crate) fn render_scene_connector_paths<'a>(
+    node: Option<&mut DrawingSceneNode>,
+    sources: &mut impl Iterator<Item = &'a XmlElement>,
+) {
+    let Some(node) = node else {
+        return;
+    };
+    if let Some(shape) = node.shape.as_deref_mut()
+        && let Some(source) = sources.next()
+    {
+        render_connector_path(shape, source);
+    }
+    for child in node.children.iter_mut().flatten() {
+        render_scene_connector_paths(Some(child), sources);
+    }
 }
 
 pub fn is_shape_drawing(drawing: &XmlElement) -> bool {
@@ -1745,7 +1838,9 @@ fn render_scene_shape(
     let mut shape = if local == "pic" {
         Box::new(parse_picture_shape(element))
     } else if is_scene_shape(local) {
-        Box::new(parse_shape(element))
+        let mut shape = Box::new(parse_shape(element));
+        render_connector_path(&mut shape, element);
+        shape
     } else {
         return None;
     };
@@ -1777,6 +1872,22 @@ pub(crate) const GROUP_SCENE_LIMIT_WARNING: &str = "BetterOffice did not show ev
 pub(crate) const GROUP_TEXT_BOX_NESTING_WARNING: &str = "BetterOffice did not show the text of group text boxes nested more than 4 levels inside other group text boxes.";
 pub(crate) const GROUP_TEXT_BOX_BUDGET_WARNING: &str = "BetterOffice did not show the text of some group text boxes nested inside other group text boxes: their copies passed the size limit for nested group text box text.";
 
+pub(crate) fn group_text_box_sources(
+    drawing: &XmlElement,
+) -> Option<(BTreeMap<TextBodyKey, Option<&XmlElement>>, bool)> {
+    let source = drawing
+        .child_elements()
+        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))?
+        .child_by_full_name("a:graphic")?
+        .child_by_full_name("a:graphicData")?
+        .child_elements()
+        .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")?;
+    let mut sources = BTreeMap::new();
+    let mut truncated = false;
+    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
+    Some((sources, truncated))
+}
+
 pub(crate) fn enrich_group_text_boxes(
     shape: &mut Shape,
     drawing: &XmlElement,
@@ -1790,21 +1901,9 @@ pub(crate) fn enrich_group_text_boxes(
     let Some(root) = shape.scene.as_mut().and_then(|scene| scene.root.as_mut()) else {
         return Ok(warnings);
     };
-    let Some(source) = drawing
-        .child_elements()
-        .find(|node| matches!(node.name.as_str(), "wp:inline" | "wp:anchor"))
-        .and_then(|container| container.child_by_full_name("a:graphic"))
-        .and_then(|graphic| graphic.child_by_full_name("a:graphicData"))
-        .and_then(|data| {
-            data.child_elements()
-                .find(|node| is_scene_group(node.local_name()) || node.local_name() == "wpc")
-        })
-    else {
+    let Some((sources, truncated)) = group_text_box_sources(drawing) else {
         return Ok(warnings);
     };
-    let mut sources = BTreeMap::new();
-    let mut truncated = false;
-    collect_text_box_sources(source, &mut 0, &mut 0, 0, &mut sources, &mut truncated);
     if truncated {
         warnings.push(GROUP_SCENE_LIMIT_WARNING);
     }

@@ -153,7 +153,8 @@ describe('created lists saved again and again through the document worker', () =
       ids.push(checked.numIds.Alpha ?? null);
       carriersPerKey.push(checked.carriersPerKey);
     }
-    console.log('WORKER-SAVE-IDS', JSON.stringify({ sequence: 'W1', ids, carriersPerKey }));
+    expect(carriersPerKey).toEqual([{ [alpha!]: 1 }, { [alpha!]: 1 }, { [alpha!]: 1 }]);
+    expect(new Set(ids).size).toBe(1);
   });
 
   test('a list taken off, another created and the first brought back by undo stay consistent on every save', async () => {
@@ -162,12 +163,9 @@ describe('created lists saved again and again through the document worker', () =
     createList(session, 'Alpha', 'bullet');
     const alpha = liveKey(session, 'Alpha');
     expect(alpha).not.toBeNull();
-    const ids: Array<Record<string, number | null>> = [];
     const carriersPerKey: Array<Record<string, number>> = [];
     const check = async (expected: Record<string, string | null>) => {
-      const checked = consistent(await save(), expected);
-      ids.push(checked.numIds);
-      carriersPerKey.push(checked.carriersPerKey);
+      carriersPerKey.push(consistent(await save(), expected).carriersPerKey);
     };
     await check({ Alpha: alpha, Beta: null });
     session.addUndoBoundary();
@@ -181,6 +179,8 @@ describe('created lists saved again and again through the document worker', () =
     const undone = session.undo();
     const after = { Alpha: liveKey(session, 'Alpha'), Beta: liveKey(session, 'Beta') };
     await check(after);
-    console.log('WORKER-SAVE-IDS', JSON.stringify({ sequence: 'W2', undone, after, ids, carriersPerKey }));
+    expect(undone).toBe(true);
+    expect(after).toEqual({ Alpha: alpha, Beta: beta });
+    expect(carriersPerKey).toEqual([{ [alpha!]: 1 }, { [beta!]: 1 }, { [alpha!]: 1, [beta!]: 1 }]);
   });
 });

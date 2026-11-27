@@ -50,6 +50,8 @@ use crate::{
     SaveOptions, SaveReport,
 };
 
+mod model_save;
+
 /// The product worker's save seed caps (`residentEngineWorker.ts`).
 const SAVE_SEED_MAX_PARAGRAPHS: u32 = 4096;
 const SAVE_SEED_MAX_INFLATED_BYTES: u32 = 16 * 1024 * 1024;
@@ -69,6 +71,7 @@ pub struct Document {
     session_baseline: Option<SavedFields>,
     session_edits: Vec<SessionEdit>,
     dirty: Dirty,
+    parse_limits: ParseLimits,
     #[cfg(feature = "raster")]
     default_limits: bool,
     #[cfg(any(feature = "fonts", feature = "raster"))]
@@ -136,6 +139,7 @@ impl Document {
             session_baseline: Some(SavedFields::of(&model)),
             session_edits: Vec::new(),
             dirty: Dirty::Clean,
+            parse_limits: limits.clone(),
             #[cfg(feature = "raster")]
             default_limits: *limits == ParseLimits::default(),
             model,
@@ -454,6 +458,7 @@ impl Document {
 
     #[cfg(feature = "fonts")]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
+        input.clamp_column_counts();
         let requirements =
             self.font_requirements(input.measured.iter().map(|measured| &measured.block));
         let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
@@ -545,6 +550,7 @@ impl Document {
 
     #[cfg(not(feature = "fonts"))]
     pub fn layout(&self, mut input: LayoutInput) -> Result<LayoutResult> {
+        input.clamp_column_counts();
         let layout = docx_layout::compute_layout_input(&mut input)?;
         let display_list =
             docx_layout::build_display_list(&input, &layout).map_err(Error::DisplayList)?;
@@ -570,6 +576,9 @@ impl Document {
 
     /// [`Document::save_with_options`] with what the save kept as source bytes or dropped.
     pub fn save_report_with_options(&self, options: SaveOptions) -> Result<SaveReport> {
+        if self.dirty == Dirty::ModelChanged {
+            return self.save_model_report(options);
+        }
         let determinism = SerializerDeterminism {
             seed: self.seed.clone(),
             now: options.now,
@@ -583,9 +592,32 @@ impl Document {
                 bytes: self.source.clone(),
                 kept_unchanged: None,
                 structure_dropped: None,
+                whole_model_write: false,
             });
         }
-        let request = S13SaveRequest {
+        let paragraph_ids = self.session_save_plan()?;
+        let whole_model_write = paragraph_ids.is_none();
+        let request = self.save_request(
+            determinism,
+            options.update_modified_date,
+            options.modified_by,
+            paragraph_ids,
+        );
+        #[cfg(test)]
+        session_save_tests::count_package_write();
+        let (bytes, report) =
+            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
+        Ok(save_report(bytes, report, whole_model_write))
+    }
+
+    fn save_request(
+        &self,
+        determinism: SerializerDeterminism,
+        update_modified_date: bool,
+        modified_by: Option<String>,
+        paragraph_ids: Option<S13ParagraphIds>,
+    ) -> S13SaveRequest {
+        S13SaveRequest {
             determinism,
             document: self.with_authored_ids(self.model.body.clone()),
             header_entries: self.model.headers.clone(),
@@ -597,17 +629,12 @@ impl Document {
             relationship_entries: self.model.relationships.clone(),
             numbering: Some(self.model.numbering.clone()),
             options: S13SaveOptions {
-                update_modified_date: options.update_modified_date,
-                modified_by: options.modified_by,
+                update_modified_date,
+                modified_by,
             },
             selective: None,
-            paragraph_ids: self.session_save_plan()?,
-        };
-        #[cfg(test)]
-        session_save_tests::count_package_write();
-        let (bytes, report) =
-            write_docx_s13_parts_with_report(request, &self.original_parts, None)?;
-        Ok(save_report(bytes, report))
+            paragraph_ids,
+        }
     }
 
     /// The editing session's paragraph save plan for the current model, as the
@@ -1176,6 +1203,7 @@ pub fn render_docx_markdown(
 type RunTemplate = Option<(
     Option<docx_parse::TextFormatting>,
     Option<Vec<docx_parse::inline::RunPropertyChange>>,
+    Vec<docx_parse::DirectionScope>,
 )>;
 
 fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
@@ -1192,7 +1220,11 @@ fn plain_run_template(paragraph: &Paragraph) -> Option<RunTemplate> {
     {
         return None;
     }
-    Some(Some((run.formatting.clone(), run.property_changes.clone())))
+    Some(Some((
+        run.formatting.clone(),
+        run.property_changes.clone(),
+        run.direction_scopes.clone(),
+    )))
 }
 
 fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTemplate) {
@@ -1200,7 +1232,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
         paragraph.content.clear();
         return;
     }
-    let (formatting, property_changes) = template.unwrap_or_default();
+    let (formatting, property_changes, direction_scopes) = template.unwrap_or_default();
     paragraph.content = vec![ParagraphContent::Inline(InlineNode::Run(Run {
         node_type: RunType::Run,
         formatting,
@@ -1209,6 +1241,7 @@ fn replace_plain_run(paragraph: &mut Paragraph, text: String, template: RunTempl
             preserve_space: (text.trim() != text).then_some(true),
             text,
         }],
+        direction_scopes,
     }))];
 }
 
@@ -1361,7 +1394,7 @@ fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
 }
 
-fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
+fn save_report(bytes: Vec<u8>, report: S13SaveReport, whole_model_write: bool) -> SaveReport {
     let structure = report
         .kept_unchanged
         .values()
@@ -1374,6 +1407,7 @@ fn save_report(bytes: Vec<u8>, report: S13SaveReport) -> SaveReport {
         }),
         structure_dropped: (!report.structure_dropped.is_empty())
             .then_some(report.structure_dropped),
+        whole_model_write,
     }
 }
 
@@ -1421,6 +1455,7 @@ mod save_report_tests {
                 ],
                 structure_dropped: vec![dropped("word/footer1.xml"), dropped("word/document.xml")],
             },
+            false,
         );
         assert_eq!(report.bytes, [1, 2, 3]);
         let kept_unchanged = report.kept_unchanged.expect("kept is reported");
@@ -1455,9 +1490,11 @@ mod save_report_tests {
                 kept_unchanged: BTreeMap::from([("word/document.xml".to_owned(), 0)]),
                 ..S13SaveReport::default()
             },
+            false,
         );
         assert!(report.kept_unchanged.is_none());
         assert!(report.structure_dropped.is_none());
+        assert!(!report.whole_model_write);
     }
 }
 
@@ -1729,11 +1766,12 @@ mod session_save_tests {
     }
 
     #[test]
-    fn known_limit_model_mut_borrow_without_change_takes_the_full_write() {
-        let mut document = open();
+    fn model_mut_borrow_without_change_returns_source_bytes() {
+        let source = package(&source());
+        let mut document = Document::open(&source).unwrap();
         document.model_mut();
         let counts = counted(|| {
-            document.save().unwrap();
+            assert_eq!(document.save().unwrap(), source);
         });
         assert_eq!(counts, (0, 1));
     }

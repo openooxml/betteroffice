@@ -140,6 +140,25 @@ async function expectCurrentOnPage(page: Page, pageIndex: number) {
   }).toBe(true);
 }
 
+test('docx: in an idle editor, text typed right after Mod+F and right after "+ Replace" goes into the dialog, not the document', async ({ page }, info) => {
+  const text = 'cat dog';
+  await open(page, [{ runs: [text] }]);
+  await openFind(page);
+  await closeFind(page);
+  await expect(documentInput(page)).toBeFocused();
+  await documentInput(page).press('ControlOrMeta+f');
+  await page.keyboard.type('dog');
+  await expect(findInput(page)).toHaveValue('dog');
+  await expectMatches(page, 1, 1);
+  await dialog(page).getByRole('button', { name: '+ Replace', exact: true }).click();
+  await page.keyboard.type('cow');
+  await expect(replaceInput(page)).toHaveValue('cow');
+  await expect(findInput(page)).toHaveValue('dog');
+  await expectRendered(page, [text]);
+  await closeFind(page);
+  await save(page, info, 'unchanged', [text]);
+});
+
 test('docx: Mod+F finds and highlights case-insensitive canvas matches', async ({ page }, info) => {
   const text = 'cat Cat dog cat';
   await open(page, [{ runs: [text] }]);

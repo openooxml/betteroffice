@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { SessionFailure } from '../types';
-import { createWorkerEditSession, sessionUnacknowledged } from './session';
+import { cancelWorkerEditTicket, createWorkerEditSession, sessionUnacknowledged } from './session';
 import type {
   Checkpoint, CommandAck, CommandConnection, CommandEnvelope, CommandOutcome,
   CommandTicket, EchoHooks, FrameEnvelope, WorkerEditSessionOptions,
@@ -83,6 +83,60 @@ function harness(overrides: Partial<WorkerEditSessionOptions<string, string, str
 }
 
 describe('worker edit session', () => {
+  it('cancels a command waiting for its predecessor before assigning a sequence', async () => {
+    const h = harness();
+    const predecessor = h.session.submit('select', 'shape');
+    const resize = h.session.submit('resize', 'east', { after: predecessor, waitForAfter: true });
+    h.pump();
+    expect(h.calls.map((call) => call.envelope.payload)).toEqual(['shape']);
+    expect(cancelWorkerEditTicket(h.session, resize)).toBe(true);
+    expect(await resize.ack).toMatchObject({ seq: undefined, status: 'cancelled', reason: 'cancelled' });
+    h.ack(0);
+    await predecessor.ack;
+    h.pump();
+    expect(h.calls.map((call) => call.envelope.payload)).toEqual(['shape']);
+    await h.session.dispose();
+  });
+
+  it('sends a waiting resize before later independent commands', async () => {
+    const h = harness({ maxInFlight: 4 });
+    try {
+      const predecessor = h.session.submit('select', 'shape');
+      const resize = h.session.submit('resize', 'east', { after: predecessor, waitForAfter: true });
+      h.session.submit('undo', 'undo');
+      h.session.submit('remote', 'remote', { lane: 'collab' });
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select']);
+      h.ack(0);
+      await predecessor.ack;
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select', 'resize', 'undo', 'remote']);
+      expect(resize.seq).toBe(2);
+    } finally { await h.session.dispose(); }
+  });
+
+  it('sends independent work after the final refusal batch clears a fence', async () => {
+    const h = harness({ maxInFlight: 1 });
+    try {
+      const predecessor = h.session.submit('select', 'shape');
+      h.pump();
+      const children = Array.from({ length: 130 }, (_, index) =>
+        h.session.submit('resize', 'east', { after: predecessor, waitForAfter: index === 129 }));
+      const independent = h.session.submit('undo', 'undo');
+      const flushed = h.session.flush();
+      h.pump();
+      h.ack(0, [{ seq: 1, status: 'refused' }]);
+      await predecessor.ack;
+      h.pump();
+      expect(await children[129]!.ack).toMatchObject({ status: 'cancelled', reason: 'dependency-refused' });
+      h.pump();
+      expect(h.calls.map(({ envelope }) => envelope.kind)).toEqual(['select', 'undo']);
+      h.ack(1);
+      expect(await independent.ack).toMatchObject({ status: 'applied' });
+      await flushed;
+    } finally { await h.session.dispose(); }
+  });
+
   it('still lists the envelopes that were unacknowledged when a crash ended the session without recovery', async () => {
     const h = harness({ maxRecoveryAttempts: 0 });
     for (const value of ['a', 'b', 'c']) h.session.submit('insert', value);

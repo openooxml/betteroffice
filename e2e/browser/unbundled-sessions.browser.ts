@@ -117,12 +117,36 @@ for (const format of ['xlsx', 'pptx', 'docx'] as const) {
   });
 }
 
-for (const format of ['xlsx', 'pptx'] as const) {
+for (const format of ['xlsx', 'pptx', 'docx'] as const) {
   test(`${format} worker session opens with the fonts package unresolvable`, async ({ page }) => {
     await page.context().route(/\/npm\/@betteroffice\/fonts(-[a-z]+)?\//, (route) => route.abort());
     await page.goto(`${origin}/?fonts=0`);
     const outcome = await open(page, format);
     expect(outcome).toMatchObject({ ok: true });
     expect((outcome as { count: number }).count).toBeGreaterThan(0);
+  });
+}
+
+for (const format of ['xlsx', 'pptx'] as const) {
+  test(`${format} worker PNG export rejects when the page cannot import fonts`, async ({ page }) => {
+    await page.goto(`${origin}/?fonts=0`);
+    const result = await page.evaluate(async (format) => {
+      const bytes = new Uint8Array(await (await fetch(`/__fixture/${format}`)).arrayBuffer());
+      const module = await import(`@betteroffice/${format}/worker`);
+      const session = format === 'pptx' ? await module.openPresentationSession(bytes) : await module.openWorkbookSession(bytes);
+      try {
+        const target = format === 'pptx' ? { slide: 0 } : { sheet: 0, range: 'A1:B2' };
+        await session.call.renderPng(target);
+        return { rendered: true };
+      } catch (error) {
+        const { name, message, code } = error as Error & { code?: string };
+        return { rendered: false, name, message, code };
+      } finally {
+        await session.dispose();
+      }
+    }, format);
+    expect(result).toMatchObject({ rendered: false, message: expect.stringContaining('@betteroffice/fonts') });
+    if (format === 'pptx') expect(result).toMatchObject({ name: 'PngExportError', code: 'font-unavailable' });
+    else expect(result).toMatchObject({ name: 'TypeError' });
   });
 }

@@ -31,7 +31,7 @@ export interface ResidentCollaborationUpdates {
   updates: ArrayBuffer[];
   inferences: Array<{ seq: number; insertion: CollaborationTextInsertion }>;
   /** This session's own state-vector clock after the drained edits and merges. */
-  clock: number;
+  clock?: number;
   /** Output of the providers this worker runs, for the threads that own their transports. */
   pipe?: PipeOutputBatch[];
 }
@@ -82,12 +82,15 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
     transportError: (error) => new CollaborationError(error.code, error.message),
     onOutput: options.onPipeOutput,
   });
+  let pendingPipe: ReturnType<typeof pipe.drain>;
   return {
-    drain(): (ResidentCollaborationUpdates & { transfer: ArrayBuffer[] }) | undefined {
-      const piped = pipe.drain();
+    drain(readClock = true): (ResidentCollaborationUpdates & { transfer: ArrayBuffer[] }) | undefined {
+      const piped = pendingPipe ??= pipe.drain();
       if (!updates.length && !inferences.length && !merged && !piped) return undefined;
+      const clock = readClock ? stateVectorClock(engine.encodeStateVector(), engine.clientId) : undefined;
       merged = false;
-      return { clock: stateVectorClock(engine.encodeStateVector(), engine.clientId), updates: updates.splice(0), inferences: inferences.splice(0),
+      pendingPipe = undefined;
+      return { ...(clock !== undefined && { clock }), updates: updates.splice(0), inferences: inferences.splice(0),
         ...(piped && { pipe: piped.batches }), transfer: piped?.transfer ?? [] };
     },
     wrap(hooks: Hooks): Hooks {
@@ -128,7 +131,7 @@ export function createResidentCollaboration(engine: ResidentEngineSession, optio
         },
       };
     },
-    dispose() { if (disposed) return; disposed = true; pipe.dispose(); unsubscribe(); updates.length = 0; inferences.length = 0; anchors.clear(); inferredAnchors.delete(engine); },
+    dispose() { if (disposed) return; disposed = true; pipe.dispose(); pendingPipe = undefined; unsubscribe(); updates.length = 0; inferences.length = 0; anchors.clear(); inferredAnchors.delete(engine); },
   };
 }
 

@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
-import type { PositionedTextLine, SlideDisplayList, TextBoxPrimitive } from '../types';
+import type { PositionedTextLine, ShapePrimitive, SlideDisplayList, TextBoxPrimitive } from '../types';
 import * as wasm from '../wasm/loader';
 import { buildCommandFrame, commandFrameMedia } from './commandFrame';
 import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry, selectionGeometry } from './commandGeometry';
@@ -22,6 +22,48 @@ function list(text = 'alpha beta\nx\nalpha beta', lines = [line(0, 10, 0), line(
   return { contractVersion: 1, width: 960, height: 540,
     background: { kind: 'solid', color: '#ffffff' }, primitives: [box] };
 }
+
+test('full and compact hit geometry follow a rotated bent connector detour', () => {
+  const connector: ShapePrimitive = {
+    kind: 'shape', objectId: 2, shapeId: 'connector', name: 'Connector', geometry: 'bentConnector3',
+    x: 100, y: 100, w: 100, h: 100, transform: { rotationDeg: 90, flipH: true },
+    stroke: { color: '#ff0000', width: 8 },
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1.5, y: 0 },
+      { type: 'line', x: 1.5, y: 1 }, { type: 'line', x: 1, y: 1 }],
+  };
+  const source = { ...list(), primitives: [connector] };
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(geometry.hits[0]).not.toHaveProperty('connector');
+    expect(hitGeometry(geometry, { x: 150, y: 53.5 })).toEqual({ kind: 'shape', shapeId: 'connector' });
+    expect(hitGeometry(geometry, { x: 150, y: 55 })).toBeNull();
+    expect(hitGeometry(geometry, { x: 150, y: 150 })).toBeNull();
+    const unstroked = index({ ...source, primitives: [{ ...connector, stroke: undefined }] });
+    expect(hitGeometry(unstroked, { x: 150, y: 53.5 })).toBeNull();
+    expect(hitGeometry(unstroked, { x: 150, y: 150 })).toBeNull();
+  }
+});
+
+test('full and compact hit geometry include a wide bent connector miter', () => {
+  const connector: ShapePrimitive = {
+    kind: 'shape', objectId: 2, shapeId: 'connector', name: 'Connector', geometry: 'bentConnector4',
+    x: 100, y: 100, w: 100, h: 100, stroke: { color: '#ff0000', width: 20 },
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 0.25, y: 0 },
+      { type: 'line', x: 0.25, y: 0.5 }, { type: 'line', x: 1, y: 0.5 },
+      { type: 'line', x: 1, y: 1 }],
+  };
+  const source = { ...list(), primitives: [connector] };
+  const miter = { x: 117, y: 158 };
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(hitGeometry(geometry, miter)).toEqual({ kind: 'shape', shapeId: 'connector' });
+    expect(hitGeometry(geometry, { x: 114, y: 158 })).toBeNull();
+    const bevel = index({ ...source, primitives: [{
+      ...connector, stroke: { color: '#ff0000', width: 20, join: 'bevel' },
+    }] });
+    expect(hitGeometry(bevel, miter)).toBeNull();
+  }
+});
 
 test('vertical_goal_worker', () => {
   const index = indexHitGeometry(list());

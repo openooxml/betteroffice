@@ -289,6 +289,76 @@ describe('two created definitions saved by one session', () => {
   });
 });
 
+describe('created lists of two collaborating sessions saved over each other', () => {
+  const pointer = (bytes: Uint8Array, numId: number | undefined) => attribute(
+    elements(text(unzipContainer(bytes)['word/numbering.xml']), 'num').find(entry => attribute(entry, NUM_ID) === numId), POINTER
+  );
+  const peerOf = async (source: YrsSession, clientId: number, bytes: Uint8Array): Promise<YrsSession> => {
+    const peer = await session(clientId);
+    peer.openDocx(bytes, false);
+    peer.loadState(source.encodeState());
+    return peer;
+  };
+  const over = async (target: YrsSession, bytes: Uint8Array) => {
+    const projected = yrsToDocument(target, { ...target.materializeDocx()!, originalBuffer: bytes.slice().buffer });
+    return new Uint8Array(await saveEditorDocument(target, projected, []));
+  };
+  const at = (target: YrsSession, value: string) => {
+    const paraId = target.paragraphs('body').find(entry => entry.text === value)!.paraId;
+    return { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } };
+  };
+
+  test('never share one pair of ids after one saved, without its list, over a file that carries the other at the ids its list was given', async () => {
+    const original = makeDocx(DOCUMENT, LISTS_NUMBERING);
+    const first = await session(5);
+    first.seedFromDocx(original);
+    const second = await peerOf(first, 6, original);
+    const alpha = at(first, 'Alpha');
+    const attrs = first.ensureListDefinition('body', alpha.start.paraId, 'bullet');
+    first.setParagraphAttrs(alpha, attrs);
+    const s1 = (await saveYrsDocx(first, { updateModifiedDate: false })).bytes;
+    const k = savedNumId(s1, 'Alpha');
+    createList(second, 'Beta', 'numbered');
+    const theirs = (await saveYrsDocx(second, { updateModifiedDate: false })).bytes;
+    first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+    first.setParagraphAttrs(alpha, { numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null } });
+    const s2 = await over(first, theirs);
+    first.setParagraphAttrs(alpha, attrs);
+    const s3 = await over(first, original);
+    const alphaId = savedNumId(s3, 'Alpha');
+    const betaId = savedNumId(s3, 'Beta');
+    expect(betaId).not.toBe(alphaId);
+    expect(pointer(s3, betaId)).not.toBe(pointer(s3, alphaId));
+    expect(savedNumId(s2, 'Beta')).not.toBe(k);
+    expect(savedNumId(s2, 'Alpha')).toBeUndefined();
+    expect(alphaId).toBe(k);
+    expect(savedNumId(theirs, 'Beta')).toBe(k);
+    expect(pointer(theirs, k)).toBe(pointer(s1, k));
+    expect(counts(s3)).toEqual({ abstractNums: SOURCE.abstractNums + 2, nums: SOURCE.nums + 2 });
+    expect(savedFormat(s3, alphaId)).toBe('bullet');
+    expect(savedFormat(s3, betaId)).toBe('decimal');
+    expect(k).toBeGreaterThan(3);
+  });
+
+  test('a numId a paragraph without a created list uses is not adopted from a file that carries the created list at it', async () => {
+    const original = makeDocx(DOCUMENT, LISTS_NUMBERING);
+    const first = await session(5);
+    first.seedFromDocx(original);
+    const second = await peerOf(first, 6, original);
+    createList(second, 'Beta', 'numbered');
+    const theirs = (await saveYrsDocx(second, { updateModifiedDate: false })).bytes;
+    first.setParagraphAttrs(at(first, 'Lead'), { numPr: { numId: 4, ilvl: 0 } });
+    first.applyUpdate(second.encodeStateAsUpdate(first.encodeStateVector()));
+    const saved = await over(first, theirs);
+    const beta = savedNumId(saved, 'Beta');
+    expect(beta).not.toBe(4);
+    expect(savedNumId(saved, 'Lead')).toBe(4);
+    expect(savedNumId(theirs, 'Beta')).toBe(4);
+    expect(beta).toBeGreaterThan(4);
+    expect(savedFormat(saved, beta)).toBe('decimal');
+  });
+});
+
 describe('a numbering part whose list points at a definition it does not hold', () => {
   test('the abstractNumId the list points at is not given to a created definition', () => {
     const dangling = `<w:numbering xmlns:w="${W}"><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
@@ -366,10 +436,10 @@ describe('created definitions no paragraph names', () => {
     return key!;
   };
 
-  test('a list put on, taken off and put on again saves only the definition its paragraph is on', async () => {
+  test('a list put on, taken off and put on as the other kind saves only the definition its paragraph is on', async () => {
     const created = await session();
     created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
-    createList(created, 'Alpha', 'bullet');
+    createList(created, 'Alpha', 'numbered');
     takeOff(created, 'Alpha');
     createList(created, 'Alpha', 'bullet');
     expect(created.createdListDefinitions()).toHaveLength(2);
@@ -641,6 +711,36 @@ describe('a session that opens another document', () => {
     const numbering = text(unzipContainer(second)['word/numbering.xml']);
     const num = elements(numbering, 'num').find(entry => attribute(entry, NUM_ID) === alpha);
     expect(attribute(num, POINTER)).toBe(1);
+    expect(k).toBeGreaterThan(3);
+  });
+});
+
+describe('an open that fails on a session that keeps its document', () => {
+  test('leaves the ids earlier saves gave as they were for the next save', async () => {
+    const created = await session();
+    created.seedFromDocx(makeDocx(DOCUMENT, LISTS_NUMBERING));
+    createList(created, 'Alpha', 'bullet');
+    const s1 = await editorSaved(created);
+    const k = savedNumId(s1, 'Alpha');
+    createList(created, 'Beta', 'numbered');
+    const alpha = created.paragraphs('body').find(entry => entry.text === 'Alpha')!.paraId;
+    created.setParagraphAttrs({ story: 'body', start: { paraId: alpha, offset: 0 }, end: { paraId: alpha, offset: 0 } }, {
+      numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+    });
+    const s2 = await editorSaved(created);
+    const beta = savedNumId(s2, 'Beta');
+    let refused: unknown;
+    try {
+      created.seedFromDocx(new Uint8Array([1, 2, 3]));
+    } catch (error) {
+      refused = error;
+    }
+    const s3 = await editorSaved(created);
+    expect(savedNumId(s3, 'Beta')).toBe(beta);
+    expect(counts(s3)).toEqual(counts(s2));
+    expect(refused).toBeDefined();
+    expect(savedNumId(s2, 'Alpha')).toBeUndefined();
+    expect(beta).toBeGreaterThan(k!);
     expect(k).toBeGreaterThan(3);
   });
 });

@@ -677,6 +677,8 @@ export type ShapePathCommand =
 
 export interface ShapePrimitive extends DocAttrs {
   kind: 'shape';
+  /** @internal Preset name of a connector, so the painter can draw its corrected route. */
+  shapeType?: string;
   x: number;
   y: number;
   w: number;

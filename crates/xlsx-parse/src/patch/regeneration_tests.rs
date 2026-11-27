@@ -243,6 +243,7 @@ fn patch_errors_keep_the_sheet_name_and_original_error() {
         let patch = SheetPatch {
             sheet: &workbook.sheets[0],
             original: &parsed.workbook.sheets[0],
+            cell_facts: &parsed.package.sheets[0].cell_facts,
             axes: &axes,
             workbook: &workbook,
             sst_index: &indices,

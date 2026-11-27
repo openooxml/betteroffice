@@ -7,7 +7,7 @@ use xlsx_model::{
     SheetId, VAlign, Workbook,
 };
 
-use crate::display_list::{DisplayList, DrawCmd, Rect, TextRun, TextRunBaseline};
+use crate::display_list::{DisplayList, DrawCmd, Rect, TextRun, TextRunBaseline, TextWrap};
 use crate::{
     Viewport, build_display_list, build_display_list_with_text_runs, run_pieces, wrap_run_lines,
 };
@@ -381,23 +381,21 @@ fn a_rich_cell_spills_into_an_empty_neighbour_and_stops_at_a_filled_one() {
     assert_eq!((kept, runs), (cell, 2));
 }
 
-fn wrapped_workbook(size_font: u32, value: &str) -> Workbook {
+fn wrapped_workbook(value: &str) -> Workbook {
     let mut workbook = workbook(vec![("A1", styled(value, 1))]);
     workbook.sheets[0].row_heights.insert(0, 60.0);
-    for size in [11.0, 20.0] {
-        workbook.styles.fonts.push(Font {
-            name: Some("Calibri".into()),
-            size_pt: Some(size),
-            ..Font::default()
-        });
-    }
+    workbook.styles.fonts.push(Font {
+        name: Some("Calibri".into()),
+        size_pt: Some(11.0),
+        ..Font::default()
+    });
     workbook.styles.cell_xfs.extend([
         Xf {
             font: Some(0),
             ..Xf::default()
         },
         Xf {
-            font: Some(size_font),
+            font: Some(0),
             alignment: Some(Alignment {
                 wrap_text: true,
                 ..Alignment::default()
@@ -409,7 +407,7 @@ fn wrapped_workbook(size_font: u32, value: &str) -> Workbook {
 }
 
 #[test]
-fn a_wrapped_rich_cell_steps_its_lines_by_its_largest_run() {
+fn a_wrapped_rich_cell_anchors_its_layout_to_the_base_size() {
     let stored = "AB CDE FG";
     let source = [
         rich_run(0, 2, |style| style.bold = Some(true)),
@@ -425,17 +423,74 @@ fn a_wrapped_rich_cell_steps_its_lines_by_its_largest_run() {
         } => (*y, *wrap, runs.len(), *font_size),
         _ => unreachable!(),
     };
-    let rich = with_runs(&wrapped_workbook(0, stored), &[("A1", &source)]);
-    let rich = layout(&rich);
-    let large = wrapped_workbook(1, stored);
-    let twin = layout(&build_display_list(&large, SheetId(0), &VIEW).unwrap());
+    let workbook = wrapped_workbook(stored);
+    let rich = layout(&with_runs(&workbook, &[("A1", &source)]));
+    let plain = layout(&build_display_list(&workbook, SheetId(0), &VIEW).unwrap());
     assert_eq!((rich.2, rich.3), (2, 11.0));
-    assert!(rich.1.is_some());
-    assert_eq!((rich.0, rich.1), (twin.0, twin.1));
+    assert_eq!(rich.0, plain.0);
+    assert_eq!(
+        rich.1,
+        plain.1.map(|wrap| TextWrap {
+            max_lines: None,
+            ..wrap
+        })
+    );
+}
 
-    let small = wrapped_workbook(0, stored);
-    let plain = layout(&build_display_list(&small, SheetId(0), &VIEW).unwrap());
-    assert_ne!(rich.1, plain.1);
+#[test]
+fn a_single_size_wrapped_rich_cell_keeps_the_plain_wrap_layout() {
+    let stored = "A\nB";
+    let source = [rich_run(0, 1, |style| {
+        style.size_pt = Some(11.0);
+        style.bold = Some(true);
+    })];
+    let workbook = wrapped_workbook(stored);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let cmd = command(&rich, stored);
+    assert!(run_pieces(cmd).is_some());
+    assert!(matches!(cmd, DrawCmd::Text { wrap: Some(wrap), .. } if wrap.max_lines == Some(4)));
+    assert_eq!(&without_runs(cmd), command(&plain, stored));
+}
+
+#[test]
+fn uniform_runs_of_a_different_size_keep_that_sizes_wrap_layout() {
+    let stored = "AB\nCD";
+    let source = [
+        rich_run(0, 2, |style| {
+            style.size_pt = Some(14.0);
+            style.bold = Some(true);
+        }),
+        rich_run(2, 5, |style| style.size_pt = Some(14.0)),
+    ];
+    let mut workbook = wrapped_workbook(stored);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    workbook.styles.fonts[0].size_pt = Some(14.0);
+    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
+    let layout = |list: &DisplayList| match command(list, stored) {
+        DrawCmd::Text {
+            wrap: Some(wrap), ..
+        } => (wrap.line_height, wrap.max_lines),
+        _ => unreachable!(),
+    };
+    assert!(run_pieces(command(&rich, stored)).is_some());
+    assert!(layout(&rich).1.is_some());
+    assert_eq!(layout(&rich), layout(&plain));
+}
+
+#[test]
+fn mixed_runs_in_a_one_point_cell_keep_a_positive_line_height() {
+    let stored = "A\nB";
+    let source = [
+        rich_run(0, 2, |style| style.size_pt = Some(11.0)),
+        rich_run(2, 3, |style| style.size_pt = Some(14.0)),
+    ];
+    let mut workbook = wrapped_workbook(stored);
+    workbook.styles.fonts[0].size_pt = Some(1.0);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    let cmd = command(&rich, stored);
+    assert!(run_pieces(cmd).is_some());
+    assert!(matches!(cmd, DrawCmd::Text { wrap: Some(wrap), .. } if wrap.line_height > 0.0));
 }
 
 fn with_y(command: &DrawCmd, baseline: f32) -> DrawCmd {
@@ -565,7 +620,7 @@ fn a_bottom_aligned_rich_cell_in_a_row_with_room_keeps_its_runs() {
 }
 
 #[test]
-fn a_wrapped_rich_cell_whose_lines_at_its_largest_pitch_pass_the_row_paints_plain() {
+fn a_top_aligned_wrapped_rich_cell_can_overflow_its_row() {
     let stored = "H\n.";
     let source = [rich_run(0, 1, |style| style.size_pt = Some(24.0))];
     let alignment = Alignment {
@@ -576,7 +631,11 @@ fn a_wrapped_rich_cell_whose_lines_at_its_largest_pitch_pass_the_row_paints_plai
     };
     let mut workbook = aligned_workbook(stored, alignment, Some(45.0));
     workbook.sheets[0].col_widths.insert(0, 10.0);
-    assert_paints_plain(&workbook, stored, &source);
+    let rich = with_runs(&workbook, &[("A1", &source)]);
+    let cmd = command(&rich, stored);
+    assert!(run_pieces(cmd).is_some());
+    assert!(matches!(cmd, DrawCmd::Text { wrap: Some(wrap), .. } if wrap.max_lines.is_none()));
+    assert_eq!(clip_of(cmd).h, 60.0);
 }
 
 fn wrapped_bottom_workbook(value: &str, height: Option<f64>) -> Workbook {
@@ -590,34 +649,16 @@ fn wrapped_bottom_workbook(value: &str, height: Option<f64>) -> Workbook {
 }
 
 #[test]
-fn a_wrapped_rich_cell_that_would_paint_fewer_lines_than_plain_paints_plain() {
+fn a_bottom_aligned_wrapped_rich_cell_keeps_its_runs_at_any_row_height() {
     let stored = "A\nB";
     let source = [rich_run(0, 1, |style| style.size_pt = Some(24.0))];
-    let workbook = wrapped_bottom_workbook(stored, None);
-    let rich = with_runs(&workbook, &[("A1", &source)]);
-    let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
-    assert!(
-        runs_of(&rich, stored).is_empty(),
-        "{:?}",
-        command(&rich, stored)
-    );
-    assert_eq!(command(&rich, stored), command(&plain, stored));
-}
-
-#[test]
-fn a_wrapped_rich_cell_with_room_for_its_lines_keeps_its_runs() {
-    let stored = "A\nB";
-    let source = [rich_run(0, 1, |style| style.size_pt = Some(24.0))];
-    let workbook = wrapped_bottom_workbook(stored, Some(66.0));
-    let rich = with_runs(&workbook, &[("A1", &source)]);
-    assert_eq!(runs_of(&rich, stored).len(), 1);
-    let DrawCmd::Text { wrap, .. } = command(&rich, stored) else {
-        unreachable!();
-    };
-    assert!(
-        wrap.is_some_and(|wrap| wrap.max_lines.is_none_or(|max| max >= 2)),
-        "{wrap:?}"
-    );
+    for height in [None, Some(66.0)] {
+        let workbook = wrapped_bottom_workbook(stored, height);
+        let rich = with_runs(&workbook, &[("A1", &source)]);
+        let cmd = command(&rich, stored);
+        assert!(run_pieces(cmd).is_some());
+        assert!(matches!(cmd, DrawCmd::Text { wrap: Some(wrap), .. } if wrap.max_lines.is_none()));
+    }
 }
 
 #[test]
@@ -736,7 +777,7 @@ fn command_floats(command: &DrawCmd) -> Vec<f32> {
 #[test]
 fn a_run_size_no_cell_font_would_take_is_ignored() {
     let stored = "A\nB";
-    let workbook = wrapped_workbook(0, stored);
+    let workbook = wrapped_workbook(stored);
     let huge = [rich_run(0, 1, |style| {
         style.size_pt = Some(1e100);
         style.bold = Some(true);
@@ -764,39 +805,34 @@ fn sized_run(size: f64) -> [RichRun; 1] {
 
 #[test]
 fn run_sizes_at_the_edges_of_the_accepted_range() {
-    let smallest = f32::from_bits(1);
+    let stored = "least under most over";
     let cases = [
-        ("A1", "least", f64::from(smallest), Some(smallest)),
-        ("C1", "under", 1e-50, None),
-        ("E1", "most", f64::from(f32::MAX), None),
-        ("G1", "over", 1e39, None),
+        (0, 1, 1.0, Some(1.0)),
+        (1, 2, 0.999_999_99, None),
+        (2, 3, 409.0, Some(409.0)),
+        (3, 4, 409.000_001, None),
     ];
-    let cells = cases.map(|(address, value, ..)| (address, text(value)));
-    let workbook = workbook(Vec::from(cells));
-    let sources = cases.map(|(address, _, size, _)| (address, sized_run(size)));
-    let lookup: Vec<(&str, &[RichRun])> = sources
+    let workbook = wrapped_workbook(stored);
+    let source =
+        cases.map(|(start, end, size, _)| rich_run(start, end, |style| style.size_pt = Some(size)));
+    let list = with_runs(&workbook, &[("A1", &source)]);
+    let sizes: Vec<_> = runs_of(&list, stored)
         .iter()
-        .map(|(address, runs)| (*address, &runs[..]))
+        .map(|run| run.font_size)
         .collect();
-    let list = with_runs(&workbook, &lookup);
-    for (_, value, _, size) in cases {
-        assert_eq!(
-            runs_of(&list, value).first().and_then(|run| run.font_size),
-            size,
-            "{value}"
-        );
-    }
+    assert_eq!(sizes, cases.map(|(_, _, _, size)| size));
 }
 
 #[test]
-fn a_run_too_large_for_any_row_leaves_the_plain_command() {
-    let stored = "HI";
-    let workbook = workbook(vec![("A1", text(stored))]);
+fn a_wrapped_run_larger_than_excels_range_uses_the_base_size() {
+    let stored = "A\nB";
+    let workbook = wrapped_workbook(stored);
     let rich = with_runs(&workbook, &[("A1", &sized_run(f64::from(f32::MAX)))]);
-    let floats = command_floats(command(&rich, stored));
-    assert!(floats.iter().all(|value| value.is_finite()), "{floats:?}");
+    let cmd = command(&rich, stored);
+    assert_eq!(runs_of(&rich, stored)[0].font_size, None);
+    assert!(run_pieces(cmd).is_none());
     let plain = build_display_list(&workbook, SheetId(0), &VIEW).unwrap();
-    assert_eq!(command(&rich, stored), command(&plain, stored));
+    assert_eq!(&without_runs(cmd), command(&plain, stored));
 }
 
 #[test]

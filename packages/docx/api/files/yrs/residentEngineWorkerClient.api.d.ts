@@ -114,7 +114,6 @@ export interface ResidentEngineWorkerPort {
 }
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
 export declare class ResidentEngineWorkerClient implements DocxCommandClient {
-    protected readonly worker: ResidentEngineWorkerPort;
     readonly fontRuntime: {
         decoder: FontDecoder;
     };
@@ -153,6 +152,9 @@ export declare class ResidentEngineWorkerClient implements DocxCommandClient {
     private readonly frameListeners;
     private readonly pipeListeners;
     private readonly collabListeners;
+    protected readonly worker: ResidentEngineWorkerPort;
+    private readonly detachFontPackSource;
+    private readonly fontPackFallback;
     protected commandIdentity: {
         session: string;
         incarnation: number;

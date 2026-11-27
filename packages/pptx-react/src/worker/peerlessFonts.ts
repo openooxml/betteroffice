@@ -1,9 +1,9 @@
-import { pptxWorkerRenderClients, type PptxPaintFont, type PptxWorkerRenderClient } from '../../../../shared/office-session/render/pptxWorkerRender';
+import { pptxWorkerRenderClients, type DefaultFontPaintFace, type PptxPaintFont, type PptxWorkerRenderClient } from '../../../../shared/office-session/render/pptxWorkerRender';
 export { installFonts, installBrowserFonts, useStableFonts } from '../fontFaces';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 
 export async function installDefaultFonts(
-  fonts: readonly DefaultFontFace[], installed: FontFace[], current: () => boolean, report: () => void,
+  fonts: readonly DefaultFontPaintFace[], installed: FontFace[], current: () => boolean, report: () => void,
   allowed: (family: string) => boolean = () => true,
 ): Promise<DefaultFontFace[]> {
   if (!current() || typeof document === 'undefined' || typeof FontFace === 'undefined' || !document.fonts) return [];
@@ -14,7 +14,7 @@ export async function installDefaultFonts(
       const traits = font.ownWeight ? undefined : await import('../fontTraits')
         .then((module) => module.readFontTraits(new Uint8Array(font.bytes))).catch(() => undefined);
       if (!current() || !allowed(font.family)) return;
-      const loading = new FontFace(font.family, font.bytes, {
+      const loading = new FontFace(font.paintFamily ?? font.family, font.bytes, {
         weight: traits ? String(traits.weight) : font.bold ? '700' : '400',
         style: traits ? traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal' : font.italic ? 'italic' : 'normal',
       }).load();

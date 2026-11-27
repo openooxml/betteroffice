@@ -104,7 +104,7 @@ export function createPeerlessShellController(initial: Options) {
   let options = initial;
   let binding: PeerlessEditSessionBinding | null = null;
   let unsubscribe: (() => void) | undefined;
-  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean; readyFor: PeerlessEditSessionBinding | null } =
+  let snapshot: { status: 'empty' | 'opening' | 'ready' | 'failed'; view: PeerlessViewSnapshot | null; error: Error | null; recoveryFailed?: boolean; mode: NonNullable<DocxEditorProps['mode']>; preview: ResidentEngineWorkerFrame | null; previewPainted: boolean; readyFor: PeerlessEditSessionBinding | null } =
     { status: 'empty', view: null, error: null, mode: initial.mode ?? 'editing', preview: null, previewPainted: false, readyFor: null };
   const listeners = new Set<() => void>();
   let shellSnapshot = snapshot;
@@ -159,11 +159,11 @@ export function createPeerlessShellController(initial: Options) {
     emit(options.onSelectionChange, state);
     for (const listener of selections) emit(listener, state);
   };
-  const reset = (status: typeof snapshot.status, error: Error | null = null) => {
+  const reset = (status: typeof snapshot.status, error: Error | null = null, recoveryFailed = false) => {
     const selected = snapshot.view?.workerSelection;
     fontRevision = 0; fontFamilies = []; metadata = null; revisions = null; firstPainted = false; readyAnnounced = false; workerMemory = null;
     unsubscribe?.(); binding = null; reviewValue = null; reviewBinding = null; reviewIdentity = null; nativeProbe = null;
-    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, mode: mode(), preview: null, previewPainted: false, readyFor: null }; publish();
+    batchResults.clear(); commentResults.clear(); appliedBatches.clear(); commentList = null; snapshot = { status, view: null, error, recoveryFailed, mode: mode(), preview: null, previewPainted: false, readyFor: null }; publish();
     if (selected) selectionChanged(null);
   };
   const publish = (frame = false) => {
@@ -1086,7 +1086,7 @@ export function createPeerlessShellController(initial: Options) {
     },
     memory(samples: WasmModuleMemory[]) { workerMemory = samples.map(sample => ({ ...sample })); reportMemory(); },
     empty() { replace(); documentKey = undefined; reset('empty'); },
-    fail(error: Error) { replace(); reset('failed', error); },
+    fail(error: Error, recoveryFailed = binding !== null) { replace(); reset('failed', error, recoveryFailed); },
     attach(next: PeerlessEditSessionBinding) {
       if (next === binding) return;
       unsubscribe?.(); binding = next;

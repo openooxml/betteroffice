@@ -18,6 +18,7 @@ use crate::remap::{
     remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
     rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
 };
+use crate::table_header::{normalize_table_header, rename_table_column, restore_table_column};
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
 /// order, restores the prior workbook state.
@@ -32,6 +33,7 @@ pub enum OpError {
         sheet: SheetId,
         cell: CellRef,
     },
+    TableHeaderUnsupported(String),
     DefinedNameNotRewritable {
         name: String,
     },
@@ -87,6 +89,9 @@ impl fmt::Display for OpError {
                 sheet.0,
                 cell.to_a1()
             ),
+            OpError::TableHeaderUnsupported(reason) => {
+                write!(f, "table header edit is unsupported: {reason}")
+            }
             OpError::SheetNameNotWritable => write!(
                 f,
                 "sheet name contains a character xml cannot carry, and the workbook references the sheet"
@@ -174,19 +179,49 @@ pub fn ensure_op_available(op: &Op) -> Result<(), OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    apply_in_place_with_cell_restoration(wb, op, false)
+}
+
+fn apply_in_place_with_cell_restoration(
+    wb: &mut Workbook,
+    op: &Op,
+    restore_cells: bool,
+) -> Result<InvertedOp, OpError> {
     ensure_op_available(op)?;
     crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
         Op::SetCell { sheet, at, cell } => {
+            let old = wb
+                .sheet(*sheet)
+                .ok_or(OpError::SheetNotFound(*sheet))?
+                .cell(*at)
+                .map(CellState::from)
+                .unwrap_or_default();
+            let (state, inverse) = if !restore_cells
+                && let Some((table, column, name)) = normalize_table_header(wb, *sheet, *at, cell)?
+            {
+                let inverse = rename_table_column(wb, table, column, *at, &name, old)?;
+                (
+                    CellState {
+                        value: CellValue::Text { value: name },
+                        formula: None,
+                        style: cell.style,
+                    },
+                    vec![inverse],
+                )
+            } else {
+                (
+                    cell.clone(),
+                    vec![Op::SetCell {
+                        sheet: *sheet,
+                        at: *at,
+                        cell: old,
+                    }],
+                )
+            };
             wb.styles.preserve_style_identity();
-            let s = sheet_mut(wb, *sheet)?;
-            let old = s.cell(*at).map(CellState::from).unwrap_or_default();
-            s.set_cell(*at, cell.clone().into());
-            Ok(InvertedOp(vec![Op::SetCell {
-                sheet: *sheet,
-                at: *at,
-                cell: old,
-            }]))
+            wb.sheets[sheet.0 as usize].set_cell(*at, state.into());
+            Ok(InvertedOp(inverse))
         }
         Op::SetColWidth { sheet, col, width } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -758,6 +793,9 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            if old != *name {
+                crate::remap::ensure_sheet_edit_references_rewritable(wb, &old, None)?;
+            }
             let renamed_names = rename_defined_names(wb, &old, name)?;
             let renamed_hyperlinks = renamed_hyperlink_locations(wb, &old, name)?;
             let renamed_formats = crate::remap::renamed_conditional_formats(wb, &old, name)?;
@@ -811,8 +849,13 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             }
             // names are left as they are: the rename's inverse restores its
             // saved table, and rewriting it here could pass the byte bound
-            let charts = rename_chart_refs(wb, &old_name, name);
-            sheet_mut(wb, *sheet)?.name = name.clone();
+            let charts = if old_name == *name {
+                Vec::new()
+            } else {
+                let charts = rename_chart_refs(wb, &old_name, name);
+                sheet_mut(wb, *sheet)?.name = name.clone();
+                charts
+            };
             for (formula_sheet, cell, state) in formulas {
                 sheet_mut(wb, *formula_sheet)?.set_cell(*cell, state.clone().into());
             }
@@ -857,6 +900,7 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 tables: std::mem::replace(&mut wb.tables, tables.clone()),
             }]))
         }
+        Op::RestoreTableColumn { .. } => Ok(InvertedOp(vec![restore_table_column(wb, op)?])),
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
         Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
         Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
@@ -1024,7 +1068,7 @@ fn set_defined_name(
         validate_defined_name(wb, name, scope, existing.is_none())?;
     }
     if existing.is_none_or(|index| wb.defined_names[index].formula != refers_to) {
-        validate_defined_name_formula(refers_to)?;
+        validate_defined_name_formula_in(wb, scope, refers_to)?;
     }
     let previous = snapshot.then(|| wb.defined_names.clone());
     if let Some(index) = existing {
@@ -1134,17 +1178,51 @@ pub fn validate_defined_name(
 
 #[doc(hidden)]
 pub fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
+    validate_name_formula(source, xlsx_calc::parse_formula)
+}
+
+#[doc(hidden)]
+pub fn validate_defined_name_formula_in(
+    workbook: &Workbook,
+    scope: Option<SheetId>,
+    source: &str,
+) -> Result<(), OpError> {
+    validate_name_formula(source, |source| {
+        if let Some(sheet) = scope {
+            return xlsx_calc::parser::parse_formula_for_cell(source, workbook, sheet);
+        }
+        xlsx_calc::parse_formula(source).or_else(|error| {
+            (0..workbook.sheets.len())
+                .find_map(|index| {
+                    xlsx_calc::parser::parse_formula_for_cell(
+                        source,
+                        workbook,
+                        SheetId(index as u32),
+                    )
+                    .ok()
+                })
+                .ok_or(error)
+        })
+    })
+}
+
+pub(crate) fn validate_rewritten_defined_name_formula(source: &str) -> Result<(), OpError> {
+    validate_name_formula(source, xlsx_calc::parser::parse_formula_for_rewrite)
+}
+
+fn validate_name_formula(
+    source: &str,
+    parse: impl FnOnce(&str) -> Result<xlsx_calc::Expr, xlsx_calc::ParseError>,
+) -> Result<(), OpError> {
     if source.is_empty() || source.starts_with('=')
         || source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES
         || !source.chars().all(|c| matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
     {
         return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
     }
-    xlsx_calc::parse_formula(source)
-        .map(|_| ())
-        .map_err(|error| {
-            OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
-        })
+    parse(source).map(|_| ()).map_err(|error| {
+        OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
+    })
 }
 
 fn replace_defined_names(wb: &mut Workbook, defined_names: Vec<DefinedName>) -> Op {
@@ -1362,14 +1440,23 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    apply_batch(wb, ops, false)
+}
+
+pub(crate) fn apply_history_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    apply_batch(wb, ops, true)
+}
+
+fn apply_batch(wb: &mut Workbook, ops: &[Op], restore_cells: bool) -> Result<Vec<Op>, OpError> {
     if let [op @ Op::SetCell { .. }] = ops {
         #[cfg(test)]
         if FORCE_CLONE_ROLLBACK.get() {
-            return apply_ops_cloned(wb, ops);
+            return apply_ops_cloned(wb, ops, restore_cells);
         }
-        return apply_in_place(wb, op).map(|inverse| inverse.0);
+        let inverse = apply_in_place_with_cell_restoration(wb, op, restore_cells)?;
+        return Ok(inverse.0);
     }
-    apply_ops_cloned(wb, ops)
+    apply_ops_cloned(wb, ops, restore_cells)
 }
 
 #[cfg(test)]
@@ -1377,19 +1464,19 @@ thread_local! {
     static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+fn apply_ops_cloned(
+    wb: &mut Workbook,
+    ops: &[Op],
+    restore_cells: bool,
+) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
-    let inverse = apply_ops_in_place(&mut next, ops)?;
-    *wb = next;
-    Ok(inverse)
-}
-
-fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
-    let mut batch = InPlaceBatch::new(wb);
+    let mut batch = InPlaceBatch::new(&mut next).with_cell_restoration(restore_cells);
     for op in ops {
         batch.apply(op)?;
     }
-    Ok(batch.finish())
+    let inverse = batch.finish();
+    *wb = next;
+    Ok(inverse)
 }
 
 /// Ops applied in sequence to one workbook as [`apply_in_place`] applies each, with no rollback
@@ -1403,6 +1490,7 @@ pub struct InPlaceBatch<'a> {
     wb: &'a mut Workbook,
     per_op: Option<Vec<Vec<Op>>>,
     names: Option<NameIndex>,
+    restore_cells: bool,
     /// the defined-name edits just applied started from a table their inverse restores
     in_name_run: bool,
 }
@@ -1442,6 +1530,7 @@ impl<'a> InPlaceBatch<'a> {
             wb,
             per_op: Some(Vec::new()),
             names: None,
+            restore_cells: false,
             in_name_run: false,
         }
     }
@@ -1452,6 +1541,11 @@ impl<'a> InPlaceBatch<'a> {
             per_op: None,
             ..Self::new(wb)
         }
+    }
+
+    pub fn with_cell_restoration(mut self, restore_cells: bool) -> Self {
+        self.restore_cells = restore_cells;
+        self
     }
 
     pub fn workbook(&self) -> &Workbook {
@@ -1472,6 +1566,14 @@ impl<'a> InPlaceBatch<'a> {
     /// Applies `op` as [`apply_in_place`] does. After an error the workbook is only fit to
     /// drop, as there.
     pub fn apply(&mut self, op: &Op) -> Result<(), OpError> {
+        self.apply_with_inverse(op, |_| {})
+    }
+
+    pub fn apply_with_inverse(
+        &mut self,
+        op: &Op,
+        visit: impl FnOnce(&[Op]),
+    ) -> Result<(), OpError> {
         let snapshot = self.per_op.is_some() && !self.in_name_run;
         let inverse = match op {
             Op::SetDefinedName {
@@ -1528,9 +1630,10 @@ impl<'a> InPlaceBatch<'a> {
             _ => {
                 self.names = None;
                 self.in_name_run = false;
-                apply_in_place(self.wb, op)?
+                apply_in_place_with_cell_restoration(self.wb, op, self.restore_cells)?
             }
         };
+        visit(&inverse.0);
         self.in_name_run = matches!(op, Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. });
         if let Some(per_op) = &mut self.per_op {
             per_op.push(inverse.0);
@@ -2662,6 +2765,11 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .map(|sheet| sheet.name.clone())
         .collect::<Vec<_>>();
     let removed_name = wb.sheets[index].name.clone();
+    crate::remap::ensure_sheet_edit_references_rewritable(
+        wb,
+        &removed_name,
+        Some((index, &order_before)),
+    )?;
     let dropped_tables = wb
         .tables
         .iter()
@@ -2669,21 +2777,21 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
     let lost = |text: &str| {
-        let sheets = xlsx_model::sheet_qualifier::remove_sheet_references(
-            text,
+        let tables = crate::remap::remove_table_references(text, &dropped_tables, &order_before);
+        xlsx_model::sheet_qualifier::remove_sheet_references(
+            tables.as_deref().unwrap_or(text),
             &removed_name,
             &order_before,
-        );
-        crate::remap::remove_table_references(sheets.as_deref().unwrap_or(text), &dropped_tables)
-            .or(sheets)
+        )
+        .or(tables)
     };
-    crate::remap::ensure_table_references_rewritable(wb, index, &dropped_tables)?;
+    crate::remap::ensure_table_references_rewritable(wb, index, &dropped_tables, &order_before)?;
     let cell_edits = crate::remap::removed_sheet_cell_edits(wb, index, &lost)?;
     let formats = crate::remap::rewritten_conditional_formats(
         wb,
         Some(index),
         &|formula| {
-            if crate::remap::names_unrewritable_table(formula, &dropped_tables) {
+            if crate::remap::names_unrewritable_table(formula, &dropped_tables, &order_before) {
                 return Err(OpError::InvalidConditionalFormat(
                     "a conditional format names a table on the deleted sheet in a form that cannot be rewritten".into(),
                 ));
@@ -3173,7 +3281,7 @@ mod tests {
                 let mut fast = initial.clone();
                 let mut oracle = initial.clone();
                 let result = apply_ops(&mut fast, std::slice::from_ref(&op));
-                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op), false);
                 assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
                 assert_eq!(result, expected);
                 assert_eq!(fast, initial);

@@ -254,6 +254,7 @@ mod tests {
                     text: "safe <&>".to_owned(),
                     preserve_space: None,
                 }],
+                direction_scopes: Vec::new(),
             },
         };
         let first = serialize_s11_wire(request.clone()).unwrap();

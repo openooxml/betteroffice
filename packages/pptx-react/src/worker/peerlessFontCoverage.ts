@@ -21,6 +21,7 @@ interface Batch {
 }
 
 const keyOf = (family: string) => family.trim().toLowerCase();
+const pageFonts = () => typeof document === 'undefined' ? undefined : document.fonts;
 
 /**
  * The page's side of sliced faces: the worker owns them and fetches their chunks; the page keeps a copy of each
@@ -32,28 +33,35 @@ export function createPeerlessFontCoverage(
 ): PaintFontCoverage & { readonly thumbnails: PaintFontCoverage; dispose(): void } {
   const families = new Map<string, Family>();
   const session = ++sessions;
+  const isSliced = (key: string) => client.state.slicedFamilies?.some((family) => keyOf(family) === key);
 
   async function request(name: string, entry: Family, batch: Batch): Promise<string> {
+    const key = keyOf(name);
+    const currentEntry = () => current() && families.get(key) === entry && isSliced(key);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const text = [...batch.texts].join('\n');
     batch.texts.clear();
     batch.flush = undefined;
-    const latest = entry.faces[entry.faces.length - 1];
-    const read = await client.readCoverageFont?.(name, text, latest?.revision ?? null).catch(() => null);
-    if (!read) return name;
-    if (!read.bytes) return latest?.family ?? name;
+    const have = entry.faces[entry.faces.length - 1]?.revision ?? null;
+    const read = await client.readCoverageFont?.(name, text, have).catch(() => null);
+    if (!read || !currentEntry()) return name;
+    if (!read.bytes) return entry.faces.find(({ revision }) => revision === read.revision)?.family ?? name;
     const family = `${name} s${session} r${read.revision}`;
-    const traits = readFontTraits(new Uint8Array(read.bytes));
-    const face = await new FontFace(family, read.bytes, traits ? {
-      weight: String(traits.weight), style: traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal',
-    } : {}).load();
-    if (!current() || families.get(keyOf(name)) !== entry) return name;
-    const newest = entry.faces[entry.faces.length - 1];
-    if (newest && newest.revision >= read.revision) return newest.family;
-    document.fonts.add(face);
-    entry.faces.push({ revision: read.revision, family, face });
-    while (entry.faces.length > KEPT_REVISIONS) document.fonts.delete(entry.faces.shift()!.face);
-    return family;
+    const fonts = pageFonts();
+    if (!fonts || typeof FontFace !== 'function') return name;
+    try {
+      const traits = readFontTraits(new Uint8Array(read.bytes));
+      const face = await new FontFace(family, read.bytes, traits ? {
+        weight: String(traits.weight), style: traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal',
+      } : {}).load();
+      if (!currentEntry()) return name;
+      const newest = entry.faces[entry.faces.length - 1];
+      if (newest && newest.revision >= read.revision) return newest.family;
+      fonts.add(face);
+      entry.faces.push({ revision: read.revision, family, face });
+      while (entry.faces.length > KEPT_REVISIONS) fonts.delete(entry.faces.shift()!.face);
+      return family;
+    } catch { return name; }
   }
 
   const latest = (name: string) => {
@@ -66,10 +74,10 @@ export function createPeerlessFontCoverage(
     return {
       prepare(name, text) {
         const key = keyOf(name);
-        if (!client.state.slicedFamilies?.some((family) => keyOf(family) === key) || !client.readCoverageFont ||
-          typeof document === 'undefined') {
+        const fonts = pageFonts();
+        if (!isSliced(key) || !client.readCoverageFont || !fonts || typeof FontFace !== 'function') {
           const replaced = families.get(key);
-          if (replaced) for (const { face } of replaced.faces) document.fonts.delete(face);
+          if (replaced) for (const { face } of replaced.faces) fonts?.delete(face);
           families.delete(key);
           return Promise.resolve(name);
         }
@@ -89,33 +97,10 @@ export function createPeerlessFontCoverage(
     ...lane(),
     thumbnails: lane(),
     dispose() {
-      for (const entry of families.values()) for (const { face } of entry.faces) document.fonts?.delete(face);
+      const fonts = pageFonts();
+      for (const entry of families.values()) for (const { face } of entry.faces) fonts?.delete(face);
       families.clear();
     },
-  };
-}
-
-/** Installs complete faces for paints that do not prepare their text; callers during a load share it, and it reads again for them. */
-export function createWholeFontInstaller<Face extends { family: string }>(
-  read: (have: string[]) => Promise<readonly Face[]>,
-  install: (faces: Face[]) => Promise<readonly { family: string }[]>,
-  supplied: (family: string) => boolean,
-): () => Promise<void> {
-  const installed = new Set<string>();
-  let loading: Promise<void> | undefined;
-  let askedAgain = false;
-  return () => {
-    if (loading) {
-      askedAgain = true;
-      return loading;
-    }
-    return loading = (async () => {
-      do {
-        askedAgain = false;
-        const faces = (await read([...installed])).filter((face) => !supplied(face.family));
-        if (faces.length) for (const face of await install(faces)) installed.add(face.family);
-      } while (askedAgain);
-    })().finally(() => { loading = undefined; });
   };
 }
 

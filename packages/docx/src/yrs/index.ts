@@ -129,6 +129,7 @@ export * from './inputPositionMap';
 export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
+export { applyListToggle, LIST_OFF_ATTRS, listOffAttrs } from './listCommands';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
 export * from './clipboardFragment';
 export * from './stories';
@@ -573,6 +574,17 @@ export interface YrsResolvedCommentAnchor {
   story: string;
   start: number;
   end: number;
+}
+
+/**
+ * A kept empty inline element of the source where its sticky anchor sits now: `offset` in story
+ * units, `ordinal` its source order among the story's kept elements. @internal
+ */
+export interface YrsRawMark {
+  story: string;
+  offset: number;
+  ordinal: number;
+  xml: string;
 }
 
 /** A paragraph's story span; `end` is its pilcrow, so `end - start` is the paragraph length. */
@@ -1228,6 +1240,15 @@ export interface YrsSession extends CollaborationReplica {
     host: YrsDocxHost,
     options?: YrsOpeningOptions
   ): YrsDocxHost;
+  /** @internal */
+  bootstrapPeerWithProvenance(
+    state: Uint8Array,
+    metadata: Uint8Array,
+    source: Uint8Array | undefined,
+    host: YrsDocxHost,
+    sidecar: Uint8Array,
+    options?: YrsOpeningOptions
+  ): YrsDocxHost;
   /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
   seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
   /**
@@ -1309,6 +1330,8 @@ export interface YrsSession extends CollaborationReplica {
   encodeStateVector(): Uint8Array;
   /** Full state, or only the state missing from a peer vector. */
   encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array;
+  /** @internal */
+  encodeEditProvenanceForTransfer(bytes: Uint8Array, base?: Uint8Array): Uint8Array;
   /**
    * The state missing from a peer vector as ordered updates of at most `maxChunkBytes` each: one update when it fits,
    * otherwise causally ordered structs and then the delete set alone. Only an update holding a single larger struct
@@ -1321,6 +1344,8 @@ export interface YrsSession extends CollaborationReplica {
   applyUpdateChunks(updates: readonly Uint8Array[]): void;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
+  /** @internal */
+  applyLocalUpdateWithProvenance(update: Uint8Array, sidecar: Uint8Array): void;
   /** Adopt another replica's host batch outside undo history. @internal */
   applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
@@ -1537,6 +1562,8 @@ export interface YrsSession extends CollaborationReplica {
   resolveComment(commentId: string): YrsResolvedCommentAnchor[];
   /** Every comment the session holds, sorted by id. @internal */
   listComments(): YrsCommentInfo[];
+  /** Where the kept empty inline elements of the source sit now, by story, offset and source order. @internal */
+  resolveRawMarks(): YrsRawMark[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
   /** Whether the document has a story with this id, without listing them all. */
@@ -1600,6 +1627,8 @@ export interface YrsSession extends CollaborationReplica {
   storyParagraphIds(story: string): Array<string | null>;
   /** The paragraph IDs a save of the session applies. @internal */
   paragraphSavePlan(): DocxParagraphSavePlan;
+  /** @internal */
+  paragraphSavePlanWithLocalProvenance(): DocxParagraphSavePlan;
   /**
    * Publishes the `[owner, paraId]` pairs a save captured and returns those
    * whose binding changed since. @internal
@@ -1647,10 +1676,20 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * The attributes that put `paraId` on a list of `kind`: its own list when that is of that kind,
    * else the list of the paragraph directly above, else below, when it is of that kind, otherwise a
-   * list definition this call creates. A paragraph already on a list keeps its own level.
+   * created list of that kind no paragraph names, or one this call creates. A paragraph already on
+   * a list keeps its own level, and joins a neighbour's list only where that list has it. With
+   * `lead`, the first paragraph of the selection `paraId` is in, it goes on the list `lead` is on
+   * when that is of `kind`.
    * @internal
    */
-  ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered'): YrsParagraphAttrs;
+  ensureListDefinition(story: string, paraId: string, kind: 'bullet' | 'numbered', lead?: string): YrsParagraphAttrs;
+  /**
+   * Whether the style `paraId` has now, or the default paragraph style when it names none, numbers
+   * it. Undefined for a session without a source package, which holds no styles. A session
+   * without this member leaves the flag stored when the file was read to decide.
+   * @internal
+   */
+  paragraphStyleNumbers?(story: string, paraId: string): boolean | undefined;
   /** The list definitions the editor created, by key. @internal */
   createdListDefinitions(): Array<{ key: string; kind: 'bullet' | 'numbered'; levelTexts: string[]; levelFormats: string[] }>;
   /** The keys of the created list definitions some paragraph is on. @internal */

@@ -307,7 +307,10 @@ function commentIds(seeded: ReadonlySet<string>, comments: readonly CommentOutpu
     if (identity) { ids.set(comment.id, String(identity.id)); continue; }
     let id = /^\d+$/u.test(comment.id) ? Number(comment.id) : Number.NaN;
     if (!Number.isSafeInteger(id) || used.has(id)) {
-      while (used.has(next)) next++;
+      while (used.has(next)) {
+        if (!(next + 1 > next)) throw new RangeError('The document holds a comment id too large to extend; no new comment id can follow it');
+        next++;
+      }
       id = next;
     }
     used.add(id);

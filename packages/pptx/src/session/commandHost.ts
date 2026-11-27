@@ -5,24 +5,31 @@ import { validPresenceCursor } from '../collaboration/presence';
 import type { PptxPresenceCursor } from '../collaboration/types';
 import { createPresentationCollaboration } from './collaboration';
 import { createMetafileSvg } from './metafileSvg';
+import { pngExportReply } from './pngExportReply';
 import { PptxDocument, engineKind } from '../wasm/engine';
 import { deferReply, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import { isCommandEnvelope } from '../../../../shared/office-session/commands/types';
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import { setFontCdnConfiguration, type FontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { fontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
+import { slicedFacesSupported } from '../../../../shared/office-session/render/pptxSlicedFonts';
+import { resizedShapeRect } from '../../../../shared/office-session/shapeResize';
 import { extendTextRange, graphemeBoundaries, textRangeAt } from '../../../../shared/textSelection';
 import { SessionFailure, type MethodHandlers, type MethodPolicies } from '../../../../shared/office-session/types';
 import type { PptxEditRequest, PptxEditResult, PptxStoryTarget, PptxStoryText, PptxTextField } from '../edits';
 import type { ProposalDiffSlide } from '../proposals';
 import { DEFAULT_EDITOR_TEXT_STYLE, insertionEchoRun, insertionStyle, typingStyle } from '../textFormatting';
-import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
+import type { ParagraphAlignment, PptxCaretAnchor, SlideDisplayList, SlidePrimitive, ShapeRect, ShapeDraft, PresetShapeDraft, PictureDraft, ShapeReceipt, ShapeSnapshot, StorySnapshot, TextStyle, TextStyleSnapshot } from '../types';
 import { canMoveShape, canResizeShape, effectiveShapeRect, findShape, findTopLevelShape, MIN_SHAPE_SIZE_EMU } from './commandShapes';
 import {
   decodeTiffImage, decodeFontFace, initWasm, openPresentation, presentationMetadata, presentationStoryFormatting,
   presentationDeleteTextJoiningParagraphs, type PresentationCommandReadResult,
   type PresentationHandle, type PresentationHistoryReceipt,
 } from '../wasm/loader';
-import { buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList } from './commandFrame';
+import {
+  buildCommandFrame, commandFrameMedia, commandFrameMediaBytes, parseCommandDisplayList,
+  parseCommandShapeRectPreview,
+} from './commandFrame';
 import type { WorkerSlideFrame, WorkerSlideRender } from './workerRender';
 import { prepareCommandOperation } from './commandOperations';
 import type { createCommandDefaultFonts } from './commandDefaultFonts';
@@ -62,7 +69,7 @@ const MIN_FONT_SIZE_PT = 1;
 const MAX_FONT_SIZE_PT = 4000;
 const PIPE_OPTION_KEYS = new Set(['maxFrameBytes', 'maxMessagesPerFrame', 'user']);
 
-export const commandDefaultFontModule = { load: () => import('./commandDefaultFonts') };
+export const commandDefaultFontModule = { load: (): Promise<FontModule> => import('./commandDefaultFonts') };
 const sessionDecodeFontFace = sessionFontDecoder((bytes, options) => decodeFontFace(bytes, options));
 const COVERAGE_SCRIPTS = new Set<unknown>(['cjk-jp', 'cjk-kr', 'cjk-sc', 'cjk-tc']);
 
@@ -133,6 +140,7 @@ export function registerPresentationCommandHandlers(
     version: string; beforeText: string };
   type FormattingProjection = { formatting: TextStyleSnapshot; alignment: ParagraphAlignment | null };
   type CachedStory = { text: PptxStoryText; snapshot: StorySnapshot; echoRanges: { start: number; end: number }[];
+    canResize: boolean;
     table: PresentationCommandEditState['toolbar']['table'];
     formatting?: StorySnapshot;
     toolbar?: { story: StorySnapshot; selection: PresentationCommandSelection; marks: TextStyle;
@@ -150,6 +158,7 @@ export function registerPresentationCommandHandlers(
   let opening = false;
   let slicedFonts: ReturnType<typeof createSlicedFontFaces> | undefined;
   let defaultFonts: ReturnType<typeof createCommandDefaultFonts> | undefined;
+  const defaultPaintFamilies = new Map<number, Map<string, string>>();
   let creatingDefaultFonts: Promise<ReturnType<typeof createCommandDefaultFonts> | undefined> | undefined;
   let cancelDefaultFontImport: (() => void) | undefined;
   let defaultFontImportAttempts = 0;
@@ -158,10 +167,19 @@ export function registerPresentationCommandHandlers(
   const gatedDefaultFonts: DefaultFontLanding[] = [];
   let fontProvider: ReturnType<FontModule['commandFontProvider']['load']> | undefined;
   let fontCdn: FontCdnConfiguration | undefined;
-  const sessionFontProvider = (fonts: FontModule) => () => (fontProvider ??= fonts.commandFontProvider.load(fontCdn).catch((error) => {
-    fontProvider = undefined;
-    throw error;
-  }));
+  function useFontCdn(configuration: FontCdnConfiguration | undefined): void {
+    if (fontCdnCacheKey(fontCdn ?? null) !== fontCdnCacheKey(configuration ?? null)) fontProvider = undefined;
+    fontCdn = configuration;
+    setFontCdnConfiguration(configuration);
+  }
+  const sessionFontProvider = (fonts: FontModule) => () => {
+    if (!fontProvider) {
+      const loading = fonts.commandFontProvider.load(fontCdn);
+      fontProvider = loading;
+      void loading.catch(() => { if (fontProvider === loading) fontProvider = undefined; });
+    }
+    return fontProvider;
+  };
   let requestedFonts: ((slideId?: string) => RequestedFontFace[]) | undefined;
   const suppliedFonts: { family: string }[] = [];
   let fontTimer: ReturnType<typeof setTimeout> | undefined;
@@ -202,7 +220,7 @@ export function registerPresentationCommandHandlers(
   const sentMedia = new Set<string>();
   const pendingMetafiles = new Set<string>();
   const metafiles = engineKind === 'native' ? {
-    start: async () => {}, ready: () => true,
+    start: async () => {}, ready: () => true, retryIn: () => undefined,
     convert: (assetId: string, _bytes: Uint8Array) => presentation().metafileSvg(assetId),
   } : createMetafileSvg();
   let metafileLoad: Promise<void> | undefined;
@@ -230,16 +248,21 @@ export function registerPresentationCommandHandlers(
     if (metafileLoad) return metafileLoad;
     metafileLoad = metafiles.start().then(() => {
       repaintMetafiles();
-    }).finally(() => { metafileLoad = undefined; });
+    }).finally(() => {
+      metafileLoad = undefined;
+      if (!opening) idleMetafiles();
+    });
     return metafileLoad;
   }
 
   function idleMetafiles(): void {
     if (disposed || metafileTimer !== undefined) return;
+    const delay = metafiles.retryIn();
+    if (delay === undefined) return;
     metafileTimer = setTimeout(() => {
       metafileTimer = undefined;
       if (!disposed) void loadMetafiles().catch(() => {});
-    }, 0);
+    }, delay);
   }
 
   const frames = new Map<string, {
@@ -282,8 +305,12 @@ export function registerPresentationCommandHandlers(
           (face) => {
             const font = { ...face, bytes: new Uint8Array(face.bytes) };
             const opened = presentation();
-            if (face.kind === 'coverage') opened.registerFallbackFont(font);
-            else opened.registerFont(font);
+            const id = face.kind === 'coverage' ? opened.registerFallbackFont(font) : opened.registerFont(font);
+            if (face.paintFamily !== undefined) {
+              let aliases = defaultPaintFamilies.get(id);
+              if (!aliases) defaultPaintFamilies.set(id, aliases = new Map());
+              aliases.set(face.family.trim().toLowerCase(), face.paintFamily);
+            }
             slicedFonts?.upgradeRegistered(opened, font.family);
           },
           (faces) => {
@@ -346,19 +373,21 @@ export function registerPresentationCommandHandlers(
   function cacheStories(content: Extract<PresentationCommandReadResult, { ok: true }>): void {
     for (const slide of content.slides) notes.set(slide.id, slide.notes ?? '');
     const tables = new Map<string, NonNullable<PresentationCommandEditState['toolbar']['table']>>();
-    const visit = (shapes: readonly ShapeSnapshot[]) => {
+    const resize = new Map<string, boolean>();
+    const visit = (shapes: readonly ShapeSnapshot[], topLevel: boolean) => {
       for (const shape of shapes) {
         const graphic = shape.graphic as { type?: string; grid?: unknown[] } | null;
+        for (const story of shape.textStories) resize.set(story.id, graphic?.type !== 'table' && topLevel && canResizeShape(shape));
         if (graphic?.type === 'table' && Array.isArray(graphic.grid) && graphic.grid.length) {
           const columns = graphic.grid.length;
           (shape.textStories ?? []).forEach((story, index) => tables.set(story.id, {
             shapeId: shape.id, row: Math.floor(index / columns), column: index % columns,
           }));
         }
-        visit(shape.children ?? []);
+        visit(shape.children ?? [], false);
       }
     };
-    for (const slide of content.slides) visit(slide.shapes ?? []);
+    for (const slide of content.slides) visit(slide.shapes ?? [], true);
     const sources = new Map(content.sources.map((source) => [source.storyId, source.paragraphs]));
     for (const story of content.stories) {
       const key = storyKey(story);
@@ -366,6 +395,7 @@ export function registerPresentationCommandHandlers(
       keys.add(key);
       slideStoryKeys.set(story.slideId, keys);
       stories.set(key, { text: story, snapshot: presentation().story(story.storyId), echoRanges: [],
+        canResize: resize.get(story.storyId) ?? false,
         table: tables.get(story.storyId) ?? null,
         source: new Map((sources.get(story.storyId) ?? []).map((paragraph) => {
           const live = story.paragraphs.find((value) => value.paragraphId === paragraph.paragraphId)!;
@@ -746,6 +776,24 @@ export function registerPresentationCommandHandlers(
     if (presentation().version() !== metadataVersion) refreshMetadata();
   }
 
+  function withDefaultPaintFonts(list: SlideDisplayList): SlideDisplayList {
+    if (!defaultPaintFamilies.size) return list;
+    const visit = (primitives: readonly SlidePrimitive[]) => {
+      for (const primitive of primitives) {
+        if (primitive.kind === 'table' || primitive.kind === 'chart') visit(primitive.primitives);
+        if (primitive.kind !== 'textBox') continue;
+        for (const line of primitive.lines) {
+          for (const run of line.runs) {
+            const paintFontFamily = defaultPaintFamilies.get(run.fontId)?.get(run.fontFamily.trim().toLowerCase());
+            if (paintFontFamily !== undefined) Object.assign(run, { paintFontFamily });
+          }
+        }
+      }
+    };
+    visit(list.primitives);
+    return list;
+  }
+
   function frame(slideId: string, retain = true, extracted?: Map<string, Uint8Array>): TransferResult<PresentationCommandFrame> {
     const opened = presentation();
     refreshTopology();
@@ -759,6 +807,7 @@ export function registerPresentationCommandHandlers(
       slideRevision: revision, coversThroughSeq: throughSeq,
       documentEpoch, incarnation: identity!.incarnation, version, epoch: ++frameEpoch }, sentMedia,
     layout ? undefined : (list) => {
+      withDefaultPaintFonts(list);
       geometry = indexHitGeometry(list);
       layouts.set(slideId, { slideIndex, revision, list, geometry });
     }, layout?.list, metafiles, pendingMetafiles, extracted);
@@ -783,7 +832,7 @@ export function registerPresentationCommandHandlers(
     const cached = layouts.get(slideId);
     let list = cached?.revision === revision && cached.slideIndex === slideIndex ? cached.list : undefined;
     if (!list) {
-      list = parseCommandDisplayList(opened, slideIndex);
+      list = withDefaultPaintFonts(parseCommandDisplayList(opened, slideIndex));
       layouts.set(slideId, { slideIndex, revision, list, geometry: indexHitGeometry(list) });
     }
     return { slideId, version, displayList: list, mediaBytes(assetId) {
@@ -795,6 +844,7 @@ export function registerPresentationCommandHandlers(
   }
 
   async function proposalFrame(diff: ProposalDiffSlide): Promise<TransferResult<ProposalDiffSlide>> {
+    withDefaultPaintFonts(diff.frame);
     const pending = new Set<string>();
     const sent = new Set<string>();
     let media = commandFrameMedia(presentation(), diff.frame, sent, metafiles, pending);
@@ -845,7 +895,9 @@ export function registerPresentationCommandHandlers(
     const reply = transferable<PresentationCommandAck>({ ...identity!, epoch: documentEpoch, throughSeq, version,
       ...(updates.length ? { updates } : {}),
       ...(observeChanges && commandOutcomes.some((outcome) => outcome.committed) ? { change: { ...identity!, throughSeq, version, snapshot: presentation().snapshot() } } : {}),
-      selection: objectSelection ?? (selection ? { ...selection } : null), editState: edit, outcomes: commandOutcomes,
+      selection: objectSelection ?? (selection
+        ? { ...selection, canResize: stories.get(storyKey(selection))?.canResize ?? false } : null),
+      editState: edit, outcomes: commandOutcomes,
       dirtySlideIds, activeSlideId, historyThroughSeq, ...slicedFonts?.ack(),
       ...(creation ? { creation } : {}), ...(editResult ? { editResult } : {}), ...(fontId !== undefined ? { fontId } : {}),
       ...(history ? { slides: metadata!.slides, size: metadata!.size } : {}),
@@ -1011,9 +1063,14 @@ export function registerPresentationCommandHandlers(
       return object ? { kind: 'object', object } : 'bad-target';
     }
     if (command.kind === 'moveShape' || command.kind === 'setShapeRect') {
-      const relative = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
-      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq ||
-        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y))) return 'invalid-payload';
+      const relativeMove = command.kind === 'moveShape' && 'delta' in command.payload ? command.payload : null;
+      const relativeResize = command.kind === 'setShapeRect' && 'delta' in command.payload ? command.payload : null;
+      const relative = relativeMove ?? relativeResize;
+      if (relative && (relative.at.source !== 'afterSeq' || relative.at.seq !== throughSeq &&
+        !(relativeResize?.frame && relativeResize.frame.coversThroughSeq <= relative.at.seq) ||
+        !relative.delta || !Number.isFinite(relative.delta.x) || !Number.isFinite(relative.delta.y) ||
+        relativeResize &&
+        !['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].includes(relativeResize.handle))) return 'invalid-payload';
       const object = relative ? objectSelection?.shapeId === relative.shapeId
         ? transformTarget(objectSelection) : null : 'target' in command.payload ? transformTarget(command.payload.target) : null;
       if (!object) return 'bad-target';
@@ -1026,7 +1083,10 @@ export function registerPresentationCommandHandlers(
         ? { ...object.rect, x: object.rect.x + Math.round(relative.delta.x * object.units.x),
           y: object.rect.y + Math.round(relative.delta.y * object.units.y) }
         : 'x' in command.payload ? { ...object.rect, x: command.payload.x, y: command.payload.y } : null
-        : command.payload.rect;
+        : relativeResize ? resizedShapeRect(object.rect, relativeResize.handle, {
+          x: Math.round(relativeResize.delta.x * object.units.x),
+          y: Math.round(relativeResize.delta.y * object.units.y),
+        }, MIN_SHAPE_SIZE_EMU, object.aspectRatioLocked) : 'rect' in command.payload ? command.payload.rect : null;
       if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
         rect.width <= 0 || rect.height <= 0 || !move &&
         (rect.width !== object.rect.width && rect.width < MIN_SHAPE_SIZE_EMU ||
@@ -1693,12 +1753,16 @@ export function registerPresentationCommandHandlers(
       return transferable(face, face.payload === undefined ? [face.font] : [face.font, face.payload]);
     },
     prefetchCoverageFonts(_, scripts, sliced, configuration) {
-      if (disposed || handle || opening || !Array.isArray(scripts)) return;
+      const current = () => !disposed && !handle && !opening;
+      if (!current() || !Array.isArray(scripts)) return;
       const coverage = scripts.filter((script): script is string => COVERAGE_SCRIPTS.has(script));
       if (!coverage.length) return;
-      fontCdn = configuration;
+      useFontCdn(configuration);
+      const useSlices = sliced === true && slicedFacesSupported();
       void commandDefaultFontModule.load().then((fonts) => {
-        if (!disposed) fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), sliced === true);
+        if (current()) {
+          fonts.prefetchCoverageFaces(coverage, (options.initWasm ?? initWasm)(), sessionFontProvider(fonts), useSlices, current);
+        }
       }).catch(() => {});
     },
     readCoverageFont(_, family, text, have) {
@@ -1720,14 +1784,12 @@ export function registerPresentationCommandHandlers(
         (input.slicedFonts !== undefined && typeof input.slicedFonts !== 'boolean')) {
         throw new TypeError('Invalid presentation command open options');
       }
-      if ((fontCdn?.baseUrl ?? false) !== (input.fontCdn?.baseUrl ?? false) ||
-        (fontCdn?.timeoutMs ?? 30_000) !== (input.fontCdn?.timeoutMs ?? 30_000)) fontProvider = undefined;
-      fontCdn = input.fontCdn;
+      useFontCdn(input.fontCdn);
       opening = true;
-      const slicing = input.slicedFonts === true
+      const useSlices = input.slicedFonts === true && slicedFacesSupported();
+      const slicing = useSlices
         ? import('./commandSlicedFonts').then((sliced) => sliced.createSlicedFontFaces(), () => undefined) : undefined;
       try {
-        if (fontCdn) setFontCdnConfiguration(fontCdn);
         const wasmReady = (options.initWasm ?? initWasm)(input.wasm);
         let openingMetafiles: Promise<void> | undefined;
         let scanned: { openingSlideMetafile: boolean; packageMetafile: boolean } | undefined;
@@ -1739,7 +1801,7 @@ export function registerPresentationCommandHandlers(
           else if (result.packageMetafile && !opening && !metafiles.ready()) idleMetafiles();
           if (input.defaultFonts !== false && result.scripts.length) {
             void commandDefaultFontModule.load().then((fonts) => {
-              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), input.slicedFonts === true);
+              if (!disposed) fonts.prefetchCoverageFaces(result.scripts, wasmReady, sessionFontProvider(fonts), useSlices, () => !disposed);
             }).catch(() => {});
           }
         }).catch(() => {});
@@ -1752,8 +1814,7 @@ export function registerPresentationCommandHandlers(
           initialUpdate: input.initialUpdate, retainSource: false });
         if (input.defaultFonts !== false) {
           for (const face of input.fonts ?? []) suppliedFonts.push({ family: face.family });
-          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId).map((face) => face.scripts
-            ? { ...face, scripts: face.scripts.filter((script) => script.startsWith('cjk-')) } : face);
+          requestedFonts = (slideId) => presentationRequestedFontFaces(handle!, slideId);
         }
         offUpdates = handle.onUpdate((update, origin) => {
           pendingUpdates.push({ bytes: update.slice().buffer, origin });
@@ -1820,6 +1881,26 @@ export function registerPresentationCommandHandlers(
       TransferResult<PresentationCommandAck> | Promise<TransferResult<PresentationCommandAck>> {
       return runCommand(command);
     },
+    previewShapeRect(_, request) {
+      const opened = presentation();
+      if (!matches(request)) throw new Error('Presentation shape preview identity differs');
+      const { basis, frame: tag, target, rect } = request;
+      if (!basis || basis.epoch !== documentEpoch || basis.version !== version ||
+        opened.version() !== version || !objectFrame(tag) || tag.slideId !== target?.slideId) {
+        throw new Error('stale-basis');
+      }
+      const object = transformTarget(target);
+      if (!object || object.slideId !== tag.slideId || object.shapeId !== target.shapeId) {
+        throw new Error('bad-target');
+      }
+      if (!rect || ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+        rect.width <= 0 || rect.height <= 0) throw new Error('invalid-payload');
+      if (!object.rect || !object.canResize) throw new Error('unsupported');
+      const displayList = new TextEncoder().encode(JSON.stringify(
+        withDefaultPaintFonts(parseCommandShapeRectPreview(opened, target.slideId, target.shapeId, rect)),
+      )).buffer;
+      return transferable(displayList, [displayList]);
+    },
     edit(_, command): TransferResult<PresentationSharedAck> | Promise<TransferResult<PresentationSharedAck>> {
       presentation();
       if (!isCommandEnvelope(command as unknown)) {
@@ -1880,11 +1961,7 @@ export function registerPresentationCommandHandlers(
       const rendered = slicedFonts ? slicedFonts.completeExport(opened).then((byFamily) =>
         opened.renderPng(target, { ...options, fonts: [...(options?.fonts ?? []), ...byFamily] }))
         : opened.renderPng(target, options ?? {});
-      return deferReply(rendered.then((bytes) => {
-        const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
-          bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
-        return transferable(buffer, [buffer]);
-      }));
+      return pngExportReply(rendered);
     },
     accessCommandEditor(_, request, method, args) {
       fence(request);
@@ -1904,8 +1981,8 @@ export function registerPresentationCommandHandlers(
         case 'searchText': return opened.searchText(args[0] as string, args[1] as Parameters<PresentationHandle['searchText']>[1]);
         case 'listProposals': return opened.listProposals();
         case 'previewProposal': return opened.previewProposal(args[0] as string);
-        case 'layoutSlide': return opened.layoutSlide(args[0] as number);
-        case 'layoutProposalSlide': return opened.layoutProposalSlide(args[0] as string, args[1] as number);
+        case 'layoutSlide': return withDefaultPaintFonts(opened.layoutSlide(args[0] as number));
+        case 'layoutProposalSlide': return withDefaultPaintFonts(opened.layoutProposalSlide(args[0] as string, args[1] as number));
         case 'proposalSlideStrip': return opened.proposalSlideStrip(args[0] as string);
         case 'layoutProposalDiffSlideById':
         case 'layoutProposalDiffSlide': {
@@ -1947,6 +2024,7 @@ export function registerPresentationCommandHandlers(
     pendingMetafiles.clear();
     cancelDefaultFontImport?.();
     defaultFonts?.dispose(); defaultFonts = undefined;
+    defaultPaintFamilies.clear();
     requestedFonts = undefined;
     suppliedFonts.length = 0;
     fontSlides.clear();
@@ -1987,6 +2065,7 @@ export function registerPresentationCommandHandlers(
     openCommandEditor: { lane: 'interactive' },
     command: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
+    previewShapeRect: { lane: 'interactive' },
     edit: (command) => ({ lane: command.kind === 'collabPipe' ? 'collab' : 'input',
       mutates: true, userInput: command.kind !== 'collabPipe' }),
     checkpoint: { lane: 'interactive' },

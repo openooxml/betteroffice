@@ -39,11 +39,32 @@ const HYPERLINK_OUT_OF_BOUNDS: &str = "sheet hyperlink range is out of bounds";
 const HYPERLINK_NO_DESTINATION: &str = "sheet hyperlink has no destination";
 const HYPERLINK_FIELD_TOO_LONG: &str = "sheet hyperlink field exceeds its length limit";
 
-/// read a sheet's charts, refusing the payload the moment it outgrows a cap.
-pub(crate) fn decode_charts(json: &str) -> Result<Vec<SheetChart>, String> {
+pub(crate) fn encode_charts(charts: &[SheetChart]) -> Result<String, String> {
+    serde_json::to_string(charts).map_err(|error| format!("cannot encode sheet charts: {error}"))
+}
+
+pub(crate) fn encode_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<String, String> {
+    serde_json::to_string(hyperlinks)
+        .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))
+}
+
+pub(crate) fn check_chart_state_size(json: &str) -> Result<(), String> {
     if json.len() > MAX_CHART_STATE_BYTES {
         return Err("sheet chart state exceeds its size limit".to_string());
     }
+    Ok(())
+}
+
+pub(crate) fn check_hyperlink_state_size(json: &str) -> Result<(), String> {
+    if json.len() > MAX_HYPERLINK_STATE_BYTES {
+        return Err("sheet hyperlink state exceeds its size limit".to_string());
+    }
+    Ok(())
+}
+
+/// read a sheet's charts, refusing the payload the moment it outgrows a cap.
+pub(crate) fn decode_charts(json: &str) -> Result<Vec<SheetChart>, String> {
+    check_chart_state_size(json)?;
     let mut deserializer = serde_json::Deserializer::from_str(json);
     ChartsSeed
         .deserialize(&mut deserializer)
@@ -53,9 +74,7 @@ pub(crate) fn decode_charts(json: &str) -> Result<Vec<SheetChart>, String> {
 
 /// read a sheet's hyperlinks under the same discipline as [`decode_charts`].
 pub(crate) fn decode_hyperlinks(json: &str) -> Result<Vec<Hyperlink>, String> {
-    if json.len() > MAX_HYPERLINK_STATE_BYTES {
-        return Err("sheet hyperlink state exceeds its size limit".to_string());
-    }
+    check_hyperlink_state_size(json)?;
     let mut deserializer = serde_json::Deserializer::from_str(json);
     let hyperlinks = HyperlinksSeed
         .deserialize(&mut deserializer)

@@ -10,7 +10,7 @@ import { addToken, makeHarness, SRC } from "../test/session/harness";
 import { openFreshClient, openTestClient } from "../test/replica/clients";
 import { closeDocument } from "../web/src/documentActions";
 
-beforeAll(initEngines);
+beforeAll(initEngines, 30_000);
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 

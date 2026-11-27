@@ -1,3 +1,4 @@
+import { bentConnectorHit, containsBentConnector } from '../../../../shared/bentConnectorHit';
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
 import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
@@ -29,6 +30,7 @@ export interface CommandHitGeometryIndex extends NavigationIndex {
 }
 
 const displayLists = new WeakMap<PresentationCommandFrame, SlideDisplayList>();
+const connectorHits = new WeakMap<CommandHitGeometryIndex['hits'][number], NonNullable<ReturnType<typeof bentConnectorHit>>>();
 
 export function decodeCommandDisplayList(frame: PresentationCommandFrame): SlideDisplayList {
   let list = displayLists.get(frame);
@@ -58,13 +60,22 @@ function textBoxLength(box: TextBoxPrimitive): number {
     length + paragraph.runs.reduce((sum, run) => sum + run.text.length, 0), Math.max(0, box.paragraphs.length - 1));
 }
 
+function cacheConnectorHit(entry: CommandHitGeometryIndex['hits'][number], source: SlidePrimitive): void {
+  const connector = source.kind === 'shape' ? bentConnectorHit(source) : undefined;
+  if (connector) connectorHits.set(entry, connector);
+}
+
 export function indexGeometry(list: SlideDisplayList): CommandGeometryIndex {
   const index: CommandGeometryIndex = { hits: [], lines: new Map() };
   function visit(primitives: readonly SlidePrimitive[], parents: readonly SlidePrimitive[], clips: readonly SlidePrimitive[]): void {
     for (const primitive of primitives) {
       const transforms = [...parents, primitive];
-      if (primitive.shapeId) index.hits.push({ primitive, transforms, clips,
-        ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive), ...spill(primitive) } : {}) });
+      if (primitive.shapeId) {
+        const entry = { primitive, transforms, clips,
+          ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive), ...spill(primitive) } : {}) };
+        index.hits.push(entry);
+        cacheConnectorHit(entry, primitive);
+      }
       if (primitive.kind === 'textBox' && primitive.shapeId && primitive.storyId) {
         const key = targetKey(primitive.shapeId, primitive.storyId);
         const lines = index.lines.get(key) ?? [];
@@ -87,8 +98,12 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
         x: source.x, y: source.y, w: source.w, h: source.h,
         ...(source.transform ? { transform: { ...source.transform } } : {}) };
       const transforms = [...parents, primitive];
-      if (source.shapeId) index.hits.push({ primitive, transforms, clips,
-        ...(source.kind === 'textBox' ? { textLength: textBoxLength(source), ...spill(source) } : {}) });
+      if (source.shapeId) {
+        const entry = { primitive, transforms, clips,
+          ...(source.kind === 'textBox' ? { textLength: textBoxLength(source), ...spill(source) } : {}) };
+        index.hits.push(entry);
+        cacheConnectorHit(entry, source);
+      }
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
         primitive.lines = source.lines.map((line) => ({ columnOffset: line.columnOffset, x: line.x, y: line.y, height: line.height,
@@ -188,8 +203,9 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
     }
     const primitive = entry.primitive;
     if (target && (primitive.shapeId !== target.shapeId || primitive.storyId !== target.storyId)) continue;
-    const inside = contains(primitive, local);
-    if ((!target && (clipped || !(inside || entry.spill && contains(entry.spill, local)))) || !primitive.shapeId) continue;
+    const connector = connectorHits.get(entry);
+    const inside = connector ? containsBentConnector(connector, local) : contains(primitive, local);
+    if (!primitive.shapeId || (!target && (clipped || !(inside || entry.spill && contains(entry.spill, local))))) continue;
     if (!target && inside && borderScale !== undefined) {
       const band = Math.min(6 / borderScale, primitive.w / 3, primitive.h / 3);
       if (local.x - primitive.x <= band || primitive.x + primitive.w - local.x <= band ||

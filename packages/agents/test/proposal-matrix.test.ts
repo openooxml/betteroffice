@@ -25,9 +25,9 @@ const exceptions = {
   ownAcceptCell: 'Attached cell handles survive own acceptance; headless XLSX handles retain whole-workbook version expiry.',
   unrelatedProposal: 'XLSX proposals retain whole-workbook staleness.',
   diagnostics: 'Attached XLSX accept diagnostics come from engine acceptance, including cycleCells 0.',
-  acceptDate: 'Attached DOCX refuses accept date; headless tracked acceptance keeps its supplied date.',
+  acceptDate: 'DOCX tracked acceptance keeps its supplied date.',
   trackedConflict: 'Attached DOCX refuses adjoining tracked revisions with their identity; headless keeps ordinary insertion beside a tracked run.',
-  undo: 'Attached DOCX settlement stays outside undo history; headless acceptance remains one undo step.',
+  undo: 'DOCX acceptance remains one undo step.',
 };
 
 for (const mode of ['headless', 'attached', 'peer'] as const) {
@@ -313,15 +313,11 @@ for (const mode of ['headless', 'attached'] as const) {
       const cursor = doc.grep({ query: 'is', limit: 1 }).nextCursor!;
       const proposal = doc.propose({ author: 'Agent', edits: [{ match: hit.match, newText: 'Updated summary' }] });
       const date = '2026-01-01T00:00:00Z';
+      await doc.accept(proposal.id, { tracked: true, date });
+      expect(owner.session.listRevisions().every(revision => Date.parse(revision.date ?? '') === Date.parse(date)), exceptions.acceptDate).toBe(true);
       if (mode === 'attached') {
-        await expect(doc.accept(proposal.id, { tracked: true, date }), exceptions.acceptDate).rejects.toMatchObject({ code: 'ACCEPT_DATE_UNSUPPORTED' });
-        expect(doc.review(proposal.id).status).toBe('pending');
-        await doc.accept(proposal.id, { tracked: true });
         expect(doc.read(hit.ref).revision).toBe(hit.revision);
         expect(doc.grep({ query: 'is', limit: 1, cursor }).matches).toHaveLength(1);
-      } else {
-        await doc.accept(proposal.id, { tracked: true, date });
-        expect(owner.session.listRevisions().every(revision => revision.date === date), exceptions.acceptDate).toBe(true);
       }
       const paragraph = owner.session.paragraphs('body')[2];
       owner.session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Tracked', { name: 'Reviewer', date });
@@ -361,7 +357,9 @@ for (const mode of ['headless', 'attached'] as const) {
       expect(undoOwner.session.undo()).toBe(true);
       expect(undoDoc.read(hit.ref).text).toBe('Updated summary');
       undoOwner.session.undo();
-      expect(undoDoc.read(hit.ref).text, exceptions.undo).toBe(mode === 'headless' ? 'Executive summary' : 'Updated summary');
+      expect(undoDoc.read(hit.ref).text, exceptions.undo).toBe('Executive summary');
+      expect(undoOwner.session.paragraphs('body')[1].text).toStartWith('Prior ');
+      expect(undoOwner.session.canUndo()).toBe(true);
     } finally { undoDoc.close(); undoOwner.close(); }
   });
 }

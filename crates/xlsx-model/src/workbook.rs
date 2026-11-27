@@ -169,10 +169,12 @@ impl Table {
 
     /// 0-based index of `column` within the table, matched case-insensitively.
     pub fn column_index(&self, column: &str) -> Option<u32> {
-        let index = self
-            .columns
-            .iter()
-            .position(|name| name.eq_ignore_ascii_case(column))?;
+        let folded = column.to_lowercase();
+        let ascii = column.is_ascii();
+        let index = self.columns.iter().position(|name| {
+            name.eq_ignore_ascii_case(column)
+                || ((!ascii || !name.is_ascii()) && name.to_lowercase() == folded)
+        })?;
         let index = u32::try_from(index).ok()?;
         let col = self.range.start.col.checked_add(index)?;
         (col <= self.range.end.col).then_some(index)
@@ -985,6 +987,7 @@ impl<'a> Iterator for SparseCells<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Workbook {
     pub full_precision: bool,
+    pub iterate: bool,
     pub sheets: Vec<Sheet>,
     pub date_system: DateSystem,
     pub defined_names: Vec<DefinedName>,
@@ -1000,6 +1003,7 @@ impl Default for Workbook {
     fn default() -> Self {
         Self {
             full_precision: true,
+            iterate: false,
             sheets: Vec::new(),
             date_system: DateSystem::default(),
             defined_names: Vec::new(),

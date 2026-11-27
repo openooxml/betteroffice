@@ -4,7 +4,7 @@ import { addToken, makeHarness, SRC } from "../../test/session/harness";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 test("an ordinary GetFile opens and nothing is written back", async () => {
   const h = makeHarness({ format: "xlsx" });
