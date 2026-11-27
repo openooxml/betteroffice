@@ -56,7 +56,7 @@ describe('canary workflow', () => {
     expect(canary.permissions).toEqual({ contents: 'read', actions: 'read' });
     expect(publisher.permissions).toEqual({ contents: 'read', actions: 'read', 'id-token': 'write' });
     expect(publisher.needs).toBe('canary');
-    expect(publisher.if).toBe("needs.canary.outputs.publish == 'true'");
+    expect(publisher.if).toBe("needs.canary.outputs.publish == 'true' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true')");
     for (const job of [canary, publisher]) {
       const source = JSON.stringify(job);
       expect(source).not.toContain('secrets.');

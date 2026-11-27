@@ -742,9 +742,9 @@ jobs:
   canary-publish:
     name: Publish the canary
     needs: canary
-    if: needs.canary.outputs.publish == 'true'
+    if: needs.canary.outputs.publish == 'true' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
       actions: read # check again that no release is running
