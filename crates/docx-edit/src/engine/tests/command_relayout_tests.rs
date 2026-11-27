@@ -1867,6 +1867,147 @@ fn cell_edits_in_a_body_with_a_section_break_keep_the_full_pass() {
     }
 }
 
+fn table_class_packages() -> [(&'static str, Vec<u8>, &'static str); 7] {
+    use super::lowering_fixture::{Package, para, run};
+
+    const SECTION: &str = r#"<w:sectPr><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#;
+    let cell = |properties: &str, content: &str| {
+        format!("<w:tc><w:tcPr>{properties}</w:tcPr>{content}</w:tc>")
+    };
+    let text_cell = |id: &str, text: &str| cell("", &para(id, &run(text)));
+    let row = |properties: &str, left: &str, right: &str| {
+        format!("<w:tr>{properties}{left}{right}</w:tr>")
+    };
+    let table = |columns: usize, column_width: usize, rows: &str| {
+        let width = columns * column_width;
+        let grid = format!(r#"<w:gridCol w:w="{column_width}"/>"#).repeat(columns);
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="{width}" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>{grid}</w:tblGrid>{rows}</w:tbl>"#
+        )
+    };
+    let long_table = |header: bool| {
+        let rows: String = (0..28)
+            .map(|index| {
+                let id = 0x1810 + 2 * index;
+                let properties = if header && index == 0 {
+                    "<w:trPr><w:tblHeader/></w:trPr>"
+                } else {
+                    ""
+                };
+                row(
+                    properties,
+                    &text_cell(&format!("{id:08X}"), &format!("Row {index}")),
+                    &text_cell(&format!("{:08X}", id + 1), "Beside it"),
+                )
+            })
+            .collect();
+        table(2, 1500, &rows)
+    };
+
+    let target = "00001801";
+    let left = text_cell(target, "Editable cell");
+    let right = text_cell("00001802", "Beside it");
+    let plain = table(2, 1500, &row("", &left, &right));
+    let inner = table(1, 1200, &row("", &left, ""));
+    let outer_left = cell("", &format!("{inner}{}", para("00001803", "")));
+    let nested = table(2, 1500, &row("", &outer_left, &right));
+    let floating = cell(
+        "",
+        &para(target, &format!("{}{ANCHORED_SHAPE}", run("Editable cell"))),
+    );
+    let anchored = table(2, 1500, &row("", &floating, &right));
+    let merge_start = cell(
+        r#"<w:gridSpan w:val="2"/><w:vMerge w:val="restart"/>"#,
+        &para(target, &run("Merged cell")),
+    );
+    let merge_end = cell(r#"<w:gridSpan w:val="2"/><w:vMerge/>"#, "<w:p/>");
+    let merged = table(
+        3,
+        1200,
+        &format!(
+            "{}{}",
+            row("", &merge_start, &right),
+            row("", &merge_end, &text_cell("00001803", "Below it"))
+        ),
+    );
+    let section_break = format!(
+        r#"<w:p w14:paraId="00001803"><w:pPr>{SECTION}</w:pPr>{}</w:p>{plain}"#,
+        run("Before the section break")
+    );
+    [
+        ("plain", plain, target),
+        ("multipage", long_table(false), "00001818"),
+        ("repeated-header", long_table(true), "00001818"),
+        ("nested", nested, target),
+        ("anchored-float", anchored, target),
+        ("merged", merged, target),
+        ("section-break", section_break, target),
+    ]
+    .map(|(case, body, id)| (case, Package::new(&format!("{body}{SECTION}")).bytes(), id))
+}
+
+#[test]
+fn cell_edits_across_table_classes_lay_out_as_a_full_recompute_does() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let cases = table_class_packages();
+    let case_count = cases.len();
+    let mut steps = 0;
+    for (index, (case, bytes, id)) in cases.into_iter().enumerate() {
+        let client_id = 9850 + index as u64;
+        let engine = seeded_engine(client_id, &bytes);
+        let request = repeated_final_section_request(font);
+        let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+        let multipage = matches!(case, "multipage" | "repeated-header");
+        if multipage {
+            assert!(page_count(&engine) >= 3, "{case}");
+        } else if case == "plain" {
+            assert_eq!(page_count(&engine), 1, "{case}");
+        }
+        let paste = " more words".repeat(if multipage { 24 } else { 5 });
+        let mut edit = |id: &str, step: &str, (start, end): (u32, u32), text: Option<&str>| {
+            let story = cell_holding(&engine, id);
+            let at = engine
+                .doc()
+                .paragraph_index(&story)
+                .unwrap()
+                .para_span(id)
+                .unwrap()
+                .0
+                + 2;
+            let label = format!("{case}/{step}");
+            REGION_FULL_PASSES.with(|count| count.set(0));
+            assert!(host.command(&story, at + start, at + end, text), "{label}");
+            let full = REGION_FULL_PASSES.with(Cell::get);
+            host.assert_matches_cold(&label);
+
+            let pagination = engine.pagination.borrow();
+            let pages = &pagination.layout.as_ref().unwrap().pages;
+            let bytes = engine
+                .with_display_list(|display| serde_json::to_vec(&(pages, display)).unwrap())
+                .unwrap();
+            let digest = bytes.into_iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+            println!(
+                "LAYOUT-DIGEST {label} {digest:016x} pages={} full={full}",
+                pages.len()
+            );
+            steps += 1;
+        };
+        edit(id, "key-1", (0, 0), Some("x"));
+        edit(id, "key-2", (1, 1), Some("y"));
+        edit(id, "key-3", (2, 2), Some("z"));
+        edit(id, "delete", (0, 2), None);
+        edit(id, "paste", (1, 1), Some(&paste));
+        if case == "nested" {
+            edit("00001802", "outer-key", (0, 0), Some("x"));
+        }
+    }
+    println!("CASES {case_count} STEPS {steps}");
+}
+
 #[test]
 fn page_text_headings_are_reused_until_the_body_changes() {
     let fonts = docx_layout::MeasureFonts::default();
