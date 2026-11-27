@@ -117,12 +117,6 @@ test('the fill, not the text, decides the caret where both shades would show', (
   expect(pptxCaretColors(slide([shape('#808080')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).caret).toBe('#000000');
 });
 
-  expect(pptxCaretColors(slide([diamond]), text, 2, caret).caret).toBe('#000000');
-  expect(pptxCaretColors(slide([diamond]), text, 2, { ...caret, x: 250 }).caret).toBe('#ffffff');
-  const rotated = { ...diamond, transform: { rotationDeg: 30 } } as SlidePrimitive;
-  expect(pptxCaretColors(slide([rotated]), text, 2, caret).caret).toBe('#000000');
-});
-
 function painted(width: number, height: number, pixel: (x: number, y: number) => readonly number[], fail?: Error) {
   const reads: number[][] = [];
   const canvas = { width, height, getContext: () => ({
