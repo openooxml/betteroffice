@@ -2025,7 +2025,11 @@ fn selective_save_assigns_a_different_shape_id() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn assert_r5_deleted_toc_closer(toc: WordToc, case: &str) -> Result<(), Box<dyn Error>> {
+fn assert_r5_deleted_toc_closer(
+    toc: WordToc,
+    case: &str,
+    pinned_summary: &str,
+) -> Result<(), Box<dyn Error>> {
     let start = r#"<w:bookmarkStart w:id="41" w:name="TocRange"/>"#;
     let end = r#"<w:bookmarkEnd w:id="41"/>"#;
     let source = package(&format!("{start}{}{end}", toc.xml(&toc.paragraphs)))?;
@@ -2050,7 +2054,8 @@ fn assert_r5_deleted_toc_closer(toc: WordToc, case: &str) -> Result<(), Box<dyn 
         .collect();
     let expected = format!("{start}{entries}{end}");
     let saved = write_docx_s13(serde_json::from_value(request)?, &source)?;
-    assert_spanning_save(&document_xml(&saved)?, &expected, case);
+    let (_, _, summary) = report_spanning_save(&document_xml(&saved)?, &expected, case);
+    assert_eq!(summary, pinned_summary, "{case}");
     Ok(())
 }
 
@@ -2062,6 +2067,7 @@ enum R5OpeningEdit {
 fn assert_r5_moved_toc_opening(
     toc: WordToc,
     case: &str,
+    pinned_summary: &str,
     edit: R5OpeningEdit,
 ) -> Result<(), Box<dyn Error>> {
     let before = match edit {
@@ -2097,39 +2103,58 @@ fn assert_r5_moved_toc_opening(
     let expected =
         expected_before + &toc_xml.replace(&format!(">{title}<"), &format!(">{edited_title}<"));
     let saved = write_docx_s13(serde_json::from_value(request)?, &source)?;
-    assert_spanning_save(&document_xml(&saved)?, &expected, case);
+    let (_, _, summary) = report_spanning_save(&document_xml(&saved)?, &expected, case);
+    assert_eq!(summary, pinned_summary, "{case}");
     assert!(edited > 0, "{case}: missing second entry title");
     Ok(())
 }
 
 macro_rules! r5_word_toc_tests {
-    ($($test:ident: $case:literal => $check:ident($build:ident $(, $edit:expr)?)),+ $(,)?) => {
+    ($($test:ident: $case:literal, $summary:literal => $check:ident($build:ident $(, $edit:expr)?)),+ $(,)?) => {
         $(
             #[test]
             fn $test() -> Result<(), Box<dyn Error>> {
-                $check($build(), $case $(, $edit)?)
+                $check($build(), $case, $summary $(, $edit)?)
             }
         )+
     };
 }
 
 r5_word_toc_tests! {
-    deleting_the_plain_toc_closer_and_next_paragraph_closes_before_the_bookmark:
-        "r5_delete_closer_and_next_w1_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w1),
-    deleting_the_inline_toc_closer_and_next_paragraph_closes_before_the_bookmark:
-        "r5_delete_closer_and_next_w2_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w2),
-    deleting_the_unlinked_toc_closer_and_next_paragraph_closes_before_the_bookmark:
-        "r5_delete_closer_and_next_w4_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w4),
-    editing_the_second_plain_toc_title_after_splitting_the_opening_keeps_page_references:
-        "r5_split_start_edit_second_w1_full_write" => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::SplitStart),
-    editing_the_second_inline_toc_title_after_splitting_the_opening_keeps_page_references:
-        "r5_split_start_edit_second_w2_full_write" => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::SplitStart),
-    editing_the_second_numbered_toc_title_after_splitting_the_opening_keeps_page_references:
-        "r5_split_start_edit_second_w3_full_write" => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::SplitStart),
-    editing_the_second_plain_toc_title_after_merging_with_a_blank_keeps_page_references:
-        "r5_merge_blank_edit_second_w1_full_write" => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::MergeBlank),
-    editing_the_second_inline_toc_title_after_merging_with_a_blank_keeps_page_references:
-        "r5_merge_blank_edit_second_w2_full_write" => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::MergeBlank),
-    editing_the_second_numbered_toc_title_after_merging_with_a_blank_keeps_page_references:
-        "r5_merge_blank_edit_second_w3_full_write" => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::MergeBlank),
+    deleting_plain_toc_closer_keeps_fields_and_page_refs_with_end_in_opening_entry:
+        "r5_delete_closer_and_next_w1_trailing_bookmark",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=bs:TocRange@0,be:TocRange@32"
+        => assert_r5_deleted_toc_closer(word_toc_w1),
+    deleting_inline_toc_closer_keeps_fields_and_page_refs_with_end_in_opening_entry:
+        "r5_delete_closer_and_next_w2_trailing_bookmark",
+        "begins=3 ends=3 instr=same pageref=2/2 endpara=0 after=outside markers=bs:TocRange@0,be:TocRange@20"
+        => assert_r5_deleted_toc_closer(word_toc_w2),
+    deleting_unlinked_toc_closer_loses_one_page_ref_with_end_in_opening_entry:
+        "r5_delete_closer_and_next_w4_trailing_bookmark",
+        "begins=3 ends=3 instr=changed pageref=2/3 endpara=0 after=outside markers=bs:TocRange@0,be:TocRange@31"
+        => assert_r5_deleted_toc_closer(word_toc_w4),
+    split_plain_toc_and_title_edit_keep_page_refs_with_end_in_opening_entry:
+        "r5_split_start_edit_second_w1_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=2 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::SplitStart),
+    split_inline_toc_and_title_edit_keep_page_refs_with_end_in_opening_entry:
+        "r5_split_start_edit_second_w2_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=2 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::SplitStart),
+    split_numbered_toc_and_title_edit_keep_page_refs_with_end_in_opening_entry:
+        "r5_split_start_edit_second_w3_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=2 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::SplitStart),
+    merge_plain_toc_and_title_edit_keep_page_refs_with_end_in_first_paragraph:
+        "r5_merge_blank_edit_second_w1_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::MergeBlank),
+    merge_inline_toc_and_title_edit_keep_page_refs_with_end_in_first_paragraph:
+        "r5_merge_blank_edit_second_w2_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::MergeBlank),
+    merge_numbered_toc_and_title_edit_keep_page_refs_with_end_in_first_paragraph:
+        "r5_merge_blank_edit_second_w3_full_write",
+        "begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=-"
+        => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::MergeBlank),
 }

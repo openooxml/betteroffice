@@ -926,20 +926,37 @@ test('a tracked insertion in the opening unlinked title is dropped and its page 
 }, 30_000);
 
 const R5_DELETE_ROUTES = [
-  ['full_write', 'on a full save'],
-  ['xml_comment', 'on a session save with an XML comment'],
-  ['insert_table', 'on a session save that also inserts a table'],
+  ['full_write', 'full save'],
+  ['xml_comment', 'session save with XML comment'],
+  ['insert_table', 'session save with table'],
 ] as const;
 
-const R5_DELETE_CASES = [WORD_TOC_SHAPES[0], WORD_TOC_SHAPES[1], WORD_TOC_SHAPES[3]]
-  .flatMap(([shape, build]) => R5_DELETE_ROUTES.map(([route, save]) => [
-    `deleting the TOC closing paragraph and the next paragraph closes the TOC in the last surviving entry ${save} (${shape})`,
+const R5_DELETE_CASES = ([
+  [WORD_TOC_SHAPES[0], 'keeps all fields and page references', {
+    full_write: 'begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=-',
+    xml_comment: 'begins=4 ends=4 instr=same pageref=3/3 endpara=0 after=outside markers=-',
+    insert_table: 'begins=4 ends=4 instr=same pageref=3/3 endpara=2 after=outside markers=-',
+  }],
+  [WORD_TOC_SHAPES[1], 'keeps all fields and page references', {
+    full_write: 'begins=3 ends=3 instr=same pageref=2/2 endpara=0 after=outside markers=-',
+    xml_comment: 'begins=3 ends=3 instr=same pageref=2/2 endpara=0 after=outside markers=-',
+    insert_table: 'begins=3 ends=3 instr=same pageref=2/2 endpara=2 after=outside markers=-',
+  }],
+  [WORD_TOC_SHAPES[3], 'loses one page reference as on main', {
+    full_write: 'begins=3 ends=3 instr=changed pageref=2/3 endpara=0 after=outside markers=-',
+    xml_comment: 'begins=3 ends=3 instr=changed pageref=2/3 endpara=0 after=outside markers=-',
+    insert_table: 'begins=3 ends=3 instr=changed pageref=2/3 endpara=2 after=outside markers=-',
+  }],
+] as const).flatMap(([[shape, build], outcome, summaries]) =>
+  R5_DELETE_ROUTES.map(([route, save]) => [
+    `Deleting the closer and next paragraph ${outcome}, with the TOC end in the opening entry (${shape}, ${save})`,
     `r5_delete_closer_and_next_${shape.slice(0, 2).toLowerCase()}_${route}`,
     build,
     route,
+    summaries[route],
   ] as const));
 
-test.each(R5_DELETE_CASES)('%s', async (_title, caseName, build, route) => {
+test.each(R5_DELETE_CASES)('%s', async (_title, caseName, build, route, pinnedSummary) => {
   const toc = build();
   const closer = toc.paragraphs.length - 1;
   const before = route === 'insert_table' ? paragraph(textRun('BEFORE')) : '';
@@ -965,31 +982,64 @@ test.each(R5_DELETE_CASES)('%s', async (_title, caseName, build, route) => {
       session.insertTable({ story, paraId: paragraphs[0]!.paraId, offset: 0 }, 1, 1);
     }
   }, route === 'full_write');
-  assertSpanningSave(xml, expected, caseName);
+  const { summary } = reportSpanningSave(xml, expected, caseName);
+  expect(summary).toBe(pinnedSummary);
   expect(deleted).toBe(true);
   if (route === 'insert_table') expect(xml).toMatch(/<w:tbl[\s>]/);
 }, 30_000);
 
 const R5_MOVE_EDITS = [
-  ['split_start', 'splitting at the start of the opening TOC paragraph'],
-  ['merge_blank', 'merging a blank paragraph with the opening TOC paragraph'],
+  ['split_start', 'splitting at the TOC start'],
+  ['merge_blank', 'merging with a blank paragraph'],
 ] as const;
 const R5_MOVE_SAVES = [
-  ['session_save', 'on a session save'],
-  ['full_write', 'on a full save'],
+  ['session_save', 'session save'],
+  ['full_write', 'full save'],
 ] as const;
 
-const R5_MOVE_CASES = [WORD_TOC_SHAPES[0], WORD_TOC_SHAPES[1], WORD_TOC_SHAPES[2]]
-  .flatMap(([shape, build]) => R5_MOVE_EDITS.flatMap(([edit, action]) =>
+const R5_MOVE_CASES = ([
+  [WORD_TOC_SHAPES[0], {
+    split_start: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=2 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=5 after=outside markers=-',
+    },
+    merge_blank: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=0 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=3 after=outside markers=-',
+    },
+  }],
+  [WORD_TOC_SHAPES[1], {
+    split_start: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=2 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=4 after=outside markers=-',
+    },
+    merge_blank: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=0 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=2 after=outside markers=-',
+    },
+  }],
+  [WORD_TOC_SHAPES[2], {
+    split_start: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=2 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=5 after=outside markers=-',
+    },
+    merge_blank: {
+      session_save: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=0 after=outside markers=-',
+      full_write: 'begins=2 ends=2 instr=changed pageref=1/3 endpara=3 after=outside markers=-',
+    },
+  }],
+] as const).flatMap(([[shape, build], summaries]) =>
+  R5_MOVE_EDITS.flatMap(([edit, action]) =>
     R5_MOVE_SAVES.map(([route, save]) => [
-      `editing the second TOC title after ${action} keeps the page references ${save} (${shape})`,
+      `The TOC keeps only its first page reference after ${action} and editing the second title, as on main (${shape}, ${save})`,
       `r5_${edit}_edit_second_${shape.slice(0, 2).toLowerCase()}_${route}`,
       build,
       edit,
       route,
+      summaries[edit][route],
     ] as const)));
 
-test.each(R5_MOVE_CASES)('%s', async (_title, caseName, build, edit, route) => {
+test.each(R5_MOVE_CASES)('%s', async (_title, caseName, build, edit, route, pinnedSummary) => {
   const toc = build();
   const { story } = toc;
   const before = paragraph(edit === 'split_start' ? textRun('BEFORE') : '');
@@ -1007,7 +1057,8 @@ test.each(R5_MOVE_CASES)('%s', async (_title, caseName, build, edit, route) => {
     }
     edited = applyWordTocEdit(session, titleEdit);
   }, route === 'full_write');
-  assertSpanningSave(xml, expected, caseName);
+  const { summary } = reportSpanningSave(xml, expected, caseName);
+  expect(summary).toBe(pinnedSummary);
   expect(edited).toBe(true);
 }, 30_000);
 
