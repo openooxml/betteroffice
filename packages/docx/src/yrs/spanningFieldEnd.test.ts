@@ -674,17 +674,16 @@ test.each(MAIN_STATE_CASES)('mainstate %s %s saves a released session', async (s
 test.each(MAIN_STATE_CASES.filter(([shape]) => shape === 'W4').map(([shape, name, toc, edit]) => {
   const [label] = WORD_TOC_EDITS.find(([label]) => label.startsWith(`${name} `))!;
   const editLabel = label.slice(name.length + 1);
+  const refused = ['E1', 'E5'].includes(name);
   const released = ['E2', 'E3', 'E4'].includes(name) ? ', as the released code does' : '';
+  const after = refused ? `on save after a refused ${editLabel}` : `after ${editLabel}${released}`;
   const title = 'a session stored before field projection moves a comment inside the first unlinked title ' +
-    `to the paragraph start after ${editLabel}${released}`;
+    `to the paragraph start ${after}`;
   const caseName = `stored_unlinked_comment_after_${editLabel.replaceAll(' ', '_')}`;
-  return [title, caseName, shape, name, toc, edit] as const;
-}))('%s', async (_title, caseName, shape, name, toc, edit) => {
+  return [title, caseName, shape, name, toc, edit, refused] as const;
+}))('%s', async (_title, caseName, shape, name, toc, edit, refused) => {
   await withMainState(shape, async (session, source) => {
-    if (edit) {
-      const applied = applyWordTocEdit(session, edit);
-      expect(applied).toBe(true);
-    }
+    if (edit) expect(applyWordTocEdit(session, edit)).toBe(!refused);
     const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
     const xml = await (await documentPart(bytes)).async('uint8array');
     const sourceXml = await readDocument(source);
