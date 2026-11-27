@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use docx_parse::HeaderFooterAliasGroup;
-use yrs::{Map, ReadTxn, Transact};
+use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::{EditCtx, EditingDoc, map_string};
 
@@ -11,7 +12,14 @@ pub(crate) fn story_id(relationship_id: &str) -> String {
     format!("hf:{relationship_id}")
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ALIAS_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
+    #[cfg(test)]
+    ALIAS_PARSES.set(ALIAS_PARSES.get() + 1);
     let groups: Vec<HeaderFooterAliasGroup> =
         serde_json::from_str(json).map_err(|error| error.to_string())?;
     let mut ids = HashSet::new();
@@ -30,6 +38,109 @@ fn parse_groups(json: &str) -> Result<Vec<HeaderFooterAliasGroup>, String> {
         }
     }
     Ok(groups)
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectionAliases {
+    declaration: Option<Arc<str>>,
+    groups: Vec<ProjectionAliasGroup>,
+    by_root: HashMap<String, usize>,
+}
+
+struct ProjectionAliasGroup {
+    roots: Arc<[String]>,
+    activity: Option<(u64, bool)>,
+}
+
+impl ProjectionAliasGroup {
+    fn active(&mut self, revisions: &crate::StoryRevisions) -> bool {
+        let revision = revisions.projection_membership;
+        if let Some((previous, active)) = self.activity
+            && previous == revision
+        {
+            return active;
+        }
+        let active = self.roots[1..]
+            .iter()
+            .all(|alias| !revisions.live_projection_roots.contains_key(alias));
+        self.activity = Some((revision, active));
+        active
+    }
+}
+
+impl ProjectionAliases {
+    fn refresh<T: ReadTxn>(&mut self, txn: &T) {
+        let declaration = txn.get_map(crate::identity::SESSION).and_then(|session| {
+            match session.get(txn, HF_ALIASES) {
+                Some(Out::Any(Any::String(value))) => Some(value),
+                _ => None,
+            }
+        });
+        let same = match (&self.declaration, &declaration) {
+            (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.by_root.clear();
+            self.groups.clear();
+            if let Some(groups) = declaration
+                .as_deref()
+                .and_then(|json| parse_groups(json).ok())
+            {
+                for group in groups {
+                    let mut roots: Vec<_> = group
+                        .relationship_ids
+                        .iter()
+                        .map(|relationship| story_id(relationship))
+                        .collect();
+                    roots[1..].sort();
+                    for root in &roots {
+                        self.by_root.insert(root.clone(), self.groups.len());
+                    }
+                    self.groups.push(ProjectionAliasGroup {
+                        roots: roots.into(),
+                        activity: None,
+                    });
+                }
+            }
+            self.declaration = declaration;
+        }
+    }
+
+    pub(crate) fn group<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+        root: &str,
+    ) -> Option<Arc<[String]>> {
+        root.strip_prefix("hf:")?;
+        self.refresh(txn);
+        let group = &mut self.groups[*self.by_root.get(root)?];
+        let revisions = doc.story_revisions.lock().unwrap();
+        group.active(&revisions).then(|| Arc::clone(&group.roots))
+    }
+
+    pub(crate) fn active_aliases<T: ReadTxn>(
+        &mut self,
+        doc: &EditingDoc,
+        txn: &T,
+    ) -> BTreeMap<String, String> {
+        self.refresh(txn);
+        let revisions = doc.story_revisions.lock().unwrap();
+        let mut aliases = BTreeMap::new();
+        for group in &mut self.groups {
+            if group.active(&revisions) {
+                aliases.extend(
+                    group.roots[1..]
+                        .iter()
+                        .cloned()
+                        .map(|alias| (alias, group.roots[0].clone())),
+                );
+            }
+        }
+        aliases
+    }
 }
 
 impl EditingDoc {
@@ -63,9 +174,13 @@ impl EditingDoc {
     #[doc(hidden)]
     pub fn header_footer_aliases(&self) -> Vec<(String, String)> {
         let txn = self.yrs_doc().transact();
+        self.header_footer_aliases_in(&txn)
+    }
+
+    pub(crate) fn header_footer_aliases_in<T: ReadTxn>(&self, txn: &T) -> Vec<(String, String)> {
         let Some(groups) = txn
             .get_map(crate::identity::SESSION)
-            .and_then(|session| map_string(&session, &txn, HF_ALIASES))
+            .and_then(|session| map_string(&session, txn, HF_ALIASES))
             .and_then(|json| parse_groups(&json).ok())
         else {
             return Vec::new();
@@ -78,7 +193,7 @@ impl EditingDoc {
                 let root = story_id(alias);
                 let prefix = format!("{root}:");
                 stories.as_ref().is_some_and(|stories| {
-                    crate::live_stories(stories, &txn)
+                    crate::live_stories(stories, txn)
                         .any(|(key, _)| key == root || key.starts_with(&prefix))
                 })
             });

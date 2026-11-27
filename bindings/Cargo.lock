@@ -112,6 +112,7 @@ dependencies = [
  "betteroffice-opc",
  "foldhash",
  "libm",
+ "memchr",
  "ryu-js",
  "serde",
  "serde_json",

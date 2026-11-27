@@ -843,6 +843,578 @@ fn table_boundary_in_flow_wrap_square_shape_is_not_lost() {
     assert!(separates_shape_and_paragraph);
 }
 
+fn cell_anchor_box(horizontal: &str, vertical: &str, wrap: &str, height: u32) -> String {
+    format!(
+        r#"<w:drawing><wp:anchor layoutInCell="1" behindDoc="0" relativeHeight="1"><wp:positionH relativeFrom="column">{horizontal}</wp:positionH><wp:positionV relativeFrom="paragraph">{vertical}</wp:positionV><wp:extent cx="609600" cy="{height}"/>{wrap}<wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>Box label</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+    )
+}
+
+fn cell_anchor_package(drawing: &str, text: &str) -> Vec<u8> {
+    document_paragraphs(
+        &format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="7800" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="5400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p/></w:tc><w:tc><w:tcPr><w:tcW w:w="5400" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:before="60" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr><w:r>{drawing}</w:r><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr><w:r><w:t>Cell tail</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        ),
+        false,
+    )
+}
+
+fn cell_anchor_after_text(drawing: &str) -> Vec<u8> {
+    rewrite_document(&cell_anchor_package(drawing, "Anchor text"), |source| {
+        source.replacen(
+            "<w:p><w:pPr>",
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="600" w:lineRule="exact"/></w:pPr><w:r><w:t>Cell lead</w:t></w:r></w:p><w:p><w:pPr>"#,
+            1,
+        )
+    })
+}
+
+fn painted_cell_anchor(primitives: &[Value]) -> &Value {
+    primitives
+        .iter()
+        .find(|item| item["kind"] == "shape")
+        .unwrap()
+}
+
+fn cell_anchor_fragment(page: &Value) -> &Value {
+    page["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "table")
+        .unwrap()
+}
+
+fn cell_anchor_table(layout: &Value) -> (&Value, &Value) {
+    let fragment = cell_anchor_fragment(&layout["layout"]["pages"][0]);
+    let table = layout["measured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["block"]["kind"] == "table")
+        .unwrap();
+    (fragment, &table["measure"])
+}
+
+#[test]
+fn cell_text_box_column_and_paragraph_offsets_leave_text_and_row_height_unchanged() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let (control, control_layout) =
+        display_with_layout(&cell_anchor_package("", "Anchor text"), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let control = control["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, measure) = cell_anchor_table(&layout);
+    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
+    assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 4.0 + 16.0);
+    let clip = &shape["clipGroup"]["clip"];
+    assert_eq!(
+        clip["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(clip["w"].as_f64(), Some(360.0));
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index > text_run_index(primitives, "Cell tail"));
+    assert_eq!(
+        measure["rows"][0]["height"].as_f64(),
+        cell_anchor_table(&control_layout).1["rows"][0]["height"].as_f64()
+    );
+    for label in ["Anchor text", "Cell tail"] {
+        assert_eq!(
+            baseline_y(text_run(primitives, label)),
+            baseline_y(text_run(control, label))
+        );
+    }
+}
+
+#[test]
+fn cell_text_box_centers_across_the_content_width() {
+    let drawing = cell_anchor_box(
+        "<wp:align>center</wp:align>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"],
+        table["x"].as_f64().unwrap() + 160.0 + (360.0 - 64.0) / 2.0
+    );
+}
+
+#[test]
+fn behind_document_cell_text_box_paints_before_preceding_cell_text() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>-285750</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    )
+    .replace(r#"behindDoc="0""#, r#"behindDoc="1""#);
+    let (display, layout) = display_with_layout(&cell_anchor_after_text(&drawing), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0 + 96.0);
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index < text_run_index(primitives, "Cell lead"));
+}
+
+#[test]
+fn cell_text_box_offset_into_an_exact_height_row_is_in_the_page_map() {
+    use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
+    use docx_layout::types::LayoutBlock;
+
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:posOffset>-285750</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_after_text(&drawing), |source| {
+        source.replacen(
+            "<w:tr>",
+            r#"<w:tr><w:trPr><w:trHeight w:val="360" w:hRule="exact"/></w:trPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, measure) = cell_anchor_table(&layout);
+    assert_eq!(measure["rows"][0]["height"], 24.0);
+    assert_eq!(shape["y"], table["y"].as_f64().unwrap() + 14.0);
+    let clip = &shape["clipGroup"]["clip"];
+    assert_eq!(clip["y"].as_f64(), table["y"].as_f64());
+    assert_eq!(clip["h"].as_f64(), Some(24.0));
+
+    let mut input = serde_json::from_value(layout).unwrap();
+    let paginated = docx_layout::compute_layout_input(&mut input).unwrap();
+    let placements = place_layout(&PlacementInput {
+        layout: &paginated,
+        measured: &input.measured,
+        headers_footers: None,
+        bands_composed: false,
+        notes: &[],
+    });
+    assert!(
+        placements.pages[0]
+            .regions
+            .iter()
+            .flat_map(|region| &region.items)
+            .any(|item| matches!(item, PlacedItem::Block(LayoutBlock::Shape(_))))
+    );
+}
+
+#[test]
+fn cell_square_wrap_text_box_stacks_above_the_anchor_paragraph() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>304800</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        r#"<wp:wrapSquare wrapText="right"/>"#,
+        342900,
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let (control, control_layout) =
+        display_with_layout(&cell_anchor_package("", "Anchor text"), true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let control = control["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, measure) = cell_anchor_table(&layout);
+    let table_y = table["y"].as_f64().unwrap();
+    let shape_height = 36.0;
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), Some(table_y));
+    assert_eq!(shape["h"].as_f64(), Some(shape_height));
+    assert_eq!(
+        measure["rows"][0]["height"].as_f64().unwrap(),
+        cell_anchor_table(&control_layout).1["rows"][0]["height"]
+            .as_f64()
+            .unwrap()
+            + shape_height
+    );
+    let anchor = text_run(primitives, "Anchor text");
+    assert!(baseline_y(anchor) > table_y + shape_height);
+    assert_eq!(start_x(anchor), start_x(text_run(control, "Anchor text")));
+}
+
+#[test]
+fn body_text_box_keeps_its_column_and_paragraph_offsets() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let primitives = primitives(&drawing, false, true);
+    let shape = painted_cell_anchor(&primitives);
+    assert_eq!(shape["x"], 192.0);
+    assert_eq!(shape["y"], 112.0);
+}
+
+#[test]
+fn cell_text_box_leaving_its_cell_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>3657600</wp:posOffset>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
+fn inside_or_outside_aligned_cell_text_box_keeps_the_cell_stack_origin() {
+    for align in ["inside", "outside"] {
+        let drawing = cell_anchor_box(
+            &format!("<wp:align>{align}</wp:align>"),
+            "<wp:posOffset>0</wp:posOffset>",
+            "<wp:wrapNone/>",
+            114300,
+        )
+        .replace(r#"relativeFrom="column""#, r#"relativeFrom="margin""#);
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+        let (table, _) = cell_anchor_table(&layout);
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    }
+}
+
+#[test]
+fn cell_text_box_in_a_column_clipped_table_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>0</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let package = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replacen(
+            "</w:sectPr>",
+            r#"<w:cols w:num="2" w:space="360" w:equalWidth="0"><w:col w:w="3600" w:space="360"/><w:col w:w="5400"/></w:cols></w:sectPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&package, true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert!(table["width"].as_f64().unwrap() < 520.0);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
+fn cell_shape_without_text_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    )
+    .replace(
+        r#"<wps:txbx><w:txbxContent><w:p><w:r><w:t>Box label</w:t></w:r></w:p></w:txbxContent></wps:txbx>"#,
+        "",
+    );
+    let (display, layout) =
+        display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
+fn page_relative_cell_text_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    for frame in [r#"relativeFrom="column""#, r#"relativeFrom="paragraph""#] {
+        let drawing = drawing.replace(frame, r#"relativeFrom="page""#);
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+        let (table, _) = cell_anchor_table(&layout);
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    }
+}
+
+#[test]
+fn nested_table_text_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Nested anchor"), |source| {
+        let (prefix, body) = source.split_once("<w:body>").unwrap();
+        let (table, section) = body.split_once("<w:sectPr>").unwrap();
+        format!(
+            r#"{prefix}<w:body><w:tbl><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc>{table}<w:p/></w:tc></w:tr></w:tbl><w:sectPr>{section}"#
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(start_x(text_run(primitives, "Nested anchor")))
+    );
+    assert_eq!(
+        shape["y"].as_f64(),
+        cell_anchor_table(&layout).0["y"].as_f64()
+    );
+}
+
+#[test]
+fn cell_text_box_before_lowered_inline_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let inline = cell_anchor_box("", "", "", 114300);
+    let (_, graphic) = inline.split_once("<a:graphic>").unwrap();
+    let graphic = graphic.split_once("</wp:anchor>").unwrap().0;
+    let inline = format!(
+        r#"<w:drawing><wp:inline><wp:extent cx="304800" cy="114300"/><wp:docPr id="2" name="Inline Box"/><a:graphic>{graphic}</wp:inline></w:drawing>"#
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replace("<w:t>Anchor text</w:t>", &inline)
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = primitives
+        .iter()
+        .find(|primitive| primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(64.0))
+        .unwrap();
+    assert!(primitives.iter().any(|primitive| {
+        primitive["kind"] == "shape" && primitive["w"].as_f64() == Some(32.0)
+    }));
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+}
+
+#[test]
+fn paragraph_aligned_center_or_bottom_cell_text_box_keeps_the_cell_stack_origin() {
+    for (frame, align) in [
+        ("paragraph", "center"),
+        ("paragraph", "bottom"),
+        ("line", "center"),
+        ("line", "bottom"),
+        ("paragraph", "outside"),
+        ("paragraph", "inside"),
+    ] {
+        let drawing = cell_anchor_box(
+            "<wp:posOffset>914400</wp:posOffset>",
+            &format!("<wp:align>{align}</wp:align>"),
+            "<wp:wrapNone/>",
+            114300,
+        )
+        .replace(
+            r#"relativeFrom="paragraph""#,
+            &format!(r#"relativeFrom="{frame}""#),
+        );
+        let (display, layout) =
+            display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+        let shape = painted_cell_anchor(display["pages"][0]["primitives"].as_array().unwrap());
+        let (table, _) = cell_anchor_table(&layout);
+        assert_eq!(
+            shape["x"].as_f64(),
+            Some(table["x"].as_f64().unwrap() + 160.0)
+        );
+        assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    }
+}
+
+#[test]
+#[ignore = "open question: where Word places a cell text box aligned center or bottom against its paragraph or line"]
+fn paragraph_aligned_cell_text_box_follows_word() {
+    todo!()
+}
+
+fn assert_cell_text_box_at_stack_origin(layout: &Value) {
+    let display = docx_layout::build_display_list_value(&layout.to_string()).unwrap();
+    let display = serde_json::to_value(display).unwrap();
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let (table, _) = cell_anchor_table(layout);
+    assert_cell_text_box_at_fragment_origin(primitives, table);
+}
+
+fn assert_cell_text_box_at_fragment_origin(primitives: &[Value], table: &Value) {
+    let shape = painted_cell_anchor(primitives);
+    assert_eq!(shape["x"], table["x"].as_f64().unwrap() + 160.0);
+    assert_eq!(shape["y"].as_f64(), table["y"].as_f64());
+    assert!(!shape["clipGroup"].is_null());
+    let shape_index = primitives.iter().position(|item| item == shape).unwrap();
+    assert!(shape_index < text_run_index(primitives, "Anchor text"));
+}
+
+#[test]
+fn repeating_header_text_box_keeps_the_cell_stack_origin_on_each_page() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        let body = r#"<w:tr><w:trPr><w:cantSplit/><w:trHeight w:val="6000" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Table body</w:t></w:r></w:p></w:tc></w:tr>"#.repeat(3);
+        source
+            .replacen("<w:tr>", "<w:tr><w:trPr><w:tblHeader/></w:trPr>", 1)
+            .replacen("</w:tbl>", &format!("{body}</w:tbl>"), 1)
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let pages = display["pages"].as_array().unwrap();
+    assert!(pages.len() > 1);
+    for (index, page) in pages.iter().enumerate() {
+        let fragment = cell_anchor_fragment(&layout["layout"]["pages"][index]);
+        assert_eq!(
+            fragment["headerRowCount"].as_f64(),
+            (index > 0).then_some(1.0)
+        );
+        let primitives = page["primitives"].as_array().unwrap();
+        assert_cell_text_box_at_fragment_origin(primitives, fragment);
+    }
+}
+
+#[test]
+fn header_after_a_body_row_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let bytes = rewrite_document(&cell_anchor_package(&drawing, "Anchor text"), |source| {
+        source.replacen(
+            "<w:tr>",
+            r#"<w:tr><w:trPr><w:trHeight w:val="300" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p/></w:tc></w:tr><w:tr><w:trPr><w:tblHeader/></w:trPr>"#,
+            1,
+        )
+    });
+    let (display, layout) = display_with_layout(&bytes, true);
+    let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+    let shape = painted_cell_anchor(primitives);
+    let (table, _) = cell_anchor_table(&layout);
+    assert_eq!(shape["cell"]["row"].as_u64(), Some(1));
+    assert_eq!(shape["cell"]["isHeader"].as_bool(), Some(true));
+    assert_eq!(
+        shape["x"].as_f64(),
+        Some(table["x"].as_f64().unwrap() + 160.0)
+    );
+    assert_eq!(
+        shape["y"].as_f64(),
+        Some(table["y"].as_f64().unwrap() + 20.0)
+    );
+}
+
+#[test]
+fn cut_or_windowed_cell_text_box_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (_, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    let cut_height = 30.0;
+    for fragment_clip in [
+        json!({"clipBottom": cut_height}),
+        json!({"cellClips": [{"row": 0, "cell": 1, "top": 0.0, "bottom": cut_height}]}),
+    ] {
+        let mut layout = layout.clone();
+        let fragment = layout["layout"]["pages"][0]["fragments"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["kind"] == "table")
+            .unwrap();
+        fragment["height"] = json!(cut_height);
+        fragment
+            .as_object_mut()
+            .unwrap()
+            .extend(fragment_clip.as_object().unwrap().clone());
+        assert_cell_text_box_at_stack_origin(&layout);
+    }
+}
+
+#[test]
+fn cell_text_box_with_missing_anchor_positions_keeps_the_cell_stack_origin() {
+    let drawing = cell_anchor_box(
+        "<wp:posOffset>914400</wp:posOffset>",
+        "<wp:posOffset>152400</wp:posOffset>",
+        "<wp:wrapNone/>",
+        114300,
+    );
+    let (_, layout) = display_with_layout(&cell_anchor_package(&drawing, "Anchor text"), true);
+    for (kind, position) in [
+        ("shape", "pmStart"),
+        ("shape", "pmEnd"),
+        ("paragraph", "pmStart"),
+        ("paragraph", "pmEnd"),
+    ] {
+        let mut layout = layout.clone();
+        let table = layout["measured"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["block"]["kind"] == "table")
+            .unwrap();
+        let block = table["block"]["rows"][0]["cells"][1]["blocks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["kind"] == kind)
+            .unwrap();
+        assert!(block.as_object_mut().unwrap().remove(position).is_some());
+        assert_cell_text_box_at_stack_origin(&layout);
+    }
+}
+
 #[test]
 fn table_boundary_empty_picture_anchor_after_overlay_and_nested_float() {
     for nested_float in [false, true] {

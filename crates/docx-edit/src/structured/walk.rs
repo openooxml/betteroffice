@@ -19,7 +19,10 @@ use crate::list_definitions::effective_list_state;
 use crate::list_marker::ListState;
 use crate::ops::{Chunk, ChunkKind};
 use crate::queries::revision_parts;
-use crate::read_types::{block_control_id, control_metadata, inline_control_id, nested_control_id};
+use crate::read_types::{
+    block_control_id, control_metadata, inline_control_id, nested_control_id, payload_json,
+    payload_str as any_str,
+};
 use crate::seed::{SourceMetadata, numeric_field_instruction};
 use crate::sticky_positions::sticky_offset;
 use crate::target::{EditTextView, StoryView, TextPosition, Views, drawing_from_payload};
@@ -79,13 +82,6 @@ fn any_text(value: Option<&Any>) -> Option<String> {
         }
         Any::Number(value) => Some(value.to_string()),
         Any::BigInt(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn any_str(value: Option<&Any>) -> Option<&str> {
-    match present(value)? {
-        Any::String(value) => Some(value),
         _ => None,
     }
 }
@@ -3321,7 +3317,7 @@ impl<'a> Exporter<'a> {
                     "shape" => {
                         let shape = any_str(payload.get("shapeJson"))
                             .filter(|json| self.fits(json.len()))
-                            .and_then(|json| serde_json::from_str::<Value>(json).ok());
+                            .and_then(payload_json);
                         let text_box = shape.as_ref().is_some_and(|shape| {
                             shape
                                 .pointer("/textBody/content")
@@ -3447,7 +3443,7 @@ impl<'a> Exporter<'a> {
                 locked: false,
             };
         }
-        let data = data.and_then(|json| serde_json::from_str::<Value>(json).ok());
+        let data = data.and_then(payload_json);
         let has_nodes = |key: &str| {
             data.as_ref()
                 .and_then(|data| data.get(key))

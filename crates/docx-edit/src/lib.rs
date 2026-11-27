@@ -91,6 +91,7 @@ mod header_footer;
 mod heading;
 mod identity;
 mod inline_content;
+mod json_tree;
 pub mod layout_request;
 mod list_definitions;
 mod list_marker;
@@ -109,6 +110,8 @@ mod part_metadata;
 mod peer_bootstrap;
 mod policy;
 mod presence;
+#[doc(hidden)]
+pub mod projection;
 mod provenance;
 mod queries;
 mod raw;
@@ -651,6 +654,9 @@ struct StoryRevisions {
     geometry: u64,
     sections: u64,
     stamped: HashMap<Arc<str>, u64>,
+    projection_roots: HashMap<String, u64>,
+    live_projection_roots: HashMap<String, HashSet<Arc<str>>>,
+    projection_membership: u64,
     /// The revision that last changed each story by more than inserting plain
     /// text: deleting, formatting, embedding, a tracked change or its entry.
     /// Text inserted without revision marks leaves the story's paragraphs,
@@ -679,6 +685,12 @@ fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> b
 }
 
 impl StoryRevisions {
+    fn stamp_projection_root(&mut self, story: &Arc<str>) {
+        if let Some(root) = projection::projection_root(story) {
+            self.projection_roots.insert(root.to_owned(), self.current);
+        }
+    }
+
     fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
         self.current += 1;
         if events.iter().any(|event| matches!(event, yrs::types::Event::Map(event)
@@ -735,6 +747,7 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    self.stamp_projection_root(story);
                     if !inserts_plain_text(txn, event) {
                         self.marked.insert(Arc::clone(story), self.current);
                     }
@@ -744,6 +757,31 @@ impl StoryRevisions {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.stamp_projection_root(story);
+                            if let Some(root) = projection::projection_root(story) {
+                                let live = txn.get_map(STORIES).is_some_and(|stories| {
+                                    stories.contains_key(txn, story)
+                                        && !story_is_removed(txn, story)
+                                });
+                                if live {
+                                    let members = self
+                                        .live_projection_roots
+                                        .entry(root.to_owned())
+                                        .or_default();
+                                    if members.is_empty() {
+                                        self.projection_membership += 1;
+                                    }
+                                    members.insert(Arc::clone(story));
+                                } else if let Some(members) =
+                                    self.live_projection_roots.get_mut(root)
+                                {
+                                    members.remove(story);
+                                    if members.is_empty() {
+                                        self.live_projection_roots.remove(root);
+                                        self.projection_membership += 1;
+                                    }
+                                }
+                            }
                             self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
@@ -861,6 +899,8 @@ pub struct EditingDoc {
     story_views: Mutex<EpochCache<target::StoryView>>,
     paragraph_facts: Mutex<paragraph_facts::FactsCache>,
     source: Arc<Mutex<Option<identity::SourcePackage>>>,
+    projection: Mutex<Box<projection::ProjectionCache>>,
+    projection_markers: Arc<Mutex<projection::MarkerIndex>>,
     media: Mutex<Option<Arc<docx_parse::media::MediaTable>>>,
     media_sources: Mutex<media::MediaSources>,
     source_note_separators: Mutex<Option<SourceNoteSeparators>>,
@@ -873,6 +913,7 @@ pub struct EditingDoc {
     commit_hooks: Rc<RefCell<CommitHooks>>,
     _update_sub: Subscription,
     _story_revision_subs: [Subscription; 2],
+    _projection_marker_subs: [Subscription; 2],
     _seen_subs: Vec<Subscription>,
 }
 
@@ -944,6 +985,7 @@ impl EditingDoc {
                     stamped.lock().unwrap().stamp(txn, events);
                     identity::StoryStateCache::evict_root_changes(&cached, txn, events);
                 });
+        let (projection_markers, projection_marker_subs) = projection::MarkerIndex::watch(&doc);
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -978,6 +1020,8 @@ impl EditingDoc {
             story_views: Mutex::default(),
             paragraph_facts: Mutex::default(),
             source: Arc::new(Mutex::new(None)),
+            projection: Mutex::default(),
+            projection_markers,
             media: Mutex::new(None),
             media_sources: Mutex::default(),
             source_note_separators: Mutex::default(),
@@ -990,6 +1034,7 @@ impl EditingDoc {
             commit_hooks,
             _update_sub: update_sub,
             _story_revision_subs: [story_revision_sub, removed_story_sub],
+            _projection_marker_subs: projection_marker_subs,
             _seen_subs: seen_subs,
         }
     }
@@ -1072,7 +1117,9 @@ impl EditingDoc {
 
     /// Retains the opened package's style and structure context and rotates the version.
     pub(crate) fn install_source(&self, source: seed::SourceMetadata, entropy: u64) {
+        let mut projection = self.projection.lock().unwrap();
         *self.metadata.lock().unwrap() = Some(Arc::new(source));
+        projection.invalidate_stories();
         // Story projections read the source, so none built before it is served again.
         self.epoch.fetch_add(1, Ordering::Relaxed);
         self.rotate_version(entropy);
@@ -1124,6 +1171,7 @@ impl EditingDoc {
     #[allow(dead_code)]
     pub(crate) fn invalidate_projections(&self) {
         self.save_story_states.lock().unwrap().clear();
+        self.projection.lock().unwrap().invalidate_stories();
         self.epoch.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1374,6 +1422,8 @@ impl EditingDoc {
 
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
+        let mut projection = self.projection.lock().unwrap();
+        **projection = projection::ProjectionCache::default();
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
@@ -1410,8 +1460,10 @@ impl EditingDoc {
     /// Keeps `media`, read from the retained package, as the table the
     /// stories' `media:{n}` image sources name.
     pub(crate) fn install_media(&self, media: docx_parse::media::MediaTable) {
+        let mut projection = self.projection.lock().unwrap();
         self.save_story_states.lock().unwrap().clear();
         *self.media.lock().unwrap() = Some(Arc::new(media));
+        projection.reset_opening();
     }
 
     /// The fingerprints of the `data:` image sources seeding wrote in place
@@ -1895,14 +1947,22 @@ impl EditingDoc {
 
     pub fn comment_anchors(&self, comment_id: &str) -> EditResult<Vec<CommentAnchor>> {
         let txn = self.doc.transact();
+        self.comment_anchors_in(&txn, comment_id)
+    }
+
+    pub(crate) fn comment_anchors_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        comment_id: &str,
+    ) -> EditResult<Vec<CommentAnchor>> {
         let comments = txn
             .get_map(COMMENTS)
             .expect("comments root is declared by EditingDoc::new");
         let comment = comments
-            .get(&txn, comment_id)
+            .get(txn, comment_id)
             .and_then(|value| value.cast::<MapRef>().ok())
             .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
-        let anchors = match comment.get(&txn, "anchors") {
+        let anchors = match comment.get(txn, "anchors") {
             Some(Out::Any(Any::Array(values))) => values,
             _ => {
                 return Err(EditError::InvalidComment("anchors must be an array".into()));
@@ -1955,11 +2015,15 @@ impl EditingDoc {
     /// content.
     pub fn resolve_raw_marks(&self) -> Vec<ResolvedRawMark> {
         let txn = self.doc.transact();
+        self.resolve_raw_marks_in(&txn)
+    }
+
+    pub(crate) fn resolve_raw_marks_in<T: ReadTxn>(&self, txn: &T) -> Vec<ResolvedRawMark> {
         let Some(marks) = txn.get_map(RAW_INLINES) else {
             return Vec::new();
         };
         let mut resolved: Vec<ResolvedRawMark> = marks
-            .iter(&txn)
+            .iter(txn)
             .filter_map(|(_, value)| {
                 let Out::Any(Any::Map(mark)) = value else {
                     return None;
@@ -1976,8 +2040,8 @@ impl EditingDoc {
                 let Some(Any::Number(ordinal)) = mark.get("ordinal") else {
                     return None;
                 };
-                story_ref(&txn, &story).ok()?;
-                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, &txn)?.index;
+                story_ref(txn, &story).ok()?;
+                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, txn)?.index;
                 Some(ResolvedRawMark {
                     story,
                     offset,

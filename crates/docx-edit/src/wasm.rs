@@ -981,6 +981,24 @@ impl EditSession {
         self.core.materialize_docx().map_err(JsValue::from)
     }
 
+    /// @internal
+    pub fn project_document_json(&self, input_json: &str) -> Result<String, JsValue> {
+        self.core
+            .engine
+            .doc()
+            .project_document_json(input_json)
+            .map_err(js_err)
+    }
+
+    /// @internal
+    pub fn project_story_json(&self, story_id: &str, input_json: &str) -> Result<String, JsValue> {
+        self.core
+            .engine
+            .doc()
+            .project_story_json(story_id, input_json)
+            .map_err(js_err)
+    }
+
     /// The bytes a `media:{n}` image source displays, as the part's
     /// [`EditSession::media_type`]; `undefined` for any other source or a
     /// part that cannot be read.

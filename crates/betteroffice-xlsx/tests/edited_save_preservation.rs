@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use betteroffice_xlsx::{
-    CalculationOptions, CellRange, CellRef, CellState, CellValue, Error, Op, SheetId, Workbook,
+    CalculationOptions, CellRange, CellRef, CellState, CellValue, Error, Op, SheetId,
+    SnapshotBudget, Workbook, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
 };
 use xlsx_parse::{
     SaveEdits, SharedStringCells, parse_workbook_with_package,
@@ -894,6 +895,195 @@ fn formatting_keeps_each_cells_base_font_and_unmodeled_style_properties() {
     assert!(xml.matches("textRotation=\"30\"").count() >= 2);
     assert!(xml.matches("<protection locked=\"0\"/>").count() >= 2);
     assert!(xml.contains("<diagonal style=\"dotted\"><color rgb=\"FF123456\"/></diagonal>"));
+}
+
+fn theme_font_source() -> Vec<u8> {
+    let mut source = parts(&package(VARIANTS[0].1));
+    let styles = format!(
+        concat!(
+            r#"<styleSheet xmlns="{main}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/><scheme val="minor"/></font>"#,
+            r#"<font><name val='Cambria' /> <sz val='12'/><scheme val='major'/></font></fonts>"#,
+            r#"<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>"#,
+            r#"<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>"#,
+            r#"<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>"#,
+            r#"<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>"#,
+            r#"<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>"#,
+            r#"<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>"#,
+        ),
+        main = MAIN,
+    );
+    source.insert("xl/styles.xml".into(), styles.into_bytes());
+    source.insert(
+        "xl/worksheets/sheet1.xml".into(),
+        worksheet(concat!(
+            r#"<sheetData><row r="1"><c r="A1" s="0" t="inlineStr"><is><t>中文字体</t></is></c>"#,
+            r#"<c r="B1" s="0"><v>2</v></c><c r="C1" s="0"><v>3</v></c>"#,
+            r#"<c r="D1" s="1"><v>4</v></c><c r="E1" s="0"><v>5</v></c></row></sheetData>"#,
+        ))
+        .into_bytes(),
+    );
+    source.insert(
+        "xl/worksheets/sheet2.xml".into(),
+        worksheet("<sheetData/>").into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&source.into_iter().collect::<Vec<_>>()).unwrap()
+}
+
+fn pick_explicit_font(workbook: &mut Workbook) {
+    workbook
+        .patch_range_style(
+            SheetId(0),
+            CellRange::parse_a1("A1").unwrap(),
+            xlsx_ops::StylePatch {
+                font_family: Some("Microsoft YaHei".into()),
+                ..Default::default()
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+fn cell_font_xml<'a>(parts: &'a BTreeMap<String, Vec<u8>>, address: &str) -> &'a str {
+    let sheet = cells(&text(parts, "xl/worksheets/sheet1.xml"));
+    let cell = &sheet[address];
+    let tag = cell.split_once('>').unwrap().0;
+    let style = if tag.contains(" s=\"") {
+        style_index(cell)
+    } else {
+        0
+    };
+    let styles = std::str::from_utf8(&parts["xl/styles.xml"]).unwrap();
+    let xf = cell_xf(styles, style);
+    let font_id: usize = xf
+        .split_once(" fontId=\"")
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .parse()
+        .unwrap();
+    let fonts = styles.split_once("<fonts").unwrap().1;
+    let fonts = fonts.split_once("</fonts>").unwrap().0;
+    let font = fonts.split_inclusive("</font>").nth(font_id).unwrap();
+    &font[font.find("<font").unwrap()..]
+}
+
+#[test]
+fn explicit_font_drops_theme_scheme() {
+    let mut workbook = Workbook::open(&theme_font_source()).unwrap();
+    pick_explicit_font(&mut workbook);
+    for (address, patch) in [
+        (
+            "C1",
+            xlsx_ops::StylePatch {
+                bold: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "D1",
+            xlsx_ops::StylePatch {
+                font_size: Some(17.0),
+                ..Default::default()
+            },
+        ),
+        (
+            "E1",
+            xlsx_ops::StylePatch {
+                text_color: Some("#123456".into()),
+                ..Default::default()
+            },
+        ),
+    ] {
+        workbook
+            .patch_range_style(
+                SheetId(0),
+                CellRange::parse_a1(address).unwrap(),
+                patch,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+
+    let saved = parts(&workbook.save().unwrap());
+    let scheme = r#"<scheme val="minor"/>"#;
+    let untouched = cell_font_xml(&saved, "B1");
+    assert!(untouched.contains(scheme), "B1 font: {untouched}");
+    let bold = cell_font_xml(&saved, "C1");
+    assert!(bold.contains("<b/>"), "C1 font: {bold}");
+    assert!(bold.contains(scheme), "C1 font: {bold}");
+    let resized = cell_font_xml(&saved, "D1");
+    assert!(resized.contains(r#"<sz val="17"/>"#), "D1 font: {resized}");
+    assert!(
+        resized.contains("<scheme val='major'/>"),
+        "D1 font: {resized}"
+    );
+    let colored = cell_font_xml(&saved, "E1");
+    assert!(
+        colored.contains(r#"<color rgb="FF123456"/>"#),
+        "E1 font: {colored}"
+    );
+    assert!(colored.contains(scheme), "E1 font: {colored}");
+    let explicit = cell_font_xml(&saved, "A1");
+    assert!(
+        explicit.contains(r#"<name val="Microsoft YaHei"/>"#),
+        "A1 font: {explicit}"
+    );
+    assert!(!explicit.contains("<scheme"), "A1 font: {explicit}");
+}
+
+#[test]
+fn explicit_font_round_trips_and_keeps_untouched_font_xml() {
+    let source = theme_font_source();
+    let mut workbook = Workbook::open(&source).unwrap();
+    pick_explicit_font(&mut workbook);
+    let saved = workbook.save().unwrap();
+
+    let reopened = Workbook::open(&saved).unwrap();
+    let model = reopened.model();
+    let style = model.sheets[0].cell(cell("A1")).unwrap().style;
+    let font = model.styles.cell_format(style).font;
+    assert_eq!(font.name.as_deref(), Some("Microsoft YaHei"));
+
+    let source = parts(&source);
+    let saved = parts(&saved);
+    let explicit = cell_font_xml(&saved, "A1");
+    assert!(!explicit.contains("<scheme"), "A1 font: {explicit}");
+    for address in ["B1", "C1", "D1", "E1"] {
+        assert_eq!(
+            cell_font_xml(&saved, address),
+            cell_font_xml(&source, address),
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn explicit_font_drops_theme_scheme_after_snapshot_restore() {
+    let source = theme_font_source();
+    let workbook = Workbook::open(&source).unwrap();
+    let budget = SnapshotBudget::new(8, 65536).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&workbook, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&workbook).unwrap() {
+        builder.push(&chunk).unwrap();
+    }
+    while !builder.advance(budget).unwrap().is_ready() {}
+    let (mut restored, _) = builder.finish().unwrap().into_parts();
+    pick_explicit_font(&mut restored);
+
+    let saved = parts(&restored.save().unwrap());
+    let explicit = cell_font_xml(&saved, "A1");
+    assert!(
+        explicit.contains(r#"<name val="Microsoft YaHei"/>"#),
+        "A1 font: {explicit}"
+    );
+    assert!(!explicit.contains("<scheme"), "A1 font: {explicit}");
+    assert_eq!(
+        cell_font_xml(&saved, "B1"),
+        cell_font_xml(&parts(&source), "B1")
+    );
 }
 
 /// Each `<c>` element's markup keyed by its `r` attribute.

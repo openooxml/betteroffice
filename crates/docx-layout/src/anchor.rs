@@ -85,3 +85,52 @@ pub(crate) fn resolve_position(
         coordinate(position.and_then(|value| value.vertical.as_ref()), false),
     )
 }
+
+pub(crate) fn is_cell_shape_anchor(
+    position: Option<&ImageRunPosition>,
+    wrap: Option<&str>,
+) -> bool {
+    match wrap {
+        Some("none" | "behind" | "inFront") => {}
+        None if position.is_some() => {}
+        _ => return false,
+    }
+    let Some(position) = position else {
+        return false;
+    };
+    !position.use_simple_pos.unwrap_or(false)
+        && position.horizontal.as_ref().is_none_or(|axis| {
+            matches!(
+                axis.relative_to.as_deref(),
+                None | Some("column" | "character" | "margin")
+            ) && !matches!(axis.align.as_deref(), Some("inside" | "outside"))
+        })
+        && position.vertical.as_ref().is_none_or(|axis| {
+            matches!(
+                axis.relative_to.as_deref(),
+                None | Some("paragraph" | "line")
+            ) && matches!(axis.align.as_deref(), None | Some("top"))
+        })
+}
+
+pub(crate) fn cell_shape_position(
+    position: Option<&ImageRunPosition>,
+    (x, width): (f64, f64),
+    paragraph_top: f64,
+    (shape_width, shape_height): (f64, f64),
+) -> (f64, f64) {
+    let frame = AnchorFrame {
+        page_width: x + width,
+        page_height: 0.0,
+        margin_left: x,
+        margin_right: 0.0,
+        margin_top: 0.0,
+        margin_bottom: 0.0,
+        flow_x: x,
+        flow_y: paragraph_top,
+        flow_width: width,
+        flow_height: 0.0,
+        odd_page: true,
+    };
+    resolve_position(position, shape_width, shape_height, &frame)
+}

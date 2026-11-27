@@ -2286,6 +2286,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scheme_bound_fonts_use_released_snapshot_records() {
+        let model = xlsx_parse::parse_workbook(&[
+            ("xl/workbook.xml".into(), b"<workbook/>".to_vec()),
+            (
+                "xl/styles.xml".into(),
+                concat!(
+                    r#"<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+                    r#"<fonts count="2"><font><sz val="11"/><name val="Calibri"/><scheme val="minor"/></font>"#,
+                    r#"<font><i/><u/><strike/><color indexed="5"/><scheme val="major"/></font></fonts></styleSheet>"#,
+                )
+                .as_bytes()
+                .to_vec(),
+            ),
+        ])
+        .unwrap();
+        let chunks = encode(&model, SnapshotBudget::new(1, 16384).unwrap());
+        let records = chunks
+            .iter()
+            .filter_map(|chunk| {
+                let (kind, _, payload) = unframe(chunk).unwrap();
+                (kind == ChunkKind::Model && payload[0] == FONT).then_some(payload)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            records,
+            [
+                b"\x03\x01\x07Calibri\x01\x00\x00\x00\x00\x00\x00\x26\x40\x00\x00\x00\x00\x00"
+                    .as_slice(),
+                b"\x03\x00\x00\x00\x01\x01\x01\x01\x02\x05".as_slice(),
+            ]
+        );
+    }
+
+    #[test]
     fn binary_model_decodes_conditional_formats_without_italic() {
         let mut model = Workbook::default();
         model.sheets.push(Sheet::new("Data"));
