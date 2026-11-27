@@ -1977,9 +1977,15 @@ fn cell_edits_across_table_classes_lay_out_as_a_full_recompute_does() {
                 .0
                 + 2;
             let label = format!("{case}/{step}");
+            let before = page_count(&engine);
             REGION_FULL_PASSES.with(|count| count.set(0));
             assert!(host.command(&story, at + start, at + end, text), "{label}");
             let full = REGION_FULL_PASSES.with(Cell::get);
+            if case == "section-break" {
+                assert_eq!(full, 1, "{label}: a section break keeps the full pass");
+            } else if page_count(&engine) == before {
+                assert_eq!(full, 0, "{label}: the edit ran the full region pass");
+            }
             host.assert_matches_cold(&label);
 
             let pagination = engine.pagination.borrow();
