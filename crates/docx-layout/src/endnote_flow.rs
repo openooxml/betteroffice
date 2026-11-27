@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use crate::footnotes::{
-    NoteContent, NoteKind, NoteRefLocation, NoteSeparatorHeights, OrderedMap, collect_note_refs,
-    content_map, map_note_anchors_to_pages, note_item, page_for_map_id,
+    AnchorPages, NoteContent, NoteKind, NoteRefLocation, NoteSeparatorHeights, OrderedMap,
+    collect_note_refs, content_map, map_note_anchors_to_pages, note_item,
 };
 use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::measure_blocks::extent_height;
@@ -200,7 +200,7 @@ pub fn flow_endnotes(
     separator_heights: &NoteSeparatorHeights,
     regions: &DocumentRegions,
 ) -> EndnoteFlow {
-    let anchors = map_note_anchors_to_pages(pages, refs);
+    let anchors = AnchorPages::new(pages, &map_note_anchors_to_pages(pages, refs));
     let contents = content_map(contents);
     let mut sections = HashMap::new();
     let mut section = 0;
@@ -219,7 +219,7 @@ pub fn flow_endnotes(
             continue;
         }
         let map_id = reference.map_id();
-        let Some(anchor) = page_for_map_id(pages, &anchors, map_id) else {
+        let Some(anchor) = anchors.page(map_id) else {
             continue;
         };
         let section = sections

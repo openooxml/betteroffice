@@ -320,6 +320,8 @@ fn fragment_pm_range(fragment: &Fragment) -> (Option<f64>, Option<f64>) {
 }
 
 fn fragment_matches_ref(fragment: &Fragment, reference: &NoteRefLocation) -> bool {
+    #[cfg(test)]
+    ANCHOR_CHECKS.with(|checks| checks.set(checks.get() + 1));
     if let (Some(table_id), Some(row_index)) = (&reference.table_block_id, reference.row_index) {
         return matches!(
             fragment,
@@ -334,18 +336,98 @@ fn fragment_matches_ref(fragment: &Fragment, reference: &NoteRefLocation) -> boo
         && end.is_some_and(|end| end >= 0.0 && reference.pm_pos < end)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Fragment and reference pairs [`fragment_matches_ref`] checked.
+    static ANCHOR_CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The pages each reference's note is anchored on: the first page holding a fragment that
+/// [`fragment_matches_ref`] matches with the reference, keyed by page number in reference order.
+///
+/// One sweep over the pages in order checks each fragment only against the references it can
+/// match that no earlier page took: references in a table row by the fragments of their table,
+/// the others by position, sorted so a fragment finds those inside its range by binary search.
 pub fn map_note_anchors_to_pages(
     pages: &[Page],
     refs: &[NoteRefLocation],
 ) -> OrderedMap<u32, Vec<i64>> {
+    let mut anchored: Vec<Option<usize>> = vec![None; refs.len()];
+    // references by table: those [`fragment_matches_ref`] matches by table row alone
+    let mut tables: Vec<(&BlockId, Vec<usize>)> = Vec::new();
+    // the other references with a position some range can hold, by position
+    let mut positioned: Vec<(f64, usize)> = Vec::new();
+    for (index, reference) in refs.iter().enumerate() {
+        match (&reference.table_block_id, reference.row_index) {
+            (Some(table), Some(_)) => match tables.iter_mut().find(|(id, _)| *id == table) {
+                Some((_, members)) => members.push(index),
+                None => tables.push((table, vec![index])),
+            },
+            _ if !reference.pm_pos.is_nan() => positioned.push((reference.pm_pos, index)),
+            _ => {}
+        }
+    }
+    positioned.sort_by(|left, right| left.0.total_cmp(&right.0));
+    // `skip[slot]`: the first slot from `slot` on whose reference no page took yet
+    let mut skip: Vec<usize> = (0..=positioned.len()).collect();
+    fn unanchored(skip: &mut [usize], slot: usize) -> usize {
+        let mut root = slot;
+        while skip[root] != root {
+            root = skip[root];
+        }
+        let mut slot = slot;
+        while skip[slot] != root {
+            slot = std::mem::replace(&mut skip[slot], root);
+        }
+        root
+    }
+    let mut left = positioned.len()
+        + tables
+            .iter()
+            .map(|(_, members)| members.len())
+            .sum::<usize>();
+    for (page_index, page) in pages.iter().enumerate() {
+        if left == 0 {
+            break;
+        }
+        for fragment in &page.fragments {
+            if let Fragment::Table(table) = fragment
+                && let Some((_, members)) = tables.iter_mut().find(|(id, _)| **id == table.block_id)
+            {
+                members.retain(|&index| {
+                    let matched = fragment_matches_ref(fragment, &refs[index]);
+                    if matched {
+                        anchored[index] = Some(page_index);
+                        left -= 1;
+                    }
+                    !matched
+                });
+            }
+            let (Some(start), Some(end)) = fragment_pm_range(fragment) else {
+                continue;
+            };
+            if !(start >= 0.0 && end >= 0.0) {
+                continue;
+            }
+            // the references `start <= position < end` holds for
+            let first = positioned.partition_point(|(position, _)| *position < start);
+            let last = positioned.partition_point(|(position, _)| *position < end);
+            let mut slot = unanchored(&mut skip, first);
+            while slot < last {
+                let index = positioned[slot].1;
+                #[cfg(test)]
+                ANCHOR_CHECKS.with(|checks| checks.set(checks.get() + 1));
+                anchored[index] = Some(page_index);
+                left -= 1;
+                skip[slot] = slot + 1;
+                slot = unanchored(&mut skip, slot + 1);
+            }
+        }
+    }
     let mut result = OrderedMap::new();
-    for reference in refs {
-        if let Some(page) = pages.iter().find(|page| {
-            page.fragments
-                .iter()
-                .any(|fragment| fragment_matches_ref(fragment, reference))
-        }) {
-            append_unique(&mut result, page.number, reference.map_id());
+    for (reference, page_index) in refs.iter().zip(anchored) {
+        if let Some(page_index) = page_index {
+            append_unique(&mut result, pages[page_index].number, reference.map_id());
         }
     }
     result
@@ -361,16 +443,41 @@ fn append_unique(map: &mut OrderedMap<u32, Vec<i64>>, page_number: u32, map_id: 
     }
 }
 
-pub(crate) fn page_for_map_id<'a>(
+/// The page each note is anchored on: the first page numbered as the first of `anchors`'
+/// entries that holds the note, looked up without scanning the entries or the pages.
+pub(crate) struct AnchorPages<'a> {
     pages: &'a [Page],
-    anchors: &OrderedMap<u32, Vec<i64>>,
-    map_id: i64,
-) -> Option<&'a Page> {
-    let page_number = anchors
-        .iter()
-        .find(|(_, ids)| ids.contains(&map_id))
-        .map(|(page_number, _)| *page_number)?;
-    pages.iter().find(|page| page.number == page_number)
+    by_note: HashMap<i64, Option<usize>>,
+}
+
+impl<'a> AnchorPages<'a> {
+    pub(crate) fn new(pages: &'a [Page], anchors: &OrderedMap<u32, Vec<i64>>) -> Self {
+        if anchors.is_empty() {
+            return Self {
+                pages,
+                by_note: HashMap::new(),
+            };
+        }
+        let mut by_number = HashMap::new();
+        for (index, page) in pages.iter().enumerate() {
+            by_number.entry(page.number).or_insert(index);
+        }
+        let mut by_note = HashMap::new();
+        for (page_number, ids) in anchors.iter() {
+            for id in ids {
+                by_note
+                    .entry(*id)
+                    .or_insert_with(|| by_number.get(page_number).copied());
+            }
+        }
+        Self { pages, by_note }
+    }
+
+    pub(crate) fn page(&self, map_id: i64) -> Option<&'a Page> {
+        #[cfg(test)]
+        ANCHOR_CHECKS.with(|checks| checks.set(checks.get() + 1));
+        Some(&self.pages[(*self.by_note.get(&map_id)?)?])
+    }
 }
 
 pub fn map_notes_to_pages(
@@ -378,11 +485,11 @@ pub fn map_notes_to_pages(
     refs: &[NoteRefLocation],
     regions: &DocumentRegions,
 ) -> OrderedMap<u32, Vec<i64>> {
-    let anchors = map_note_anchors_to_pages(pages, refs);
+    let anchors = AnchorPages::new(pages, &map_note_anchors_to_pages(pages, refs));
     let mut result = OrderedMap::new();
     for reference in refs {
         let map_id = reference.map_id();
-        let Some(anchor_page) = page_for_map_id(pages, &anchors, map_id) else {
+        let Some(anchor_page) = anchors.page(map_id) else {
             continue;
         };
         if crate::endnote_flow::flows_with_body(
@@ -419,15 +526,16 @@ pub fn build_note_presentations(
     pages: &[Page],
     regions: &DocumentRegions,
 ) -> OrderedMap<i64, NotePresentation> {
-    let anchors = map_note_anchors_to_pages(pages, refs);
+    let anchors = AnchorPages::new(pages, &map_note_anchors_to_pages(pages, refs));
     let mut result = OrderedMap::new();
+    let mut presented = std::collections::HashSet::new();
     let mut counters = NoteCounters::default();
     for reference in refs {
         let map_id = reference.map_id();
-        if result.get(&map_id).is_some() {
+        if presented.contains(&map_id) {
             continue;
         }
-        let Some(page) = page_for_map_id(pages, &anchors, map_id) else {
+        let Some(page) = anchors.page(map_id) else {
             continue;
         };
         let properties =
@@ -442,7 +550,9 @@ pub fn build_note_presentations(
             &section,
             Some(page.number),
         );
-        result.set(
+        presented.insert(map_id);
+        // a note not presented yet: `set` would append it
+        result.entries.push((
             map_id,
             NotePresentation {
                 display_number,
@@ -452,7 +562,7 @@ pub fn build_note_presentations(
                     doc_end: Some(reference.pm_pos + 1.0),
                 },
             },
-        );
+        ));
     }
     result
 }
@@ -2081,5 +2191,316 @@ mod tests {
         assert_eq!(marker.text, "III  ");
         assert_eq!(marker.fmt.font_family.as_deref(), Some("Cambria"));
         assert_eq!(marker.fmt.superscript, Some(true));
+    }
+
+    /// Reference implementation of [`map_note_anchors_to_pages`]: every page scanned for each reference.
+    fn anchors_by_scan(pages: &[Page], refs: &[NoteRefLocation]) -> OrderedMap<u32, Vec<i64>> {
+        let mut result = OrderedMap::new();
+        for reference in refs {
+            if let Some(page) = pages.iter().find(|page| {
+                page.fragments
+                    .iter()
+                    .any(|fragment| fragment_matches_ref(fragment, reference))
+            }) {
+                append_unique(&mut result, page.number, reference.map_id());
+            }
+        }
+        result
+    }
+
+    /// Reference implementation of [`AnchorPages::page`]: the page of the first anchor entry holding
+    /// `map_id`, found by scanning the entries and the pages.
+    fn page_by_scan<'a>(
+        pages: &'a [Page],
+        anchors: &OrderedMap<u32, Vec<i64>>,
+        map_id: i64,
+    ) -> Option<&'a Page> {
+        let page_number = anchors
+            .iter()
+            .find(|(_, ids)| ids.contains(&map_id))
+            .map(|(page_number, _)| *page_number)?;
+        pages.iter().find(|page| page.number == page_number)
+    }
+
+    /// Reference implementation of [`map_notes_to_pages`], built on the scans above.
+    fn notes_to_pages_by_scan(
+        pages: &[Page],
+        refs: &[NoteRefLocation],
+        regions: &DocumentRegions,
+    ) -> Vec<(u32, Vec<i64>)> {
+        let anchors = anchors_by_scan(pages, refs);
+        let mut result = OrderedMap::new();
+        for reference in refs {
+            let map_id = reference.map_id();
+            let Some(anchor_page) = page_by_scan(pages, &anchors, map_id) else {
+                continue;
+            };
+            if crate::endnote_flow::flows_with_body(
+                reference.note_kind,
+                regions,
+                anchor_page.region_section_index,
+            ) {
+                continue;
+            }
+            let properties = regions.note_properties(
+                anchor_page.region_section_index,
+                reference.note_kind.as_str(),
+            );
+            let default_position = match reference.note_kind {
+                NoteKind::Footnote => "pageBottom",
+                NoteKind::Endnote => "docEnd",
+            };
+            let target = match properties.position.as_deref().unwrap_or(default_position) {
+                "docEnd" => pages.last().unwrap_or(anchor_page),
+                "sectEnd" => pages
+                    .iter()
+                    .rev()
+                    .find(|page| page.region_section_index == anchor_page.region_section_index)
+                    .unwrap_or(anchor_page),
+                _ => anchor_page,
+            };
+            append_unique(&mut result, target.number, map_id);
+        }
+        result.entries
+    }
+
+    /// Reference implementation of the page and section each note is numbered on, built on the scans
+    /// above.
+    fn presentation_pages_by_scan(
+        pages: &[Page],
+        refs: &[NoteRefLocation],
+    ) -> Vec<(i64, u32, usize)> {
+        let anchors = anchors_by_scan(pages, refs);
+        let mut result: Vec<(i64, u32, usize)> = Vec::new();
+        for reference in refs {
+            let map_id = reference.map_id();
+            if result.iter().any(|(id, ..)| *id == map_id) {
+                continue;
+            }
+            if let Some(page) = page_by_scan(pages, &anchors, map_id) {
+                result.push((map_id, page.number, page.region_section_index));
+            }
+        }
+        result
+    }
+
+    fn table_rows(id: &str, pm: (f64, f64), rows: (usize, usize)) -> Fragment {
+        Fragment::Table(TableFragment {
+            block_id: BlockId::Str(id.to_owned()),
+            x: 96.0,
+            y: 96.0,
+            width: 624.0,
+            pm_start: Some(pm.0),
+            pm_end: Some(pm.1),
+            row_start: rows.0,
+            row_end: rows.1,
+            height: 40.0,
+            is_floating: None,
+            carried_from_prev: None,
+            carried_to_next: None,
+            header_row_count: None,
+            clip_top: None,
+            clip_bottom: None,
+            cell_clips: None,
+        })
+    }
+
+    fn text_ref(note_id: i64, note_kind: NoteKind, pm_pos: f64) -> NoteRefLocation {
+        NoteRefLocation {
+            note_id,
+            note_kind,
+            pm_pos,
+            table_block_id: None,
+            row_index: None,
+        }
+    }
+
+    fn row_ref(note_id: i64, pm_pos: f64, table: &str, row: usize) -> NoteRefLocation {
+        NoteRefLocation {
+            note_id,
+            note_kind: NoteKind::Footnote,
+            pm_pos,
+            table_block_id: Some(BlockId::Str(table.to_owned())),
+            row_index: Some(row),
+        }
+    }
+
+    #[test]
+    fn note_anchors_land_on_the_first_page_a_scan_of_every_page_finds() {
+        // Paragraphs split over pages, ranges that overlap and nest, a table split by rows
+        // whose range also holds text references, fragments without or with negative ranges,
+        // repeated and unanchored references, references out of document order.
+        let pages = vec![
+            page(
+                1,
+                0,
+                vec![
+                    paragraph_fragment(0.0, 10.0),
+                    paragraph_fragment(10.0, 30.0),
+                    paragraph_fragment(4.0, 6.0),
+                ],
+            ),
+            page(
+                2,
+                0,
+                vec![
+                    paragraph_fragment(20.0, 40.0),
+                    Fragment::Reserved(crate::types::ReservedFragment {
+                        block_id: BlockId::Str("r".to_owned()),
+                        x: 96.0,
+                        y: 96.0,
+                        width: 624.0,
+                        height: 20.0,
+                    }),
+                    table_rows("t1", (40.0, 80.0), (0, 2)),
+                ],
+            ),
+            page(
+                3,
+                0,
+                vec![
+                    table_rows("t1", (40.0, 80.0), (2, 4)),
+                    paragraph_fragment(-5.0, 90.0),
+                    paragraph_fragment(80.0, 90.0),
+                ],
+            ),
+            page(4, 0, Vec::new()),
+            page(
+                5,
+                0,
+                vec![
+                    paragraph_fragment(90.0, 100.0),
+                    table_rows("t2", (100.0, 120.0), (0, 1)),
+                ],
+            ),
+        ];
+        let refs = vec![
+            text_ref(1, NoteKind::Footnote, 25.0),
+            text_ref(2, NoteKind::Footnote, 5.0),
+            text_ref(3, NoteKind::Endnote, 35.0),
+            row_ref(4, 60.0, "t1", 3),
+            row_ref(5, 50.0, "t1", 1),
+            text_ref(6, NoteKind::Footnote, 50.0),
+            text_ref(7, NoteKind::Footnote, 85.0),
+            text_ref(1, NoteKind::Footnote, 95.0),
+            text_ref(8, NoteKind::Footnote, 130.0),
+            text_ref(9, NoteKind::Footnote, -1.0),
+            text_ref(10, NoteKind::Footnote, f64::NAN),
+            row_ref(11, 110.0, "t2", 0),
+            row_ref(12, 110.0, "t2", 5),
+            row_ref(13, 110.0, "t3", 0),
+            text_ref(14, NoteKind::Footnote, 0.0),
+            text_ref(15, NoteKind::Footnote, -0.0),
+            text_ref(16, NoteKind::Footnote, 10.0),
+            text_ref(17, NoteKind::Endnote, 100.0),
+        ];
+        let mapped = map_note_anchors_to_pages(&pages, &refs);
+        assert_eq!(mapped, anchors_by_scan(&pages, &refs));
+        let sections = DocumentRegions {
+            note_settings: NoteSettings {
+                footnote: NoteProperties {
+                    position: Some("sectEnd".to_owned()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // the pages a note shows on and is numbered on, for every placement of the notes
+        let same_pages = |refs: &[NoteRefLocation], label: &str| {
+            for regions in [&DocumentRegions::default(), &sections] {
+                assert_eq!(
+                    map_notes_to_pages(&pages, refs, regions).entries,
+                    notes_to_pages_by_scan(&pages, refs, regions),
+                    "{label}"
+                );
+            }
+            let presented: Vec<_> =
+                build_note_presentations(refs, &pages, &DocumentRegions::default())
+                    .iter()
+                    .map(|(map_id, presentation)| (*map_id, presentation.clone()))
+                    .collect();
+            let numbered: Vec<_> = presented
+                .iter()
+                .map(|(map_id, _)| {
+                    let page = AnchorPages::new(&pages, &map_note_anchors_to_pages(&pages, refs))
+                        .page(*map_id)
+                        .unwrap();
+                    (*map_id, page.number, page.region_section_index)
+                })
+                .collect();
+            assert_eq!(
+                numbered,
+                presentation_pages_by_scan(&pages, refs),
+                "{label}"
+            );
+        };
+        same_pages(&refs, "all references");
+        let expected: OrderedMap<u32, Vec<i64>> = [
+            (1, vec![1, 2, 14, 15, 16]),
+            (2, vec![-4, 5, 6]),
+            (3, vec![4, 7]),
+            (5, vec![1, 11, -18]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(mapped, expected);
+        // every prefix and every order of the references agrees as well
+        for count in 0..refs.len() {
+            assert_eq!(
+                map_note_anchors_to_pages(&pages, &refs[..count]),
+                anchors_by_scan(&pages, &refs[..count]),
+                "first {count} references"
+            );
+            let mut rotated = refs.clone();
+            rotated.rotate_left(count);
+            assert_eq!(
+                map_note_anchors_to_pages(&pages, &rotated),
+                anchors_by_scan(&pages, &rotated),
+                "references rotated by {count}"
+            );
+            same_pages(&rotated, &format!("references rotated by {count}"));
+        }
+    }
+
+    #[test]
+    fn note_anchors_check_each_reference_once_however_many_pages_come_before_it() {
+        // 200 pages of 20 paragraphs, a note reference in every tenth paragraph
+        let pages: Vec<Page> = (0..200)
+            .map(|page_index| {
+                let fragments = (0..20)
+                    .map(|line| {
+                        let start = f64::from(page_index * 20 + line) * 10.0;
+                        paragraph_fragment(start, start + 10.0)
+                    })
+                    .collect();
+                page(page_index + 1, 0, fragments)
+            })
+            .collect();
+        let refs: Vec<_> = (0..400)
+            .map(|note| text_ref(note + 1, NoteKind::Footnote, note as f64 * 100.0 + 5.0))
+            .collect();
+        ANCHOR_CHECKS.with(|checks| checks.set(0));
+        let mapped = map_note_anchors_to_pages(&pages, &refs);
+        let checks = ANCHOR_CHECKS.with(std::cell::Cell::get);
+        assert_eq!(mapped.iter().map(|(_, ids)| ids.len()).sum::<usize>(), 400);
+        assert_eq!(mapped.get(&200), Some(&vec![399, 400]));
+        assert_eq!(
+            checks, 400,
+            "fragment checks for 400 references over 4000 fragments"
+        );
+
+        // placing and numbering the notes looks each up once more, not along the pages
+        ANCHOR_CHECKS.with(|checks| checks.set(0));
+        let placed = map_notes_to_pages(&pages, &refs, &DocumentRegions::default());
+        let presented = build_note_presentations(&refs, &pages, &DocumentRegions::default());
+        let checks = ANCHOR_CHECKS.with(std::cell::Cell::get);
+        assert_eq!(placed, mapped);
+        assert_eq!(presented.iter().count(), 400);
+        assert_eq!(
+            checks,
+            2 * (400 + 400),
+            "checks and lookups placing and numbering 400 notes"
+        );
     }
 }
