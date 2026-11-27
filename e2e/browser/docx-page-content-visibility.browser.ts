@@ -140,28 +140,28 @@ async function settledShot(page: Page, clip: Rect): Promise<string> {
   throw new Error('Document area never settled');
 }
 
-const selectionRects = (page: Page) => page.evaluate(() => {
+const selectionRects = (page: Page, find = false) => page.evaluate((find) => {
   const host = document.querySelector('[data-docx-pages-host]')!.getBoundingClientRect();
   return Array.from(document.querySelectorAll<HTMLElement>('[data-docx-pages-host] div[aria-hidden="true"]'))
-    .filter((element) => /59, 130, 246|255, 150, 0|255, 220, 0/.test(element.style.background))
+    .filter((element) => (find ? /255, 150, 0|255, 220, 0/ : /59, 130, 246|255, 150, 0|255, 220, 0/).test(element.style.background))
     .map((element) => {
       const rect = element.getBoundingClientRect();
       return { x: Math.round(rect.x - host.x), y: Math.round(rect.y - host.y), width: Math.round(rect.width), height: Math.round(rect.height) };
     });
-});
+}, find);
 
 /** Runs `gesture`, then returns the selection once it differs from the one before, reaches the line at `y` (or shows a find match) and holds still. */
 async function selectionAfter(page: Page, until: { y: number } | { find: true }, gesture: () => Promise<unknown>): Promise<Rect[]> {
-  const before = JSON.stringify(await selectionRects(page));
+  const find = 'find' in until;
+  const before = JSON.stringify(await selectionRects(page, find));
   await gesture();
   let previous = '';
   let rects: Rect[] = [];
   await expect.poll(async () => {
-    rects = await selectionRects(page);
+    rects = await selectionRects(page, find);
     const key = JSON.stringify(rects);
-    const reached = 'y' in until
-      ? await page.locator('[data-docx-pages-host]').boundingBox().then((host) => rects.some((rect) => Math.abs(until.y - host!.y - rect.y - rect.height / 2) <= rect.height * 1.5))
-      : await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-docx-pages-host] div[aria-hidden="true"]')).some((element) => /255, 150, 0|255, 220, 0/.test(element.style.background)));
+    const reached = !('y' in until) || await page.locator('[data-docx-pages-host]').boundingBox()
+      .then((host) => rects.some((rect) => Math.abs(until.y - host!.y - rect.y - rect.height / 2) <= rect.height * 1.5));
     const stable = rects.length > 0 && key !== before && reached && key === previous;
     previous = key;
     return stable;
@@ -179,7 +179,7 @@ async function interactions(page: Page) {
   await scrollToPage(page, 11);
   let box = await canvasBox(page, 11);
   const word = await selectionAfter(page, { y: box.y + 300 }, () => page.mouse.dblclick(box.x + 200, box.y + 300));
-  await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.dblclick(box.x + 200, box.y + 400));
+  await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.dblclick(box.x + 208, box.y + 400));
   const paragraph = await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 }));
   await scrollToPage(page, 12, 1200);
   const upper = await canvasBox(page, 11), lower = await canvasBox(page, 12);
