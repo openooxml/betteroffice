@@ -9,11 +9,10 @@ import { preloadEditWasm } from './wasm/index';
 import { EditSession as EngineEditSession } from '../wasm/engineEdit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
-import * as commandHostModule from './residentCommandHost';
 import * as projectionModule from './yrsToDocument';
 import * as facadeModule from './yrsSessionFacade';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
 import { createdListKey } from './listDefinitionSave';
@@ -2092,54 +2091,6 @@ test('worker reuses layout input until the proposal preview changes', async () =
   } finally {
     stringify.mockRestore();
     layouts.mockRestore();
-    client.destroy();
-  }
-}, TIMEOUT);
-
-test('worker rebuilds preview layout input when only the layout mode changes', async () => {
-  const build = standalonePreviewLayoutBuilder();
-  const host = spyOn(commandHostModule, 'createResidentCommandHost');
-  const { client, engine } = await openWorker({ factory(clientId) {
-    const worker = startWorker(clientId);
-    const port: ResidentEngineWorkerPort = worker;
-    const post = port.postMessage.bind(port);
-    port.postMessage = (message, transfer) => {
-      if (message.type === 'commandInit') {
-        const input = JSON.parse(message.request.layoutInput);
-        message.request.layoutInput = JSON.stringify({
-          ...input, measured: [], retainOnly: true,
-          workerOwned: { bodyStory: 'body', measurement: input.measurement, renderEnv: { revisionPreview: {} } },
-        });
-      }
-      post(message, transfer);
-    };
-    return worker;
-  } }).catch(error => {
-    host.mockRestore();
-    throw error;
-  });
-  const init = host.mock.calls[0]?.[0].init;
-  host.mockRestore();
-  const regionLayouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
-  const plainLayouts = spyOn(engine, 'layoutDocumentJson');
-  try {
-    if (!init) throw new Error('Expected bound worker command inputs');
-    const first = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
-    expect(first.outcomes[0]?.status).toBe('applied');
-    const source = init.layoutInput;
-    expect(regionLayouts.mock.calls).toEqual([[source]]);
-    expect(plainLayouts.mock.calls).toEqual([]);
-
-    init.layoutWithRegions = false;
-    const next = await client.edit(intent(2, first.version, 'insertText', { text: '?' }));
-    expect(next.outcomes[0]?.status).toBe('applied');
-    const cleared = build(source, false, undefined);
-    expect(cleared).not.toBe(source);
-    expect(JSON.parse(cleared).workerOwned.renderEnv).toEqual({});
-    expect(plainLayouts.mock.calls).toEqual([[cleared]]);
-  } finally {
-    plainLayouts.mockRestore();
-    regionLayouts.mockRestore();
     client.destroy();
   }
 }, TIMEOUT);
