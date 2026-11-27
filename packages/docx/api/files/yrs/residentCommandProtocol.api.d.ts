@@ -635,7 +635,10 @@ export interface PreparedDocxCommand {
     range: YrsStoryRange | null;
     cellNavigation?: DocxCellNavigationPlan;
     cells?: YrsTableRange | null;
-    /** The cell texts an inline formatting command covers in place of `range`. */
+    /**
+     * The cell texts an inline formatting command covers in place of `range`.
+     * @internal
+     */
     cellRanges?: YrsStoryRange[];
     table?: DocxTableCommandTarget;
     paragraphChanges?: Array<{
