@@ -11784,7 +11784,12 @@ impl EngineSession {
         if story != "body" && !is_nested_body_story(story) {
             return Ok(false);
         }
-        if self.pagination.borrow().layout.as_ref().map(|layout| layout.partial)
+        if self
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .map(|layout| layout.partial)
             != Some(self.partial_document.get())
         {
             return Ok(false);
