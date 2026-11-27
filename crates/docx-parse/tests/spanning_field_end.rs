@@ -261,17 +261,7 @@ fn save_story(
     route: WriteRoute,
     story_path: &str,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let parsed = parse_docx_s9_wire(source, S9ParseOptions::default())?;
-    let mut package = serde_json::to_value(parsed.document.package)?;
-    package["document"]
-        .as_object_mut()
-        .ok_or("missing document model")?
-        .remove("sections");
-    let mut request = json!({
-        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
-        "document": package["document"],
-        "options": {"updateModifiedDate": false}
-    });
+    let mut request = save_request(source, false)?;
     let digest = format!("{:x}", Sha256::digest(document_xml(source)?.as_bytes()));
     let insertion_donor = if story_path != "/document/content"
         && matches!(edit, Edit::Paragraph(ParagraphEdit::InsertAfter(_)))
@@ -354,6 +344,24 @@ fn save_story(
     Ok(write_docx_s13(request, source)?)
 }
 
+fn save_request(source: &[u8], source_ordinals: bool) -> Result<Value, Box<dyn Error>> {
+    let options = S9ParseOptions {
+        source_ordinals,
+        ..Default::default()
+    };
+    let parsed = parse_docx_s9_wire(source, options)?;
+    let mut package = serde_json::to_value(parsed.document.package)?;
+    package["document"]
+        .as_object_mut()
+        .ok_or("missing document model")?
+        .remove("sections");
+    Ok(json!({
+        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+        "document": package["document"],
+        "options": {"updateModifiedDate": false}
+    }))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct FieldSpan {
     begin: usize,
@@ -382,78 +390,241 @@ fn story_paragraphs(xml: &str) -> impl Iterator<Item = &str> {
 }
 
 fn inspect_story(xml: &str, case: &str) -> Story {
-    let mut story = Story::default();
-    let mut open = Vec::<usize>::new();
-    for (index, paragraph) in story_paragraphs(xml).enumerate() {
-        let mut visible = String::new();
-        for tag in paragraph.split("<w:").skip(1) {
-            let Some((opening, content)) = tag.split_once('>') else {
-                continue;
-            };
-            let name = opening
-                .split(|ch: char| ch.is_ascii_whitespace() || ch == '/')
-                .next();
-            match name {
-                Some("fldChar") if opening.contains(BEGIN) => {
-                    story.fields.push(FieldSpan {
-                        begin: index,
-                        end: None,
-                        separates: Vec::new(),
-                        instructions: Vec::new(),
-                        result: String::new(),
-                        parent: open.last().copied(),
-                    });
-                    open.push(story.fields.len() - 1);
+    let saved = scan_story(xml);
+    assert_eq!(saved.unpaired, 0, "{case}: unpaired field characters");
+    saved.story
+}
+
+#[derive(Default)]
+struct SavedStory {
+    story: Story,
+    text: String,
+    tabs: Vec<usize>,
+    ends_at: Vec<Option<usize>>,
+    markers: Vec<String>,
+    marker_fields: Vec<Vec<usize>>,
+    unpaired: usize,
+}
+
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split_once(&format!(r#" {name}=""#))?
+        .1
+        .split_once('"')
+        .map(|(value, _)| value)
+}
+
+fn scan_story(xml: &str) -> SavedStory {
+    let mut saved = SavedStory::default();
+    let mut open: Vec<usize> = Vec::new();
+    let mut paragraphs: Vec<usize> = Vec::new();
+    let mut bookmarks = std::collections::HashMap::new();
+    let mut revisions = Vec::new();
+    let mut offset = 0;
+    let mut run_depth = 0;
+    for tag in xml.split('<').skip(1) {
+        let Some((opening, content)) = tag.split_once('>') else {
+            continue;
+        };
+        let name = opening
+            .trim_end_matches('/')
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default();
+        if name == "w:p" {
+            let index = saved.story.paragraphs.len();
+            saved.story.paragraphs.push(String::new());
+            saved.tabs.push(0);
+            if !opening.ends_with('/') {
+                paragraphs.push(index);
+            }
+        } else if name == "/w:p" {
+            paragraphs.pop();
+        } else if name == "w:r" && !opening.ends_with('/') {
+            run_depth += 1;
+        } else if name == "/w:r" {
+            run_depth -= 1;
+        }
+
+        let id = attribute(opening, "w:id").unwrap_or("-");
+        let marker = match name {
+            "w:bookmarkStart" => {
+                let name = attribute(opening, "w:name").unwrap_or(id);
+                bookmarks.insert(id, name);
+                Some(("bs", name))
+            }
+            "w:bookmarkEnd" => Some(("be", bookmarks.get(id).copied().unwrap_or(id))),
+            "w:commentRangeStart" => Some(("cs", id)),
+            "w:commentRangeEnd" => Some(("ce", id)),
+            "w:commentReference" => Some(("cr", id)),
+            "w:moveFromRangeStart" | "w:moveFromRangeEnd"
+            | "w:moveToRangeStart" | "w:moveToRangeEnd" => Some((&name[2..], id)),
+            "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => {
+                if !opening.ends_with('/') {
+                    revisions.push(id);
                 }
-                Some("fldChar") if opening.contains(SEPARATE) => {
-                    let field = *open
-                        .last()
-                        .unwrap_or_else(|| panic!("{case}: field separator without a begin"));
-                    story.fields[field].separates.push(index);
+                Some((&name[2..], id))
+            }
+            "/w:ins" => Some(("/ins", revisions.pop().unwrap_or("-"))),
+            "/w:del" => Some(("/del", revisions.pop().unwrap_or("-"))),
+            "/w:moveFrom" => Some(("/moveFrom", revisions.pop().unwrap_or("-"))),
+            "/w:moveTo" => Some(("/moveTo", revisions.pop().unwrap_or("-"))),
+            _ => None,
+        };
+        if let Some((kind, id)) = marker {
+            saved.markers.push(format!("{kind}:{id}@{offset}"));
+            saved.marker_fields.push(open.clone());
+        }
+        let Some(&index) = paragraphs.last() else {
+            continue;
+        };
+        let visible = open.iter().all(|&field| !saved.story.fields[field].separates.is_empty());
+        match name {
+            "w:fldChar" if opening.contains(BEGIN) => {
+                saved.story.fields.push(FieldSpan {
+                    begin: index,
+                    end: None,
+                    separates: Vec::new(),
+                    instructions: Vec::new(),
+                    result: String::new(),
+                    parent: open.last().copied(),
+                });
+                saved.ends_at.push(None);
+                open.push(saved.story.fields.len() - 1);
+            }
+            "w:fldChar" if opening.contains(SEPARATE) => {
+                if let Some(&field) = open.last() {
+                    saved.story.fields[field].separates.push(index);
+                } else {
+                    saved.unpaired += 1;
                 }
-                Some("fldChar") if opening.contains(END) => {
-                    story.ends += 1;
-                    let field = open
-                        .pop()
-                        .unwrap_or_else(|| panic!("{case}: field end without a begin"));
-                    story.fields[field].end = Some(index);
+            }
+            "w:fldChar" if opening.contains(END) => {
+                saved.story.ends += 1;
+                if let Some(field) = open.pop() {
+                    saved.story.fields[field].end = Some(index);
+                    saved.ends_at[field] = Some(offset);
+                } else {
+                    saved.unpaired += 1;
                 }
-                Some("instrText" | "t") => {
-                    let raw = if opening.ends_with('/') {
-                        ""
-                    } else {
-                        content.split('<').next().unwrap_or_default()
-                    };
-                    let text = quick_xml::escape::unescape(raw)
-                        .unwrap_or_else(|error| panic!("{case}: invalid XML text: {error}"));
-                    if name == Some("instrText") {
-                        let code = text.into_owned();
-                        let field = *open
-                            .last()
-                            .unwrap_or_else(|| panic!("{case}: field instruction without a begin"));
-                        assert!(
-                            story.fields[field].separates.is_empty(),
-                            "{case}: instruction after separator"
-                        );
-                        story.fields[field].instructions.push(code.clone());
-                        story.instructions.push(code);
-                    } else {
-                        visible.push_str(&text);
-                        for &field in &open {
-                            if !story.fields[field].separates.is_empty() {
-                                story.fields[field].result.push_str(&text);
-                            }
-                        }
+            }
+            "w:instrText" if !opening.ends_with('/') => {
+                let code = quick_xml::escape::unescape(content).unwrap().into_owned();
+                if let Some(&field) = open.last() {
+                    saved.unpaired += usize::from(!saved.story.fields[field].separates.is_empty());
+                    saved.story.fields[field].instructions.push(code.clone());
+                } else {
+                    saved.unpaired += 1;
+                }
+                saved.story.instructions.push(code);
+            }
+            "w:t" if visible && !opening.ends_with('/') => {
+                let text = quick_xml::escape::unescape(content).unwrap();
+                saved.story.paragraphs[index].push_str(&text);
+                for &field in &open {
+                    if !saved.story.fields[field].separates.is_empty() {
+                        saved.story.fields[field].result.push_str(&text);
                     }
                 }
-                _ => {}
+                offset += text.encode_utf16().count();
+                saved.text.push_str(&text);
             }
+            "w:tab" if visible && run_depth > 0 => {
+                saved.tabs[index] += 1;
+                offset += 1;
+                saved.text.push('\t');
+            }
+            _ => {}
         }
-        story.paragraphs.push(visible);
     }
-    assert!(open.is_empty(), "{case}: fields without ends: {open:?}");
-    assert_eq!(story.fields.len(), story.ends, "{case}: begin/end count");
+    saved.unpaired += open.len();
+    saved
+}
+
+fn closed_pagerefs(story: &Story) -> Vec<String> {
     story
+        .fields
+        .iter()
+        .filter(|field| field.end.is_some())
+        .map(|field| field.instructions.concat())
+        .filter(|code| code.split_whitespace().next() == Some("PAGEREF"))
+        .collect()
+}
+
+fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
+    let actual = scan_story(xml);
+    let expected = scan_story(expected_xml);
+    let mut actual_refs = closed_pagerefs(&actual.story);
+    let expected_refs = closed_pagerefs(&expected.story);
+    let kept = expected_refs
+        .iter()
+        .filter(|code| {
+            actual_refs
+                .iter()
+                .position(|actual| actual == *code)
+                .map(|index| actual_refs.swap_remove(index))
+                .is_some()
+        })
+        .count();
+    let instruction = if actual.story.instructions == expected.story.instructions {
+        "same"
+    } else {
+        "changed"
+    };
+    let end_para = actual
+        .story
+        .fields
+        .first()
+        .and_then(|field| field.end)
+        .map_or_else(|| "none".to_owned(), |index| index.to_string());
+    let after = expected.ends_at.first().copied().flatten().and_then(|end| {
+        let units: Vec<_> = expected.text.encode_utf16().skip(end).collect();
+        let tail = String::from_utf16_lossy(&units);
+        actual
+            .text
+            .rfind(&tail)
+            .map(|start| actual.text[..start].encode_utf16().count())
+    });
+    let outside = actual
+        .ends_at
+        .first()
+        .copied()
+        .flatten()
+        .zip(after)
+        .is_some_and(|(end, start)| end <= start);
+    let markers = actual.markers.join(",");
+    println!(
+        "SPANDIFF rust {case} begins={} ends={} instr={instruction} pageref={kept}/{} \
+         endpara={end_para} after={} markers={}",
+        actual.story.fields.len(),
+        actual.story.ends,
+        expected_refs.len(),
+        if outside { "outside" } else { "inside" },
+        if markers.is_empty() { "-" } else { &markers },
+    );
+    assert_eq!(
+        actual.unpaired, expected.unpaired,
+        "{case}: unpaired field characters"
+    );
+    assert_eq!(actual.story, expected.story, "{case}: field boundaries and text");
+    assert_eq!(actual.tabs, expected.tabs, "{case}: tabs per paragraph");
+    assert_eq!(actual.ends_at, expected.ends_at, "{case}: field end offsets");
+    assert_eq!(actual.markers, expected.markers, "{case}: markers");
+    assert_eq!(
+        actual.marker_fields, expected.marker_fields,
+        "{case}: markers within fields"
+    );
+}
+
+fn assert_spanning_cases(cases: &[(String, String, String)]) {
+    let failed: Vec<_> = cases
+        .iter()
+        .filter_map(|(xml, expected, case)| {
+            std::panic::catch_unwind(|| assert_spanning_save(xml, expected, case))
+                .is_err()
+                .then_some(case)
+        })
+        .collect();
+    assert!(failed.is_empty(), "failed cases: {failed:?}");
 }
 
 fn assert_save(
@@ -947,20 +1118,7 @@ fn assert_word_toc_save(toc: &WordToc, edit: Edit, case: &str) -> Result<(), Box
         (false, _) => WriteRoute::SourceParagraphs,
     };
     let xml = document_xml(&save_story(&source, edit, route, story_path)?)?;
-    let actual = inspect_story(&xml, case);
-    let expected = inspect_story(&expected_xml, case);
-    assert_eq!(
-        actual.paragraphs, expected.paragraphs,
-        "{case}: paragraph text"
-    );
-    assert_eq!(
-        actual.instructions, expected.instructions,
-        "{case}: field instructions"
-    );
-    assert_eq!(
-        actual.fields, expected.fields,
-        "{case}: field boundaries and results"
-    );
+    assert_spanning_save(&xml, &expected_xml, case);
     if toc.in_control {
         let paragraphs_in_control = xml
             .split_once("<w:sdtContent>")
@@ -972,20 +1130,6 @@ fn assert_word_toc_save(toc: &WordToc, edit: Edit, case: &str) -> Result<(), Box
             "{case}: paragraphs inside the TOC content control"
         );
     }
-    let tabs = |xml: &str| {
-        story_paragraphs(xml)
-            .map(|paragraph| {
-                paragraph.matches("<w:tab/").count()
-                    + paragraph.matches("<w:tab ").count()
-                    + paragraph.matches("<w:tab>").count()
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        tabs(&xml),
-        tabs(&expected_xml),
-        "{case}: tabs per paragraph"
-    );
     Ok(())
 }
 
@@ -995,14 +1139,21 @@ macro_rules! word_toc_save_tests {
             #[test]
             fn $test() {
                 let toc = $build();
+                let mut failed = Vec::new();
                 for (name, edit) in WORD_TOC_EDITS {
                     let case = format!("{} {name}", $shape);
                     let edit = edit(&toc);
-                    if !matches!(edit, Edit::None) {
-                        assert_word_toc_save(&toc, edit, &case)
-                            .unwrap_or_else(|error| panic!("{case}: {error}"));
+                    if !matches!(edit, Edit::None)
+                        && std::panic::catch_unwind(|| {
+                            assert_word_toc_save(&toc, edit, &case)
+                                .unwrap_or_else(|error| panic!("{case}: {error}"));
+                        })
+                        .is_err()
+                    {
+                        failed.push(case);
                     }
                 }
+                assert!(failed.is_empty(), "failed cases: {failed:?}");
             }
         )+
     };
@@ -1512,5 +1663,251 @@ fn a_same_paragraph_raw_end_stays_on_its_original_side_of_the_next_field()
             inspect(&source.replace(">NEXT<", ">NEXT edited<"))
         );
     }
+    Ok(())
+}
+
+#[test]
+fn finding_s2_mixed_bookmark_endpoints_keep_the_closing_field_end() -> Result<(), Box<dyn Error>> {
+    let start = r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>"#;
+    let stop = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let middle = paragraph(1, &entry(2, ENTRY_TWO, PAGE_MARKERS[1]));
+    let last = entry(3, "ENTRYTHREE", PAGE_MARKERS[2]);
+    let source = body("TA")
+        .replace(&middle, &format!("{start}{middle}"))
+        .replace(&last, &format!("{last}{stop}"));
+    let saved = save(
+        &package(&source)?,
+        Edit::Text("ENTRYTHREE"),
+        WriteRoute::ChangedParaIds,
+    )?;
+    assert_spanning_save(
+        &document_xml(&saved)?,
+        &source.replace("ENTRYTHREE", "ENTRYTHREE edited"),
+        "finding_s2_mixed_bookmarks",
+    );
+    Ok(())
+}
+
+#[test]
+fn finding_s3_opening_bookmark_keeps_the_unlinked_pageref() -> Result<(), Box<dyn Error>> {
+    let mut toc = word_toc_w4();
+    let title = text_run("ENTRYONE");
+    let bookmarked = format!(
+        r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>{title}<w:bookmarkEnd w:id="41"/>"#
+    );
+    toc.paragraphs[0] = toc.paragraphs[0].replace(&title, &bookmarked);
+    let source = toc.xml(&toc.paragraphs);
+    let saved = save(
+        &package(&source)?,
+        Edit::Text("ENTRYONE"),
+        WriteRoute::ChangedParaIds,
+    )?;
+    assert_spanning_save(
+        &document_xml(&saved)?,
+        &source.replace("ENTRYONE", "ENTRYONE edited"),
+        "finding_s3_bookmark_and_pageref",
+    );
+    Ok(())
+}
+
+#[test]
+fn finding_s6_whole_save_matches_unlinked_entries_by_pageref() -> Result<(), Box<dyn Error>> {
+    let toc = word_toc(
+        "TOC",
+        &["Same title"; 3],
+        1,
+        WordTocOptions {
+            inline_end: true,
+            unlinked: true,
+            ..WordTocOptions::default()
+        },
+    );
+    let source = without_paragraph_ids(&toc.xml(&toc.paragraphs));
+    let mut expected = toc.paragraphs.clone();
+    expected.insert(2, text_run(INSERTED));
+    let saved = save(
+        &package(&source)?,
+        Edit::Paragraph(ParagraphEdit::InsertAfter(1)),
+        WriteRoute::Whole,
+    )?;
+    assert_spanning_save(
+        &document_xml(&saved)?,
+        &toc.xml(&expected),
+        "finding_s6_repeated_unlinked_entries",
+    );
+    Ok(())
+}
+
+#[test]
+fn finding_n2_deleting_the_closer_keeps_the_end_before_trailing_blocks()
+-> Result<(), Box<dyn Error>> {
+    let mut toc = word_toc_w4();
+    let end = field_char("end");
+    toc.paragraphs.truncate(3);
+    toc.paragraphs[2].push_str(&end);
+    let bookmark_start = r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>"#;
+    let bookmark_end = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let tail = paragraph(3, &text_run(BODY_NEXT));
+    let source = format!(
+        "{bookmark_start}{}{bookmark_end}{tail}",
+        toc.paragraphs
+            .iter()
+            .enumerate()
+            .map(|(i, p)| paragraph(i, p))
+            .collect::<String>()
+    );
+    let expected = format!(
+        "{bookmark_start}{}{}{bookmark_end}",
+        paragraph(0, &toc.paragraphs[0]),
+        paragraph(1, &(toc.paragraphs[1].clone() + &end)),
+    );
+    let bytes = package(&source)?;
+    let mut request = save_request(&bytes, true)?;
+    let blocks = request["document"]["content"].as_array_mut().unwrap();
+    blocks.retain(|block| !matches!(block["sourceOrdinal"].as_u64(), Some(2 | 3)));
+    let digest = format!("{:x}", Sha256::digest(document_xml(&bytes)?.as_bytes()));
+    request["paragraphIds"] = json!({"splicedParts": [{
+        "part": DOCUMENT_PART, "sha256": digest, "paragraphs": [0, 1], "removed": [2, 3],
+    }]});
+    let saved = write_docx_s13(serde_json::from_value(request)?, &bytes)?;
+    assert_spanning_save(
+        &document_xml(&saved)?,
+        &expected,
+        "finding_n2_trailing_blocks",
+    );
+    Ok(())
+}
+
+#[test]
+fn finding_n3_insertion_next_to_a_container_keeps_its_span() -> Result<(), Box<dyn Error>> {
+    let before = paragraph(4, &text_run("BEFORE"));
+    let tail = paragraph(5, &text_run(BODY_NEXT));
+    let inner = body("S1");
+    let containers = [
+        (
+            "table",
+            format!("<w:tbl><w:tr><w:tc>{inner}</w:tc></w:tr></w:tbl>"),
+        ),
+        (
+            "sdt",
+            block_sdt(&inner).replace(r#"<w:id w:val="42"/>"#, ""),
+        ),
+    ];
+    let mut cases = Vec::new();
+    for (container, inner) in containers {
+        let source = format!("{before}{inner}{tail}");
+        let saved = save(
+            &package(&source)?,
+            Edit::Paragraph(ParagraphEdit::InsertAfter(0)),
+            WriteRoute::Whole,
+        )?;
+        cases.push((
+            document_xml(&saved)?,
+            format!("{before}{}{inner}{tail}", paragraph(6, &text_run(INSERTED))),
+            format!("finding_n3_insert_before_{container}"),
+        ));
+    }
+    assert_spanning_cases(&cases);
+    Ok(())
+}
+
+#[test]
+fn finding_n5_the_end_follows_a_simple_field_or_inline_control() -> Result<(), Box<dyn Error>> {
+    let text = text_run("LEADING");
+    let wrappers = [
+        (
+            "simple_field",
+            format!(r#"<w:fldSimple w:instr="QUOTE">{text}</w:fldSimple>"#),
+        ),
+        (
+            "inline_control",
+            format!(r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent>{text}</w:sdtContent></w:sdt>"#),
+        ),
+    ];
+    let mut cases = Vec::new();
+    for (wrapper, leading) in wrappers {
+        let source = body("S1").replace(&text_run("SPANEND"), &leading);
+        let saved = save(&package(&source)?, Edit::Text("AFTERSPAN"), WriteRoute::Whole)?;
+        cases.push((
+            document_xml(&saved)?,
+            source.replace("AFTERSPAN", "AFTERSPAN edited"),
+            format!("finding_n5_end_after_{wrapper}"),
+        ));
+    }
+    assert_spanning_cases(&cases);
+    Ok(())
+}
+
+#[test]
+fn finding_n6_the_end_splits_a_run_before_its_tab() -> Result<(), Box<dyn Error>> {
+    let tabbed = "<w:r><w:tab/><w:t>AFTERSPAN</w:t></w:r>";
+    let source = body("S1").replace(&text_run("AFTERSPAN"), tabbed);
+    let bytes = package(&source)?;
+    let mut request = save_request(&bytes, false)?;
+    let content = request
+        .pointer_mut("/document/content/1/content")
+        .and_then(Value::as_array_mut)
+        .ok_or("missing closing paragraph runs")?;
+    content.clear();
+    content.push(json!({
+        "type": "run",
+        "content": [
+            {"type": "text", "text": "SPANEND edited"},
+            {"type": "tab"},
+            {"type": "text", "text": "AFTERSPAN"},
+        ],
+    }));
+    let saved = write_docx_s13(serde_json::from_value(request)?, &bytes)?;
+    assert_spanning_save(
+        &document_xml(&saved)?,
+        &source.replace("SPANEND", "SPANEND edited"),
+        "finding_n6_end_before_tab_in_run",
+    );
+    Ok(())
+}
+
+#[test]
+fn finding_n7_selective_save_accounts_for_shapes_in_spanning_results()
+-> Result<(), Box<dyn Error>> {
+    let shape = concat!(
+        r#"<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">"#,
+        r#"<wp:extent cx="914400" cy="914400"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
+        r#"<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+        r#"<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:spPr>"#,
+        r#"<a:prstGeom prst="rect"/></wps:spPr><wps:bodyPr/></wps:wsp>"#,
+        "</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+    );
+    let control = format!("<w:sdt><w:sdtPr/><w:sdtContent>{shape}</w:sdtContent></w:sdt>");
+    let linked = |name: &str| {
+        format!(
+            r#"<w:hyperlink w:anchor="{name}">{}{control}</w:hyperlink>"#,
+            text_run(name),
+        )
+    };
+    let end = field_char("end");
+    let source = [
+        paragraph(0, &(field_start("QUOTE FIRST") + &linked("FIRST"))),
+        paragraph(1, &(text_run("FIRSTEND") + &end)),
+        paragraph(2, &(field_start("QUOTE SECOND") + &linked("SECOND"))),
+        paragraph(3, &(text_run("SECONDEND") + &end)),
+        paragraph(4, &text_run(BODY_NEXT)),
+    ]
+    .concat();
+    let bytes = package(&source)?;
+    let selective = document_xml(&save(&bytes, Edit::Text("SECOND"), WriteRoute::ChangedParaIds)?)?;
+    assert_spanning_save(
+        &selective,
+        &source.replace(">SECOND<", ">SECOND edited<"),
+        "finding_n7_selective_shape_ids",
+    );
+    let whole = document_xml(&save(&bytes, Edit::Text("SECOND"), WriteRoute::Whole)?)?;
+    let final_id = |xml: &str| {
+        xml.rsplit_once("<wp:docPr")
+            .and_then(|(_, tag)| attribute(tag.split_once('>')?.0, "id"))
+            .map(str::to_owned)
+    };
+    let whole_id = final_id(&whole);
+    assert!(whole_id.is_some(), "shape in the edited field has no DrawingML ID");
+    assert_eq!(final_id(&selective), whole_id);
     Ok(())
 }

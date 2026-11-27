@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { parseDocx } from '../docx';
 import { repackDocx } from '../docx/rezip';
 import { documentToYrs } from './documentToYrs';
-import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
+import { createYrsSession, saveYrsDocx, type YrsAuthor, type YrsRawOp, type YrsSession } from './index';
 import { yrsToDocument } from './yrsToDocument';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -104,51 +104,166 @@ function storyParagraphs(xml: string) {
   return xml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g);
 }
 
-function inspect(xml: string) {
+function attribute(tag: string, name: string): string | undefined {
+  return tag.split(` ${name}="`)[1]?.split('"')[0];
+}
+
+function scanStory(xml: string) {
   const paragraphs: string[] = [];
   const fields: FieldSpan[] = [];
-  const open: FieldSpan[] = [];
+  const open: number[] = [];
   const instructions: string[] = [];
+  const tabs: number[] = [];
+  const endsAt: Array<number | null> = [];
+  const markers: string[] = [];
+  const markerFields: number[][] = [];
+  const bookmarkNames = new Map<string, string>();
+  const revisions: string[] = [];
+  const paragraphStack: number[] = [];
+  let visible = '';
+  let runDepth = 0;
   let ends = 0;
-  for (const [, paragraph] of storyParagraphs(xml)) {
-    const index = paragraphs.length;
-    let visible = '';
-    for (const [, tag, attributes = '', text = ''] of paragraph!.matchAll(/<w:(fldChar|instrText|t)\b([^>]*)>([^<]*)/g)) {
-      if (tag === 'fldChar' && attributes.includes('w:fldCharType="begin"')) {
-        const parent = open.at(-1);
-        const field = { begin: index, end: null, separates: [], instructions: [], result: '',
-          parent: parent ? fields.indexOf(parent) : null };
-        fields.push(field);
-        open.push(field);
-      } else if (tag === 'fldChar' && attributes.includes('w:fldCharType="end"')) {
-        ends += 1;
-        const field = open.pop();
-        if (!field) throw new Error('Field end without a begin');
-        field.end = index;
-      } else if (tag === 'fldChar' && attributes.includes('w:fldCharType="separate"')) {
-        const field = open.at(-1);
-        if (!field) throw new Error('Field separator without a begin');
-        field.separates.push(index);
-      } else if (tag === 'instrText') {
-        const code = decodeXmlText(attributes.endsWith('/') ? '' : text);
-        const field = open.at(-1);
-        if (!field) throw new Error('Field instruction without a begin');
-        expect(field.separates).toEqual([]);
-        field.instructions.push(code);
-        instructions.push(code);
-      } else if (tag === 't' && !attributes.endsWith('/')) {
-        const value = decodeXmlText(text);
-        visible += value;
-        for (const field of open) {
-          if (field.separates.length) field.result += value;
-        }
-      }
+  let unpaired = 0;
+  for (const [, opening = '', content = ''] of xml.matchAll(/<([^>]*)>([^<]*)/g)) {
+    const tag = opening.replace(/\/$/, '').split(/\s+/, 1)[0];
+    if (tag === 'w:p') {
+      if (!opening.endsWith('/')) paragraphStack.push(paragraphs.length);
+      paragraphs.push('');
+      tabs.push(0);
+    } else if (tag === '/w:p') {
+      paragraphStack.pop();
+    } else if (tag === 'w:r' && !opening.endsWith('/')) {
+      runDepth += 1;
+    } else if (tag === '/w:r') {
+      runDepth -= 1;
     }
-    paragraphs.push(visible);
+
+    let id = attribute(opening, 'w:id') ?? '-';
+    let kind: string | undefined;
+    switch (tag) {
+      case 'w:bookmarkStart':
+        kind = 'bs';
+        bookmarkNames.set(id, attribute(opening, 'w:name') ?? id);
+        id = bookmarkNames.get(id)!;
+        break;
+      case 'w:bookmarkEnd':
+        kind = 'be';
+        id = bookmarkNames.get(id) ?? id;
+        break;
+      case 'w:commentRangeStart': kind = 'cs'; break;
+      case 'w:commentRangeEnd': kind = 'ce'; break;
+      case 'w:commentReference': kind = 'cr'; break;
+      case 'w:moveFromRangeStart':
+      case 'w:moveFromRangeEnd':
+      case 'w:moveToRangeStart':
+      case 'w:moveToRangeEnd':
+        kind = tag.slice(2);
+        break;
+      case 'w:ins':
+      case 'w:del':
+      case 'w:moveFrom':
+      case 'w:moveTo':
+        kind = tag.slice(2);
+        if (!opening.endsWith('/')) revisions.push(id);
+        break;
+      case '/w:ins':
+      case '/w:del':
+      case '/w:moveFrom':
+      case '/w:moveTo':
+        kind = '/' + tag.slice(3);
+        id = revisions.pop() ?? '-';
+        break;
+    }
+    if (kind !== undefined) {
+      markers.push(`${kind}:${id}@${visible.length}`);
+      markerFields.push(open.slice());
+    }
+
+    const index = paragraphStack.at(-1);
+    if (index === undefined) continue;
+    const showsResult = open.every(field => fields[field]!.separates.length > 0);
+    if (tag === 'w:fldChar' && opening.includes('w:fldCharType="begin"')) {
+      fields.push({ begin: index, end: null, separates: [], instructions: [], result: '',
+        parent: open.at(-1) ?? null });
+      endsAt.push(null);
+      open.push(fields.length - 1);
+    } else if (tag === 'w:fldChar' && opening.includes('w:fldCharType="end"')) {
+      ends += 1;
+      const field = open.pop();
+      if (field === undefined) unpaired += 1;
+      else {
+        fields[field]!.end = index;
+        endsAt[field] = visible.length;
+      }
+    } else if (tag === 'w:fldChar' && opening.includes('w:fldCharType="separate"')) {
+      const field = open.at(-1);
+      if (field === undefined) unpaired += 1;
+      else fields[field]!.separates.push(index);
+    } else if (tag === 'w:instrText' && !opening.endsWith('/')) {
+      const code = decodeXmlText(content);
+      const field = open.at(-1);
+      if (field === undefined) unpaired += 1;
+      else {
+        if (fields[field]!.separates.length) unpaired += 1;
+        fields[field]!.instructions.push(code);
+      }
+      instructions.push(code);
+    } else if (tag === 'w:t' && showsResult && !opening.endsWith('/')) {
+      const value = decodeXmlText(content);
+      visible += value;
+      paragraphs[index] += value;
+      for (const field of open) {
+        if (fields[field]!.separates.length) fields[field]!.result += value;
+      }
+    } else if (tag === 'w:tab' && showsResult && runDepth > 0) {
+      tabs[index] = tabs[index]! + 1;
+      visible += '\t';
+    }
   }
-  expect(open).toEqual([]);
-  expect(fields.length).toBe(ends);
-  return { paragraphs, fields, instructions };
+  return { story: { paragraphs, fields, instructions }, ends, endsAt, visible, tabs, markers,
+    markerFields, unpaired: unpaired + open.length };
+}
+
+function inspect(xml: string) {
+  const saved = scanStory(xml);
+  expect(saved.unpaired).toBe(0);
+  return saved.story;
+}
+
+function assertSpanningSave(xml: string, expectedXml: string, caseName: string): void {
+  const actual = scanStory(xml);
+  const expected = scanStory(expectedXml);
+  const pageRefs = (fields: FieldSpan[]) => fields.flatMap(field => {
+    const code = field.instructions.join('');
+    return field.end !== null && code.trim().split(/\s+/, 1)[0] === 'PAGEREF' ? [code] : [];
+  });
+  const actualRefs = pageRefs(actual.story.fields);
+  const expectedRefs = pageRefs(expected.story.fields);
+  let kept = 0;
+  for (const code of expectedRefs) {
+    const index = actualRefs.indexOf(code);
+    if (index < 0) continue;
+    actualRefs.splice(index, 1);
+    kept += 1;
+  }
+  const instr = JSON.stringify(actual.story.instructions) === JSON.stringify(expected.story.instructions)
+    ? 'same' : 'changed';
+  const endPara = actual.story.fields[0]?.end ?? 'none';
+  const expectedEnd = expected.endsAt[0];
+  const after = expectedEnd == null ? -1 : actual.visible.lastIndexOf(expected.visible.slice(expectedEnd));
+  const end = actual.endsAt[0];
+  const outside = end != null && after >= 0 && end <= after;
+  console.log(
+    `SPANDIFF session ${caseName} begins=${actual.story.fields.length} ends=${actual.ends} instr=${instr} ` +
+    `pageref=${kept}/${expectedRefs.length} endpara=${endPara} after=${outside ? 'outside' : 'inside'} ` +
+    `markers=${actual.markers.join(',') || '-'}`,
+  );
+  expect(actual.unpaired).toBe(expected.unpaired);
+  expect(actual.story).toEqual(expected.story);
+  expect(actual.tabs).toEqual(expected.tabs);
+  expect(actual.endsAt).toEqual(expected.endsAt);
+  expect(actual.markers).toEqual(expected.markers);
+  expect(actual.markerFields).toEqual(expected.markerFields);
 }
 
 function shiftFields(fields: FieldSpan[], after: number, by: number) {
@@ -287,11 +402,17 @@ async function editAndSave(
   source: string,
   edit: (session: YrsSession) => void,
   fullWrite = false,
+  seeder: 'native' | 'projected' = 'native',
 ): Promise<string> {
   const bytes = await packageBytes(source);
   const session = await createYrsSession();
   try {
-    session.seedFromDocx(bytes);
+    if (seeder === 'native') {
+      session.seedFromDocx(bytes);
+    } else {
+      session.openDocx(bytes, false);
+      documentToYrs(session, await parseDocx(bytes, { preloadFonts: false }));
+    }
     edit(session);
     if (fullWrite) {
       const base = session.materializeDocx();
@@ -397,44 +518,62 @@ const WORD_TOC_EDITS: ReadonlyArray<readonly [string, (toc: WordToc) => WordTocE
   ['E6 edit following body paragraph', () => ({ kind: 'text', story: 'body', marker: BODY_NEXT })],
 ];
 
-async function assertWordTocSave(toc: WordToc, edit: WordTocEdit) {
-  const toXml = (paragraphs: string[]) => {
-    const entries = paragraphs.map(paragraph).join('');
-    return (toc.story === 'body' ? entries : blockSdt(entries)) + paragraph(textRun(BODY_NEXT));
-  };
-  const expected = toc.paragraphs.slice();
-  const xml = await editAndSave(toXml(toc.paragraphs), session => {
-    if (edit.kind === 'text') {
-      insertInText(session, edit.marker, 1, ' EDIT ', edit.story);
-      return;
-    }
-    const { story } = edit;
-    const target = session.paragraphs(story)[edit.index];
-    if (!target) throw new Error(`Missing paragraph ${edit.index} in ${story}`);
-    const { paraId } = target;
-    const result = session.applyEdits({
-      expectVersion: session.version(),
-      steps: [edit.kind === 'insert'
-        ? { op: 'insertParagraphs', target: { story, paraId }, at: 'end', paragraphs: [{ text: INSERTED }] }
-        : { op: 'deleteParagraphs', story, firstParaId: paraId, lastParaId: paraId }],
-    });
-    expect(result.ok).toBe(true);
-    if (edit.kind === 'insert') expected.splice(edit.index + 1, 0, textRun(INSERTED));
-    else expected.splice(edit.index, 1);
-  });
-  let expectedXml = toXml(expected);
+function wordTocXml(toc: WordToc, paragraphs = toc.paragraphs): string {
+  const entries = paragraphs.map(paragraph).join('');
+  return (toc.story === 'body' ? entries : blockSdt(entries)) + paragraph(textRun(BODY_NEXT));
+}
+
+function applyWordTocEdit(session: YrsSession, edit: WordTocEdit): boolean {
+  const { story } = edit;
+  if (edit.kind === 'text') {
+    const match = session.searchText(edit.marker, { caseSensitive: true }).find(hit => hit.story === story);
+    if (!match) return false;
+    const receipt = session.insertText({ story, paraId: match.paraId, offset: match.start + 1 }, ' EDIT ');
+    return receipt.range !== undefined;
+  }
+  const target = session.paragraphs(story)[edit.index];
+  if (!target) return false;
+  const { paraId } = target;
+  return session.applyEdits({
+    expectVersion: session.version(),
+    steps: [edit.kind === 'insert'
+      ? { op: 'insertParagraphs', target: { story, paraId }, at: 'end', paragraphs: [{ text: INSERTED }] }
+      : { op: 'deleteParagraphs', story, firstParaId: paraId, lastParaId: paraId }],
+  }).ok;
+}
+
+function editedWordTocXml(toc: WordToc, edit: WordTocEdit, source: string): string {
   if (edit.kind === 'text') {
     const { marker } = edit;
-    expectedXml = expectedXml.replace(`>${marker}<`, `>${marker[0]} EDIT ${marker.slice(1)}<`);
+    return source.replace(`>${marker}<`, `>${marker[0]} EDIT ${marker.slice(1)}<`);
   }
-  expect(inspect(xml)).toEqual(inspect(expectedXml));
+  const paragraphs = toc.paragraphs.slice();
+  paragraphs.splice(edit.index + (edit.kind === 'insert' ? 1 : 0), edit.kind === 'delete' ? 1 : 0,
+    ...(edit.kind === 'insert' ? [textRun(INSERTED)] : []));
+  return wordTocXml(toc, paragraphs);
+}
+
+async function assertWordTocSave(
+  toc: WordToc,
+  edit: WordTocEdit,
+  caseName: string,
+  seeder: 'native' | 'projected' = 'native',
+) {
+  const source = wordTocXml(toc);
+  const expected = editedWordTocXml(toc, edit, source);
+  let applied = false;
+  const xml = await editAndSave(source, session => {
+    applied = applyWordTocEdit(session, edit);
+  }, false, seeder);
+  assertSpanningSave(xml, expected, caseName);
+  expect(applied).toBe(true);
   if (toc.story === 'body:sdt0') {
-    const control = xml.match(/<w:sdtContent>([\s\S]*?)<\/w:sdtContent>/)?.[1];
-    expect(control === undefined ? null : [...storyParagraphs(control)].length).toBe(expected.length);
+    const paragraphsInControl = (body: string) => {
+      const content = body.match(/<w:sdtContent>([\s\S]*?)<\/w:sdtContent>/)?.[1];
+      return content === undefined ? null : [...storyParagraphs(content)].length;
+    };
+    expect(paragraphsInControl(xml)).toBe(paragraphsInControl(expected));
   }
-  const tabs = (body: string) => Array.from(storyParagraphs(body), ([, content]) =>
-    (content?.match(/<w:tab(?=[\s/>])/g) ?? []).length);
-  expect(tabs(xml)).toEqual(tabs(expectedXml));
 }
 
 const WORD_TOC_CASES = WORD_TOC_SHAPES.flatMap(([shape, build]) => {
@@ -445,9 +584,77 @@ const WORD_TOC_CASES = WORD_TOC_SHAPES.flatMap(([shape, build]) => {
   });
 });
 
-test.each(WORD_TOC_CASES)('%s preserves field boundaries after session save (%s)', async (_shape, _name, toc, edit) => {
-  await assertWordTocSave(toc, edit);
+test.each(WORD_TOC_CASES)('%s preserves field boundaries after session save (%s)', async (shape, name, toc, edit) => {
+  await assertWordTocSave(toc, edit, `${shape.split(' ')[0]} ${name}`);
 }, 30_000);
+
+interface MainState {
+  shape: string;
+  docx: string;
+  update: string;
+}
+
+async function mainState(shape: string): Promise<MainState> {
+  const fixture = Bun.file(new URL('./__fixtures__/spanning-main-states.json', import.meta.url));
+  if (!await fixture.exists()) {
+    throw new Error('Missing __fixtures__/spanning-main-states.json. Generate it on main (504f163ef) with .gen-main-states.test.ts.');
+  }
+  const states = await fixture.json() as MainState[];
+  const state = states.find(entry => entry.shape === shape);
+  if (!state) throw new Error(`Missing ${shape} in spanning-main-states.json`);
+  return state;
+}
+
+const MAIN_STATE_CASES = WORD_TOC_SHAPES.flatMap(([name, build]) => {
+  const shape = name.split(' ')[0]!;
+  const toc = build();
+  return WORD_TOC_EDITS.slice(0, shape === 'W4' ? 3 : 2).map(([label, plan]) => [
+    shape, label.split(' ')[0]!, toc, plan(toc)!,
+  ] as const);
+});
+
+test.each(MAIN_STATE_CASES)("%s opens a session produced by main's code (%s)", async (shape, name, toc, edit) => {
+  const state = await mainState(shape);
+  const source = new Uint8Array(Buffer.from(state.docx, 'base64'));
+  const update = new Uint8Array(Buffer.from(state.update, 'base64'));
+  const expected = editedWordTocXml(toc, edit, await readDocument(source));
+  const session = await createYrsSession();
+  try {
+    session.openDocx(source, false);
+    session.loadState(update);
+    const applied = applyWordTocEdit(session, edit);
+    const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
+    assertSpanningSave(await readDocument(bytes), expected, `mainstate ${shape} ${name}`);
+    expect(applied).toBe(true);
+    if (shape === 'W4' && name === 'E3') {
+      await expectMatchingUnlinkedProjection();
+    }
+  } finally {
+    session.destroy();
+  }
+}, 30_000);
+
+async function expectMatchingUnlinkedProjection(): Promise<void> {
+  const toc = wordToc({ code: 'TOC', unlinked: true });
+  const source = await packageBytes(wordTocXml(toc));
+  const native = await createYrsSession();
+  try {
+    const projected = await createYrsSession();
+    try {
+      native.openDocx(source, true);
+      projected.openDocx(source, false);
+      documentToYrs(projected, await parseDocx(source, { preloadFonts: false }));
+      const firstTitle = (session: YrsSession) => session.storySegments('body').flatMap(segment =>
+        segment.kind === 'text' && segment.attributes.fieldResult ? [segment.text] : []).join('');
+      expect(firstTitle(projected)).toBe(firstTitle(native));
+      expect(firstTitle(native)).toContain('ENTRYONE');
+    } finally {
+      projected.destroy();
+    }
+  } finally {
+    native.destroy();
+  }
+}
 
 test('deleting the last TOC entry closes the field after the last surviving entry', async () => {
   const end = fieldChar('end');
@@ -637,4 +844,122 @@ test('both seeders keep the projection id after a same-paragraph raw end', async
       session.destroy();
     }
   }
+}, 30_000);
+
+test('finding s1 keeps a tracked insertion in the opening unlinked title', async () => {
+  const source = wordTocXml(wordToc({ code: 'TOC', unlinked: true }));
+  const author: YrsAuthor = { name: 'Reviewer', date: '2000-01-01T00:00:00Z' };
+  let revisionId: string | null = null;
+  const xml = await editAndSave(source, session => {
+    const match = session.searchText('ENTRYONE', { caseSensitive: true })[0];
+    if (match) {
+      const at = { story: match.story, paraId: match.paraId, offset: match.start + 1 };
+      revisionId = session.insertText(at, 'ADDED', author).revisionId;
+    }
+  }, true);
+  const insertion = xml.match(/<w:ins\b([^>]*)>[\s\S]*?<\/w:ins>/)?.[0];
+  const id = insertion && attribute(insertion, 'w:id');
+  const expected = source.replace(textRun('ENTRYONE'),
+    textRun('E') + `<w:ins w:id="${id ?? 'missing'}">${textRun('ADDED')}</w:ins>` + textRun('NTRYONE'));
+  assertSpanningSave(xml, expected, 'finding_s1_tracked_unlinked_title');
+  expect(revisionId).not.toBeNull();
+  expect(id).toMatch(/^\d+$/);
+  expect(insertion).toContain('w:author="Reviewer"');
+  expect(insertion).toContain('w:date="2000-01-01T00:00:00Z"');
+}, 30_000);
+
+const LINKED_TITLE_CASES = ['text separator', 'added tab'] as const;
+
+test.each(LINKED_TITLE_CASES.map(kind => [kind] as const))(
+  'finding s4 keeps the linked page reference with a %s',
+  async kind => {
+    const tab = '<w:r><w:tab/></w:r>';
+    const source = kind === 'text separator' ? body('TA').replace(tab, textRun('...')) : body('TA');
+    const added = kind === 'added tab' ? '\t' : 'EDIT';
+    const xml = await editAndSave(source, session => insertInText(session, 'ENTRYONE', 1, added), true);
+    const expected = source.replace(textRun('ENTRYONE'), kind === 'added tab'
+      ? textRun('E') + tab + textRun('NTRYONE')
+      : textRun('EEDITNTRYONE'));
+    assertSpanningSave(xml, expected, `finding_s4_${kind.replace(' ', '_')}`);
+  },
+  30_000,
+);
+
+const UNLINKED_NO_PAGE_CASES = (['native', 'projected'] as const).flatMap(seeder =>
+  (['first title', 'delete continuation'] as const).map(edit => [seeder, edit] as const));
+
+test.each(UNLINKED_NO_PAGE_CASES)('finding s5 %s loader supports %s without level-one pages', async (seeder, edit) => {
+  const toc = wordToc({ code: 'TOC \\n "1-1"', unlinked: true, omitLevelOnePages: true });
+  const plan: WordTocEdit = edit === 'first title'
+    ? { kind: 'text', story: toc.story, marker: toc.titles[0]! }
+    : { kind: 'delete', story: toc.story, index: 1 };
+  await assertWordTocSave(toc, plan, `finding_s5_${seeder}_${edit.replace(' ', '_')}`, seeder);
+}, 30_000);
+
+test('finding n2 deleting the last entry and following paragraph carries the end', async () => {
+  const toc = wordToc({ code: 'TOC', inlineEnd: true, unlinked: true });
+  const source = wordTocXml(toc);
+  const expected = paragraph(toc.paragraphs[0]!) + paragraph(toc.paragraphs[1]! + fieldChar('end'));
+  let applied = false;
+  const xml = await editAndSave(source, session => {
+    const story = 'body';
+    const [, , first, last] = session.paragraphs(story);
+    applied = session.applyEdits({
+      expectVersion: session.version(),
+      steps: [{ op: 'deleteParagraphs', story, firstParaId: first!.paraId, lastParaId: last!.paraId }],
+    }).ok;
+  });
+  assertSpanningSave(xml, expected, 'finding_n2_delete_last_and_following');
+  expect(applied).toBe(true);
+}, 30_000);
+
+test('finding n4 editing a projected title keeps the simple field and page reference', async () => {
+  const simple = `<w:fldSimple w:instr="DATE">${textRun('TODAY')}</w:fldSimple>`;
+  const source = body('TA').replace('</w:hyperlink>', '</w:hyperlink>' + simple);
+  const xml = await editAndSave(source, session => insertInText(session, 'ENTRYONE', 1, ' EDIT '), true);
+  assertSpanningSave(xml, source.replace('ENTRYONE', 'E EDIT NTRYONE'), 'finding_n4_projected_simple_field');
+  expect(xml).toMatch(/<w:fldSimple\b[^>]*w:instr="DATE"[^>]*>[\s\S]*?TODAY[\s\S]*?<\/w:fldSimple>/);
+  expect(xml).toContain('w:anchor="_Toc1"');
+}, 30_000);
+
+test('finding n9 structured export keeps cached title runs in a code-only projection', async () => {
+  const toc = wordToc({ code: 'TOC', unlinked: true });
+  const codeChild = `<w:hyperlink w:anchor="code">${textRun('CODE')}</w:hyperlink>`;
+  toc.paragraphs[0] = toc.paragraphs[0]!.replace(fieldChar('separate'), codeChild + fieldChar('separate'));
+  const source = wordTocXml(toc);
+  let title: string | undefined;
+  const xml = await editAndSave(source, session => {
+    const ops: YrsRawOp[] = [];
+    let index = 0;
+    let owner = false;
+    for (const segment of session.storySegments('body')) {
+      const len = segment.kind === 'text' ? segment.text.length : 1;
+      const mark = segment.attributes.fieldResult as { index: number } | undefined;
+      if (mark && mark.index >= 0) ops.unshift({ op: 'delete', index, len });
+      if (segment.kind === 'embed' && segment.embedKind === 'field' && segment.payload.fieldType === 'TOC') {
+        const projection = segment.payload.resultProjection as { id: number; children: { index: number }[] } | undefined;
+        if (projection?.children.some(child => child.index < 0)) {
+          owner = true;
+          const children = projection.children.filter(child => child.index < 0);
+          ops.unshift({ op: 'setEmbedAttr', index, key: 'resultProjection', value: { ...projection, children } });
+        }
+        break;
+      }
+      index += len;
+    }
+    if (owner) {
+      session.applyRawOps('body', ops);
+      const exported = session.exportStructured({ revisionView: 'accepted' });
+      const first = exported.ok ? exported.content.stories.find(story => story.story === 'body')?.blocks[0] : undefined;
+      const field = first && 'paragraph' in first
+        ? first.paragraph.inlines.find(inline => inline.kind === 'field' && inline.fieldType === 'TOC')
+        : undefined;
+      if (field?.kind === 'field' && field.cachedResult.kind === 'inline') {
+        title = field.cachedResult.inlines.flatMap(inline => inline.kind === 'text' ? [inline.text] : []).join('');
+      }
+    }
+    insertInText(session, ENTRY_TWO, 1, ' EDIT ');
+  }, true);
+  assertSpanningSave(xml, source.replace(ENTRY_TWO, 'E EDIT NTRYTWO'), 'finding_n9_code_only_projection');
+  expect(title).toContain('ENTRYONE');
 }, 30_000);
