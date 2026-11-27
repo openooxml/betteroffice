@@ -97,7 +97,7 @@ function npm(args, options = {}) {
 
 function npmView(spec, field) {
   try {
-    const out = npm(['view', spec, field, '--json']).trim();
+    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     return out ? JSON.parse(out) : undefined;
   } catch {
     return undefined;
