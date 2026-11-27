@@ -120,6 +120,7 @@ dependencies = [
  "foldhash",
  "js-sys",
  "libm",
+ "memchr",
  "ryu-js",
  "serde",
  "serde_json",
