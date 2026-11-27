@@ -107,11 +107,43 @@ for (const [name, lines, point, position] of [
   });
 }
 
+test('overflowing table cell text past its cell selects the table', () => {
+  const source = list('ab', [line(0, 2, 60)]);
+  const cell = source.primitives[0] as TextBoxPrimitive;
+  cell.h = 20;
+  cell.overflow = true;
+  source.primitives = [{ kind: 'table', objectId: 2, shapeId: cell.shapeId,
+    x: 0, y: 0, w: 100, h: 100, name: 'Table', label: '', primitives: [cell] }];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 10, y: 70 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: cell.shapeId! });
+  }
+});
+
 test('top-level text box padding hit keeps shape selection', () => {
   const source = list('ab', [line(0, 2, 20)]);
   for (const index of [indexGeometry, indexHitGeometry]) {
     expect(hitGeometry(index(source), { x: 20, y: 10 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
     expect(hitGeometry(index(source), { x: 20, y: 50 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+  }
+});
+
+test('overflowing text is hittable past its frame, over a shape beneath it', () => {
+  const source = list('alpha beta\nx\nalpha beta');
+  const box = source.primitives[0] as TextBoxPrimitive;
+  box.h = 20;
+  source.primitives = [{ kind: 'shape', objectId: 2, shapeId: 'below', x: 0, y: 30, w: 100, h: 40,
+    name: 'Below', geometry: 'rect', path: [] }, box];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1)).toMatchObject({ kind: 'shape', shapeId: 'below' });
+    box.overflow = true;
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1))
+      .toMatchObject({ kind: 'text', shapeId: 'box', position: 16 });
+    expect(hitGeometry(index(source), { x: 2, y: 30 }, undefined, 1)).toMatchObject({ kind: 'text', position: 11 });
+    expect(hitGeometry(index(source), { x: 50, y: 18 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+    box.lines[2] = line(13, 23, 50);
+    expect(hitGeometry(index(source), { x: 31, y: 47 }, undefined, 1)).toMatchObject({ kind: 'text', position: 16 });
+    box.lines[2] = line(13, 23, 40);
+    delete box.overflow;
   }
 });
 
