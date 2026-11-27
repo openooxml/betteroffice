@@ -195,6 +195,11 @@ test('a diagonal caret at half zoom skips pixels touched only at their corners',
   expect(paintedCaretInk(stripe.canvas, list, { x: 201, y: 201 }, { x: 229, y: 229 }, stripe.read)).toBe('#ffffff');
 });
 
+test('rounding does not let corner-touched pixels into a diagonal caret sample', () => {
+  const stripe = painted(480, 270, (x, y) => x === y || Math.max(x, y) <= 53 ? [16, 16, 16, 255] : [255, 255, 255, 255]);
+  expect(paintedCaretInk(stripe.canvas, list, { x: 100.02, y: 100.02 }, { x: 140.04, y: 140.04 }, stripe.read)).toBe('#ffffff');
+});
+
 test('an upright caret on a pixel edge at half zoom samples the pixels it touches', () => {
   const edge = painted(480, 270, (x) => x === 99 || x === 100 ? [16, 16, 16, 255] : [255, 255, 255, 255]);
   expect(paintedCaretInk(edge.canvas, list, { x: 200, y: 100 }, { x: 200, y: 140 }, edge.read)).toBe('#ffffff');

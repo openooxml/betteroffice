@@ -157,6 +157,8 @@ const readThroughScratch: PixelRead = (source, left, top, width, height) => {
   }
 };
 
+const EDGE = 1e-6;
+
 function ink(shade: number): string {
   return 1.05 / (shade + 0.05) > (shade + 0.05) / 0.05 ? WHITE : BLACK;
 }
@@ -205,14 +207,16 @@ export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
       if (data[index + 3] !== 255) continue;
       const cx = left + column + 0.5;
       const cy = top + row + 0.5;
-      const box = Math.max(minX - cx, cx - maxX, minY - cy, cy - maxY);
-      const cross = Math.abs((cx - ax) * pixelDy - (cy - ay) * pixelDx);
-      const shade = luminance([data[index]!, data[index + 1]!, data[index + 2]!]);
-      const x = (cx - ax) / sx;
-      const y = (cy - ay) / sy;
-      const t = lengthSquared ? Math.min(1, Math.max(0, (x * dx + y * dy) / lengthSquared)) : 0;
-      if ((box < 0.5 && cross < squareLimit) || Math.hypot(x - t * dx, y - t * dy) <= 0.5) shades.push(shade);
-      else if (box <= 0.5 && cross <= squareLimit) touched.push(shade);
+      const box = Math.max(minX - cx, cx - maxX, minY - cy, cy - maxY) - 0.5;
+      const cross = Math.abs((cx - ax) * pixelDy - (cy - ay) * pixelDx) - squareLimit;
+      let into: number[] | null = box < -EDGE && cross < -EDGE * pixelLength ? shades : null;
+      if (!into) {
+        const x = (cx - ax) / sx;
+        const y = (cy - ay) / sy;
+        const t = lengthSquared ? Math.min(1, Math.max(0, (x * dx + y * dy) / lengthSquared)) : 0;
+        into = Math.hypot(x - t * dx, y - t * dy) <= 0.5 ? shades : box <= EDGE && cross <= EDGE * pixelLength ? touched : null;
+      }
+      into?.push(luminance([data[index]!, data[index + 1]!, data[index + 2]!]));
     }
   }
   if (!shades.length) shades.push(...touched);
