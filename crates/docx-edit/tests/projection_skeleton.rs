@@ -109,6 +109,53 @@ fn projects_plain_paragraphs_in_session_order() {
 }
 
 #[test]
+fn projection_after_edit_matches_freshly_opened_copy() {
+    let bytes = package_with_parts(
+        r#"<w:p w14:paraId="00000011"><w:r><w:rPr><w:i/></w:rPr><w:t>AB</w:t></w:r></w:p>"#,
+        "",
+        "",
+        &[],
+    );
+    let doc = EditingDoc::new(41);
+    let fresh = EditingDoc::new(41);
+    seed_from_docx(&doc, &bytes).unwrap();
+    let before = doc.project_document_json("{}").unwrap();
+    seed_from_docx(&fresh, &bytes).unwrap();
+
+    let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
+    for copy in [&doc, &fresh] {
+        copy.insert_text(&ctx, Position::new("body", 1), "!", FormatPolicy::Inherit)
+            .unwrap();
+    }
+
+    let after = doc.project_document_json("{}").unwrap();
+    let fresh_after = fresh.project_document_json("{}").unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after, fresh_after);
+}
+
+#[test]
+fn projection_uses_new_source_after_reopening() {
+    let doc = EditingDoc::new(41);
+    let input = ProjectionInput::default();
+    for (label, width) in [("First", 10_800), ("Second", 11_906)] {
+        let body_xml = format!(
+            r#"<w:p w14:paraId="00000011"><w:r><w:t>{label}</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="{width}" w:h="15840"/></w:sectPr>"#,
+        );
+        let bytes = package_with_parts(&body_xml, "", "", &[]);
+        seed_from_docx(&doc, &bytes).unwrap();
+
+        let output = doc.project_document(&input).unwrap();
+        assert_eq!(text(paragraph(&body(&output)[0])), label);
+        let section = output.document.package.document.final_section_properties;
+        assert_eq!(
+            section.and_then(|section| section.page_width),
+            Some(f64::from(width))
+        );
+    }
+}
+
+#[test]
 fn restores_authored_run_properties_and_boundaries() {
     let doc = seeded(concat!(
         r#"<w:p><w:r><w:rPr><w:b w:val="0"/><w:i/><w:sz w:val="26"/><w:rFonts w:ascii="Arial" w:eastAsia="Yu Gothic"/><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr><w:t>First</w:t></w:r>"#,
