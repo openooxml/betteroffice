@@ -1739,8 +1739,7 @@ fn finding_s6_whole_save_matches_unlinked_entries_by_pageref() -> Result<(), Box
 }
 
 #[test]
-fn finding_n2_deleting_the_closer_keeps_the_end_before_trailing_blocks()
--> Result<(), Box<dyn Error>> {
+fn deleted_closer_carries_the_end_before_trailing_bookmarks() -> Result<(), Box<dyn Error>> {
     let mut toc = word_toc_w4();
     let end = field_char("end");
     toc.paragraphs.truncate(3);
@@ -1773,7 +1772,7 @@ fn finding_n2_deleting_the_closer_keeps_the_end_before_trailing_blocks()
     assert_spanning_save(
         &document_xml(&saved)?,
         &expected,
-        "finding_n2_trailing_blocks",
+        "deleted_closing_entry_before_trailing_bookmarks",
     );
     Ok(())
 }

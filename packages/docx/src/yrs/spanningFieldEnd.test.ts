@@ -605,15 +605,25 @@ async function mainState(shape: string): Promise<MainState> {
   return state;
 }
 
+const STORED_UNLINKED_NAMES = [
+  ['a stored session keeps the comment after the first title', 'stored_unlinked_comment_after_first_title'],
+  ['a stored session keeps the comment after editing the last title', 'stored_unlinked_comment_after_last_title_edit'],
+  ['a stored session keeps the comment after editing the middle title', 'stored_unlinked_comment_after_middle_title_edit'],
+] as const;
+
 const MAIN_STATE_CASES = WORD_TOC_SHAPES.flatMap(([name, build]) => {
   const shape = name.split(' ')[0]!;
   const toc = build();
-  return WORD_TOC_EDITS.slice(0, shape === 'W4' ? 3 : 2).map(([label, plan]) => [
-    shape, label.split(' ')[0]!, toc, plan(toc)!,
-  ] as const);
+  return WORD_TOC_EDITS.slice(0, shape === 'W4' ? 3 : 2).map(([label, plan], index) => {
+    const editName = label.split(' ')[0]!;
+    const [title, caseName] = (shape === 'W4' ? STORED_UNLINKED_NAMES[index] : undefined) ?? [
+      `${shape} opens a session produced by main's code (${editName})`, `mainstate ${shape} ${editName}`,
+    ];
+    return [title, caseName, shape, editName, toc, plan(toc)!] as const;
+  });
 });
 
-test.each(MAIN_STATE_CASES)("%s opens a session produced by main's code (%s)", async (shape, name, toc, edit) => {
+test.each(MAIN_STATE_CASES)('%s', async (_title, caseName, shape, name, toc, edit) => {
   const state = await mainState(shape);
   const source = new Uint8Array(Buffer.from(state.docx, 'base64'));
   const update = new Uint8Array(Buffer.from(state.update, 'base64'));
@@ -624,7 +634,7 @@ test.each(MAIN_STATE_CASES)("%s opens a session produced by main's code (%s)", a
     session.loadState(update);
     const applied = applyWordTocEdit(session, edit);
     const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
-    assertSpanningSave(await readDocument(bytes), expected, `mainstate ${shape} ${name}`);
+    assertSpanningSave(await readDocument(bytes), expected, caseName);
     expect(applied).toBe(true);
     if (shape === 'W4' && name === 'E3') {
       await expectMatchingUnlinkedProjection();
@@ -896,7 +906,7 @@ test.each(UNLINKED_NO_PAGE_CASES)('finding s5 %s loader supports %s without leve
   await assertWordTocSave(toc, plan, `finding_s5_${seeder}_${edit.replace(' ', '_')}`, seeder);
 }, 30_000);
 
-test('finding n2 deleting the last entry and following paragraph carries the end', async () => {
+test('deleting the last entry and following paragraph closes the TOC in the last surviving entry', async () => {
   const toc = wordToc({ code: 'TOC', inlineEnd: true, unlinked: true });
   const source = wordTocXml(toc);
   const expected = paragraph(toc.paragraphs[0]!) + paragraph(toc.paragraphs[1]! + fieldChar('end'));
@@ -909,7 +919,7 @@ test('finding n2 deleting the last entry and following paragraph carries the end
       steps: [{ op: 'deleteParagraphs', story, firstParaId: first!.paraId, lastParaId: last!.paraId }],
     }).ok;
   });
-  assertSpanningSave(xml, expected, 'finding_n2_delete_last_and_following');
+  assertSpanningSave(xml, expected, 'delete_last_entry_and_following_paragraph_carries_end');
   expect(applied).toBe(true);
 }, 30_000);
 
