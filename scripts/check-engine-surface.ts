@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { docxWasmOnly } from "../bindings/native-extras";
 
 export interface ParamInfo {
   type: string;
@@ -41,7 +42,7 @@ export const FORMATS: Record<string, FormatConfig> = {
   docx: {
     wasm: "packages/docx/src/wasm/generated/edit/docx_edit.d.ts",
     native: "bindings/docx-native/index.d.ts",
-    pending: [],
+    pending: Object.keys(docxWasmOnly).map((path) => path.replace(".prototype.", ".")),
   },
   "docx-parse": {
     wasm: "packages/docx/src/wasm/generated/parse/docx_parse.d.ts",

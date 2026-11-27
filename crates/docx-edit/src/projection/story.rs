@@ -1,0 +1,946 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
+use std::sync::Arc;
+
+use docx_parse::BlockContent;
+use docx_parse::inline::{InlineNode, Run, RunContent};
+use docx_parse::paragraph::{Paragraph, ParagraphContent};
+use docx_parse::s9::S9DocumentBodyWire;
+use yrs::Any;
+
+use super::{
+    Attrs, HOOKS, Lowered, LoweringInput, ProjectionContext, ProjectionError, ProjectionFamily,
+    ProjectionHooks, StoryPosition, StoryProjection, StoryState, attr_string, embed_hook,
+    fields_dispatch, markers_dispatch, paragraph, runs,
+};
+use crate::{ParagraphProperties, SegmentContent, StorySegment};
+
+struct PlacedSegment {
+    offset: usize,
+    segment: StorySegment,
+    projected: Option<Vec<ParagraphContent>>,
+}
+
+impl StoryPosition<'_> {
+    pub(super) fn defer_here(&mut self, family: ProjectionFamily, kind: &str) {
+        self.result
+            .defer(family, kind, self.id, Some(self.state.paragraph_index));
+    }
+}
+
+pub(super) fn project(
+    context: &mut ProjectionContext<'_, '_>,
+    id: &str,
+    state: StoryState,
+) -> Result<StoryProjection, ProjectionError> {
+    let mut story = StoryPosition {
+        id,
+        state,
+        ..StoryPosition::default()
+    };
+    story.result.story_id = id.to_owned();
+    let read_error = |error| ProjectionError::StoryRead {
+        story_id: id.to_owned(),
+        error,
+    };
+    let segments = context
+        .doc
+        .story_segments_in(context.txn, id)
+        .map_err(read_error)?;
+    let saved_ids = context
+        .doc
+        .story_paragraph_ids_in(context.txn, id, context.source_index)
+        .map_err(read_error)?;
+    for hook in HOOKS {
+        hook.setup_story(context, &mut story, &segments)?;
+    }
+    let relocated_breaks = relocated_breaks(context, id, &segments);
+    let segments = tabs_as_embeds(segments);
+    let mut items = Vec::new();
+    let mut raw_blocks = RawBlocks::new(&context.source.blocks);
+    let mut deferred_stories = BTreeSet::from([id.to_owned()]);
+    for segment in segments {
+        match &segment.content {
+            SegmentContent::Text(text) => {
+                let offset = story.state.offset;
+                story.state.offset += text.encode_utf16().count();
+                items.push(PlacedSegment {
+                    offset,
+                    segment,
+                    projected: None,
+                });
+            }
+            SegmentContent::Pilcrow(properties) => {
+                let saved = saved_ids
+                    .get(story.state.paragraph_index)
+                    .cloned()
+                    .flatten();
+                let source = context.source.paragraphs.get(&properties.para_id).cloned();
+                if let Some(source) = &source {
+                    raw_blocks.before_paragraph(source, &mut story);
+                }
+                finish_paragraph(
+                    context,
+                    &mut story,
+                    &items,
+                    Some(properties),
+                    saved,
+                    source.as_deref(),
+                )?;
+                items.clear();
+                story.state.paragraph_index += 1;
+                story.state.offset += 1;
+                story.state.paragraph_start = story.state.offset;
+            }
+            SegmentContent::OtherEmbed { kind, payload } if container(kind, payload) => {
+                let source_id = container_id(&mut story, kind, payload);
+                if let Some(id) = &source_id
+                    && let Some(block) = context.source.containers.get(id)
+                {
+                    raw_blocks.before_block(block, &mut story);
+                }
+                let hook = embed_hook(kind, payload);
+                let mut lowered = hook.lower(
+                    context,
+                    &mut story,
+                    LoweringInput {
+                        kind,
+                        payload,
+                        segment: &segment,
+                    },
+                )?;
+                if matches!(lowered, Lowered::Deferred) {
+                    let source = source_id.and_then(|id| context.source.containers.get(&id));
+                    lowered = retain_container(&mut story, hook.family(), kind, source);
+                    defer_descendant_containers(
+                        context,
+                        &mut story.result,
+                        kind,
+                        payload,
+                        &mut deferred_stories,
+                    )?;
+                }
+                for hook in HOOKS {
+                    hook.wrap(context, &mut story, &segment, &mut lowered)?;
+                }
+                match lowered {
+                    Lowered::Blocks(blocks) => story.result.append(blocks),
+                    Lowered::Inline(inline) => {
+                        items.push(PlacedSegment {
+                            offset: story.state.offset,
+                            segment,
+                            projected: Some(inline),
+                        });
+                    }
+                    Lowered::Deferred => {}
+                }
+                story.state.offset += 1;
+            }
+            SegmentContent::OtherEmbed { kind, .. } => {
+                let offset = story.state.offset;
+                story.state.offset += 1;
+                if matches!(kind.as_str(), "pageBreak" | "columnBreak")
+                    && let Ok(offset) = u32::try_from(offset)
+                    && let Some(&owner) = relocated_breaks.get(&offset)
+                {
+                    story
+                        .result
+                        .defer(ProjectionFamily::Fields, kind, id, Some(owner));
+                    continue;
+                }
+                items.push(PlacedSegment {
+                    offset,
+                    segment,
+                    projected: None,
+                });
+            }
+        }
+    }
+    if !items.is_empty() {
+        finish_paragraph(context, &mut story, &items, None, None, None)?;
+    }
+    raw_blocks.finish(&mut story);
+    for hook in HOOKS {
+        hook.finish_story(context, &mut story)?;
+    }
+    Ok(story.result)
+}
+
+fn relocated_breaks(
+    context: &ProjectionContext<'_, '_>,
+    id: &str,
+    segments: &[StorySegment],
+) -> HashMap<u32, usize> {
+    let Some(provenance) = context.source_provenance else {
+        return HashMap::new();
+    };
+    let Some((_, relocated)) = provenance.by_story.get(id) else {
+        return HashMap::new();
+    };
+    if relocated.is_empty() {
+        return HashMap::new();
+    }
+    let paragraphs: HashMap<_, _> = segments
+        .iter()
+        .filter_map(|segment| match &segment.content {
+            SegmentContent::Pilcrow(properties) => Some(properties.para_id.as_str()),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect();
+    let mut resolved = HashMap::new();
+    relocated
+        .iter()
+        .filter_map(|&index| {
+            let relocated = &provenance.relocated[index];
+            let paragraph = *paragraphs.get(relocated.para_id.as_str())?;
+            Some((
+                relocated.pin.resolve(context.txn, &mut resolved)?,
+                paragraph,
+            ))
+        })
+        .collect()
+}
+
+fn tabs_as_embeds(segments: Vec<StorySegment>) -> Vec<StorySegment> {
+    let mut expanded = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if let SegmentContent::Text(text) = &segment.content
+            && text.contains('\t')
+        {
+            for (index, part) in text.split('\t').enumerate() {
+                if index != 0 {
+                    expanded.push(StorySegment {
+                        content: SegmentContent::OtherEmbed {
+                            kind: "tab".to_owned(),
+                            payload: Attrs::new(),
+                        },
+                        attributes: segment.attributes.clone(),
+                    });
+                }
+                if !part.is_empty() {
+                    expanded.push(StorySegment {
+                        content: SegmentContent::Text(part.to_owned()),
+                        attributes: segment.attributes.clone(),
+                    });
+                }
+            }
+        } else {
+            expanded.push(segment);
+        }
+    }
+    expanded
+}
+
+fn container(kind: &str, payload: &Attrs) -> bool {
+    (crate::segments::is_block_embed(kind) && matches!(kind, "table" | "blockSdt"))
+        || (kind == "opaque" && matches!(opaque_type(payload), Some("blockSdt" | "pageBreak")))
+}
+
+fn retain_container(
+    story: &mut StoryPosition<'_>,
+    family: ProjectionFamily,
+    kind: &str,
+    source: Option<&BlockContent>,
+) -> Lowered {
+    story.defer_here(family, kind);
+    match source {
+        Some(source) => Lowered::Blocks(StoryProjection {
+            blocks: vec![source.clone()],
+            ..StoryProjection::default()
+        }),
+        None => Lowered::Deferred,
+    }
+}
+
+pub(super) fn opaque_type(payload: &Attrs) -> Option<&str> {
+    let Any::Map(blob) = payload.get("blob")? else {
+        return None;
+    };
+    crate::read_types::payload_str(blob.get("type"))
+}
+
+fn container_id(story: &mut StoryPosition<'_>, kind: &str, payload: &Attrs) -> Option<String> {
+    match kind {
+        "table" => {
+            let index = story.state.table_index;
+            story.state.table_index += 1;
+            let cell = first_table_cell(payload);
+            if let Some(cell) = cell {
+                crate::structured::source::cell_table(cell).map(str::to_owned)
+            } else {
+                Some(format!("{}:t{index}", story.id))
+            }
+        }
+        "blockSdt" => {
+            story.state.sdt_index += 1;
+            attr_string(payload, "story").map(crate::read_types::block_control_id)
+        }
+        "opaque" if opaque_type(payload) == Some("blockSdt") => {
+            let index = story.state.sdt_index;
+            story.state.sdt_index += 1;
+            Some(format!("{}:sdt{index}", story.id))
+        }
+        _ => None,
+    }
+}
+
+fn first_table_cell(payload: &Attrs) -> Option<&str> {
+    table_cell_stories(payload).next()
+}
+
+fn table_cell_stories(payload: &Attrs) -> impl DoubleEndedIterator<Item = &str> {
+    fn array(value: Option<&Any>) -> &[Any] {
+        match value {
+            Some(Any::Array(values)) => values,
+            _ => &[],
+        }
+    }
+
+    array(payload.get("rows"))
+        .iter()
+        .flat_map(|row| {
+            if let Any::Map(row) = row {
+                array(row.get("cells"))
+            } else {
+                &[]
+            }
+        })
+        .filter_map(|cell| match cell {
+            Any::Map(cell) => crate::read_types::payload_str(cell.get("story")),
+            _ => None,
+        })
+}
+
+fn push_child_stories(pending: &mut Vec<String>, kind: &str, payload: &Attrs) {
+    if kind == "table" {
+        pending.extend(table_cell_stories(payload).rev().map(str::to_owned));
+    } else if kind == "blockSdt"
+        && let Some(id) = attr_string(payload, "story")
+    {
+        pending.push(id.to_owned());
+    }
+}
+
+fn defer_descendant_containers(
+    context: &ProjectionContext<'_, '_>,
+    result: &mut StoryProjection,
+    kind: &str,
+    payload: &Attrs,
+    visited: &mut BTreeSet<String>,
+) -> Result<(), ProjectionError> {
+    let mut pending = Vec::new();
+    push_child_stories(&mut pending, kind, payload);
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        let segments = context
+            .doc
+            .story_segments_in(context.txn, &id)
+            .map_err(|error| ProjectionError::StoryRead {
+                story_id: id.clone(),
+                error,
+            })?;
+        let mut paragraph = 0;
+        for segment in segments {
+            match segment.content {
+                SegmentContent::Pilcrow(_) => paragraph += 1,
+                SegmentContent::OtherEmbed { kind, payload } if container(&kind, &payload) => {
+                    let family = embed_hook(&kind, &payload).family();
+                    result.defer(family, &kind, &id, Some(paragraph));
+                    push_child_stories(&mut pending, &kind, &payload);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finish_paragraph(
+    context: &mut ProjectionContext<'_, '_>,
+    story: &mut StoryPosition<'_>,
+    items: &[PlacedSegment],
+    properties: Option<&ParagraphProperties>,
+    saved_id: Option<String>,
+    source: Option<&Paragraph>,
+) -> Result<(), ProjectionError> {
+    let empty = Attrs::new();
+    let attrs = properties.map_or(&empty, |properties| &properties.values);
+    story.state.attributes.clone_from(attrs);
+    let first_deferral = story.result.deferred.len();
+    let mut content = lower_items(context, story, attrs, items, source)?;
+    if properties.is_none() && content.is_empty() {
+        for deferral in &mut story.result.deferred[first_deferral..] {
+            deferral.paragraph = matches!(deferral.kind.as_str(), "pageBreak" | "columnBreak")
+                .then(|| story.state.paragraph_index.saturating_sub(1));
+        }
+        return Ok(());
+    }
+    if let Some(source) = source {
+        carry_side_markers(story, &mut content, &source.content);
+    }
+    let formatting = properties
+        .map(|properties| {
+            paragraph::formatting(context, story.id, &story.state, properties, source)
+        })
+        .transpose()?
+        .flatten();
+    let mut paragraph = paragraph::new(source, saved_id, formatting, content);
+    for hook in HOOKS {
+        hook.finish_paragraph(context, story, properties, source, &mut paragraph)?;
+    }
+    story
+        .result
+        .paragraph_session_keys
+        .push(properties.map_or_else(String::new, |props| props.para_id.clone()));
+    story
+        .result
+        .blocks
+        .push(BlockContent::Paragraph(Arc::new(paragraph)));
+    Ok(())
+}
+
+fn lower_items(
+    context: &mut ProjectionContext<'_, '_>,
+    story: &mut StoryPosition<'_>,
+    attrs: &Attrs,
+    items: &[PlacedSegment],
+    source: Option<&Paragraph>,
+) -> Result<Vec<ParagraphContent>, ProjectionError> {
+    let authored = runs::AuthoredRuns::new(source, attrs)?;
+    fields_dispatch::defer_boundary_content(story, attrs, &authored);
+    let plain = |item: &PlacedSegment| {
+        item.projected.is_none()
+            && matches!(item.segment.content, SegmentContent::Text(_))
+            && !fields_dispatch::MARKS
+                .iter()
+                .chain(markers_dispatch::MARKS)
+                .any(|kind| has_mark(&item.segment, kind))
+    };
+    if items.iter().all(plain) {
+        return runs::lower_plain(context, story, attrs, &text_items(items), &authored, None);
+    }
+
+    let mut offsets = Vec::with_capacity(items.len() + 1);
+    let mut live = Vec::new();
+    for item in items {
+        offsets.push(live.len());
+        match &item.segment.content {
+            SegmentContent::Text(text) => live.extend(text.chars()),
+            SegmentContent::OtherEmbed { kind, .. } if kind == "tab" => live.push('\t'),
+            SegmentContent::OtherEmbed { kind, .. }
+                if matches!(kind.as_str(), "pageBreak" | "columnBreak") => {}
+            SegmentContent::OtherEmbed { .. } => live.push('\u{fffc}'),
+            SegmentContent::Pilcrow(_) => unreachable!("pilcrows close segments"),
+        }
+    }
+    offsets.push(live.len());
+    let mapped = runs::MappedSourceRuns::new(&authored, live);
+    let live_range = |start: usize, end: usize| offsets[start]..offsets[end];
+    let mut fallback = SourceInlines::new(source);
+    let mut content = Vec::new();
+    let paragraph_end = story.state.offset;
+    let mut index = 0;
+    while index < items.len() {
+        let placed = &items[index];
+        let item = &placed.segment;
+        story.state.offset = placed.offset;
+        if let Some(projected) = &placed.projected {
+            content.extend_from_slice(projected);
+            index += 1;
+            continue;
+        }
+        if plain(placed) {
+            let end = items[index..]
+                .iter()
+                .position(|item| !plain(item))
+                .map_or(items.len(), |count| index + count);
+            let text = text_items(&items[index..end]);
+            content.extend(runs::lower_plain(
+                context,
+                story,
+                attrs,
+                &text,
+                &authored,
+                Some(mapped.slice(live_range(index, end))),
+            )?);
+            index = end;
+            continue;
+        }
+        let mut lowered = match &item.content {
+            SegmentContent::Text(text) => {
+                let mark = runs::attributes(&item.attributes)?;
+                let kind = ["del", "ins", "hyperlink", "rPrChange"]
+                    .into_iter()
+                    .find(|kind| has_mark(item, kind));
+                let mut lowered = Lowered::Deferred;
+                let mut deferred_marks = Vec::new();
+                for mark in fields_dispatch::MARKS
+                    .iter()
+                    .copied()
+                    .filter(|mark| has_mark(item, mark))
+                {
+                    lowered = fields_dispatch::Hooks.lower(
+                        context,
+                        story,
+                        LoweringInput {
+                            kind: mark,
+                            payload: &item.attributes,
+                            segment: item,
+                        },
+                    )?;
+                    if matches!(lowered, Lowered::Deferred) {
+                        deferred_marks.push((fields_dispatch::Hooks.family(), mark));
+                    } else {
+                        break;
+                    }
+                }
+                deferred_marks.extend(
+                    markers_dispatch::MARKS
+                        .iter()
+                        .copied()
+                        .filter(|mark| has_mark(item, mark))
+                        .map(|mark| (markers_dispatch::Hooks.family(), mark)),
+                );
+                if matches!(lowered, Lowered::Deferred) {
+                    let (&first, rest) = deferred_marks
+                        .split_first()
+                        .expect("deferred text has at least one mark");
+                    let deferred = DeferredMarks { first, rest };
+                    lowered = if let Some(source) = fallback.marked(story, &deferred, kind, text) {
+                        Lowered::Inline(vec![source])
+                    } else {
+                        let mut slices = deferred_text_slice(
+                            story,
+                            &deferred,
+                            &mapped,
+                            live_range(index, index + 1),
+                        );
+                        if slices.is_empty() {
+                            slices.push((text.clone(), None));
+                        }
+                        let runs = slices
+                            .into_iter()
+                            .map(|(text, source)| {
+                                runs::make_run(context, &story.state, attrs, &text, &mark, source)
+                                    .map(runs::inline)
+                            })
+                            .collect::<Result<_, _>>()?;
+                        Lowered::Inline(runs)
+                    };
+                } else {
+                    for (family, kind) in deferred_marks {
+                        story.defer_here(family, kind);
+                    }
+                }
+                lowered
+            }
+            SegmentContent::OtherEmbed { kind, payload } => {
+                let hook = embed_hook(kind, payload);
+                match hook.lower(
+                    context,
+                    story,
+                    LoweringInput {
+                        kind,
+                        payload,
+                        segment: item,
+                    },
+                )? {
+                    Lowered::Deferred => {
+                        let mut source = fallback.take(story, hook.family(), kind, payload);
+                        if kind == "noteRef"
+                            && let Some(ParagraphContent::Inline(InlineNode::Run(run))) =
+                                &mut source
+                        {
+                            run.formatting = None;
+                        }
+                        Lowered::Inline(source.into_iter().collect())
+                    }
+                    lowered => lowered,
+                }
+            }
+            SegmentContent::Pilcrow(_) => unreachable!("pilcrows close segments"),
+        };
+        for hook in HOOKS {
+            hook.wrap(context, story, item, &mut lowered)?;
+        }
+        match lowered {
+            Lowered::Inline(mut inline) => content.append(&mut inline),
+            Lowered::Blocks(blocks) => story.result.append(blocks),
+            Lowered::Deferred => {}
+        }
+        index += 1;
+    }
+    story.state.offset = paragraph_end;
+    Ok(content)
+}
+
+struct DeferredMarks<'a> {
+    first: (ProjectionFamily, &'a str),
+    rest: &'a [(ProjectionFamily, &'a str)],
+}
+
+impl DeferredMarks<'_> {
+    fn record(&self, story: &mut StoryPosition<'_>) {
+        for (family, kind) in std::iter::once(self.first).chain(self.rest.iter().copied()) {
+            story.defer_here(family, kind);
+        }
+    }
+}
+
+fn deferred_text_slice<'a>(
+    story: &mut StoryPosition<'_>,
+    marks: &DeferredMarks<'_>,
+    mapped: &runs::MappedSourceRuns<'a>,
+    range: Range<usize>,
+) -> Vec<runs::SourceRun<'a>> {
+    marks.record(story);
+    mapped.slice(range)
+}
+
+fn text_items(items: &[PlacedSegment]) -> Vec<(&str, &Attrs)> {
+    items
+        .iter()
+        .map(|placed| &placed.segment)
+        .filter_map(|segment| match &segment.content {
+            SegmentContent::Text(text) => Some((text.as_str(), &segment.attributes)),
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) fn has_mark(item: &StorySegment, key: &str) -> bool {
+    item.attributes
+        .get(key)
+        .is_some_and(|value| !matches!(value, Any::Null | Any::Undefined | Any::Bool(false)))
+}
+
+#[derive(Default)]
+struct RawBlocks {
+    before: Vec<(BlockContent, Vec<BlockContent>)>,
+    trailing: Vec<BlockContent>,
+}
+
+impl RawBlocks {
+    fn new(blocks: &[BlockContent]) -> Self {
+        let mut result = Self::default();
+        for block in blocks {
+            if matches!(block, BlockContent::RawXml(_)) {
+                result.trailing.push(block.clone());
+            } else if !result.trailing.is_empty() {
+                result
+                    .before
+                    .push((block.clone(), std::mem::take(&mut result.trailing)));
+            }
+        }
+        result
+    }
+
+    fn before_paragraph(&mut self, source: &Paragraph, story: &mut StoryPosition<'_>) {
+        for (block, raw) in &mut self.before {
+            if matches!(block, BlockContent::Paragraph(paragraph) if std::ptr::eq(paragraph.as_ref(), source))
+            {
+                Self::retain(Some(story.state.paragraph_index), story, raw.drain(..));
+                break;
+            }
+        }
+    }
+
+    fn before_block(&mut self, source: &BlockContent, story: &mut StoryPosition<'_>) {
+        for (block, raw) in &mut self.before {
+            let same = match (&*block, source) {
+                (BlockContent::Table(left), BlockContent::Table(right)) => Arc::ptr_eq(left, right),
+                (BlockContent::BlockSdt(left), BlockContent::BlockSdt(right)) => {
+                    Arc::ptr_eq(left, right)
+                }
+                _ => false,
+            };
+            if same {
+                Self::retain(Some(story.state.paragraph_index), story, raw.drain(..));
+                break;
+            }
+        }
+    }
+
+    fn finish(self, story: &mut StoryPosition<'_>) {
+        Self::retain(
+            None,
+            story,
+            self.before
+                .into_iter()
+                .flat_map(|(_, raw)| raw)
+                .chain(self.trailing),
+        );
+    }
+
+    fn retain(
+        paragraph: Option<usize>,
+        story: &mut StoryPosition<'_>,
+        raw: impl IntoIterator<Item = BlockContent>,
+    ) {
+        for block in raw {
+            let kind = match &block {
+                BlockContent::RawXml(raw)
+                    if matches!(
+                        crate::structured::source::element_name(&raw.xml).as_str(),
+                        "w:bookmarkStart" | "w:bookmarkEnd"
+                    ) =>
+                {
+                    "bookmarks"
+                }
+                _ => "rawBlock",
+            };
+            story
+                .result
+                .defer(ProjectionFamily::Markers, kind, story.id, paragraph);
+            story.result.blocks.push(block);
+        }
+    }
+}
+
+struct SourceInlines {
+    items: BTreeMap<&'static str, Vec<Option<ParagraphContent>>>,
+}
+
+impl SourceInlines {
+    fn new(source: Option<&Paragraph>) -> Self {
+        let mut items: BTreeMap<&'static str, Vec<Option<ParagraphContent>>> = BTreeMap::new();
+        for content in source.into_iter().flat_map(|source| &source.content) {
+            if let ParagraphContent::Inline(InlineNode::Run(run)) = content {
+                if run.property_changes.is_some() {
+                    items
+                        .entry("rPrChange")
+                        .or_default()
+                        .push(Some(content.clone()));
+                }
+                for item in &run.content {
+                    if let Some(kind) = run_item_kind(item) {
+                        items.entry(kind).or_default().push(Some(runs::inline(Run {
+                            content: vec![item.clone()],
+                            ..run.clone()
+                        })));
+                    }
+                }
+            } else {
+                let key = match content.node_type() {
+                    "hyperlink" => "hyperlink",
+                    "insertion" | "moveTo" => "ins",
+                    "deletion" | "moveFrom" => "del",
+                    "simpleField" | "complexField" => "field",
+                    "inlineSdt" => "sdt",
+                    "mathEquation" => "math",
+                    "rawXml" => "rawInline",
+                    _ => continue,
+                };
+                items.entry(key).or_default().push(Some(content.clone()));
+            }
+        }
+        Self { items }
+    }
+
+    fn take(
+        &mut self,
+        story: &mut StoryPosition<'_>,
+        family: ProjectionFamily,
+        kind: &str,
+        payload: &Attrs,
+    ) -> Option<ParagraphContent> {
+        story.defer_here(family, kind);
+        let kind =
+            if kind == "field" && attr_string(payload, "modelKind") == Some("commentReference") {
+                "commentReference"
+            } else {
+                kind
+            };
+        let candidates = self.items.get_mut(kind)?;
+        let raw_xml = attr_string(payload, "xml");
+        let comment_id = match payload.get("commentId") {
+            Some(Any::Number(id)) => Some(*id),
+            _ => None,
+        };
+        candidates
+            .iter_mut()
+            .find(|item| {
+                item.as_ref().is_some_and(|item| match (item, raw_xml) {
+                    (ParagraphContent::Inline(InlineNode::RawXml(raw)), Some(xml)) => {
+                        raw.xml == xml
+                    }
+                    (ParagraphContent::Inline(InlineNode::Run(run)), _)
+                        if kind == "commentReference" && comment_id.is_some() =>
+                    {
+                        matches!(
+                            run.content.as_slice(),
+                            [RunContent::CommentReference { id }] if *id == comment_id
+                        )
+                    }
+                    _ => true,
+                })
+            })?
+            .take()
+    }
+
+    fn marked(
+        &mut self,
+        story: &mut StoryPosition<'_>,
+        marks: &DeferredMarks<'_>,
+        kind: Option<&str>,
+        text: &str,
+    ) -> Option<ParagraphContent> {
+        let candidates = self.items.get_mut(kind?)?;
+        let source = candidates
+            .iter_mut()
+            .find(|item| {
+                item.as_ref().is_some_and(|item| match item {
+                    ParagraphContent::Inline(InlineNode::Hyperlink(link)) => {
+                        inline_text(&link.children) == text
+                    }
+                    ParagraphContent::Tracked(track) => inline_text(&track.content) == text,
+                    ParagraphContent::Inline(InlineNode::Run(run)) => run_text(run) == text,
+                    _ => false,
+                })
+            })?
+            .take()?;
+        marks.record(story);
+        Some(source)
+    }
+}
+
+fn inline_text(content: &[InlineNode]) -> String {
+    let mut text = String::new();
+    let mut pending = vec![content.iter()];
+    while let Some(nodes) = pending.last_mut() {
+        match nodes.next() {
+            Some(InlineNode::Run(run)) => text.push_str(&run_text(run)),
+            Some(InlineNode::Hyperlink(link)) => pending.push(link.children.iter()),
+            Some(_) => {}
+            None => {
+                pending.pop();
+            }
+        }
+    }
+    text
+}
+
+fn run_text(run: &Run) -> String {
+    run.content
+        .iter()
+        .filter_map(|content| match content {
+            RunContent::Text { text, .. } => Some(text.as_str()),
+            RunContent::SoftHyphen => Some("\u{ad}"),
+            RunContent::NoBreakHyphen => Some("\u{2011}"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_item_kind(content: &RunContent) -> Option<&'static str> {
+    match content {
+        RunContent::Tab => Some("tab"),
+        RunContent::Break { break_type, .. } => match break_type.as_deref() {
+            Some("page") => Some("pageBreak"),
+            Some("column") => Some("columnBreak"),
+            _ => Some("break"),
+        },
+        RunContent::FootnoteRef { .. } | RunContent::EndnoteRef { .. } => Some("noteRef"),
+        RunContent::CommentReference { .. } => Some("commentReference"),
+        RunContent::Drawing { .. } => Some("image"),
+        RunContent::Shape { .. } => Some("shape"),
+        RunContent::HorizontalRule { .. } => Some("horizontalRule"),
+        RunContent::Chart { .. } => Some("chart"),
+        RunContent::OpaqueDrawing { .. } => Some("opaqueDrawing"),
+        RunContent::FieldChar { .. } | RunContent::InstrText { .. } => Some("field"),
+        _ => None,
+    }
+}
+
+fn side_marker_kind(inline: &ParagraphContent) -> Option<&'static str> {
+    match inline {
+        ParagraphContent::RangeStart(_) | ParagraphContent::RangeEnd(_) => Some("revisions"),
+        ParagraphContent::CommentRange(_) => Some("commentRanges"),
+        _ => match inline.node_type() {
+            "bookmarkStart" | "bookmarkEnd" => Some("bookmarks"),
+            "rawXml" => Some("rawInline"),
+            _ => None,
+        },
+    }
+}
+
+fn carry_side_markers(
+    story: &mut StoryPosition<'_>,
+    content: &mut Vec<ParagraphContent>,
+    source: &[ParagraphContent],
+) {
+    let supported: Vec<_> = source
+        .iter()
+        .filter(|inline| side_marker_kind(inline).is_none())
+        .collect();
+    if supported.len() != content.len() || supported.len() == source.len() {
+        return;
+    }
+    let same_units = supported
+        .iter()
+        .zip(content.iter())
+        .all(|(source, content)| match (source, content) {
+            (
+                ParagraphContent::Inline(InlineNode::Run(source)),
+                ParagraphContent::Inline(InlineNode::Run(content)),
+            ) => {
+                run_text(source) == run_text(content)
+                    && source.content.len() == content.content.len()
+            }
+            _ => *source == content,
+        });
+    if same_units {
+        let mut projected = std::mem::take(content).into_iter();
+        content.extend(source.iter().filter_map(|inline| {
+            if let Some(kind) = side_marker_kind(inline) {
+                (!projected.as_slice().contains(inline)).then(|| {
+                    story.defer_here(ProjectionFamily::Markers, kind);
+                    inline.clone()
+                })
+            } else {
+                projected.next()
+            }
+        }));
+    }
+}
+
+pub(super) fn has_revision_ranges(block: &BlockContent) -> bool {
+    matches!(block, BlockContent::Paragraph(paragraph) if paragraph.content.iter().any(|content| {
+        matches!(content, ParagraphContent::RangeStart(_) | ParagraphContent::RangeEnd(_))
+    }))
+}
+
+pub(super) fn has_comment_ranges(block: &BlockContent) -> bool {
+    matches!(block, BlockContent::Paragraph(paragraph) if paragraph.content.iter()
+        .any(|content| matches!(content, ParagraphContent::CommentRange(_))))
+}
+
+pub(super) fn clamp_sections(body: &mut S9DocumentBodyWire) {
+    let Some(sections) = &mut body.sections else {
+        return;
+    };
+    let len = body.content.len();
+    let mut closers = body.content.iter().enumerate().filter_map(|(index, block)| {
+        matches!(block, BlockContent::Paragraph(paragraph) if paragraph.section_properties.is_some())
+            .then_some(index + 1)
+    });
+    let mut start = 0;
+    let count = sections.len();
+    for (index, section) in sections.iter_mut().enumerate() {
+        let end = if index + 1 == count {
+            len
+        } else {
+            closers
+                .next()
+                .unwrap_or(section.content_end)
+                .clamp(start, len)
+        };
+        section.content_start = start;
+        section.content_end = end;
+        start = end;
+    }
+}
