@@ -1158,6 +1158,209 @@ pub(crate) mod tests {
         }
     }
 
+    fn table_embed(index: u32, cells: &[&str]) -> RawOp {
+        let cells: Vec<_> = cells
+            .iter()
+            .map(|story| serde_json::json!({"tcPr": {"colspan": 1, "rowspan": 1}, "story": story}))
+            .collect();
+        let rows = serde_json::json!([{"trPr": {"height": 360}, "cells": cells}]).to_string();
+        RawOp::InsertEmbed {
+            index,
+            kind: "table".into(),
+            payload: vec![
+                ("grid".into(), Any::from_json("[2000,2000]").unwrap()),
+                ("rows".into(), Any::from_json(&rows).unwrap()),
+            ],
+            attrs: Default::default(),
+        }
+    }
+
+    fn pilcrow(index: u32, para_id: &str) -> RawOp {
+        RawOp::InsertEmbed {
+            index,
+            kind: "pilcrow".into(),
+            payload: vec![("paraId".into(), Any::from(para_id))],
+            attrs: Default::default(),
+        }
+    }
+
+    fn text(index: u32, text: &str) -> RawOp {
+        RawOp::Insert {
+            index,
+            text: text.into(),
+            attrs: Default::default(),
+        }
+    }
+
+    const TABLE_STORIES: [&str; 6] = [
+        "body",
+        "body:t0:r0c0",
+        "body:t0:r0c1",
+        "body:t1:r0c0",
+        "body:t1:r0c1",
+        "body:t1:r0c0:t0:r0c0",
+    ];
+
+    /// `Before [t0] Between [t1] After` in the body, with a table nested in t1's first cell.
+    fn table_doc() -> EditingDoc {
+        let doc = EditingDoc::new(73);
+        let ctx = EditCtx::local("", "");
+        for (story, text) in [
+            ("body:t0:r0c0", "Alpha"),
+            ("body:t0:r0c1", "Beta"),
+            ("body:t1:r0c0", "Gamma"),
+            ("body:t1:r0c1", "Delta"),
+            ("body:t1:r0c0:t0:r0c0", "Nested"),
+        ] {
+            doc.create_story(story, text, "Normal", "left").unwrap();
+        }
+        doc.apply_raw_ops(
+            "body:t1:r0c0",
+            vec![
+                table_embed(6, &["body:t1:r0c0:t0:r0c0"]),
+                pilcrow(7, "p-nested"),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        doc.create_story("body", "Before", "Normal", "left")
+            .unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                table_embed(7, &["body:t0:r0c0", "body:t0:r0c1"]),
+                text(8, "Between"),
+                pilcrow(15, "p-between"),
+                table_embed(16, &["body:t1:r0c0", "body:t1:r0c1"]),
+                text(17, "After"),
+                pilcrow(22, "p-after"),
+            ],
+            &ctx,
+        )
+        .unwrap();
+        doc
+    }
+
+    /// Reads every table story's indexes, counting the units rebuilt to serve them, and checks
+    /// each against a from-scratch build.
+    fn read_table_indexes(doc: &EditingDoc) -> usize {
+        crate::STORY_INDEX_UNITS_BUILT.with(|built| built.set(0));
+        let read: Vec<_> = TABLE_STORIES
+            .iter()
+            .map(|story| {
+                (
+                    doc.paragraph_index(story).unwrap(),
+                    doc.segment_index(story).unwrap(),
+                )
+            })
+            .collect();
+        let rebuilt = crate::STORY_INDEX_UNITS_BUILT.with(|built| built.get());
+        for (story, (paragraphs, segments)) in TABLE_STORIES.iter().zip(read) {
+            assert_paragraph_indexes_eq(&paragraphs, &fresh_paragraph_index(doc, story));
+            let txn = doc.yrs_doc().transact();
+            let text = crate::story_ref(&txn, story).unwrap();
+            assert_eq!(
+                units(&segments),
+                units(&build_indexes(&text, &txn).0),
+                "{story}"
+            );
+        }
+        rebuilt
+    }
+
+    #[test]
+    fn text_edits_in_one_story_keep_the_other_stories_indexes() {
+        let doc = table_doc();
+        read_table_indexes(&doc);
+        let ctx = EditCtx::local("", "");
+        let mut rebuilt = Vec::new();
+        for (story, at, insert) in [
+            ("body:t0:r0c0", 2, true),
+            ("body:t1:r0c0:t0:r0c0", 0, true),
+            ("body:t0:r0c1", 1, false),
+            ("body:t1:r0c1", 5, true),
+            ("body", 9, true),
+            ("body:t0:r0c0", 3, false),
+            ("body", 20, false),
+            ("body:t1:r0c0", 1, true),
+        ] {
+            let before = doc.committed_epoch();
+            if insert {
+                doc.insert_text(&ctx, Position::new(story, at), "xy", FormatPolicy::Inherit)
+                    .unwrap();
+                doc.advance_indexes_after_text_insert(
+                    story,
+                    before,
+                    doc.committed_epoch(),
+                    at,
+                    "xy",
+                );
+            } else {
+                doc.delete_range(&ctx, StoryRange::new(story, at, at + 1))
+                    .unwrap();
+                doc.advance_indexes_after_text_delete(
+                    story,
+                    before,
+                    doc.committed_epoch(),
+                    at,
+                    at + 1,
+                );
+            }
+            rebuilt.push((story, read_table_indexes(&doc)));
+        }
+        assert!(rebuilt.iter().all(|(_, units)| *units == 0), "{rebuilt:?}");
+    }
+
+    #[test]
+    fn a_commit_into_two_stories_drops_the_other_stories_indexes() {
+        use yrs::Text;
+        let doc = table_doc();
+        read_table_indexes(&doc);
+        let before = doc.committed_epoch();
+        {
+            let mut txn = doc.yrs_doc().transact_mut();
+            for story in ["body", "body:t0:r0c0"] {
+                crate::story_ref(&txn, story)
+                    .unwrap()
+                    .insert(&mut txn, 0, "x");
+            }
+        }
+        let after = doc.committed_epoch();
+        assert_eq!(after, before + 1);
+        doc.advance_indexes_after_text_insert("body:t0:r0c0", before, after, 0, "x");
+        assert!(
+            doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        assert!(
+            doc.segment_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        assert!(read_table_indexes(&doc) > 0);
+        let before = doc.committed_epoch();
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body:t0:r0c1", 0),
+            "y",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        doc.advance_indexes_after_text_insert(
+            "body:t0:r0c1",
+            before,
+            doc.committed_epoch(),
+            0,
+            "y",
+        );
+        assert_eq!(read_table_indexes(&doc), 0);
+    }
+
     #[test]
     fn story_indexes_advance_after_text_insert() {
         let doc = seeded_doc();
