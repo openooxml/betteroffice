@@ -100,13 +100,17 @@ interface FieldSpan {
   parent: number | null;
 }
 
+function storyParagraphs(xml: string) {
+  return xml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g);
+}
+
 function inspect(xml: string) {
   const paragraphs: string[] = [];
   const fields: FieldSpan[] = [];
   const open: FieldSpan[] = [];
   const instructions: string[] = [];
   let ends = 0;
-  for (const [, paragraph] of xml.matchAll(/<w:p(?:\s[^>]*)?>([\s\S]*?)<\/w:p>/g)) {
+  for (const [, paragraph] of storyParagraphs(xml)) {
     const index = paragraphs.length;
     let visible = '';
     for (const [, tag, attributes = '', text = ''] of paragraph!.matchAll(/<w:(fldChar|instrText|t)\b([^>]*)>([^<]*)/g)) {
@@ -299,6 +303,151 @@ async function editAndSave(
     session.destroy();
   }
 }
+
+const WORD_TOC_CODE = 'TOC \\o "1-3" \\h \\z \\u';
+const WORD_TOC_TITLES = ['ENTRYONE', ENTRY_TWO, 'ENTRYTHREE'];
+const WORD_FIGURE_TITLES = ['FIGUREONE', 'FIGURETWO', 'FIGURETHREE'];
+
+interface WordToc {
+  paragraphs: string[];
+  titles: readonly string[];
+  story: 'body' | 'body:sdt0';
+}
+
+interface WordTocOptions {
+  code?: string;
+  titles?: readonly string[];
+  firstAnchor?: number;
+  inlineEnd?: boolean;
+  numbered?: boolean;
+  unlinked?: boolean;
+  omitLevelOnePages?: boolean;
+}
+
+function wordToc({
+  code = WORD_TOC_CODE,
+  titles = WORD_TOC_TITLES,
+  firstAnchor = 1,
+  inlineEnd = false,
+  numbered = false,
+  unlinked = false,
+  omitLevelOnePages = false,
+}: WordTocOptions = {}): WordToc {
+  const tab = '<w:r><w:rPr><w:webHidden/></w:rPr><w:tab/></w:r>';
+  const page = '<w:r><w:rPr><w:webHidden/></w:rPr><w:t>3</w:t></w:r>';
+  const end = fieldChar('end');
+  const paragraphs = titles.map((title, index) => {
+    const level = numbered || omitLevelOnePages ? [1, 2, 1][index] : index + 1;
+    const anchor = '_Toc' + (firstAnchor + index);
+    let content = `<w:pPr><w:pStyle w:val="TOC${level}"/></w:pPr>`;
+    if (index === 0) content += fieldStart(code);
+    if (!unlinked) content += `<w:hyperlink w:anchor="${anchor}" w:history="1">`;
+    if (numbered) content += textRun(['1', '1.1', '2'][index]!) + tab;
+    content += textRun(title);
+    if (!omitLevelOnePages || level !== 1) {
+      content += tab + fieldStart(`PAGEREF ${anchor} \\h`) + page + end;
+    }
+    if (!unlinked) content += '</w:hyperlink>';
+    if (inlineEnd && index === titles.length - 1) content += end;
+    return content;
+  });
+  if (!inlineEnd) paragraphs.push(end);
+  return { paragraphs, titles, story: 'body' };
+}
+
+const WORD_TOC_SHAPES = [
+  ['W1 hyperlinked plain', () => wordToc()],
+  ['W2 inline end', () => wordToc({ inlineEnd: true })],
+  ['W3 numbered', () => wordToc({ numbered: true })],
+  ['W4 unlinked', () => wordToc({ code: 'TOC \\o "1-3"', unlinked: true })],
+  ['W5 without level-one pages', () => wordToc({
+    code: WORD_TOC_CODE + ' \\n "1-1"', omitLevelOnePages: true,
+  })],
+  ['W6 block content control', (): WordToc => {
+    const toc = wordToc();
+    const heading = '<w:pPr><w:pStyle w:val="TOCHeading"/></w:pPr>' + textRun('Contents');
+    return { ...toc, paragraphs: [heading, ...toc.paragraphs], story: 'body:sdt0' };
+  }],
+  ['W7 followed by table of figures', (): WordToc => {
+    const toc = wordToc();
+    const figures = wordToc({ code: 'TOC \\h \\z \\c "Figure"', titles: WORD_FIGURE_TITLES, firstAnchor: 4 });
+    return {
+      ...toc,
+      paragraphs: [...toc.paragraphs, ...figures.paragraphs],
+      titles: [...toc.titles, ...figures.titles],
+    };
+  }],
+  ['W8 single entry', () => wordToc({ titles: WORD_TOC_TITLES.slice(0, 1) })],
+] as const;
+
+type WordTocEdit =
+  | { kind: 'text'; story: WordToc['story']; marker: string }
+  | { kind: 'insert' | 'delete'; story: WordToc['story']; index: number };
+
+const WORD_TOC_EDITS: ReadonlyArray<readonly [string, (toc: WordToc) => WordTocEdit | null]> = [
+  ['E1 edit first title', toc => ({ kind: 'text', story: toc.story, marker: toc.titles[0]! })],
+  ['E2 edit last title', toc => ({ kind: 'text', story: toc.story, marker: toc.titles.at(-1)! })],
+  ['E3 edit middle title', toc => ({ kind: 'text', story: toc.story, marker: toc.titles[1] ?? toc.titles[0]! })],
+  ['E4 insert after first entry', toc => ({
+    kind: 'insert', story: toc.story, index: toc.story === 'body' ? 0 : 1,
+  })],
+  ['E5 delete middle entry', toc => toc.titles.length === 1 ? null : {
+    kind: 'delete', story: toc.story, index: toc.story === 'body' ? 1 : 2,
+  }],
+  ['E6 edit following body paragraph', () => ({ kind: 'text', story: 'body', marker: BODY_NEXT })],
+];
+
+async function assertWordTocSave(toc: WordToc, edit: WordTocEdit) {
+  const toXml = (paragraphs: string[]) => {
+    const entries = paragraphs.map(paragraph).join('');
+    return (toc.story === 'body' ? entries : blockSdt(entries)) + paragraph(textRun(BODY_NEXT));
+  };
+  const expected = toc.paragraphs.slice();
+  const xml = await editAndSave(toXml(toc.paragraphs), session => {
+    if (edit.kind === 'text') {
+      insertInText(session, edit.marker, 1, ' EDIT ', edit.story);
+      return;
+    }
+    const { story } = edit;
+    const target = session.paragraphs(story)[edit.index];
+    if (!target) throw new Error(`Missing paragraph ${edit.index} in ${story}`);
+    const { paraId } = target;
+    const result = session.applyEdits({
+      expectVersion: session.version(),
+      steps: [edit.kind === 'insert'
+        ? { op: 'insertParagraphs', target: { story, paraId }, at: 'end', paragraphs: [{ text: INSERTED }] }
+        : { op: 'deleteParagraphs', story, firstParaId: paraId, lastParaId: paraId }],
+    });
+    expect(result.ok).toBe(true);
+    if (edit.kind === 'insert') expected.splice(edit.index + 1, 0, textRun(INSERTED));
+    else expected.splice(edit.index, 1);
+  });
+  let expectedXml = toXml(expected);
+  if (edit.kind === 'text') {
+    const { marker } = edit;
+    expectedXml = expectedXml.replace(`>${marker}<`, `>${marker[0]} EDIT ${marker.slice(1)}<`);
+  }
+  expect(inspect(xml)).toEqual(inspect(expectedXml));
+  if (toc.story === 'body:sdt0') {
+    const control = xml.match(/<w:sdtContent>([\s\S]*?)<\/w:sdtContent>/)?.[1];
+    expect(control === undefined ? null : [...storyParagraphs(control)].length).toBe(expected.length);
+  }
+  const tabs = (body: string) => Array.from(storyParagraphs(body), ([, content]) =>
+    (content?.match(/<w:tab(?=[\s/>])/g) ?? []).length);
+  expect(tabs(xml)).toEqual(tabs(expectedXml));
+}
+
+const WORD_TOC_CASES = WORD_TOC_SHAPES.flatMap(([shape, build]) => {
+  const toc = build();
+  return WORD_TOC_EDITS.flatMap(([name, plan]) => {
+    const edit = plan(toc);
+    return edit ? [[shape, name, toc, edit] as const] : [];
+  });
+});
+
+test.each(WORD_TOC_CASES)('%s preserves field boundaries after session save (%s)', async (_shape, _name, toc, edit) => {
+  await assertWordTocSave(toc, edit);
+}, 30_000);
 
 test('deleting the last TOC entry closes the field after the last surviving entry', async () => {
   const end = fieldChar('end');

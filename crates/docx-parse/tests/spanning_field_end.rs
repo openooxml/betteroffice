@@ -203,6 +203,7 @@ fn splice_paragraphs(
     edit: ParagraphEdit,
     digest: &str,
     addressed: bool,
+    insertion_donor: Option<Value>,
 ) -> Result<Value, Box<dyn Error>> {
     let (ParagraphEdit::InsertAfter(index) | ParagraphEdit::Delete(index)) = edit;
     if index >= paragraphs.len() {
@@ -215,7 +216,9 @@ fn splice_paragraphs(
     }
     let (inserted, removed) = match edit {
         ParagraphEdit::InsertAfter(index) => {
-            let mut paragraph = paragraphs.last().ok_or("missing plain paragraph")?.clone();
+            let mut paragraph = insertion_donor
+                .or_else(|| paragraphs.last().cloned())
+                .ok_or("missing plain paragraph")?;
             paragraph
                 .as_object_mut()
                 .ok_or("invalid plain paragraph")?
@@ -270,6 +273,18 @@ fn save_story(
         "options": {"updateModifiedDate": false}
     });
     let digest = format!("{:x}", Sha256::digest(document_xml(source)?.as_bytes()));
+    let insertion_donor = if story_path != "/document/content"
+        && matches!(edit, Edit::Paragraph(ParagraphEdit::InsertAfter(_)))
+    {
+        request
+            .pointer("/document/content")
+            .and_then(Value::as_array)
+            .and_then(|blocks| blocks.last())
+            .filter(|block| block["type"] == "paragraph")
+            .cloned()
+    } else {
+        None
+    };
     let paragraphs = request
         .pointer_mut(story_path)
         .and_then(Value::as_array_mut)
@@ -280,6 +295,7 @@ fn save_story(
             edit,
             &digest,
             matches!(route, WriteRoute::Splice),
+            insertion_donor,
         )?;
         if matches!(route, WriteRoute::Splice) {
             request["paragraphIds"] = plan;
@@ -357,13 +373,18 @@ struct Story {
 }
 
 fn inspect(xml: &str) -> Story {
+    inspect_story(xml, "story")
+}
+
+fn story_paragraphs(xml: &str) -> impl Iterator<Item = &str> {
+    xml.split("</w:p>")
+        .filter(|paragraph| paragraph.contains("<w:p>") || paragraph.contains("<w:p "))
+}
+
+fn inspect_story(xml: &str, case: &str) -> Story {
     let mut story = Story::default();
     let mut open = Vec::<usize>::new();
-    for (index, paragraph) in xml
-        .split("</w:p>")
-        .filter(|paragraph| paragraph.contains("<w:p>") || paragraph.contains("<w:p "))
-        .enumerate()
-    {
+    for (index, paragraph) in story_paragraphs(xml).enumerate() {
         let mut visible = String::new();
         for tag in paragraph.split("<w:").skip(1) {
             let Some((opening, content)) = tag.split_once('>') else {
@@ -385,12 +406,16 @@ fn inspect(xml: &str) -> Story {
                     open.push(story.fields.len() - 1);
                 }
                 Some("fldChar") if opening.contains(SEPARATE) => {
-                    let field = *open.last().expect("field separator without a begin");
+                    let field = *open
+                        .last()
+                        .unwrap_or_else(|| panic!("{case}: field separator without a begin"));
                     story.fields[field].separates.push(index);
                 }
                 Some("fldChar") if opening.contains(END) => {
                     story.ends += 1;
-                    let field = open.pop().expect("field end without a begin");
+                    let field = open
+                        .pop()
+                        .unwrap_or_else(|| panic!("{case}: field end without a begin"));
                     story.fields[field].end = Some(index);
                 }
                 Some("instrText" | "t") => {
@@ -399,13 +424,16 @@ fn inspect(xml: &str) -> Story {
                     } else {
                         content.split('<').next().unwrap_or_default()
                     };
-                    let text = quick_xml::escape::unescape(raw).expect("valid XML text");
+                    let text = quick_xml::escape::unescape(raw)
+                        .unwrap_or_else(|error| panic!("{case}: invalid XML text: {error}"));
                     if name == Some("instrText") {
                         let code = text.into_owned();
-                        let field = *open.last().expect("field instruction without a begin");
+                        let field = *open
+                            .last()
+                            .unwrap_or_else(|| panic!("{case}: field instruction without a begin"));
                         assert!(
                             story.fields[field].separates.is_empty(),
-                            "instruction after separator"
+                            "{case}: instruction after separator"
                         );
                         story.fields[field].instructions.push(code.clone());
                         story.instructions.push(code);
@@ -423,8 +451,12 @@ fn inspect(xml: &str) -> Story {
         }
         story.paragraphs.push(visible);
     }
-    assert!(open.is_empty(), "fields without ends: {open:?}");
-    assert_eq!(story.fields.len(), story.ends);
+    assert!(open.is_empty(), "{case}: fields without ends: {open:?}");
+    assert_eq!(
+        story.fields.len(),
+        story.ends,
+        "{case}: begin/end count"
+    );
     story
 }
 
@@ -671,6 +703,319 @@ fn assert_matrix(scenario: &str, edits: &[(&str, Edit)]) {
                 .unwrap_or_else(|error| panic!("{scenario} {name} {route:?}: {error}"));
         }
     }
+}
+
+const WORD_TOC_CODE: &str = r#"TOC \o "1-3" \h \z \u"#;
+const WORD_TOC_TITLES: [&str; 3] = ["ENTRYONE", ENTRY_TWO, "ENTRYTHREE"];
+const WORD_FIGURE_TITLES: [&str; 3] = ["FIGUREONE", "FIGURETWO", "FIGURETHREE"];
+
+#[derive(Default)]
+struct WordTocOptions {
+    inline_end: bool,
+    numbered: bool,
+    unlinked: bool,
+    omit_level_one_pages: bool,
+}
+
+struct WordToc {
+    paragraphs: Vec<String>,
+    titles: Vec<&'static str>,
+    in_control: bool,
+}
+
+impl WordToc {
+    fn xml(&self, paragraphs: &[String]) -> String {
+        let entries = paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, content)| paragraph(index, content))
+            .collect::<String>();
+        let entries = if self.in_control {
+            block_sdt(&entries)
+        } else {
+            entries
+        };
+        entries + &paragraph(paragraphs.len(), &text_run(BODY_NEXT))
+    }
+}
+
+fn word_toc(
+    code: &str,
+    titles: &[&'static str],
+    first_anchor: usize,
+    options: WordTocOptions,
+) -> WordToc {
+    let tab = "<w:r><w:rPr><w:webHidden/></w:rPr><w:tab/></w:r>";
+    let page = "<w:r><w:rPr><w:webHidden/></w:rPr><w:t>3</w:t></w:r>";
+    let end = field_char("end");
+    let mut paragraphs = Vec::new();
+    for (index, title) in titles.iter().enumerate() {
+        let level = if options.numbered || options.omit_level_one_pages {
+            [1, 2, 1][index]
+        } else {
+            index + 1
+        };
+        let anchor = format!("_Toc{}", first_anchor + index);
+        let mut content = format!(r#"<w:pPr><w:pStyle w:val="TOC{level}"/></w:pPr>"#);
+        if index == 0 {
+            content.push_str(&field_start(code));
+        }
+        if !options.unlinked {
+            content.push_str(&format!(
+                r#"<w:hyperlink w:anchor="{anchor}" w:history="1">"#
+            ));
+        }
+        if options.numbered {
+            content.push_str(&text_run(["1", "1.1", "2"][index]));
+            content.push_str(tab);
+        }
+        content.push_str(&text_run(title));
+        if !options.omit_level_one_pages || level != 1 {
+            content.push_str(tab);
+            content.push_str(&field_start(&format!(r"PAGEREF {anchor} \h")));
+            content.push_str(page);
+            content.push_str(&end);
+        }
+        if !options.unlinked {
+            content.push_str("</w:hyperlink>");
+        }
+        if options.inline_end && index + 1 == titles.len() {
+            content.push_str(&end);
+        }
+        paragraphs.push(content);
+    }
+    if !options.inline_end {
+        paragraphs.push(end);
+    }
+    WordToc {
+        paragraphs,
+        titles: titles.to_vec(),
+        in_control: false,
+    }
+}
+
+fn word_toc_w1() -> WordToc {
+    word_toc(WORD_TOC_CODE, &WORD_TOC_TITLES, 1, WordTocOptions::default())
+}
+
+fn word_toc_w2() -> WordToc {
+    word_toc(
+        WORD_TOC_CODE,
+        &WORD_TOC_TITLES,
+        1,
+        WordTocOptions {
+            inline_end: true,
+            ..WordTocOptions::default()
+        },
+    )
+}
+
+fn word_toc_w3() -> WordToc {
+    word_toc(
+        WORD_TOC_CODE,
+        &WORD_TOC_TITLES,
+        1,
+        WordTocOptions {
+            numbered: true,
+            ..WordTocOptions::default()
+        },
+    )
+}
+
+fn word_toc_w4() -> WordToc {
+    word_toc(
+        r#"TOC \o "1-3""#,
+        &WORD_TOC_TITLES,
+        1,
+        WordTocOptions {
+            unlinked: true,
+            ..WordTocOptions::default()
+        },
+    )
+}
+
+fn word_toc_w5() -> WordToc {
+    word_toc(
+        r#"TOC \o "1-3" \h \z \u \n "1-1""#,
+        &WORD_TOC_TITLES,
+        1,
+        WordTocOptions {
+            omit_level_one_pages: true,
+            ..WordTocOptions::default()
+        },
+    )
+}
+
+fn word_toc_w6() -> WordToc {
+    let mut toc = word_toc_w1();
+    toc.in_control = true;
+    toc.paragraphs.insert(
+        0,
+        r#"<w:pPr><w:pStyle w:val="TOCHeading"/></w:pPr>"#.to_owned() + &text_run("Contents"),
+    );
+    toc
+}
+
+fn word_toc_w7() -> WordToc {
+    let mut toc = word_toc_w1();
+    let figures = word_toc(
+        r#"TOC \h \z \c "Figure""#,
+        &WORD_FIGURE_TITLES,
+        4,
+        WordTocOptions::default(),
+    );
+    toc.paragraphs.extend(figures.paragraphs);
+    toc.titles.extend(figures.titles);
+    toc
+}
+
+fn word_toc_w8() -> WordToc {
+    word_toc(
+        WORD_TOC_CODE,
+        &WORD_TOC_TITLES[..1],
+        1,
+        WordTocOptions::default(),
+    )
+}
+
+fn edit_word_toc_first(toc: &WordToc) -> Edit {
+    Edit::Text(toc.titles[0])
+}
+
+fn edit_word_toc_last(toc: &WordToc) -> Edit {
+    Edit::Text(toc.titles[toc.titles.len() - 1])
+}
+
+fn edit_word_toc_middle(toc: &WordToc) -> Edit {
+    Edit::Text(toc.titles.get(1).copied().unwrap_or(toc.titles[0]))
+}
+
+fn insert_after_word_toc_first(toc: &WordToc) -> Edit {
+    Edit::Paragraph(ParagraphEdit::InsertAfter(usize::from(toc.in_control)))
+}
+
+fn delete_word_toc_middle(toc: &WordToc) -> Edit {
+    if toc.titles.len() == 1 {
+        Edit::None
+    } else {
+        Edit::Paragraph(ParagraphEdit::Delete(usize::from(toc.in_control) + 1))
+    }
+}
+
+fn edit_after_word_toc(_: &WordToc) -> Edit {
+    Edit::Text(BODY_NEXT)
+}
+
+type WordTocEdit = fn(&WordToc) -> Edit;
+const WORD_TOC_EDITS: [(&str, WordTocEdit); 6] = [
+    ("E1 edit first title", edit_word_toc_first),
+    ("E2 edit last title", edit_word_toc_last),
+    ("E3 edit middle title", edit_word_toc_middle),
+    ("E4 insert after first entry", insert_after_word_toc_first),
+    ("E5 delete middle entry", delete_word_toc_middle),
+    ("E6 edit following body paragraph", edit_after_word_toc),
+];
+
+fn assert_word_toc_save(toc: &WordToc, edit: Edit, case: &str) -> Result<(), Box<dyn Error>> {
+    let source = package(&toc.xml(&toc.paragraphs))?;
+    let mut expected_paragraphs = toc.paragraphs.clone();
+    match edit {
+        Edit::Paragraph(ParagraphEdit::InsertAfter(index)) => {
+            expected_paragraphs.insert(index + 1, text_run(INSERTED));
+        }
+        Edit::Paragraph(ParagraphEdit::Delete(index)) => {
+            expected_paragraphs.remove(index);
+        }
+        Edit::Text(_) => {}
+        _ => unreachable!("{case}: unexpected edit"),
+    }
+    let mut expected_xml = toc.xml(&expected_paragraphs);
+    if let Edit::Text(marker) = edit {
+        expected_xml = expected_xml.replace(&format!(">{marker}<"), &format!(">{marker} edited<"));
+    }
+    let inner_story = toc.in_control && !matches!(edit, Edit::Text(BODY_NEXT));
+    let story_path = if inner_story {
+        "/document/content/0/content"
+    } else {
+        "/document/content"
+    };
+    let route = match (toc.in_control, edit) {
+        (true, Edit::Paragraph(_)) => WriteRoute::Whole,
+        (true, _) => WriteRoute::ChangedParaIds,
+        (false, Edit::Paragraph(_)) => WriteRoute::Splice,
+        (false, _) => WriteRoute::SourceParagraphs,
+    };
+    let xml = document_xml(&save_story(&source, edit, route, story_path)?)?;
+    let actual = inspect_story(&xml, case);
+    let expected = inspect_story(&expected_xml, case);
+    assert_eq!(
+        actual.paragraphs, expected.paragraphs,
+        "{case}: paragraph text"
+    );
+    assert_eq!(
+        actual.instructions, expected.instructions,
+        "{case}: field instructions"
+    );
+    assert_eq!(
+        actual.fields, expected.fields,
+        "{case}: field boundaries and results"
+    );
+    if toc.in_control {
+        let paragraphs_in_control = xml
+            .split_once("<w:sdtContent>")
+            .and_then(|(_, content)| content.split_once("</w:sdtContent>"))
+            .map(|(content, _)| story_paragraphs(content).count());
+        assert_eq!(
+            paragraphs_in_control,
+            Some(expected_paragraphs.len()),
+            "{case}: paragraphs inside the TOC content control"
+        );
+    }
+    let tabs = |xml: &str| {
+        story_paragraphs(xml)
+            .map(|paragraph| {
+                paragraph.matches("<w:tab/").count()
+                    + paragraph.matches("<w:tab ").count()
+                    + paragraph.matches("<w:tab>").count()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        tabs(&xml),
+        tabs(&expected_xml),
+        "{case}: tabs per paragraph"
+    );
+    Ok(())
+}
+
+macro_rules! word_toc_save_tests {
+    ($($test:ident: $shape:literal => $build:ident),+ $(,)?) => {
+        $(
+            #[test]
+            fn $test() {
+                let toc = $build();
+                for (name, edit) in WORD_TOC_EDITS {
+                    let case = format!("{} {name}", $shape);
+                    let edit = edit(&toc);
+                    if !matches!(edit, Edit::None) {
+                        assert_word_toc_save(&toc, edit, &case)
+                            .unwrap_or_else(|error| panic!("{case}: {error}"));
+                    }
+                }
+            }
+        )+
+    };
+}
+
+word_toc_save_tests! {
+    word_toc_hyperlinked_plain_saves: "W1" => word_toc_w1,
+    word_toc_inline_end_saves: "W2" => word_toc_w2,
+    word_toc_numbered_saves: "W3" => word_toc_w3,
+    word_toc_unlinked_saves: "W4" => word_toc_w4,
+    word_toc_without_level_one_pages_saves: "W5" => word_toc_w5,
+    word_toc_in_block_control_saves: "W6" => word_toc_w6,
+    word_toc_followed_by_figures_saves: "W7" => word_toc_w7,
+    word_toc_single_entry_saves: "W8" => word_toc_w8,
 }
 
 #[test]
