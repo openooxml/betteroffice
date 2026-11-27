@@ -9,10 +9,11 @@ import { preloadEditWasm } from './wasm/index';
 import { EditSession as EngineEditSession } from '../wasm/engineEdit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { createResidentEngineSession } from './residentEngineSession';
+import * as commandHostModule from './residentCommandHost';
 import * as projectionModule from './yrsToDocument';
 import * as facadeModule from './yrsSessionFacade';
 import { residentWorkerFactory } from './__fixtures__/residentWorker';
-import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import { ResidentEngineWorkerClient, type ResidentEngineWorkerPort } from './residentEngineWorkerClient';
 import { DocxSourceWorkerClient } from './residentSourceWorkerClient';
 import { createYrsSession } from './index';
 import { createdListKey } from './listDefinitionSave';
@@ -2001,7 +2002,17 @@ test('review_commands_order_proposals_preview_withdrawal_and_revision_resolution
   } finally { client.destroy(); }
 }, TIMEOUT);
 
+function standalonePreviewLayoutBuilder() {
+  const source = readFileSync(`${import.meta.dir}/residentEngineWorker.ts`, 'utf8');
+  const declaration = source.match(/^function buildPreviewLayoutInput\([\s\S]*?^\}/m)![0];
+  const body = new Bun.Transpiler({ loader: 'ts' }).transformSync(declaration);
+  expect(body).toMatch(/function buildPreviewLayoutInput\(\s*\w+\s*,\s*\w+\s*,\s*\w+\s*\)/);
+  return new Function(`"use strict";\n${body}\nreturn buildPreviewLayoutInput;`)() as
+    (source: string, layoutWithRegions: boolean, preview: ReturnType<typeof proposalRevisionPreview>) => string;
+}
+
 test('worker reuses layout input until the proposal preview changes', async () => {
+  const build = standalonePreviewLayoutBuilder();
   const bodyXml = '<w:p w14:paraId="00000001"><w:r><w:t>Seed</w:t></w:r></w:p>' +
     '<w:p w14:paraId="00000002"><w:r><w:t>End</w:t></w:r></w:p>';
   const { client, engine, init } = await openWorker({ bodyXml });
@@ -2022,6 +2033,7 @@ test('worker reuses layout input until the proposal preview changes', async () =
     const input = layouts.mock.calls[0]![0];
     expect(layouts.mock.calls).toEqual([[input], [input], [input]]);
     expect(rewrites(input)).toBe(1);
+    expect(input).toBe(build(init.layoutInput, true, undefined));
 
     const review = await client.documentRead({ kind: 'reviewSnapshot' });
     const decided = await client.edit(intent(4, proposed.version, 'setProposalStates', {
@@ -2046,6 +2058,7 @@ test('worker reuses layout input until the proposal preview changes', async () =
     expect(typed.outcomes[0]?.status).toBe('applied');
     expect(layouts.mock.calls.slice(4)).toEqual([[previewedInput]]);
     expect(rewrites(previewedInput)).toBe(1);
+    expect(previewedInput).toBe(build(init.layoutInput, true, preview));
 
     const cold = await createResidentEngineSession();
     try {
@@ -2062,6 +2075,7 @@ test('worker reuses layout input until the proposal preview changes', async () =
     expect(updated.outcomes[0]?.status).toBe('noop');
     expect(layouts.mock.calls).toHaveLength(6);
     const updatedRequest = { ...source, renderEnv: { ...source.renderEnv, ...environment } };
+    expect(layouts.mock.calls[5]![0]).toBe(build(JSON.stringify(updatedRequest), true, preview));
     expect(JSON.parse(layouts.mock.calls[5]![0])).toEqual({
       ...updatedRequest, renderEnv: { ...updatedRequest.renderEnv, revisionPreview: preview },
     });
@@ -2073,10 +2087,59 @@ test('worker reuses layout input until the proposal preview changes', async () =
     }));
     expect(cleared.outcomes[0]?.status).toBe('applied');
     expect(layouts.mock.calls).toHaveLength(7);
+    expect(layouts.mock.calls[6]![0]).toBe(build(JSON.stringify(updatedRequest), true, undefined));
     expect(JSON.parse(layouts.mock.calls[6]![0])).toEqual(updatedRequest);
   } finally {
     stringify.mockRestore();
     layouts.mockRestore();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('worker rebuilds preview layout input when only the layout mode changes', async () => {
+  const build = standalonePreviewLayoutBuilder();
+  const host = spyOn(commandHostModule, 'createResidentCommandHost');
+  const { client, engine } = await openWorker({ factory(clientId) {
+    const worker = startWorker(clientId);
+    const port: ResidentEngineWorkerPort = worker;
+    const post = port.postMessage.bind(port);
+    port.postMessage = (message, transfer) => {
+      if (message.type === 'commandInit') {
+        const input = JSON.parse(message.request.layoutInput);
+        message.request.layoutInput = JSON.stringify({
+          ...input, measured: [], retainOnly: true,
+          workerOwned: { bodyStory: 'body', measurement: input.measurement, renderEnv: { revisionPreview: {} } },
+        });
+      }
+      post(message, transfer);
+    };
+    return worker;
+  } }).catch(error => {
+    host.mockRestore();
+    throw error;
+  });
+  const init = host.mock.calls[0]?.[0].init;
+  host.mockRestore();
+  const regionLayouts = spyOn(engine, 'layoutDocumentWithRegionsAfterEdit');
+  const plainLayouts = spyOn(engine, 'layoutDocumentJson');
+  try {
+    if (!init) throw new Error('Expected bound worker command inputs');
+    const first = await client.edit(intent(1, 0, 'insertText', { text: '!' }));
+    expect(first.outcomes[0]?.status).toBe('applied');
+    const source = init.layoutInput;
+    expect(regionLayouts.mock.calls).toEqual([[source]]);
+    expect(plainLayouts.mock.calls).toEqual([]);
+
+    init.layoutWithRegions = false;
+    const next = await client.edit(intent(2, first.version, 'insertText', { text: '?' }));
+    expect(next.outcomes[0]?.status).toBe('applied');
+    const cleared = build(source, false, undefined);
+    expect(cleared).not.toBe(source);
+    expect(JSON.parse(cleared).workerOwned.renderEnv).toEqual({});
+    expect(plainLayouts.mock.calls).toEqual([[cleared]]);
+  } finally {
+    plainLayouts.mockRestore();
+    regionLayouts.mockRestore();
     client.destroy();
   }
 }, TIMEOUT);
