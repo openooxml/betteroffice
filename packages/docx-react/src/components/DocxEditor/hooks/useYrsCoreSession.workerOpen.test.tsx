@@ -2,7 +2,7 @@ import { LEGACY_SYNC_API_PROP } from '../peerless/contracts';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { budgetedTest } from '../../../../../../shared/office-session/testing/loadBudget';
+import { budgetedTest, pollUntil } from '../../../../../../shared/office-session/testing/loadBudget';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -1603,13 +1603,7 @@ async function openingPluginMetadataFallback() {
       onWorkerOpen: (worker) => { if (worker) opened = worker; },
     },
   });
-  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
-    await act(async () => {
-      clock.advance(0);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    });
-  }
-  await flushPluginFallback(clock);
+  await openedPluginFallback(result, clock, () => opened);
   expect(result.current.host).not.toBeNull();
   expect(opened).toBeDefined();
   const session = result.current.core.session!;
@@ -9403,6 +9397,22 @@ async function flushPluginFallback(clock: ReturnType<typeof holdPeerFallback>) {
   }
 }
 
+async function openedPluginFallback(
+  result: { readonly current: { readonly host: unknown; readonly errors: readonly unknown[] } },
+  clock: ReturnType<typeof holdPeerFallback>,
+  opened: () => unknown
+) {
+  await pollUntil(
+    () => (Boolean(opened()) && result.current.host !== null) || result.current.errors.length > 0,
+    () => act(async () => {
+      clock.advance(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    })
+  );
+  expect(result.current.errors).toEqual([]);
+  await flushPluginFallback(clock);
+}
+
 async function openingPluginFallback() {
   const source = await longFixture(2);
   const worker = installWorker({ holdState: true, holdCompletion: true });
@@ -9418,13 +9428,7 @@ async function openingPluginFallback() {
       onWorkerOpen: (worker) => { if (worker) opened = worker; },
     },
   });
-  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
-    await act(async () => {
-      clock.advance(0);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    });
-  }
-  await flushPluginFallback(clock);
+  await openedPluginFallback(result, clock, () => opened);
   expect(result.current.host).not.toBeNull();
   expect(opened).toBeDefined();
   const session = result.current.core.session!;

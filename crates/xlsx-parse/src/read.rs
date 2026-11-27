@@ -44,6 +44,7 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
     pub(crate) cell_facts: Vec<WorksheetCellFacts>,
+    pub(crate) table_parts: Vec<String>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
     /// The style table releases that needed an explicit `applyX` flag read,
     /// present only when it differs. A legacy collaboration fingerprint is the
@@ -136,6 +137,7 @@ pub(crate) fn parse_workbook_indexed(
         legacy_dimensions.push(legacy);
     }
 
+    let (table_parts, tables) = tables.into_iter().unzip();
     let tables = crate::table_style::resolve_tables(tables, styles_bytes, &styles)?;
     if styles.cell_xfs.is_empty() && references_zero_style(&sheets) {
         styles.cell_xfs.push(xlsx_model::Xf::default());
@@ -154,6 +156,7 @@ pub(crate) fn parse_workbook_indexed(
         active_sheet: meta.active_sheet,
         shared_string_cells,
         cell_facts,
+        table_parts,
         legacy_dimensions,
         legacy_styles,
         declined_parts,
@@ -440,6 +443,8 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
     Ok(map)
 }
 
+type ParsedTable = (Table, Option<TableStyleInfo>);
+
 /// Read every `table` relationship of one worksheet into the model. A part that
 /// is absent or lacks a usable `ref`/name is skipped: it stays preserved on the
 /// package either way, and a structured reference to it reports `#REF!`.
@@ -448,7 +453,7 @@ fn collect_tables(
     worksheet_path: &str,
     sheet_rels: &BTreeMap<String, Relationship>,
     sheet: SheetId,
-    out: &mut Vec<(Table, Option<TableStyleInfo>)>,
+    out: &mut Vec<(String, ParsedTable)>,
 ) -> Result<(), ParseError> {
     let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
     let mut seen = PartNames::default();
@@ -467,7 +472,7 @@ fn collect_tables(
             if out.len() >= MAX_TABLES {
                 return Err(ParseError::Malformed("table count exceeded cap".into()));
             }
-            out.push(table);
+            out.push((path, table));
         }
     }
     Ok(())
@@ -484,12 +489,15 @@ pub(crate) fn take_table_parses() -> usize {
     TABLE_PARSES.replace(0)
 }
 
+struct TableAlternate {
+    depth: usize,
+    column_count: usize,
+    branch: bool,
+}
+
 /// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
 /// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
-fn parse_table(
-    data: &[u8],
-    sheet: SheetId,
-) -> Result<Option<(Table, Option<TableStyleInfo>)>, ParseError> {
+fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<ParsedTable>, ParseError> {
     #[cfg(test)]
     TABLE_PARSES.set(TABLE_PARSES.get() + 1);
     let mut reader = reader(data);
@@ -497,9 +505,11 @@ fn parse_table(
     let mut depth = 0;
     let mut table: Option<Table> = None;
     let mut style = None;
+    let mut alternates: Vec<TableAlternate> = Vec::new();
+    let mut columns = None;
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
-            Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
+            Event::Start(e) if depth == 1 && local_name(&e) == b"table" => {
                 let Some(reference) = attr(&e, b"ref")? else {
                     return Ok(None);
                 };
@@ -525,15 +535,52 @@ fn parse_table(
             Event::Start(e) if local_name(&e) == b"tableStyleInfo" && table.is_some() => {
                 style = TableStyleInfo::parse(&e)?;
             }
-            Event::Start(e) if local_name(&e) == b"tableColumn" => {
-                if let Some(table) = table.as_mut() {
-                    if table.columns.len() >= MAX_TABLE_COLUMNS {
-                        return Err(ParseError::Malformed(
-                            "table column count exceeded cap".into(),
-                        ));
+            Event::Start(e) => {
+                let Some(table) = table.as_mut() else {
+                    continue;
+                };
+                let name = e.local_name();
+                if let Some(alternate) = alternates.last_mut() {
+                    if depth == alternate.depth + 1 {
+                        alternate.branch = table.columns.len() == alternate.column_count
+                            && matches!(name.as_ref(), b"Choice" | b"Fallback");
+                        continue;
                     }
-                    let name = attr(&e, b"name")?.unwrap_or_default();
-                    table.columns.push(unescape_name(&name));
+                    if !alternate.branch {
+                        continue;
+                    }
+                }
+                let table_depth = depth - 2 * alternates.len();
+                match (table_depth, name.as_ref()) {
+                    (2, b"tableColumns") => columns = Some(depth),
+                    (2 | 3, b"AlternateContent") if table_depth == 2 || columns.is_some() => {
+                        alternates.push(TableAlternate {
+                            depth,
+                            column_count: table.columns.len(),
+                            branch: false,
+                        });
+                    }
+                    (3, b"tableColumn") if columns.is_some() => {
+                        if table.columns.len() >= MAX_TABLE_COLUMNS {
+                            return Err(ParseError::Malformed(
+                                "table column count exceeded cap".into(),
+                            ));
+                        }
+                        let name = attr(&e, b"name")?.unwrap_or_default();
+                        table.columns.push(unescape_name(&name));
+                    }
+                    _ => {}
+                }
+            }
+            Event::End(_) => {
+                if columns == Some(depth + 1) {
+                    columns = None;
+                }
+                if alternates
+                    .last()
+                    .is_some_and(|alternate| alternate.depth == depth + 1)
+                {
+                    alternates.pop();
                 }
             }
             Event::Eof => break,
@@ -700,6 +747,7 @@ pub struct SourceCellFacts {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WorksheetCellFacts {
     pub(crate) source: SourceCellFacts,
+    pub(crate) alternate_cells: BTreeSet<(u32, u32)>,
     // The XML and model disagree about whether these cells hold a cache.
     cache_presence_overrides: BTreeSet<(u32, u32)>,
 }
@@ -722,6 +770,10 @@ struct CellBuild {
     inline_text: Option<String>,
     inline_runs: bool,
     formula: Option<String>,
+    /// Depth of an `mc:AlternateContent` directly under the cell.
+    alternate: Option<usize>,
+    /// Depth of that block's `mc:Fallback`, whose children are read as the cell's own.
+    fallback: Option<usize>,
 }
 
 /// parse one worksheet into a `Sheet`: cells (values, cached formulas, types),
@@ -755,13 +807,33 @@ fn parse_worksheet(
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) if cur.is_some() => {
-                let Some(c) = cur.as_mut().filter(|cell| depth == cell.depth + 1) else {
+                let Some(c) = cur.as_mut() else {
                     continue;
                 };
-                match local_name(&e).as_slice() {
+                let name = local_name(&e);
+                if depth == c.depth + 1 {
+                    let alternate = name.as_slice() == b"AlternateContent";
+                    c.alternate = alternate.then_some(depth);
+                    c.fallback = None;
+                    if alternate {
+                        continue;
+                    }
+                }
+                if c.alternate.is_some_and(|at| depth == at + 1) {
+                    c.fallback = (name.as_slice() == b"Fallback").then_some(depth);
+                    continue;
+                }
+                let direct = depth == c.depth + 1;
+                if !direct && !c.fallback.is_some_and(|at| depth == at + 1) {
+                    continue;
+                }
+                match name.as_slice() {
                     b"v" => c.value_text = Some(collect_text(&mut reader, &mut buf, &mut depth)?),
                     b"f" => {
                         let text = collect_text(&mut reader, &mut buf, &mut depth)?;
+                        if c.formula.is_some() && !direct {
+                            continue;
+                        }
                         if let Some(origin) = c.addr {
                             shared_formulas.record(&e, origin, &text)?;
                             record_array_formula(&e, origin, &mut sheet, facts)?;
@@ -821,6 +893,9 @@ fn parse_worksheet(
                             .map_err(|_| ParseError::Malformed(format!("bad cell ref {v:?}")))?,
                         None => CellRef::new(cur_row.unwrap_or(0), col_cursor),
                     };
+                    if alternate_depth > 0 {
+                        facts.alternate_cells.insert((addr.row, addr.col));
+                    }
                     col_cursor = addr.col;
                     let style = attr(&e, b"s")?.and_then(|v| v.parse::<u32>().ok());
                     cur = Some(CellBuild {
@@ -1317,7 +1392,6 @@ fn finalize_cell(
         Some("str") => CellValue::Text {
             value: unescape_name(&c.value_text.unwrap_or_default()),
         },
-        Some("b") if c.value_text.as_deref() == Some("") => CellValue::Empty,
         Some("b") => CellValue::Bool {
             value: c.value_text.as_deref() == Some("1"),
         },

@@ -10,6 +10,10 @@ container image. It serves discovery at `GET /hosting/discovery`, capabilities
 at `GET /hosting/capabilities`, a health check at `GET /healthz`, and the
 editor page the host embeds in an iframe.
 
+**Status: alpha.** The label covers the WOPI app only: its configuration options and the host setup
+steps on this page may change between releases. The editors and engines it serves are the same ones
+the `@betteroffice/*` packages ship.
+
 Supported formats are DOCX, XLSX and PPTX. Supported actions are `view`,
 `edit` and `editnew`, where `editnew` opens a 0-byte file as a blank document
 and writes real bytes on first save.

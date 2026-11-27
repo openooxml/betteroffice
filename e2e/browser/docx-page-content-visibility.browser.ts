@@ -7,6 +7,8 @@ const root = resolve(import.meta.dirname, '../..');
 const PAGES = 18;
 const FORCE_VISIBLE = '.paged-editor__page, .canvas-page { content-visibility: visible !important; }';
 const SETTLE = '[data-docx-caret], [data-testid="caret"] { visibility: hidden !important; } * { caret-color: transparent !important; }';
+const CLICK_WINDOW_MS = 500;
+const CLICK_WINDOW_MARGIN_MS = 250;
 type Rect = { x: number; y: number; width: number; height: number };
 
 async function longDocument(): Promise<Buffer> {
@@ -140,23 +142,29 @@ async function settledShot(page: Page, clip: Rect): Promise<string> {
   throw new Error('Document area never settled');
 }
 
-const selectionRects = (page: Page) => page.evaluate(() => {
+const selectionRects = (page: Page, find = false) => page.evaluate((find) => {
   const host = document.querySelector('[data-docx-pages-host]')!.getBoundingClientRect();
   return Array.from(document.querySelectorAll<HTMLElement>('[data-docx-pages-host] div[aria-hidden="true"]'))
-    .filter((element) => /59, 130, 246|255, 150, 0|255, 220, 0/.test(element.style.background))
+    .filter((element) => (find ? /255, 150, 0|255, 220, 0/ : /59, 130, 246|255, 150, 0|255, 220, 0/).test(element.style.background))
     .map((element) => {
       const rect = element.getBoundingClientRect();
       return { x: Math.round(rect.x - host.x), y: Math.round(rect.y - host.y), width: Math.round(rect.width), height: Math.round(rect.height) };
     });
-});
+}, find);
 
-async function settledSelection(page: Page): Promise<Rect[]> {
+/** Runs `gesture`, then returns the selection once it differs from the one before, reaches the line at `y` (or shows a find match) and holds still. */
+async function selectionAfter(page: Page, until: { y: number } | { find: true }, gesture: () => Promise<unknown>): Promise<Rect[]> {
+  const find = 'find' in until;
+  const before = JSON.stringify(await selectionRects(page, find));
+  await gesture();
   let previous = '';
   let rects: Rect[] = [];
   await expect.poll(async () => {
-    rects = await selectionRects(page);
+    rects = await selectionRects(page, find);
     const key = JSON.stringify(rects);
-    const stable = rects.length > 0 && key === previous;
+    const reached = !('y' in until) || await page.locator('[data-docx-pages-host]').boundingBox()
+      .then((host) => rects.some((rect) => Math.abs(until.y - host!.y - rect.y - rect.height / 2) <= rect.height * 1.5));
+    const stable = rects.length > 0 && key !== before && reached && key === previous;
     previous = key;
     return stable;
   }, { timeout: 15_000, intervals: [300] }).toBe(true);
@@ -172,17 +180,18 @@ async function interactions(page: Page) {
   const input = page.locator('[data-docx-worker-editor] .paged-editor__input');
   await scrollToPage(page, 11);
   let box = await canvasBox(page, 11);
-  await page.mouse.dblclick(box.x + 200, box.y + 300);
-  const word = await settledSelection(page);
-  await page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 });
-  const paragraph = await settledSelection(page);
+  const word = await selectionAfter(page, { y: box.y + 300 }, () => page.mouse.dblclick(box.x + 200, box.y + 300));
+  await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.dblclick(box.x + 200, box.y + 400));
+  await page.waitForTimeout(CLICK_WINDOW_MS + CLICK_WINDOW_MARGIN_MS);
+  const paragraph = await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 }));
   await scrollToPage(page, 12, 1200);
   const upper = await canvasBox(page, 11), lower = await canvasBox(page, 12);
-  await page.mouse.move(upper.x + 150, upper.y + 300);
-  await page.mouse.down();
-  await page.mouse.move(lower.x + 300, lower.y + 220, { steps: 12 });
-  await page.mouse.up();
-  const drag = await settledSelection(page);
+  const drag = await selectionAfter(page, { y: lower.y + 220 }, async () => {
+    await page.mouse.move(upper.x + 150, upper.y + 300);
+    await page.mouse.down();
+    await page.mouse.move(lower.x + 300, lower.y + 220, { steps: 12 });
+    await page.mouse.up();
+  });
   const dragPages = await page.evaluate((rects) => {
     const host = document.querySelector('[data-docx-pages-host]')!.getBoundingClientRect();
     return [...new Set(rects.flatMap((rect) => Array.from(document.querySelectorAll<HTMLElement>('.canvas-page[data-page-index]'))
@@ -196,9 +205,10 @@ async function interactions(page: Page) {
   await page.mouse.click(box.x + 150, box.y + 150);
   await input.press('ControlOrMeta+f');
   const dialog = page.getByTestId('find-replace-dialog');
-  await dialog.getByRole('textbox', { name: 'Find text', exact: true }).fill('Marker16 line 3 ');
-  await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText('1 of 1 matches');
-  const found = await settledSelection(page);
+  const found = await selectionAfter(page, { find: true }, async () => {
+    await dialog.getByRole('textbox', { name: 'Find text', exact: true }).fill('Marker16 line 3 ');
+    await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText('1 of 1 matches');
+  });
   await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
   await scrollToPage(page, 0);
   await page.mouse.click((await canvasBox(page, 0)).x + 150, (await canvasBox(page, 0)).y + 150);

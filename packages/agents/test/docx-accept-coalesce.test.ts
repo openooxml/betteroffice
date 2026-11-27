@@ -52,7 +52,7 @@ function forceLegacy(doc: DocxAgentDocument) {
   doc.session.setParagraphAttrs({
     story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 },
   }, { defaultTextFormatting: { fontSize: 40 } });
-  const parts = doc.session.paragraphSavePlan().splicedParts ?? [];
+  const parts = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts ?? [];
   const part = parts.find(part => part.part === 'word/document.xml');
   if (part) expect(part.legacyParagraphs?.some(entry => entry.ordinal === 1)).toBe(true);
   else expect(parts).toHaveLength(0);
@@ -65,6 +65,8 @@ async function savedParagraph(doc: DocxAgentDocument, preserveBytes = true) {
   return paragraphsOf(xml)[1]!;
 }
 
+const sharedSuffix = `<w:r><w:rPr>${RPR_ALT}</w:rPr><w:t xml:space="preserve"> alpha.</w:t></w:r>`;
+
 const shapes = [
   { name: 'inside one run', source: run('000000A1', 'Alpha bravo charlie delta.'), query: 'bravo',
     replacement: 'BRAVO', expected: 'Alpha BRAVO charlie delta.', runs: 1 },
@@ -76,7 +78,8 @@ const shapes = [
     query: 'romeo', replacement: 'ROMEO', expected: 'Quebec ROMEO sierra.', runs: 3 },
   { name: 'crosses identical properties', source: run('000000E1', 'Tango uniform ') + run('000000E2', 'victor whiskey.'),
     query: 'uniform victor', replacement: 'UNIFORM VICTOR', expected: 'Tango UNIFORM VICTOR whiskey.', runs: 1 },
-  { name: 'crosses different properties', source: run('000000F1', 'Xray yankee ') + run('000000F2', 'zulu alpha.', RPR_ALT),
+  { name: 'keeps the original properties of each replaced word',
+    source: run('000000F1', 'Xray yankee ') + run('000000F2', 'zulu', RPR_ALT) + sharedSuffix,
     query: 'yankee zulu', replacement: 'YANKEE ZULU', expected: 'Xray YANKEE ZULU alpha.', runs: 3 },
   { name: 'untouched source split', source: run('00000061', 'Guard first ') + run('00000062', 'second part.'),
     query: 'first', replacement: 'FIRST', expected: 'Guard FIRST second part.', runs: 2 },
@@ -105,7 +108,7 @@ for (const legacy of [false, true]) {
         }, { bold: null });
         if (legacy) forceLegacy(doc);
         else {
-          const part = doc.session.paragraphSavePlan().splicedParts?.find(part => part.part === 'word/document.xml');
+          const part = doc.session.paragraphSavePlanWithLocalProvenance().splicedParts?.find(part => part.part === 'word/document.xml');
           expect(part?.paragraphPatches?.some(patch => patch.ordinal === 1)).toBe(true);
         }
         const saved = await savedParagraph(doc);
@@ -144,16 +147,17 @@ for (const legacy of [false, true]) {
           expect(saved).toContain(`<w:rPr>${RPR}</w:rPr>`);
           expect(saved).not.toContain('000000E2');
         }
-        if (shape.name === 'crosses different properties') {
+        if (shape.name === 'keeps the original properties of each replaced word') {
           const runs = saved.match(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)!;
           expect(runs.map(textOf)).toEqual(['Xray YANKEE ', 'ZULU', ' alpha.']);
           expect(runs[0]).toContain('0066AA');
+          expect(runs[0]).toContain('<w:b/>');
           expect(runs[0]).toContain('<w:bCs/>');
-          expect(runs[1]).toContain('0066AA');
+          expect(runs[1]).toContain('C00000');
+          expect(runs[1]).toContain('<w:i/>');
           expect(runs[1]).toContain('<w:iCs/>');
           expect(runs[1]).not.toContain('<w:bCs');
-          expect(runs[2]).toContain('<w:i/>');
-          expect(runs[2]).toContain('C00000');
+          expect(runs[2]).toBe(sharedSuffix);
         }
         if (shape.name === 'untouched source split' && !legacy) {
           expect(saved).toContain(run('00000062', 'second part.'));

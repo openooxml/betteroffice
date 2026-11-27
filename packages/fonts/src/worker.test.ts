@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import * as fonts from './index';
 import * as worker from './worker';
 import * as progressive from './progressive-entry';
@@ -40,22 +40,26 @@ test('base Latin and the optional Latin pack have separate URL maps', async () =
   expect(source.mock.calls).toEqual([['latin'], ['base']]);
 });
 
-test('a missing CJK add-on loads the Latin substitute unless strict loading is requested', async () => {
-  const face = worker.resolveScriptFallbackFace('cjk-sc', false, false)!;
+test('missing script add-ons load the Latin substitute unless strict loading is requested', async () => {
   const fallback = worker.resolveMetricCompatFace('Arial', false, false)!;
-  const source = mock(async (pack: FontAssetKind) => ({ urls: pack === 'cjk' ? undefined : await fonts.fontAssetUrls(pack) }));
+  const source = mock(async (pack: FontAssetKind) => ({
+    urls: pack === 'cjk' || pack === 'intl' ? undefined : await fonts.fontAssetUrls(pack),
+  }));
   setWorkerFontAssets(source);
   globalThis.fetch = fontAssetResponse as typeof fetch;
-  expect(await worker.bundledFaceInstalled(face)).toBe(false);
-  expect(await worker.loadBundledFontBytes(face, undefined, { decoder })).toEqual(
-    await fonts.loadBundledFontBytes(fallback, undefined, { decoder }));
-  const strict = await worker.loadBundledFontBytes(face, undefined, { strict: true }).catch((error: unknown) => error);
-  expect(strict).toBeInstanceOf(Error);
-  expect((strict as Error).constructor.name).toBe('MissingCjkAddonError');
-  expect(fonts.isMissingFontAddon(strict)).toBe(true);
+  const expected = await fonts.loadBundledFontBytes(fallback, undefined, { decoder });
+  for (const [script, name] of [['cjk-sc', 'MissingCjkAddonError'], ['thai', 'MissingIntlAddonError']] as const) {
+    const face = worker.resolveScriptFallbackFace(script, false, false)!;
+    expect(await worker.bundledFaceInstalled(face)).toBe(false);
+    await expect(worker.loadBundledFontBytes(face, undefined, { decoder })).resolves.toEqual(expected);
+    const strict = await worker.loadBundledFontBytes(face, undefined, { strict: true }).catch((error: unknown) => error);
+    expect(strict).toBeInstanceOf(Error);
+    expect((strict as Error).constructor.name).toBe(name);
+    expect(fonts.isMissingFontAddon(strict)).toBe(true);
+  }
   const location = worker.createFontProvider().resolveScriptFallback('cjk-sc', false, false)!.slices!;
   const sliceError = await location.url(location.ref.index).catch((error: unknown) => error);
-  expect((sliceError as Error).constructor).toBe((strict as Error).constructor);
+  expect((sliceError as Error).constructor.name).toBe('MissingCjkAddonError');
 });
 
 test('missing intl and Latin add-ons keep their own errors and are retried', async () => {
@@ -63,7 +67,7 @@ test('missing intl and Latin add-ons keep their own errors and are retried', asy
   setWorkerFontAssets(source);
   const intl = worker.resolveScriptFallbackFace('thai', false, false)!;
   const latin = worker.resolveMetricCompatFace('Calibri', false, false)!;
-  const intlError = await worker.loadBundledFontBytes(intl).catch((error: unknown) => error);
+  const intlError = await worker.loadBundledFontBytes(intl, undefined, { strict: true }).catch((error: unknown) => error);
   expect((intlError as Error).constructor.name).toBe('MissingIntlAddonError');
   await expect(worker.loadBundledFontBytes(latin)).rejects.toMatchObject({ name: 'MissingFontAddonError' });
   await expect(worker.bundledFaceInstalled(intl)).resolves.toBe(false);
@@ -197,5 +201,15 @@ test('the published main entry leaves all five slice manifests in the CJK add-on
   for (const file of manifests) {
     const index = JSON.parse(await readFile(new URL(urls![file]!), 'utf8')) as { chunks: { sha256: string }[] };
     expect(bundle).not.toContain(index.chunks[0]!.sha256);
+  }
+});
+
+test('published font declarations keep CDN session hooks internal', async () => {
+  const dist = new URL('../dist/', import.meta.url);
+  const entries = (await readdir(dist)).filter((file) => file.endsWith('.d.ts'));
+  expect(entries).toEqual(expect.arrayContaining(['index.d.ts', 'progressive.d.ts']));
+  for (const file of entries) {
+    const types = await readFile(new URL(file, dist), 'utf8');
+    expect(types).not.toMatch(/\b(?:FontCdnReporter|reportCdnFailure|checkImplicitCdnPack|onSubstitute)\b/);
   }
 });

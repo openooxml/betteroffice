@@ -23,13 +23,15 @@ use docx_layout::display_list::{
 };
 use docx_layout::skipped_effects::{PrimitiveAt, Region};
 use ooxml_raster::svg;
-use ooxml_raster::{encode_png, parse_css_color};
+use ooxml_raster::{
+    clip_dashed_polyline, clipped_dash_outline, encode_png, parse_css_color, stroke_path_length,
+};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
-    LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
-    RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
+    LinearGradient, Mask, Paint, Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient,
+    Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use font::{FontSpecCache, PaintContext};
@@ -369,6 +371,33 @@ impl PageBudget {
 
     fn charge_path(&mut self, segments: u64) -> Result<(), String> {
         self.charge_scratch(segments.saturating_mul(PATH_SEGMENT_BYTES))
+    }
+
+    fn charge_clipped_dash(
+        &mut self,
+        length: f32,
+        dash: &[f32],
+        mut phase: f32,
+    ) -> Result<(), String> {
+        if !length.is_finite() {
+            return self.charge_path(u64::MAX);
+        }
+        let mut remaining = f64::from(length);
+        for (index, &interval) in dash.iter().enumerate().cycle() {
+            if remaining <= 0.0 {
+                break;
+            }
+            if phase > interval || (phase == interval && interval > 0.0) {
+                phase -= interval;
+                continue;
+            }
+            if index.is_multiple_of(2) {
+                self.charge_path(1)?;
+            }
+            remaining -= f64::from(interval - phase);
+            phase = 0.0;
+        }
+        Ok(())
     }
 
     pub(crate) fn charge_glyphs(&mut self, glyphs: u64) -> Result<(), String> {
@@ -876,9 +905,6 @@ fn paint_shape<'k>(
         )?;
     }
     let stroked = shape_stroke(shape, opacity)?;
-    if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
-        budget.charge_path(dash_segments(path_length(&path), dash))?;
-    }
     let mut ends = Vec::new();
     if let Some(stroked) = &stroked
         && (stroked.head.is_some() || stroked.tail.is_some())
@@ -899,20 +925,23 @@ fn paint_shape<'k>(
         );
         budget.charge_path(ends.len() as u64)?;
     }
-    type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
+    type Draw<'d> = Box<
+        dyn Fn(&mut Pixmap, Transform, Option<&Mask>, &mut PageBudget) -> Result<(), String> + 'd,
+    >;
     let mut parts: Vec<Draw<'_>> = Vec::new();
     if let (Some((source, _)), Some(draws)) = (&picture, &picture_draws) {
         let path = &path;
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+                Ok(())
             },
         ));
     }
     if failed_picture {
         let path = &path;
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 paint_picture_placeholder(
                     target,
                     path,
@@ -921,20 +950,58 @@ fn paint_shape<'k>(
                     mask,
                     opacity,
                 );
+                Ok(())
             },
         ));
     }
     if let Some(paint) = &fill {
         parts.push(Box::new(
-            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 target.fill_path(&path, paint, FillRule::Winding, transform, mask);
+                Ok(())
             },
         ));
     }
     if let Some(stroked) = &stroked {
         parts.push(Box::new(
-            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, budget| {
+                if let Some(dash) = &stroked.dash {
+                    let period = dash.iter().sum::<f32>();
+                    if let Some(fragments) = clip_dashed_polyline(
+                        &path,
+                        &stroked.stroke,
+                        transform,
+                        (target.width(), target.height()),
+                        f64::from(period),
+                    ) {
+                        budget.charge_scratch(
+                            (std::mem::size_of_val(dash.as_slice()) as u64)
+                                .saturating_mul(fragments.len() as u64),
+                        )?;
+                        for (fragment, phase) in &fragments {
+                            budget.charge_clipped_dash(
+                                stroke_path_length(fragment),
+                                dash,
+                                *phase % period,
+                            )?;
+                        }
+                        if let Some(outline) =
+                            clipped_dash_outline(fragments, dash, &stroked.stroke, transform)
+                        {
+                            target.fill_path(
+                                &outline,
+                                &stroked.paint,
+                                FillRule::Winding,
+                                transform,
+                                mask,
+                            );
+                        }
+                        return Ok(());
+                    }
+                    budget.charge_path(dash_segments(stroke_path_length(&path), dash))?;
+                }
                 target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+                Ok(())
             },
         ));
     }
@@ -947,7 +1014,7 @@ fn paint_shape<'k>(
             ..stroked.stroke.clone()
         };
         parts.push(Box::new(
-            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>, _| {
                 for (end, open) in ends {
                     if *open {
                         target.stroke_path(end, &stroked.paint, &outline, transform, mask);
@@ -955,6 +1022,7 @@ fn paint_shape<'k>(
                         target.fill_path(end, &stroked.paint, FillRule::Winding, transform, mask);
                     }
                 }
+                Ok(())
             },
         ));
     }
@@ -982,10 +1050,11 @@ fn paint_shape<'k>(
                 &mut surface.pixmap,
                 surface.offset.pre_concat(transform),
                 None,
-            );
+                budget,
+            )?;
             shadow::composite_shadow(pixmap, mask, surface, &shadow);
         }
-        draw(pixmap, transform, mask);
+        draw(pixmap, transform, mask, budget)?;
     }
     Ok(())
 }
@@ -1588,20 +1657,32 @@ fn line_end(value: Option<&Value>) -> Result<Option<LineEnd>, String> {
     }))
 }
 
-/// The first two and last two points the outline passes through, as the web
-/// backend reads them for line ends.
 fn path_endpoints(commands: &[ShapePathCommand]) -> Result<Option<[(f32, f32); 4]>, String> {
     let mut points = Vec::new();
     for command in commands {
         let (x, y) = match command {
-            ShapePathCommand::Move { x, y }
-            | ShapePathCommand::Line { x, y }
-            | ShapePathCommand::Quad { x, y, .. }
-            | ShapePathCommand::Cubic { x, y, .. } => (x, y),
+            ShapePathCommand::Move { x, y } | ShapePathCommand::Line { x, y } => (x, y),
+            ShapePathCommand::Quad { cpx, cpy, x, y } => {
+                points.push((number_f32(cpx)?, number_f32(cpy)?));
+                (x, y)
+            }
+            ShapePathCommand::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                points.push((number_f32(cp1x)?, number_f32(cp1y)?));
+                points.push((number_f32(cp2x)?, number_f32(cp2y)?));
+                (x, y)
+            }
             ShapePathCommand::Close => continue,
         };
         points.push((number_f32(x)?, number_f32(y)?));
     }
+    points.dedup();
     let count = points.len();
     if count < 2 {
         return Ok(None);
@@ -3144,45 +3225,6 @@ fn dash_segments(length: f32, dash: &[f32]) -> u64 {
     count.min(u64::MAX as f64) as u64
 }
 
-/// An upper bound on the length a stroke walks, since a curve is no longer
-/// than the control polygon it is drawn from.
-fn path_length(path: &Path) -> f32 {
-    let mut total = 0.0;
-    let mut cursor = Point::zero();
-    let mut start = Point::zero();
-    let mut step = |from: Point, to: Point| {
-        total += (to.x - from.x).hypot(to.y - from.y);
-    };
-    for segment in path.segments() {
-        match segment {
-            PathSegment::MoveTo(point) => {
-                cursor = point;
-                start = point;
-            }
-            PathSegment::LineTo(point) => {
-                step(cursor, point);
-                cursor = point;
-            }
-            PathSegment::QuadTo(control, point) => {
-                step(cursor, control);
-                step(control, point);
-                cursor = point;
-            }
-            PathSegment::CubicTo(first, second, point) => {
-                step(cursor, first);
-                step(first, second);
-                step(second, point);
-                cursor = point;
-            }
-            PathSegment::Close => {
-                step(cursor, start);
-                cursor = start;
-            }
-        }
-    }
-    total
-}
-
 fn stroke_style(width: f32, dash: Option<&[f32]>, style: StrokeStyle) -> Result<Stroke, String> {
     if !width.is_finite() || width < 0.0 {
         return Err("stroke width must be finite and non-negative".to_string());
@@ -4052,6 +4094,63 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn overlapping_clipped_dashes_preserve_stroke_opacity() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0, "width": 32, "height": 16,
+                "primitives": [{
+                    "kind": "shape", "x": 0, "y": 0, "w": 32, "h": 16,
+                    "geometryPath": [
+                        {"type": "move", "x": 8, "y": 8},
+                        {"type": "line", "x": 104, "y": 8},
+                        {"type": "line", "x": 8, "y": 8}
+                    ],
+                    "strokePaint": {"color": "#ff000080", "width": 4, "customDash": [2, 1]}
+                }]
+            }]
+        }))
+        .unwrap();
+        let png = render_png(
+            &scene,
+            0,
+            &RenderResources::new(&FontStore::new(), &FontChains::new(), &ImageMap::new()),
+        )
+        .unwrap();
+        let single = picture_pixel(&png, 10, 8);
+        assert!((126..=128).contains(&single[1]));
+        assert_eq!(picture_pixel(&png, 14, 8), single);
+        assert_eq!(picture_pixel(&png, 18, 8), single);
+    }
+
+    #[test]
+    fn off_page_dashed_connector_exports_with_its_original_dash_phase() {
+        let scene: DisplayList = serde_json::from_value(json!({
+            "pages": [{
+                "pageIndex": 0, "width": 192, "height": 160,
+                "primitives": [{
+                    "kind": "shape", "x": 32, "y": 24, "w": 96, "h": 96,
+                    "geometryPath": [
+                        {"type": "move", "x": 32, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 24},
+                        {"type": "line", "x": 96000032, "y": 120},
+                        {"type": "line", "x": 128, "y": 120}
+                    ],
+                    "strokePaint": {"color": "#ff0000", "width": 4, "customDash": [2, 1]}
+                }]
+            }]
+        }))
+        .unwrap();
+        let png = render_png(
+            &scene,
+            0,
+            &RenderResources::new(&FontStore::new(), &FontChains::new(), &ImageMap::new()),
+        )
+        .unwrap();
+        assert_eq!(picture_pixel(&png, 160, 120), [255, 0, 0, 255]);
+        assert_eq!(picture_pixel(&png, 154, 120), [255, 255, 255, 255]);
+    }
+
+    #[test]
     fn shape_line_ends_point_back_along_the_outline() {
         assert!(line_end(Some(&json!({"type": "none"}))).unwrap().is_none());
         let end = line_end(Some(
@@ -4080,6 +4179,37 @@ mod tests {
         }
         let arrow = line_end(Some(&json!({"type": "arrow"}))).unwrap().unwrap();
         assert!(line_end_path(&arrow, tip, previous, 2.0).unwrap().1);
+    }
+
+    #[test]
+    fn connector_line_ends_follow_the_first_and_last_nonzero_tangents() {
+        for (preset, commands, expected) in [
+            (
+                "bentConnector2",
+                json!([
+                    {"type": "move", "x": 0, "y": 0},
+                    {"type": "line", "x": 100, "y": 0},
+                    {"type": "line", "x": 100, "y": 0}
+                ]),
+                [(0.0, 0.0), (100.0, 0.0), (0.0, 0.0), (100.0, 0.0)],
+            ),
+            (
+                "curvedConnector2",
+                json!([
+                    {"type": "move", "x": 0, "y": 0},
+                    {"type": "cubic", "cp1x": 50, "cp1y": 0, "cp2x": 100, "cp2y": 40,
+                        "x": 100, "y": 80}
+                ]),
+                [(0.0, 0.0), (50.0, 0.0), (100.0, 40.0), (100.0, 80.0)],
+            ),
+        ] {
+            let commands: Vec<ShapePathCommand> = serde_json::from_value(commands).unwrap();
+            assert_eq!(
+                path_endpoints(&commands).unwrap(),
+                Some(expected),
+                "{preset}"
+            );
+        }
     }
 
     fn picture_scene(references: &[&str]) -> DisplayList {

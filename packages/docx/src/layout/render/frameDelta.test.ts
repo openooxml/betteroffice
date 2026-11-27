@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import type { PartsMap } from '../../docx/rezip/parts';
+import { drawPrimitive } from './canvasBackend';
 import {
   applyFrameDelta,
   applyFrameDeltaInternal,
@@ -1670,7 +1671,7 @@ interface WireObject {
 }
 
 /** One full frame holding a single page whose payload is `page`. */
-function encodeSinglePageFrame(page: WireObject): Uint8Array {
+function encodeSinglePageFrame(page: WireObject, primitiveCount = 0): Uint8Array {
   const strings: string[] = [];
   const stringId = (value: string): number => {
     const index = strings.indexOf(value);
@@ -1722,7 +1723,8 @@ function encodeSinglePageFrame(page: WireObject): Uint8Array {
   }
   const stringsOffset = 80 + 48;
   const dataOffset = Math.ceil((stringsOffset + table.length) / 8) * 8;
-  const total = dataOffset + payload.length;
+  const payloadOffset = dataOffset + primitiveCount * 8;
+  const total = payloadOffset + payload.length;
   const bytes = new Uint8Array(total);
   const view = new DataView(bytes.buffer);
   bytes.set([0x46, 0x44, 0x56, 0x31], 0);
@@ -1741,13 +1743,73 @@ function encodeSinglePageFrame(page: WireObject): Uint8Array {
   view.setUint32(68, dataOffset, true);
   bytes[80] = 1;
   view.setBigUint64(88, 1n, true);
+  view.setUint32(80 + 24, primitiveCount, true);
   view.setUint32(80 + 28, dataOffset, true);
-  view.setUint32(80 + 32, dataOffset, true);
+  view.setUint32(80 + 32, payloadOffset, true);
   view.setUint32(80 + 36, payload.length, true);
   bytes.set(table, stringsOffset);
-  bytes.set(payload, dataOffset);
+  for (let index = 0; index < primitiveCount; index++) {
+    view.setBigUint64(dataOffset + index * 8, BigInt(index + 1), true);
+  }
+  bytes.set(payload, payloadOffset);
   return bytes;
 }
+
+it('paints legacy FrameDelta connector arrowheads from command endpoints', async () => {
+  const object = (fields: Record<string, WireValue>): WireObject => ({
+    entries: Object.entries(fields),
+  });
+  const start = object({ type: 'move', x: 0, y: 0 });
+  const corner = object({ type: 'line', x: 60, y: 0 });
+  const end = object({ type: 'line', x: 60, y: 80 });
+  const curve = object({ type: 'cubic', cp1x: 20, cp1y: 0, cp2x: 60, cp2y: 40, x: 60, y: 80 });
+  const arrow = object({ type: 'arrow' });
+  const primitives = [[start, corner, end, end], [start, curve]].map((geometryPath) =>
+    object({
+      kind: 'shape', x: 0, y: 0, w: 60, h: 80, geometryPath,
+      fillPaint: object({ kind: 'none' }),
+      strokePaint: object({ width: 5, dash: 'dash', headEnd: arrow, tailEnd: arrow }),
+    })
+  );
+  const frame = encodeSinglePageFrame(
+    object({ pageIndex: 0, width: 200, height: 200, primitives }),
+    primitives.length
+  );
+  const upsert = decodeFrameDelta(frame).operations[0];
+  if (upsert?.kind !== 'upsert') throw new Error('expected an upsert');
+
+  type Point = [number, number];
+  let path: Point[] = [];
+  const strokes: Point[][] = [];
+  const dashPatterns: number[][] = [];
+  const recordPoint = (x: number, y: number): void => {
+    path.push([Math.round(x), Math.round(y)]);
+  };
+  const ctx = {
+    beginPath() { path = []; },
+    moveTo: recordPoint,
+    lineTo: recordPoint,
+    bezierCurveTo() {},
+    closePath() {},
+    save() {},
+    restore() {},
+    setLineDash(dash: number[]) { dashPatterns.push(dash); },
+    stroke() { strokes.push(path); },
+  } as unknown as CanvasRenderingContext2D;
+
+  const arrowheads: Point[][][] = [];
+  for (const primitive of upsert.page.primitives) {
+    expect(primitive).not.toHaveProperty('shapeType');
+    strokes.length = 0;
+    await drawPrimitive(ctx, primitive);
+    arrowheads.push(strokes.slice(1));
+  }
+  expect(dashPatterns).toEqual([[15, 10], [15, 10]]);
+  expect(arrowheads).toEqual([
+    [[[0, 0], [20, 10], [20, -10]], [[60, 80], [80, 90], [80, 70]]],
+    [[[0, 0], [4, 22], [20, 10]], [[60, 80], [56, 58], [40, 70]]],
+  ]);
+});
 
 describe('FrameDelta typed values', () => {
   const page = (meta: [string, WireValue][]): WireObject => ({

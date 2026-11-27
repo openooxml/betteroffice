@@ -57,6 +57,63 @@ struct RecoveryHistory {
     preserved_redo: Vec<RecoveryPreservedHistory>,
 }
 
+fn capture_history_stack(model: &WorkbookModel, stack: &[Vec<Op>]) -> Result<Vec<Vec<Op>>> {
+    let Some(first_rename) = stack.iter().position(|step| {
+        step.iter()
+            .any(|op| matches!(op, Op::RestoreTableColumn { .. }))
+    }) else {
+        return Ok(stack.to_vec());
+    };
+    let mut preview = model.clone();
+    let mut batch =
+        xlsx_ops::InPlaceBatch::without_inverse(&mut preview).with_cell_restoration(true);
+    let mut captured = Vec::with_capacity(stack.len());
+    for step in stack[first_rename..].iter().rev() {
+        let mut ops = Vec::with_capacity(step.len());
+        for op in step {
+            if let Op::RestoreTableColumn { sheet, at, .. } = op {
+                let mut cells = vec![(*sheet, *at)];
+                let mut names_changed = false;
+                batch.apply_with_inverse(op, |inverse| {
+                    if let [
+                        Op::RestoreTableColumn {
+                            formulas,
+                            defined_names,
+                            ..
+                        },
+                    ] = inverse
+                    {
+                        cells.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                        names_changed = !defined_names.is_empty();
+                    }
+                })?;
+                let model = batch.workbook();
+                ops.push(Op::SetTables {
+                    tables: model.tables.clone(),
+                });
+                ops.extend(cells.into_iter().map(|(sheet, at)| Op::SetCell {
+                    sheet,
+                    at,
+                    cell: current_cell_state(model, sheet, at),
+                }));
+                if names_changed {
+                    ops.push(Op::SetDefinedNames {
+                        defined_names: model.defined_names.clone(),
+                    });
+                }
+            } else {
+                batch.apply(op)?;
+                ops.push(op.clone());
+            }
+        }
+        captured.push(ops);
+        pulse();
+    }
+    captured.extend(stack[..first_rename].iter().rev().cloned());
+    captured.reverse();
+    Ok(captured)
+}
+
 struct RecoveryPreservedHistory {
     before: RecoveryPreserved,
     after: RecoveryPreserved,
@@ -372,7 +429,11 @@ struct RecoveryHiddenSizes {
 }
 
 impl RecoveryCalculation {
-    fn capture(model: &WorkbookModel, projection: WorkbookModel) -> Result<Self> {
+    fn capture(
+        model: &WorkbookModel,
+        projection: WorkbookModel,
+        collaborative: bool,
+    ) -> Result<Self> {
         if model.sheets.len() != projection.sheets.len() {
             return Err(invalid("Recovery authority sheet count mismatch"));
         }
@@ -395,8 +456,8 @@ impl RecoveryCalculation {
             );
             arrays.push(sheet.array_formulas().collect());
         }
-        let hidden_differs =
-            model
+        let hidden_differs = !collaborative
+            && model
                 .sheets
                 .iter()
                 .zip(&projection.sheets)
@@ -422,11 +483,21 @@ impl RecoveryCalculation {
                 Vec::new()
             },
         };
-        let applied = state.apply(projection)?;
+        let mut applied = state.apply(projection)?;
+        if collaborative {
+            for (sheet, applied) in model.sheets.iter().zip(&mut applied.sheets) {
+                applied
+                    .hidden_row_heights
+                    .clone_from(&sheet.hidden_row_heights);
+                applied
+                    .hidden_col_widths
+                    .clone_from(&sheet.hidden_col_widths);
+            }
+        }
         if applied != *model {
             return Err(invalid(format!(
                 "Recovery projection cannot be reconstructed: {}",
-                first_difference(model, &applied)
+                first_difference(model, &applied, collaborative)
             )));
         }
         Ok(state)
@@ -479,7 +550,7 @@ impl RecoveryCalculation {
     }
 }
 
-fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
+fn first_difference(left: &WorkbookModel, right: &WorkbookModel, collaborative: bool) -> String {
     let workbook = [
         ("sheet count", left.sheets.len() != right.sheets.len()),
         ("date system", left.date_system != right.date_system),
@@ -519,11 +590,11 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
             ("row heights", left.row_heights != right.row_heights),
             (
                 "hidden column widths",
-                left.hidden_col_widths != right.hidden_col_widths,
+                !collaborative && left.hidden_col_widths != right.hidden_col_widths,
             ),
             (
                 "hidden row heights",
-                left.hidden_row_heights != right.hidden_row_heights,
+                !collaborative && left.hidden_row_heights != right.hidden_row_heights,
             ),
             ("sheet format", left.format != right.format),
             ("column styles", left.col_styles != right.col_styles),
@@ -684,8 +755,23 @@ impl Workbook {
         };
         let projection = built.materialize().map_err(authority_error)?;
         pulse();
-        let calculation = RecoveryCalculation::capture(&self.model, projection)?;
+        let calculation =
+            RecoveryCalculation::capture(&self.model, projection, self.is_collaborative())?;
         pulse();
+        let history = if let Some((preserved_undo, preserved_redo)) = history {
+            let (undo, redo) = self.undo.recovery_stacks();
+            Some(RecoveryHistory {
+                undo: UndoStack::from_recovery_stacks(
+                    capture_history_stack(&self.model, undo)?,
+                    capture_history_stack(&self.model, redo)?,
+                ),
+                sheet_order: built.recovery_sheet_order_history(),
+                preserved_undo,
+                preserved_redo,
+            })
+        } else {
+            None
+        };
         let checkpoint = RecoveryCheckpoint {
             engine: env!("CARGO_PKG_VERSION").into(),
             through_seq,
@@ -695,12 +781,7 @@ impl Workbook {
             proposals: self.proposals.list().to_vec(),
             proposal_id_counter: self.proposals.id_counter(),
             axes: capture_axes(&self.preserved.axes)?,
-            history: history.map(|(preserved_undo, preserved_redo)| RecoveryHistory {
-                undo: self.undo.clone(),
-                sheet_order: built.recovery_sheet_order_history(),
-                preserved_undo,
-                preserved_redo,
-            }),
+            history,
         };
         let mut metadata = Writer::bounded(limit.max - limit.used);
         checkpoint.write(&mut metadata);
@@ -783,7 +864,7 @@ impl Workbook {
         }
         pulse();
         let source_workbook = source
-            .map(|source| Self::open_internal(source, false, None))
+            .map(|source| Self::open_source(source, false, None, AuthorityBuild::RecoverySource))
             .transpose()?;
         let source_model = source_workbook.as_ref().map(Self::model);
         let full_precision = authority
@@ -803,6 +884,13 @@ impl Workbook {
         if let Some(styles) = &source_markers {
             model.styles.inherit_xf_xml_markers(styles);
         }
+        let structure = if checkpoint.collaborative {
+            let structure = authority.structure().map_err(authority_error)?;
+            derive_source_hidden_sizes(&mut model, &structure.sheet_keys, source_model);
+            Some(structure)
+        } else {
+            None
+        };
         pulse();
         authority.set_snapshot_projection_valid(true);
         let states = preserved_states
@@ -845,15 +933,9 @@ impl Workbook {
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
         workbook.authority = AuthoritySlot::built(authority);
-        if checkpoint.collaborative {
+        if let Some(structure) = structure {
             workbook.mode = WorkbookMode::Collaborative {
-                structure: Box::new(
-                    workbook
-                        .authority
-                        .get()?
-                        .structure()
-                        .map_err(authority_error)?,
-                ),
+                structure: Box::new(structure),
             };
         } else if !pending_remote_updates.is_empty() {
             return Err(invalid("Standalone recovery has remote updates"));

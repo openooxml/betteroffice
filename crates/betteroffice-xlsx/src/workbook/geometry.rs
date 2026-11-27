@@ -119,7 +119,8 @@ impl Workbook {
                 | Op::RemoveSheet { .. }
                 | Op::MoveSheet { .. }
                 | Op::RenameSheet { .. }
-                | Op::RestoreSheet { .. } => delta.full = true,
+                | Op::RestoreSheet { .. }
+                | Op::RestoreTableColumn { .. } => delta.full = true,
             }
         }
         delta

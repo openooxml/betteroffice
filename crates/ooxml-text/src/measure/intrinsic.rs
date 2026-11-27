@@ -121,12 +121,8 @@ pub fn measure_intrinsic_widths(
     let left = indent.and_then(|indent| indent.left).unwrap_or(0.0);
     let right = indent.and_then(|indent| indent.right).unwrap_or(0.0);
     let hanging = indent.and_then(|indent| indent.hanging).unwrap_or(0.0);
-    let marker = match attrs {
-        Some(attrs) if hanging == 0.0 => {
-            list_marker::list_marker_inline_width(store, request, attrs)?
-        }
-        _ => 0.0,
-    };
+    let marker = list_marker::measure_inline_list_marker(store, request, f32::INFINITY, false)?
+        .map_or(0.0, |marker| marker.advance);
     let visible_marker = attrs.is_some_and(|attrs| {
         !attrs.list_marker_hidden
             && attrs

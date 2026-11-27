@@ -51,6 +51,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::session::{EditSessionCore, EngineError, EngineErrorKind, Host, UpdateSubscription};
 
+mod section_plan;
+
 #[wasm_bindgen(typescript_custom_section)]
 const DECODED_FONT_FACE: &str =
     r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
@@ -819,6 +821,19 @@ impl EditSession {
             .map_err(JsValue::from)
     }
 
+    /// @internal
+    pub fn bootstrap_peer_with_provenance(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+        sidecar: &[u8],
+    ) -> Result<(), JsValue> {
+        self.core
+            .bootstrap_peer_with_provenance(state, metadata, source, sidecar)
+            .map_err(JsValue::from)
+    }
+
     /// [`EditSession::open_docx`] with seeding always on.
     #[wasm_bindgen(js_name = seed_from_docx)]
     pub fn seed_from_docx_owned(
@@ -1002,6 +1017,17 @@ impl EditSession {
         self.core.encode_state()
     }
 
+    /// @internal
+    pub fn encode_edit_provenance_for_transfer(
+        &self,
+        bytes: &[u8],
+        base: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, JsValue> {
+        Ok(self
+            .core
+            .encode_edit_provenance_for_transfer(bytes, base.as_deref()))
+    }
+
     /// This replica's yrs v1 state vector — what a peer sends so
     /// [`EditSession::encode_diff`] can compute the update it is missing.
     pub fn encode_state_vector(&self) -> Vec<u8> {
@@ -1085,6 +1111,17 @@ impl EditSession {
     /// the edit; remote/collaboration updates must use `apply_update` instead.
     pub fn apply_local_update(&self, update: &[u8]) -> Result<(), JsValue> {
         self.core.apply_local_update(update).map_err(JsValue::from)
+    }
+
+    /// @internal
+    pub fn apply_local_update_with_provenance(
+        &self,
+        update: &[u8],
+        sidecar: &[u8],
+    ) -> Result<(), JsValue> {
+        self.core
+            .apply_local_update_with_provenance(update, sidecar)
+            .map_err(JsValue::from)
     }
 
     /// Applies an update another replica of this document committed for a host batch.
@@ -1404,6 +1441,14 @@ impl EditSession {
 
     pub fn list_sections_json(&self) -> Result<String, JsValue> {
         self.core.list_sections_json().map_err(JsValue::from)
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(skip_typescript)]
+    pub fn section_save_plan_json(&self, input_json: &str) -> Result<String, JsValue> {
+        section_plan::plan_json(input_json)
+            .map_err(EngineError::message)
+            .map_err(JsValue::from)
     }
 
     pub fn section_margins_json(&self) -> String {
@@ -2947,7 +2992,16 @@ impl EditSession {
     /// whose session keys the caller resolves to the model paragraphs it marks
     /// with their ordinals.
     pub fn paragraph_save_plan(&self) -> Result<String, JsValue> {
-        self.core.paragraph_save_plan().map_err(JsValue::from)
+        self.core
+            .paragraph_save_plan_with_local_provenance(false)
+            .map_err(JsValue::from)
+    }
+
+    /// @internal
+    pub fn paragraph_save_plan_with_local_provenance(&self) -> Result<String, JsValue> {
+        self.core
+            .paragraph_save_plan_with_local_provenance(true)
+            .map_err(JsValue::from)
     }
 
     /// Reconciles and publishes the `[owner, paraId]` pairs a save captured,

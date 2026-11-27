@@ -40,12 +40,20 @@ test('reports the missing intl add-on for every intl face and retries misses', a
   let attempts = 0;
   for (const face of BUNDLED_FONTS.filter((candidate) => candidate.file.endsWith('.ttf.zst') && !isLatinFont(candidate.file))) {
     for (const script of [face.script, undefined]) {
-      await expect(loadBundledFontBytes({ ...face, script })).rejects.toThrow(
+      await expect(loadBundledFontBytes({ ...face, script }, undefined, { strict: true })).rejects.toThrow(
         `Bundled font ${face.file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
       );
       expect(importIntl).toHaveBeenCalledTimes(++attempts);
     }
   }
+});
+
+test('an absent intl pack substitutes the same Latin bytes as an absent CJK pack', async () => {
+  const { loadBundledFontBytes, resolveMetricCompatFace, resolveScriptFallbackFace } = await import('./index');
+  globalThis.fetch = fontAssetResponse as typeof fetch;
+  const thai = resolveScriptFallbackFace('thai', false, false)!;
+  const latin = resolveMetricCompatFace('Arial', false, false)!;
+  await expect(loadBundledFontBytes(thai)).resolves.toEqual(await loadBundledFontBytes(latin));
 });
 
 test('recognizes missing-module errors without hiding dependency or evaluation failures', async () => {
@@ -59,7 +67,7 @@ test('recognizes missing-module errors without hiding dependency or evaluation f
     "Module name, '@betteroffice/fonts-intl' does not resolve",
   ]) {
     importIntl.mockImplementation(() => { throw new Error(message); });
-    await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
+    await expect(loadBundledFontBytes(face, undefined, { strict: true })).rejects.toThrow('install @betteroffice/fonts-intl');
   }
   for (const message of [
     "Cannot find package 'dependency-of-intl'",
@@ -110,7 +118,7 @@ test('recovers after installing intl, resolves asset hrefs and reports missing a
   const absolute = 'https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst';
   const relative = '/_next/static/media/another.zst';
   expect(await fontAssetUrls('intl')).toBeUndefined();
-  await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
+  await expect(loadBundledFontBytes(face, undefined, { strict: true })).rejects.toThrow('install @betteroffice/fonts-intl');
   importIntl.mockImplementation(() => ({
     INTL_FONT_ASSET_URLS: {
       [face.file]: () => new URL(absolute),

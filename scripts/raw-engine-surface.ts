@@ -9,7 +9,7 @@ export type RuntimeSurface = Map<string, ExportKind | MemberKind>;
 
 /** A native-only (or wasm-only) member that is meant to exist. Intended extras name the
  * public API they back; pending ones name the gap-list item that removes them. */
-export type Extra = { reason: string } & ({ backs: string } | { pending: `item ${number}` });
+export type Extra = { reason: string } & ({ backs: string } | { pending: `item ${number}` } | { runtimeOnly: true });
 
 /** Engine glue members that are not API: wasm-bindgen and napi internals. */
 export type Internal = { reason: string };
@@ -208,7 +208,12 @@ export function compareDeclarations(
   for (const [side, runtime, declared, internals] of sides) {
     for (const [path, kind] of runtime) {
       if (internals[path] || internals[owner(path)] || path.includes('[') || kind === 'value') continue;
-      if (declaration(declared, path, kind) === undefined) {
+      const extra = side === 'wasm' ? allow.wasmOnly[path] : allow.nativeOnly[path];
+      const runtimeOnly = extra !== undefined && 'runtimeOnly' in extra;
+      const declaredMember = declaration(declared, path, kind);
+      if (runtimeOnly && declaredMember !== undefined) {
+        problems.push(`${path}: runtime-only member is declared on ${side}`);
+      } else if (!runtimeOnly && declaredMember === undefined) {
         problems.push(`${path}: ${kind} on ${side} at runtime but not in its declarations`);
       }
     }

@@ -165,7 +165,12 @@ fn language_only_paragraph_with_run_revision_stays_patchable() {
         inheritance: Default::default(),
     };
     assert_eq!(
-        ok(patch_inner(source, &patch, &PatchContext::word_document())),
+        ok(patch_inner(
+            source,
+            &patch,
+            &PatchContext::word_document(),
+            None
+        )),
         source.replace("en-US", "de-DE")
     );
 }

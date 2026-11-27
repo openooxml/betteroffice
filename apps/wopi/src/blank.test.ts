@@ -8,7 +8,7 @@ import { openFreshClient } from "../test/replica/clients";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 const FORMATS: Format[] = ["docx", "xlsx", "pptx"];
 

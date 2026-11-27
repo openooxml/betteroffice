@@ -45,6 +45,7 @@ import type {
 import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
+import { sectionSavePlanTestSeam } from './sectionSavePlanTestSeam';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { finalSectionStartMetadata, pageBreakTarget, sectionClosingParaIds, splitSection } from './sectionBreak';
 import type { ResidentPartMetadata } from './residentParts';
@@ -218,6 +219,29 @@ export function forgetMaterializedSource(session: EditSession): void {
 
 function wholeBuffer(bytes: Uint8Array): ArrayBufferLike | null {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : null;
+}
+
+function parseParagraphSavePlan(json: string): DocxParagraphSavePlan {
+  const { provenanceNet, ...plan } = JSON.parse(json) as DocxParagraphSavePlan & { provenanceNet?: number };
+  for (const part of plan.splicedParts ?? []) {
+    if (!part.changed.length) continue;
+    if (!part.paragraphPatches || !part.legacyParagraphs) {
+      throw new Error(
+        `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
+      );
+    }
+    const writerVersion = paragraphPatchWriterVersionWire();
+    if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
+      throw new Error(
+        `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
+        'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
+      );
+    }
+  }
+  if (provenanceNet) {
+    console.debug(`DOCX_MINIMAL_PATCH replace counts ${JSON.stringify({ provenanceNet })}`);
+  }
+  return plan;
 }
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
@@ -550,6 +574,66 @@ export function wrapSession(
   const proposals = createProposalRegistry(proposalHooks);
   const detachedProposals = new Set<ReturnType<typeof createProposalRegistry>>();
 
+  const bootstrapPeer = (
+    state: Uint8Array,
+    metadata: Uint8Array,
+    bytes: Uint8Array | undefined,
+    workerHost: YrsDocxHost,
+    options: YrsOpeningOptions = {},
+    sidecar?: Uint8Array
+  ): YrsDocxHost => {
+    checkPeerMetadataHeader(metadata);
+    if (typeof peerSession.bootstrap_peer !== 'function') {
+      throw new PeerMetadataError('missing-capability', 'Editing wasm cannot bootstrap peers');
+    }
+    const source = bytes?.slice() ?? docxSource;
+    if (!source) {
+      throw new PeerMetadataError('source-required', 'Peer bootstrap requires retained source bytes');
+    }
+    const { wholeBody: _wholeBody, ...sourceHost } = workerHost;
+    const host: YrsDocxHost = {
+      ...sourceHost,
+      document: { ...workerHost.document, originalBuffer: docxSourceBuffer(source) },
+      unusedScriptFonts: [],
+    };
+    const keys = editorSaveKeys(host.document);
+    const transferredSource = bytes === undefined ? undefined : source;
+    mutate(() => {
+      try {
+        forgetMaterializedSource(session);
+        if (sidecar !== undefined && typeof session.bootstrap_peer_with_provenance === 'function') {
+          session.bootstrap_peer_with_provenance(state, metadata, transferredSource, sidecar);
+        } else {
+          peerSession.bootstrap_peer(state, metadata, transferredSource);
+        }
+      } catch (error) {
+        throw peerMetadataFailure(error);
+      }
+      forgetSavedListDefinitions(facade);
+      session.set_media_tokens(options.mediaTokens === true);
+      markDirty('all');
+      resetMedia();
+      docxSource = source;
+      docxSourceKeys = keys;
+      sourceClosing = sectionClosingParaIds(facade);
+      partialDocument = false;
+      proposals.reset();
+    });
+    return withHostMedia(host);
+  };
+
+  const applyLocalUpdate = (update: Uint8Array, sidecar?: Uint8Array): void => {
+    ensureUndo();
+    markDirty('all');
+    mutate(() => {
+      if (sidecar !== undefined && typeof session.apply_local_update_with_provenance === 'function') {
+        session.apply_local_update_with_provenance(update, sidecar);
+      } else {
+        session.apply_local_update(update);
+      }
+    });
+  };
+
   const facade: YrsSession = {
     clientId,
     openDocxPreview: (bytes, blocks, paragraphBudget) => {
@@ -813,42 +897,10 @@ export function wrapSession(
         throw peerMetadataFailure(error);
       }
     },
-    bootstrapPeer: (state, metadata, bytes, workerHost, options = {}) => {
-      checkPeerMetadataHeader(metadata);
-      if (typeof peerSession.bootstrap_peer !== 'function') {
-        throw new PeerMetadataError('missing-capability', 'Editing wasm cannot bootstrap peers');
-      }
-      const source = bytes?.slice() ?? docxSource;
-      if (!source) {
-        throw new PeerMetadataError('source-required', 'Peer bootstrap requires retained source bytes');
-      }
-      const { wholeBody: _wholeBody, ...sourceHost } = workerHost;
-      const host: YrsDocxHost = {
-        ...sourceHost,
-        document: { ...workerHost.document, originalBuffer: docxSourceBuffer(source) },
-        unusedScriptFonts: [],
-      };
-      const keys = editorSaveKeys(host.document);
-      const bootstrap = peerSession.bootstrap_peer;
-      mutate(() => {
-        try {
-          forgetMaterializedSource(session);
-          bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
-        } catch (error) {
-          throw peerMetadataFailure(error);
-        }
-        forgetSavedListDefinitions(facade);
-        session.set_media_tokens(options.mediaTokens === true);
-        markDirty('all');
-        resetMedia();
-        docxSource = source;
-        docxSourceKeys = keys;
-        sourceClosing = sectionClosingParaIds(facade);
-        partialDocument = false;
-        proposals.reset();
-      });
-      return withHostMedia(host);
-    },
+    bootstrapPeer: (state, metadata, bytes, host, options) =>
+      bootstrapPeer(state, metadata, bytes, host, options),
+    bootstrapPeerWithProvenance: (state, metadata, bytes, host, sidecar, options) =>
+      bootstrapPeer(state, metadata, bytes, host, options, sidecar),
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,
     beginOpening: (generation) => {
@@ -894,6 +946,8 @@ export function wrapSession(
       remoteStateVector === undefined
         ? session.encode_state()
         : session.encode_diff(remoteStateVector.slice()),
+    encodeEditProvenanceForTransfer: (bytes, base) =>
+      session.encode_edit_provenance_for_transfer?.(bytes, base) ?? new Uint8Array(0),
     encodeStateAsUpdateChunks: (remoteStateVector, maxChunkBytes) => {
       if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 0xffffffff) {
         throw new RangeError('maxChunkBytes must be a positive 32-bit integer');
@@ -913,11 +967,8 @@ export function wrapSession(
       markDirty('all');
       withYrsSelectionCause(facade, 'remote', () => mutate(() => session.apply_update_chunks([...updates])));
     },
-    applyLocalUpdate: (update) => {
-      ensureUndo();
-      markDirty('all');
-      mutate(() => session.apply_local_update(update));
-    },
+    applyLocalUpdate: (update) => applyLocalUpdate(update),
+    applyLocalUpdateWithProvenance: (update, sidecar) => applyLocalUpdate(update, sidecar),
     applyHostUpdate: (update, stories) => {
       markDirty(stories ?? 'all');
       mutate(() => session.apply_host_update(update));
@@ -1600,25 +1651,9 @@ export function wrapSession(
       ) as DocxParagraphAnchorResult,
     storyParagraphIds: (story) =>
       JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => {
-      const plan = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
-      for (const part of plan.splicedParts ?? []) {
-        if (!part.changed.length) continue;
-        if (!part.paragraphPatches || !part.legacyParagraphs) {
-          throw new Error(
-            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: missing producer capability`
-          );
-        }
-        const writerVersion = paragraphPatchWriterVersionWire();
-        if (writerVersion !== null && writerVersion !== PARAGRAPH_PATCH_WRITER_VERSION) {
-          throw new Error(
-            `DOCX_MINIMAL_PATCH [INVALID_PLAN] ${part.part} p#?: ` +
-            'paragraphPatchWriterVersion must report PARAGRAPH_PATCH_WRITER_VERSION=1'
-          );
-        }
-      }
-      return plan;
-    },
+    paragraphSavePlan: () => parseParagraphSavePlan(session.paragraph_save_plan()),
+    paragraphSavePlanWithLocalProvenance: () =>
+      parseParagraphSavePlan(session.paragraph_save_plan_with_local_provenance()),
     recordSavedParagraphIds: (saved) =>
       mutate(
         () =>
@@ -1872,6 +1907,7 @@ export function wrapSession(
     failComparedDocx: (message) => session.fail_compared_docx_json(message),
   });
 
+  sectionSavePlanTestSeam.hook?.attach(facade, session);
   return facade;
 }
 

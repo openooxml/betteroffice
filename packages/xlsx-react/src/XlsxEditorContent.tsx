@@ -1284,7 +1284,7 @@ export function XlsxEditorContent({
       } catch {}
     }
     try {
-      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, () => paintDisplayList(ctx, dl, dpr * zoom))
+      canvas.dataset.defaultFonts = paintWithDefaultFonts(dl, (list) => paintDisplayList(ctx, list, dpr * zoom))
         ? 'settled' : 'pending';
     } catch (paintError) {
       failPaint(paintError);
@@ -2147,7 +2147,7 @@ export function XlsxEditorContent({
         height: scroll.clientHeight / zoom,
       },
     };
-    const fonts = await editorExportFaces(handle.renderPngFonts(target), null, defaultFonts);
+    const fonts = await editorExportFaces(handle.renderPngFonts(target), null, defaultFonts, target);
     const png = await handle.renderPng(target, { fonts });
     downloadBytes(png, pngName(fileName), 'image/png');
   }, [activeSheetRef, defaultFonts, fileName, zoom]);

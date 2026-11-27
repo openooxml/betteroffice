@@ -602,25 +602,21 @@ export function resolveBundledFamilyFace(
   );
 }
 
-/**
- * Requested Word families (lowercase) whose script text Word draws in a
- * style one bundled script face approximates better than the bucket's sans
- * default, keyed by script, naming that face's family. The face serves every
- * weight and style; the engine synthesizes what it lacks.
- */
 const REQUESTED_FAMILY_SCRIPT_FALLBACK: Record<string, Partial<Record<BundledFontScript, string>>> = {
   'simplified arabic': { arabic: 'Noto Naskh Arabic' },
   'traditional arabic': { arabic: 'Noto Naskh Arabic' },
+  'noto sans arabic': { arabic: 'Noto Sans Arabic' },
 };
 
-/**
- * Pick the bundled face that provides glyph coverage for a script bucket.
- * A requested `family` listed in `REQUESTED_FAMILY_SCRIPT_FALLBACK` for the
- * script gets that face's Regular whatever the style. Otherwise preference
- * order: exact (weight, style) -> same weight upright -> the script's
- * Regular -> the first face of the bucket. Ties resolve to the earlier
- * manifest entry, i.e. the sans face.
- */
+const DEFAULT_SCRIPT_FALLBACK_FAMILY: Partial<Record<BundledFontScript, string>> = {
+  arabic: 'Noto Naskh Arabic',
+};
+
+function scriptFallbackFaces(script: BundledFontScript, family = DEFAULT_SCRIPT_FALLBACK_FAMILY[script]): BundledFontFace[] {
+  return BUNDLED_FONTS.filter((face) => face.script === script && (family === undefined || face.family === family));
+}
+
+/** Pick the best available style of the bundled script fallback. */
 export function resolveScriptFallbackFace(
   script: BundledFontScript,
   bold: boolean,
@@ -629,11 +625,7 @@ export function resolveScriptFallbackFace(
 ): BundledFontFace | undefined {
   const preferred = family === undefined ? undefined
     : REQUESTED_FAMILY_SCRIPT_FALLBACK[family.trim().toLowerCase()]?.[script];
-  const faces = BUNDLED_FONTS.filter((f) => f.script === script);
-  if (preferred !== undefined) {
-    const face = faces.find((f) => f.family === preferred && f.weight === 400 && f.style === 'normal');
-    if (face !== undefined) return face;
-  }
+  const faces = scriptFallbackFaces(script, preferred);
   if (faces.length === 0) return undefined;
   const weight = bold ? 700 : 400;
   const style = italic ? 'italic' : 'normal';
@@ -703,12 +695,6 @@ function resolveWidthMatchedSubstitute(family: string) {
   return WIDTH_MATCHED_SUBSTITUTES.get(family.trim().toLowerCase());
 }
 
-/**
- * `Calibri Light` and `Inter Light` are families of their own on the machine
- * that drew the reference: a Regular and an Italic, no bold member, so a run
- * marked bold is still drawn at the family's own weight, and a name we cannot
- * place at all is Calibri, whatever weight it claims (#797).
- */
 const LIGHTER_THAN_REGULAR = new Set([
   'thin',
   'hairline',
@@ -721,6 +707,7 @@ const LIGHTER_THAN_REGULAR = new Set([
 
 function lightVariantOf(
   family: string,
+  bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
   const words = family.trim().split(/[\s-]+/);
@@ -728,20 +715,22 @@ function lightVariantOf(
   if (!LIGHTER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
     return undefined;
   }
-  return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+  const base = words.slice(0, -1).join(' ');
+  const ownBold = bold && resolveMetricCompatFamily(base) !== 'Selawik';
+  const face = resolveMetricCompatFace(base, ownBold, italic);
+  return face && (!ownBold || face.weight === 700) ? face : resolveMetricCompatFace(base, false, italic);
 }
 
 /**
- * The bundled face for a lighter member of a family we carry, such as
- * `Calibri Light`, at its own weight whatever weight the run claims; undefined
- * for any other name.
+ * The bundled face for a lighter member such as `Calibri Light`, honoring bold
+ * when the substitute has a bold face. Returns undefined for other names.
  */
 export function resolveLightVariantFace(
   family: string,
-  _bold: boolean,
+  bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
-  return lightVariantOf(family, italic);
+  return lightVariantOf(family, bold, italic);
 }
 
 /**
@@ -846,7 +835,7 @@ function resolveBaseFace(
   office: LastResortOffice,
   excludeSelawik = false,
 ): BundledFontFace {
-  const light = lightVariantOf(family, italic);
+  const light = lightVariantOf(family, bold, italic);
   if (light && (!excludeSelawik || light.family !== 'Selawik')) return light;
   if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);

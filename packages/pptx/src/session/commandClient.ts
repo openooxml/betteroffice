@@ -37,6 +37,10 @@ type CommandOpenInput = Omit<PresentationCommandOpenOptions, 'fonts' | 'fallback
   fallbackFonts?: readonly CommandFont[];
 };
 
+const familyKey = (family: string) => family.trim().toLowerCase();
+const faceKey = ({ family, bold = false, italic = false }: Omit<PptxFontFace, 'bytes'>) =>
+  JSON.stringify([familyKey(family), bold, italic]);
+
 export async function createPresentationCommandClient(
   bytes: Uint8Array | ArrayBuffer,
   options: PresentationCommandOpenOptions,
@@ -94,14 +98,14 @@ async function createCommandClient(
 
   const transportErrors = new Set<(error: unknown) => void>();
   const outstandingCalls = new Set<number>();
-  const suppliedFamilies = new Set(options.fonts?.map((face) => face.family.trim().toLowerCase()));
+  const suppliedFaces = new Set(options.fonts?.map(faceKey));
   const guarded: SessionTransport = {
     post(message, transfer) {
       if (installDefaultFonts && isClientMessage(message) && message.kind === 'call' &&
         (message.method === 'command' || message.method === 'edit')) {
         const command = message.args[0] as PresentationCommandEnvelope | undefined;
         if (command?.kind === 'registerFont' && typeof command.payload?.font?.family === 'string') {
-          suppliedFamilies.add(command.payload.font.family.trim().toLowerCase());
+          suppliedFaces.add(faceKey(command.payload.font));
         }
       }
       const call = isClientMessage(message) && message.kind === 'call' ? message.id : undefined;
@@ -129,14 +133,15 @@ async function createCommandClient(
           deliver(message); return;
         }
         const request = message.payload as DefaultFontInstallRequest;
-        const allowed = (family: string) => !suppliedFamilies.has(family.trim().toLowerCase());
-        const faces = request.faces.filter((face) => allowed(face.family));
+        const canInstall = (face: (typeof request.faces)[number]) => face.kind === 'coverage' || !suppliedFaces.has(faceKey(face));
+        const faces = request.faces.filter(canInstall);
+        const allowed = (family: string) => faces.some((face) => familyKey(face.family) === familyKey(family) && canInstall(face));
         let finished = false;
         const finish = (installed: ReadonlyArray<(typeof faces)[number]>) => {
           if (finished) return;
           finished = true;
           clearTimeout(timer);
-          const indices = request.faces.flatMap((face, index) => allowed(face.family) && installed.includes(face) ? [index] : []);
+          const indices = request.faces.flatMap((face, index) => canInstall(face) && installed.includes(face) ? [index] : []);
           try { transport.post({ protocol: 1, kind: 'pptx-default-fonts-installed', id: request.id, installed: indices }); }
           catch {}
         };

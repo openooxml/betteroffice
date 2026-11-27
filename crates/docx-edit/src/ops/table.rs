@@ -20,7 +20,7 @@ use yrs::{
 
 use crate::identity::IdAllocator;
 use crate::op::{OpError, OpResult};
-use crate::ops::paragraph_content_before;
+use crate::ops::{paragraph_content_before, utf16_len};
 use crate::seed::border_side_sources;
 use crate::sticky_positions::{sticky_index, sticky_offset};
 use crate::{
@@ -890,9 +890,24 @@ fn validate_fragment_segment(
                     .ok_or_else(|| invalid(format!("{detail} format must be an object")))?;
                 let delta = crate::format::parse_inline_format_delta(map)
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
-                let lowered = delta
+                let mut lowered = delta
                     .to_attrs()
                     .map_err(|error| invalid(format!("{detail} format is invalid: {error}")))?;
+                if matches!(delta.font_family, crate::Patch::Set(_))
+                    && !delta.other.contains_key("fontFamily")
+                    && let Some(fonts) = lowered.get("fontFamily")
+                {
+                    let fonts = crate::format::merge_font_family(
+                        merged.get("fontFamily"),
+                        fonts,
+                        lowered
+                            .get("complexScript")
+                            .or_else(|| merged.get("complexScript")),
+                        text,
+                        (0, utf16_len(text)),
+                    );
+                    lowered.insert(Arc::from("fontFamily"), fonts);
+                }
                 for (key, entry) in lowered {
                     if entry == Any::Null {
                         merged.remove(&key);
@@ -1979,6 +1994,7 @@ impl EditingDoc {
         if rows == 0 || columns == 0 {
             return Err(invalid("table dimensions must be positive"));
         }
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let revision_id = ctx.is_suggesting().then(|| self.next_id(&txn));
         let story = story_ref(&txn, &at.story)?;
@@ -2090,6 +2106,7 @@ impl EditingDoc {
     ) -> OpResult<TableFragmentReceipt> {
         let mut remaining = MAX_FRAGMENT_CELLS;
         let (valid, columns) = validate_fragment_table(fragment, 1, &mut remaining)?;
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let revision_id = ctx.is_suggesting().then(|| self.next_id(&txn));
         let story = story_ref(&txn, &at.story)?;
@@ -2327,6 +2344,7 @@ impl EditingDoc {
     /// cell's covering row. Spans crossing the insertion boundary grow by one.
     pub fn insert_row(&self, ctx: &EditCtx, at: &CellLoc, after: bool) -> OpResult<TableReceipt> {
         let locator = at.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let revision_id = ctx.is_suggesting().then(|| self.next_id(&txn));
         let (_, table, _) = table_at(&txn, &locator)?;
@@ -2426,6 +2444,7 @@ impl EditingDoc {
         after: bool,
     ) -> OpResult<TableReceipt> {
         let locator = at.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (_, table, _) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
@@ -2511,6 +2530,7 @@ impl EditingDoc {
     /// the first surviving row. Deleting every row removes the whole table.
     pub fn delete_row(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
         let locator = range.anchor.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
@@ -2568,6 +2588,7 @@ impl EditingDoc {
     /// deletion band shrink. Deleting all columns removes the whole table.
     pub fn delete_column(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
         let locator = range.anchor.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
@@ -2614,6 +2635,7 @@ impl EditingDoc {
 
     /// Removes the structural embed and every cell story reachable beneath it.
     pub fn delete_table(&self, ctx: &EditCtx, locator: &TableLocator) -> OpResult<TableReceipt> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (parent_story, table, table_story_index) = table_at(&txn, locator)?;
         let data = match read_table(&table, &txn) {
@@ -2631,6 +2653,7 @@ impl EditingDoc {
     /// the survivor before being marked removed.
     pub fn merge_cells(&self, ctx: &EditCtx, range: &TableRange) -> OpResult<TableReceipt> {
         let locator = range.anchor.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (_, table, _) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
@@ -2726,6 +2749,7 @@ impl EditingDoc {
         columns: Option<u32>,
     ) -> OpResult<TableReceipt> {
         let locator = at.table();
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (_, table, _) = table_at(&txn, &locator)?;
         let mut data = read_table(&table, &txn)?;
@@ -4499,6 +4523,47 @@ mod tests {
         assert_eq!(receipt.after.offset, 1);
         let paragraphs = doc.paragraphs("body").unwrap();
         assert_eq!(receipt.after.para_id, paragraphs[0].para_id);
+    }
+
+    #[test]
+    fn fragment_font_pick_uses_run_font_slot_flags() {
+        for (text, complex_script, east_asia) in [
+            ("abc", false, "SimSun"),
+            ("中文", false, "Georgia"),
+            ("é", false, "Georgia"),
+            ("中文", true, "SimSun"),
+        ] {
+            let doc = fragment_doc();
+            let fragment = fragment_table(vec![serde_json::json!({
+                "tcPr": {},
+                "content": [
+                    {
+                        "kind": "text",
+                        "text": text,
+                        "attributes": {
+                            "complexScript": complex_script,
+                            "fontFamily": {
+                                "ascii": "Calibri", "hAnsi": "Calibri",
+                                "eastAsia": "SimSun", "hint": "eastAsia"
+                            }
+                        },
+                        "format": {"fontFamily": {"ascii": "Georgia"}}
+                    },
+                    {"kind": "pilcrow", "properties": {}, "attributes": {}}
+                ]
+            })]);
+            let receipt = doc
+                .insert_table_fragment(&direct(), Position::new("body", 0), &fragment)
+                .unwrap();
+            let segments = doc.story_segments(&receipt.created_story_ids[0]).unwrap();
+            assert_eq!(segments.len(), 2);
+            let Some(Any::Map(fonts)) = segments[0].attributes.get("fontFamily") else {
+                panic!("fontFamily");
+            };
+            assert_eq!(fonts["ascii"], Any::from("Georgia"));
+            assert_eq!(fonts["hAnsi"], Any::from("Georgia"));
+            assert_eq!(fonts["eastAsia"], Any::from(east_asia), "{text}");
+        }
     }
 
     #[test]
