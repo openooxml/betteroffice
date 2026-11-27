@@ -729,6 +729,45 @@ fn typing_ahead_of_layout_beside_a_column_break_lays_out_as_a_fresh_session_does
 }
 
 #[test]
+fn typing_into_a_paragraph_typed_ahead_of_layout_beside_a_break_patches_again() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let bytes = break_package();
+    let engine = seeded_engine(9815, &bytes);
+    engine.set_local_lowering(true);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(9815, bytes);
+
+    // The key typed ahead drops the seed of the paragraph the column break
+    // leads, and the layout after the next key keeps the seeds it had.
+    let ahead = typing_key(&engine, (At::Body("00003004", 2), Some("b")));
+    let range = crate::StoryRange::new(&ahead.story, ahead.start, ahead.end);
+    engine.edit_resident_text(range, ahead.text, true).unwrap();
+    let key = typing_key(&engine, (At::Body("00003005", 3), Some("c")));
+    assert!(host.command(&key.story, key.start, key.end, key.text));
+    resident_matches_fresh(&host, "reseed, keystroke typed ahead of the layout");
+
+    let before = deferred_patches();
+    for (step, key) in AFTER_BREAK_TYPING.into_iter().enumerate() {
+        let key = typing_key(&engine, key);
+        let label = format!("reseed, keystroke {} [{}]", step + 1, key.describe());
+        let work = keystroke_work(&engine, || {
+            assert!(host.command(&key.story, key.start, key.end, key.text));
+        });
+        // Only the first keystroke in that paragraph lowers the body, and it
+        // records the paragraph's seed again.
+        assert_eq!(
+            work.full_lowerings,
+            u64::from(step == 0),
+            "{label}: {work:?}"
+        );
+        resident_matches_fresh(&host, &label);
+    }
+    assert_deferred(deferred_since(before), 0, "reseed");
+}
+
+#[test]
 fn fresh_sessions_agree_on_every_typed_state() {
     assert_deferred(type_fixed(fresh_matches_fresh), 0, "fixed typing");
     assert_deferred(
