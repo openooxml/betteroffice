@@ -1,5 +1,7 @@
 //! Bounded, resolver-free OOXML event/tree core.
 
+use std::sync::{Arc, Mutex};
+
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -103,6 +105,8 @@ pub struct ParseBudget<'a> {
     direction_scopes: u32,
     direction_scope_bytes: std::cell::Cell<usize>,
     unmodeled_inline: Vec<(String, usize)>,
+    pub(crate) preview_connectors: Option<Arc<Mutex<crate::s9::PreviewConnectorSources>>>,
+    pub(crate) connector_story: Option<(String, Option<String>)>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -130,6 +134,31 @@ impl<'a> ParseBudget<'a> {
             direction_scopes: 0,
             direction_scope_bytes: std::cell::Cell::new(0),
             unmodeled_inline: Vec::new(),
+            preview_connectors: None,
+            connector_story: None,
+        }
+    }
+
+    pub(crate) fn connector_story(&mut self, part: &str, item: Option<String>) {
+        if self.preview_connectors.is_some() {
+            self.connector_story = Some((part.trim_start_matches('/').to_owned(), item));
+        }
+    }
+
+    pub(crate) fn record_connector(
+        &mut self,
+        baseline: &crate::shape::Shape,
+        guides: crate::s9::PreviewConnectorGuides,
+    ) {
+        if !guides.is_empty()
+            && let (Some(sources), Some(story)) = (&self.preview_connectors, &self.connector_story)
+        {
+            sources
+                .lock()
+                .unwrap()
+                .entry(story.clone())
+                .or_default()
+                .push((baseline.clone(), guides));
         }
     }
 
@@ -2954,5 +2983,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn budget_clones_share_preview_connector_captures() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.preview_connectors = Some(Default::default());
+        let shape = crate::shape::Shape::empty("bentConnector2".to_owned(), Default::default());
+        let guides = || vec![(Vec::new(), "bentConnector2".to_owned(), Default::default())];
+        budget.connector_story("word/header1.xml", None);
+        budget.record_connector(&shape, guides());
+
+        let checkpoint = budget.clone();
+        budget.connector_story("word/footer1.xml", None);
+        budget.record_connector(&shape, guides());
+        assert!(format!("{:?}", checkpoint.preview_connectors).contains("word/footer1.xml"));
     }
 }

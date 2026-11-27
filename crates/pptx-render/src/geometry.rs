@@ -80,11 +80,19 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
         adjust_values,
         w,
         h,
+        fill,
         ..
-    } = &primitive
+    } = &mut primitive
     else {
         return vec![(primitive, true)];
     };
+    if matches!(
+        geometry.as_str(),
+        "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
+    ) {
+        *fill = None;
+        return vec![(primitive, false)];
+    }
     let adjustments = adjust_values
         .iter()
         .map(|(key, value)| (key.clone(), f64::from(*value)))

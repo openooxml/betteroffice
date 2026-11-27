@@ -4,7 +4,6 @@ import { expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { repackDocx } from '../../packages/docx/src/docx/rezip';
 import { buildResidentRegionLayoutRequest } from '../../packages/docx/src/editor/computeLayout';
 import type {
   ResidentFontRequirement,
@@ -22,7 +21,7 @@ import { preloadOpcWasm } from '../../packages/docx/src/wasm/opc';
 import { preloadParseWasm } from '../../packages/docx/src/wasm/parse';
 import {
   createYrsSession,
-  yrsToDocument,
+  saveYrsDocx,
 } from '../../packages/docx/src/yrs';
 import type {
   YrsEngineApplyProfile,
@@ -292,18 +291,11 @@ export function blocks(
   ).length;
 }
 
-/** Project the session onto the opened package and repack it, as saving does. */
+/** Save the session through its own save plan. */
 export async function save(editor: Editor, timer: Timer): Promise<Uint8Array> {
-  const materialized = timer.op('materializeDocx', () =>
-    editor.session.materializeDocx()
-  );
-  expect(materialized).not.toBeNull();
-  const projected = timer.op('save:project', () =>
-    yrsToDocument(editor.session, materialized!)
-  );
-  const bytes = await timer.opAsync('save:repack', () => repackDocx(projected));
+  const { bytes } = await timer.opAsync('save', () => saveYrsDocx(editor.session));
   expect(bytes.byteLength).toBeGreaterThan(0);
-  return new Uint8Array(bytes);
+  return bytes;
 }
 
 /** One collaborative session with the update bytes its own edits produced. */

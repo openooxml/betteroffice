@@ -166,6 +166,7 @@ pub fn parse_related_header_footers_with_aliases(
         let Some(root) = document.root() else {
             continue;
         };
+        budget.connector_story(part_path, None);
         let mut parser = StoryParser {
             relationships: Some(relationships),
             theme,
@@ -180,6 +181,7 @@ pub fn parse_related_header_footers_with_aliases(
             part: part_path,
         };
         let story = parse_header_footer(root, is_header, "default", &mut parser)?;
+        budget.connector_story = None;
         if is_header {
             headers.insert(relationship_id.clone(), story);
         } else {
