@@ -2819,6 +2819,12 @@ pub struct NoteWindow {
 }
 
 impl NoteWindow {
+    /// Whether a page showing `window` of a note, or all of it without one, shows the
+    /// note's opening, where its label and backlink are.
+    pub fn shows_start(window: Option<Self>) -> bool {
+        window.is_none_or(|window| window.block_start == 0 && window.line_start == 0)
+    }
+
     pub fn of(item: &NoteLayoutItemContract) -> Option<Self> {
         Self::from_parts(
             item.block_start,

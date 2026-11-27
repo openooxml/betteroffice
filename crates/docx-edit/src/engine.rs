@@ -36,8 +36,8 @@ use docx_layout::regions::{
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Fragment, HeaderFooterRefs, Input as LayoutInput, Layout,
-    LayoutBlock, MeasuredBlock, NoteAreaContract, ParagraphExtent, Run, SectionBreakType,
-    SectionPageMargins,
+    LayoutBlock, MeasuredBlock, NoteAreaContract, NoteLayoutItemContract, ParagraphExtent, Run,
+    SectionBreakType, SectionPageMargins,
 };
 use ooxml_text::measure::{FontChainDependencies, FontChains};
 use serde::Serialize;
@@ -1064,6 +1064,7 @@ fn cut_exact_prefix(pagination: &mut PaginationState, pages: usize) -> bool {
         .display_rebuilt_pages
         .retain(|&page| page < pages);
     pagination.note_changed_pages.retain(|&page| page < pages);
+    pagination.note_anchor_pages.retain(|&page| page < pages);
     if let Some(restamped) = &mut pagination.restamped_pages {
         restamped.retain(|&page| page < pages);
     }
@@ -1322,14 +1323,146 @@ fn wraps_by_page_side(shape: &docx_layout::types::ShapeBlock) -> bool {
 }
 
 /// What each page's note areas show, which an edit elsewhere can change.
-fn note_page_keys_plain(layout: Option<&Layout>) -> Vec<Option<Vec<NoteAreaContract>>> {
+fn note_page_keys_plain(layout: Option<&Layout>) -> Vec<((), Option<Vec<NoteAreaContract>>)> {
     layout.map_or_else(Vec::new, |layout| {
         layout
             .pages
             .iter()
-            .map(|page| page.note_areas.clone())
+            .map(|page| ((), page.note_areas.clone()))
             .collect()
     })
+}
+
+/// How a page's note areas changed between two layouts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoteAreasChange {
+    Same,
+    /// Only where the notes' references sit: the same areas, notes, content, labels,
+    /// windows and heights, each anchor present in both or neither. The display builds such
+    /// areas alike but for the backlink anchors, which
+    /// [`docx_layout::display_list::refresh_note_region_anchors`] rewrites in place.
+    AnchorsMoved,
+    Changed,
+}
+
+fn note_areas_change(
+    previous: &Option<Vec<NoteAreaContract>>,
+    next: &Option<Vec<NoteAreaContract>>,
+) -> NoteAreasChange {
+    /// Whether two notes match but for their anchors, and if so whether those moved.
+    fn note_change(
+        previous: &NoteLayoutItemContract,
+        next: &NoteLayoutItemContract,
+    ) -> Option<bool> {
+        let NoteLayoutItemContract {
+            kind,
+            id,
+            display_label,
+            blocks,
+            measures,
+            height,
+            anchor_doc_start,
+            anchor_doc_end,
+            custom_mark_follows,
+            block_start,
+            line_start,
+            block_end,
+            line_end,
+        } = previous;
+        (*kind == next.kind
+            && *id == next.id
+            && *display_label == next.display_label
+            && *height == next.height
+            && anchor_doc_start.is_some() == next.anchor_doc_start.is_some()
+            && anchor_doc_end.is_some() == next.anchor_doc_end.is_some()
+            && *custom_mark_follows == next.custom_mark_follows
+            && *block_start == next.block_start
+            && *line_start == next.line_start
+            && *block_end == next.block_end
+            && *line_end == next.line_end
+            && *blocks == next.blocks
+            && *measures == next.measures)
+            .then(|| {
+                *anchor_doc_start != next.anchor_doc_start || *anchor_doc_end != next.anchor_doc_end
+            })
+    }
+    fn area_change(previous: &NoteAreaContract, next: &NoteAreaContract) -> Option<bool> {
+        let NoteAreaContract {
+            page_index,
+            section_id,
+            kind,
+            placement,
+            y,
+            height,
+            columns,
+            separator,
+            notes,
+            continuation,
+            x,
+            width,
+        } = previous;
+        let same_frame = *page_index == next.page_index
+            && *section_id == next.section_id
+            && *kind == next.kind
+            && *placement == next.placement
+            && *y == next.y
+            && *height == next.height
+            && *columns == next.columns
+            && *continuation == next.continuation
+            && *x == next.x
+            && *width == next.width
+            && *separator == next.separator;
+        match (notes, &next.notes) {
+            _ if !same_frame => None,
+            (Some(previous), Some(next)) if previous.len() == next.len() => previous
+                .iter()
+                .zip(next)
+                .try_fold(false, |moved, (previous, next)| {
+                    Some(note_change(previous, next)? | moved)
+                }),
+            (None, None) => Some(false),
+            _ => None,
+        }
+    }
+    let moved = match (previous, next) {
+        (None, None) => Some(false),
+        (Some(previous), Some(next)) if previous.len() == next.len() => previous
+            .iter()
+            .zip(next)
+            .try_fold(false, |moved, (previous, next)| {
+                Some(area_change(previous, next)? | moved)
+            }),
+        _ => None,
+    };
+    match moved {
+        Some(false) => NoteAreasChange::Same,
+        Some(true) => NoteAreasChange::AnchorsMoved,
+        None => NoteAreasChange::Changed,
+    }
+}
+
+/// The pages whose note areas changed against `previous`: those the display rebuilds, and
+/// those whose notes' references alone moved, whose regions take the new anchors in place.
+fn note_area_changes<K: PartialEq>(
+    previous: &[(K, Option<Vec<NoteAreaContract>>)],
+    next: &[(K, Option<Vec<NoteAreaContract>>)],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut changed = Vec::new();
+    let mut moved_anchors = Vec::new();
+    for (index, (key, areas)) in next.iter().enumerate() {
+        let change = match previous.get(index) {
+            Some((previous_key, previous_areas)) if previous_key == key => {
+                note_areas_change(previous_areas, areas)
+            }
+            _ => NoteAreasChange::Changed,
+        };
+        match change {
+            NoteAreasChange::Same => {}
+            NoteAreasChange::AnchorsMoved => moved_anchors.push(index),
+            NoteAreasChange::Changed => changed.push(index),
+        }
+    }
+    (changed, moved_anchors)
 }
 
 fn note_page_keys(layout: Option<&Layout>) -> Vec<(f64, Option<Vec<NoteAreaContract>>)> {
@@ -2236,6 +2369,9 @@ struct PaginationState {
     measured_with_floats: bool,
     /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
+    /// Pages whose note areas, since the last display build, changed only in where their
+    /// notes' references sit; the display rewrites their backlink anchors in place.
+    note_anchor_pages: Vec<usize>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     region_placements: Vec<RegionPlacementState>,
@@ -2407,6 +2543,7 @@ impl PaginationState {
             || !self.display_rebuilt_pages.is_empty()
             || !self.position_deltas.is_empty()
             || !self.note_changed_pages.is_empty()
+            || !self.note_anchor_pages.is_empty()
             || self
                 .restamped_pages
                 .as_ref()
@@ -2429,6 +2566,7 @@ impl PaginationState {
         self.display_layout_pending = false;
         self.display_full_rebuild = false;
         self.note_changed_pages.clear();
+        self.note_anchor_pages.clear();
         self.restamped_pages = Some(BTreeSet::new());
     }
 }
@@ -2870,6 +3008,87 @@ fn window_build_pages(
         }
     }
     Some(pages)
+}
+
+/// Rewrites the note backlink anchors of the retained display pages in `anchor_pages`
+/// that are neither in `first` nor in `note_pages`, from `layout`, and returns, ascending,
+/// those whose anchors changed. A page whose regions do not list its layout page's notes
+/// joins `note_pages` to be rebuilt instead.
+fn refresh_moved_note_anchors(
+    list: Option<&mut docx_layout::display_list::DisplayList>,
+    layout: &Layout,
+    anchor_pages: &[usize],
+    first: &std::ops::Range<usize>,
+    note_pages: &mut Vec<usize>,
+) -> Vec<usize> {
+    // A list of another length is rebuilt whole.
+    let Some(list) = list.filter(|list| list.pages.len() == layout.pages.len()) else {
+        return Vec::new();
+    };
+    let mut moved = Vec::new();
+    let mut unmatched = false;
+    for &index in anchor_pages {
+        if index >= layout.pages.len()
+            || first.contains(&index)
+            || note_pages.binary_search(&index).is_ok()
+        {
+            continue;
+        }
+        match docx_layout::display_list::refresh_note_region_anchors(
+            &mut list.pages[index],
+            &layout.pages[index],
+        ) {
+            Some(true) => moved.push(index),
+            Some(false) => {}
+            None => {
+                note_pages.push(index);
+                unmatched = true;
+            }
+        }
+    }
+    if unmatched {
+        note_pages.sort_unstable();
+    }
+    moved.sort_unstable();
+    moved
+}
+
+/// Takes `pages` (ascending) out of the uniform shift runs and into the pages compared
+/// position by position: a uniform shift carries no note anchors.
+fn compare_pages_by_position(
+    shifts: &mut docx_layout::display_list::IncrementalDisplayShifts,
+    pages: &[usize],
+) {
+    if pages.is_empty() {
+        return;
+    }
+    let mut runs = Vec::with_capacity(shifts.runs.len() + pages.len());
+    for run in shifts.runs.drain(..) {
+        let mut start = run.start;
+        let inside = pages.partition_point(|&page| page < run.start)
+            ..pages.partition_point(|&page| page < run.end);
+        for &page in &pages[inside] {
+            if start < page {
+                runs.push(docx_layout::display_list::DisplayShiftRun {
+                    start,
+                    end: page,
+                    delta: run.delta,
+                });
+            }
+            start = page + 1;
+        }
+        if start < run.end {
+            runs.push(docx_layout::display_list::DisplayShiftRun {
+                start,
+                end: run.end,
+                delta: run.delta,
+            });
+        }
+    }
+    shifts.runs = runs;
+    shifts.mixed.extend_from_slice(pages);
+    shifts.mixed.sort_unstable();
+    shifts.mixed.dedup();
 }
 
 /// With windowed builds on, compile the window and a mapped caret's page,
@@ -8548,12 +8767,8 @@ impl EngineSession {
                 None => NoteSettlement::Unsettled,
             }
         };
-        let note_changed_pages: Vec<usize> = note_page_keys_plain(Some(layout))
-            .iter()
-            .enumerate()
-            .filter(|(index, keys)| previous_notes.get(*index) != Some(*keys))
-            .map(|(index, _)| index)
-            .collect();
+        let (note_changed_pages, note_anchor_pages) =
+            note_area_changes(&previous_notes, &note_page_keys_plain(Some(layout)));
         let measured_value = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -8563,7 +8778,14 @@ impl EngineSession {
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
-        pagination.note_changed_pages = note_changed_pages;
+        // Both accumulate until the display is built: a page whose notes changed in an
+        // earlier pass and whose anchors alone moved in this one must still be rebuilt.
+        pagination.note_changed_pages.extend(note_changed_pages);
+        pagination.note_changed_pages.sort_unstable();
+        pagination.note_changed_pages.dedup();
+        pagination.note_anchor_pages.extend(note_anchor_pages);
+        pagination.note_anchor_pages.sort_unstable();
+        pagination.note_anchor_pages.dedup();
         pagination.keep_flowed_fragments(flowed_fragments);
         let page_count = certified.map_or(usize::MAX, |cut| cut.pages);
         restamped_pages.retain(|&page| page < page_count);
@@ -9121,12 +9343,8 @@ impl EngineSession {
                 None => NoteSettlement::Unsettled,
             }
         };
-        let note_changed_pages: Vec<usize> = note_page_keys(Some(layout))
-            .iter()
-            .enumerate()
-            .filter(|(index, keys)| previous_notes.get(*index) != Some(*keys))
-            .map(|(index, _)| index)
-            .collect();
+        let (note_changed_pages, note_anchor_pages) =
+            note_area_changes(&previous_notes, &note_page_keys(Some(layout)));
         let measured_value = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -9147,6 +9365,9 @@ impl EngineSession {
         pagination.note_changed_pages.extend(note_changed_pages);
         pagination.note_changed_pages.sort_unstable();
         pagination.note_changed_pages.dedup();
+        pagination.note_anchor_pages.extend(note_anchor_pages);
+        pagination.note_anchor_pages.sort_unstable();
+        pagination.note_anchor_pages.dedup();
         if let Some(pages) = &mut pagination.restamped_pages {
             pages.extend(restamped_pages);
         }
@@ -10269,6 +10490,7 @@ impl EngineSession {
             pagination.display_full_rebuild |= pagination.display_layout_pending;
             pagination.position_deltas = deltas;
             pagination.note_changed_pages.clear();
+            pagination.note_anchor_pages.clear();
             pagination.display_rebuilt_pages.clear();
             pagination.limit_display_damage();
         }
@@ -11977,10 +12199,15 @@ impl EngineSession {
                         })
                         .unwrap_or_default(),
                 };
-                let note_pages: Vec<usize> = if pagination.display_uses_region_path {
+                let note_changed = pagination
+                    .note_changed_pages
+                    .iter()
+                    .copied()
+                    .filter(|&index| index < layout.pages.len());
+                let mut note_pages: Vec<usize> = if pagination.display_uses_region_path {
                     pagination
                         .pending_display_pages()
-                        .chain(pagination.note_changed_pages.iter().copied())
+                        .chain(note_changed)
                         .chain(restamped)
                         .filter(|&index| !first.contains(&index))
                         .collect::<BTreeSet<_>>()
@@ -11993,13 +12220,23 @@ impl EngineSession {
                         .filter(|_| pagination.display_layout_pending)
                         .skip(1)
                         .flat_map(Clone::clone)
-                        .chain(pagination.note_changed_pages.iter().copied())
+                        .chain(note_changed)
                         .chain(restamped)
                         .filter(|&index| !first.contains(&index))
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect()
                 };
+                // A page whose notes' references alone moved keeps its display page: its
+                // regions take the new anchors, and the frame compares it position by
+                // position. One whose regions do not match its notes is rebuilt.
+                let moved_anchor_pages = refresh_moved_note_anchors(
+                    display.list.as_mut(),
+                    layout,
+                    &pagination.note_anchor_pages,
+                    &first,
+                    &mut note_pages,
+                );
                 let rebuilt_pages: HashSet<usize> =
                     first.clone().chain(note_pages.iter().copied()).collect();
                 let mut build =
@@ -12035,6 +12272,10 @@ impl EngineSession {
                 } else {
                     None
                 };
+                let mut shifts = shifts;
+                if let Some(shifts) = &mut shifts {
+                    compare_pages_by_position(shifts, &moved_anchor_pages);
+                }
                 let incremental = shifts.is_some();
                 if !incremental {
                     let mut build = windowed_full_build_pages(&display, layout, caret);
@@ -13186,6 +13427,8 @@ mod tests {
     mod preview_refresh_tests;
 
     mod command_relayout_tests;
+
+    mod note_anchor_tests;
 
     #[test]
     fn the_paragraph_mark_face_leaves_the_font_set_fingerprint_alone() {
@@ -16264,7 +16507,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 })
                 .unwrap_or_default(),
         };
-        let extra_pages: Vec<_> = pagination
+        let mut extra_pages: Vec<_> = pagination
             .rebuilt_page_ranges
             .iter()
             .skip(1)
@@ -16279,7 +16522,14 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let shifts = if pagination.last_incremental {
+        let moved_anchor_pages = refresh_moved_note_anchors(
+            display.list.as_mut(),
+            layout,
+            &pagination.note_anchor_pages,
+            &first,
+            &mut extra_pages,
+        );
+        let mut shifts = if pagination.last_incremental {
             docx_layout::update_resident_display_list_incremental_partial_shifts_observed(
                 input,
                 layout,
@@ -16296,6 +16546,9 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         } else {
             None
         };
+        if let Some(shifts) = &mut shifts {
+            compare_pages_by_position(shifts, &moved_anchor_pages);
+        }
         let rebuilt_pages: BTreeSet<_> = first.chain(extra_pages).collect();
         let rebuilt_count = if pagination.last_incremental {
             rebuilt_pages.len()
