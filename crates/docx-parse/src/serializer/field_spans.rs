@@ -995,8 +995,17 @@ impl FieldSpans {
                     let ordinal = source[end].1.paragraph_ordinal;
                     let deleted = ordinal.is_some_and(|id| edits.removed.contains(&id));
                     let patch = ordinal.and_then(|id| edits.patches.get(&id).copied());
-                    let next = following[end]
-                        .or_else(|| (end + 1 == matches.len()).then_some(model.len()));
+                    let next = following[end].or_else(|| {
+                        source[end + 1..]
+                            .iter()
+                            .all(|(_, element)| {
+                                let ordinal = element.paragraph_ordinal;
+                                deleted
+                                    && (element.name != "w:p"
+                                        || ordinal.is_some_and(|id| edits.removed.contains(&id)))
+                            })
+                            .then_some(model.len())
+                    });
                     self.pair(
                         opening,
                         closing,

@@ -137,6 +137,8 @@ interface EmbedItem {
 
 type InlineItem = TextItem | EmbedItem;
 
+const fieldStoryLengths = new WeakMap<EmbedItem | ComplexField, { live: number; seeded: number }>();
+
 const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   paraId: null,
   textId: null,
@@ -774,11 +776,8 @@ function hyperlinkKey(attributes: Attrs): string | null {
   return link ? asString(link.href) || '' : null;
 }
 
-function fieldFromPayload(
-  payload: Attrs,
-  attributes: Attrs,
-  format: RunFormatter
-): SimpleField | ComplexField {
+function fieldFromPayload(item: EmbedItem, format: RunFormatter): SimpleField | ComplexField {
+  const { payload, attributes } = item;
   const fieldData = asString(payload.fieldData);
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
@@ -792,6 +791,9 @@ function fieldFromPayload(
       ) {
         const displayMode = asString(payload.displayMode) as 'result' | 'code' | undefined;
         if (stored.fieldTree && displayMode) stored.fieldTree.displayMode = displayMode;
+        if (stored.type === 'complexField') {
+          fieldStoryLengths.set(stored, fieldStoryLengths.get(item) ?? { live: 1, seeded: 1 });
+        }
         return stored;
       }
     } catch {
@@ -1316,7 +1318,7 @@ function inlineContentForItem(
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ??
-        fieldFromPayload(item.payload, item.attributes, format)
+        fieldFromPayload(item, format)
       );
     case 'math':
       return mathFromPayload(item.payload);
@@ -1422,7 +1424,7 @@ function addToHyperlink(
   else if (item.embedKind === 'field') {
     child =
       commentReferenceFromPayload(item.payload) ??
-      fieldFromPayload(item.payload, item.attributes, format);
+      fieldFromPayload(item, format);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
   else if (item.embedKind === 'sdt') {
     const control = inlineSdtFromPayload(item.payload, recovery, format);
@@ -1485,16 +1487,22 @@ function restoreProjectedFieldResults(
     return false;
   });
   for (const { owner } of owners) {
-    const stored = fieldFromPayload(owner.payload, owner.attributes, format);
+    const stored = fieldFromPayload(owner, format);
     if (stored.type !== 'complexField') continue;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
     const replacements = new Map<number, FieldInlineContent[]>();
+    const currentGroups = groups.get(owner);
+    const units = (length: number, item: InlineItem) => length + (item.kind === 'text' ? item.text.length : 1);
+    let live = 1;
+    for (const group of currentGroups?.values() ?? []) live = group.reduce(units, live);
+    let seeded = 1;
     for (const raw of originals) {
       const child = asObject(raw);
       const index = asFiniteNumber(child?.index);
       if (index === undefined || !Array.isArray(child?.items)) continue;
-      const current = groups.get(owner)?.get(index) ?? [];
+      seeded = (child.items as InlineItem[]).reduce(units, seeded);
+      const current = currentGroups?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
       const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
@@ -1504,6 +1512,7 @@ function restoreProjectedFieldResults(
       }
       replacements.set(index, rebuilt);
     }
+    fieldStoryLengths.set(owner, { live, seeded });
     if (replacements.size === 0) continue;
     delete stored.sourceRunXml;
     delete stored.sourceRunDigest;
@@ -1767,11 +1776,14 @@ function inlineSpanText(child: ParagraphContent): string | null {
     case 'inlineSdt':
     case 'mathEquation':
       return '￼';
-    case 'complexField':
+    case 'complexField': {
+      const lengths = fieldStoryLengths.get(child);
+      if (lengths ? lengths.live > 1 : unlinkedTocEntryRuns(child)) return null;
       return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
         .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
         ? null
         : '￼';
+    }
     case 'hyperlink':
       return plainRunsText(child.structuredChildren ?? child.children);
     case 'insertion':
@@ -2119,6 +2131,8 @@ function paragraphContentLength(content: ParagraphContent): number {
         0
       );
     case 'complexField': {
+      const lengths = fieldStoryLengths.get(content);
+      if (lengths) return lengths.live;
       const entry = unlinkedTocEntryRuns(content);
       if (entry) return entry.reduce((sum, run) => sum + runTextLength(run), 1);
       return [
@@ -2361,12 +2375,17 @@ function baseRawInlineUnits(raw: RawXml): number {
 
 /** Puts each foreign inline element of the base paragraph back at its offset: foreign markup seeds as nothing. */
 function restoreForeignInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
-  if (!base) return content;
+  if (!base?.content.some(child => child.type === 'rawXml' && !KEPT_WORD_INLINE.test(child.xml))) return content;
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const fields = content.filter((child): child is ComplexField => child.type === 'complexField');
   const boundaries: CommentBoundary[] = [];
   let offset = 0;
   for (const [index, child] of base.content.entries()) {
-    if (child.type !== 'rawXml') {
+    if (child.type === 'complexField') {
+      const match = fields.findIndex(field => field.instruction === child.instruction);
+      const field = match < 0 ? undefined : fields.splice(match, 1)[0];
+      offset += (field && fieldStoryLengths.get(field)?.seeded) ?? paragraphContentLength(child);
+    } else if (child.type !== 'rawXml') {
       offset += paragraphContentLength(child);
     } else if (KEPT_WORD_INLINE.test(child.xml)) {
       offset += baseRawInlineUnits(child);
