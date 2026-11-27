@@ -997,7 +997,7 @@ fn settle_reserved_heights(
 }
 
 pub fn stabilize_note_layout<F>(
-    mut layout_with_reserved: F,
+    layout_with_reserved: F,
     refs: &[NoteRefLocation],
     contents: &[NoteContent],
     separator_heights: &NoteSeparatorHeights,
@@ -1006,6 +1006,32 @@ pub fn stabilize_note_layout<F>(
 ) -> Result<StabilizedNoteLayout, LayoutError>
 where
     F: FnMut(&OrderedMap<u32, f64>) -> Result<Layout, LayoutError>,
+{
+    stabilize_note_layout_retiring(
+        layout_with_reserved,
+        |_| {},
+        refs,
+        contents,
+        separator_heights,
+        initial_layout,
+        regions,
+    )
+}
+
+/// [`stabilize_note_layout`], handing each layout a later pass replaces to `retire`: the
+/// initial layout first, then the passes in the order they ran.
+pub fn stabilize_note_layout_retiring<F, R>(
+    mut layout_with_reserved: F,
+    mut retire: R,
+    refs: &[NoteRefLocation],
+    contents: &[NoteContent],
+    separator_heights: &NoteSeparatorHeights,
+    initial_layout: Layout,
+    regions: &DocumentRegions,
+) -> Result<StabilizedNoteLayout, LayoutError>
+where
+    F: FnMut(&OrderedMap<u32, f64>) -> Result<Layout, LayoutError>,
+    R: FnMut(Layout),
 {
     let mut page_note_map = map_notes_to_pages(&initial_layout.pages, refs, regions);
     let mut reserved = calculate_note_reserved_heights(
@@ -1027,7 +1053,8 @@ where
     let mut layout = initial_layout;
     let mut converged = false;
     for _ in 0..MAX_FOOTNOTE_LAYOUT_PASSES {
-        layout = layout_with_reserved(&reserved)?;
+        let next = layout_with_reserved(&reserved)?;
+        retire(std::mem::replace(&mut layout, next));
         page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
         let next = calculate_note_reserved_heights(
             &page_note_map,
@@ -1051,7 +1078,8 @@ where
         let settle_passes = (FOOTNOTE_SETTLE_PAGE_BUDGET / layout.pages.len().max(1))
             .clamp(MAX_FOOTNOTE_LAYOUT_PASSES, MAX_FOOTNOTE_SETTLE_PASSES);
         for pass in 0..settle_passes + MAX_FOOTNOTE_LAYOUT_PASSES {
-            layout = layout_with_reserved(&fallback)?;
+            let next = layout_with_reserved(&fallback)?;
+            retire(std::mem::replace(&mut layout, next));
             page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
             let required = calculate_note_reserved_heights(
                 &page_note_map,
@@ -1079,7 +1107,8 @@ where
             starts = next_starts;
         }
         if !covered {
-            layout = layout_with_reserved(&fallback)?;
+            let next = layout_with_reserved(&fallback)?;
+            retire(std::mem::replace(&mut layout, next));
             page_note_map = map_notes_to_pages(&layout.pages, refs, regions);
         }
         reserved = fallback;
