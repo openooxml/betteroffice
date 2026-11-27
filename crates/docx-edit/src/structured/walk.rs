@@ -3479,10 +3479,14 @@ impl<'a> Exporter<'a> {
         } else if !has_result {
             CachedResult::Missing
         } else if let Some(projected) = projected {
-            let entry_runs = data
-                .as_ref()
-                .and_then(crate::seed::unlinked_toc_entry_runs)
-                .map_or(0, |runs| runs.len());
+            let entry_runs = if any_str(payload.get("spanningFieldProjection")) == Some("unlinkedToc")
+            {
+                data.as_ref()
+                    .and_then(crate::seed::unlinked_toc_entry_runs)
+                    .map_or(0, |runs| runs.len())
+            } else {
+                0
+            };
             CachedResult::Inline {
                 inlines: self.projected_result_inlines(
                     ctx,

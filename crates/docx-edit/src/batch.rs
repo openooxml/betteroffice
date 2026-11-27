@@ -26,7 +26,7 @@ use crate::ops::paragraph::{ParagraphRecord, StylePlan, plan_paragraph_style};
 use crate::ops::text::{OverlayRun, RichRun, validate_text};
 use crate::ops::utf16_len;
 use crate::read_types::Anchor;
-use crate::seed::{Restoration, SourceMetadata, is_closed_pageref, unlinked_toc_entry_runs};
+use crate::seed::{Restoration, SourceMetadata, is_closed_pageref};
 use crate::target::{
     EditTextView, ParagraphTarget, ParagraphView, SearchScope, Selection, StoryView, TextRange,
     TextTarget, Views, comment_spans, field_result_blocks,
@@ -1784,20 +1784,16 @@ fn unlinked_toc_entry_ids<T: ReadTxn>(openers: &[ParagraphView], txn: &T) -> BTr
         let Some(field) = field.as_ref().filter(|_| kind == "field") else {
             continue;
         };
+        if crate::map_string(field, txn, "spanningFieldProjection").as_deref() != Some("unlinkedToc") {
+            continue;
+        }
         let Some(Out::Any(Any::Array(blocks))) = field.get(txn, "fieldSpanBlocks") else {
             continue;
         };
-        let Some(data) = crate::map_string(field, txn, "fieldData")
-            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
-        else {
-            continue;
-        };
-        if unlinked_toc_entry_runs(&data).is_some() {
-            entries.extend(blocks.iter().filter_map(|block| match block {
-                Any::String(id) => Some(id.to_string()),
-                _ => None,
-            }));
-        }
+        entries.extend(blocks.iter().filter_map(|block| match block {
+            Any::String(id) => Some(id.to_string()),
+            _ => None,
+        }));
     }
     entries
 }

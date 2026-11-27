@@ -969,6 +969,11 @@ function fieldToUnits(
     children.length > 0
   );
   if (children.length > 0) field.payload.resultProjection = { id: projectionId, children };
+  const codeBlocks = partBlockCount(value.structuredCode);
+  const resultBlocks = partBlockCount(value.structuredResult);
+  if (typeof codeBlocks === 'number' || typeof resultBlocks === 'number') {
+    field.payload.spanningFieldProjection = entryRuns > 0 ? 'unlinkedToc' : 'standard';
+  }
   units.push(embedUnit('field', field.payload, field.marks));
   return units;
 }

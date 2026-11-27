@@ -133,11 +133,17 @@ interface EmbedItem {
   embedKind: string;
   payload: Attrs;
   attributes: Attrs;
+  projectedFieldLengths?: ProjectedFieldLengths;
 }
 
 type InlineItem = TextItem | EmbedItem;
 
-const fieldStoryLengths = new WeakMap<EmbedItem | ComplexField, { live: number; seeded: number }>();
+interface ProjectedFieldLengths {
+  live: number;
+  seeded: number;
+}
+
+const projectedFieldLengths = new WeakMap<ComplexField, ProjectedFieldLengths>();
 
 const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   paraId: null,
@@ -791,8 +797,8 @@ function fieldFromPayload(item: EmbedItem, format: RunFormatter): SimpleField | 
       ) {
         const displayMode = asString(payload.displayMode) as 'result' | 'code' | undefined;
         if (stored.fieldTree && displayMode) stored.fieldTree.displayMode = displayMode;
-        if (stored.type === 'complexField') {
-          fieldStoryLengths.set(stored, fieldStoryLengths.get(item) ?? { live: 1, seeded: 1 });
+        if (stored.type === 'complexField' && payload.spanningFieldProjection !== undefined) {
+          projectedFieldLengths.set(stored, item.projectedFieldLengths ?? { live: 1, seeded: 1 });
         }
         return stored;
       }
@@ -1489,30 +1495,35 @@ function restoreProjectedFieldResults(
   for (const { owner } of owners) {
     const stored = fieldFromPayload(owner, format);
     if (stored.type !== 'complexField') continue;
+    const marked = owner.payload.spanningFieldProjection !== undefined;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
     const replacements = new Map<number, FieldInlineContent[]>();
     const currentGroups = groups.get(owner);
     const units = (length: number, item: InlineItem) => length + (item.kind === 'text' ? item.text.length : 1);
-    let live = 1;
-    for (const group of currentGroups?.values() ?? []) live = group.reduce(units, live);
-    let seeded = 1;
+    if (marked) {
+      const lengths = { live: 1, seeded: 1 };
+      for (const group of currentGroups?.values() ?? []) {
+        lengths.live = group.reduce(units, lengths.live);
+      }
+      owner.projectedFieldLengths = lengths;
+    }
     for (const raw of originals) {
       const child = asObject(raw);
       const index = asFiniteNumber(child?.index);
       if (index === undefined || !Array.isArray(child?.items)) continue;
-      seeded = (child.items as InlineItem[]).reduce(units, seeded);
+      const lengths = owner.projectedFieldLengths;
+      if (lengths) lengths.seeded = (child.items as InlineItem[]).reduce(units, lengths.seeded);
       const current = currentGroups?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
       const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
         const link = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
-        rebuilt[0] = spansParagraphs(stored) ? restorePageReference(link, original) : link;
+        rebuilt[0] = marked ? restorePageReference(link, original) : link;
       }
       replacements.set(index, rebuilt);
     }
-    fieldStoryLengths.set(owner, { live, seeded });
     if (replacements.size === 0) continue;
     delete stored.sourceRunXml;
     delete stored.sourceRunDigest;
@@ -1777,8 +1788,8 @@ function inlineSpanText(child: ParagraphContent): string | null {
     case 'mathEquation':
       return '￼';
     case 'complexField': {
-      const lengths = fieldStoryLengths.get(child);
-      if (lengths ? lengths.live > 1 : unlinkedTocEntryRuns(child)) return null;
+      const lengths = projectedFieldLengths.get(child);
+      if (lengths && lengths.live > 1) return null;
       return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
         .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
         ? null
@@ -2131,10 +2142,8 @@ function paragraphContentLength(content: ParagraphContent): number {
         0
       );
     case 'complexField': {
-      const lengths = fieldStoryLengths.get(content);
+      const lengths = projectedFieldLengths.get(content);
       if (lengths) return lengths.live;
-      const entry = unlinkedTocEntryRuns(content);
-      if (entry) return entry.reduce((sum, run) => sum + runTextLength(run), 1);
       return [
         ...(content.structuredCode?.inline ?? []),
         ...(content.structuredResult?.inline ?? []),
@@ -2375,16 +2384,17 @@ function baseRawInlineUnits(raw: RawXml): number {
 
 /** Puts each foreign inline element of the base paragraph back at its offset: foreign markup seeds as nothing. */
 function restoreForeignInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
-  if (!base?.content.some(child => child.type === 'rawXml' && !KEPT_WORD_INLINE.test(child.xml))) return content;
+  if (!base) return content;
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
   const fields = content.filter((child): child is ComplexField => child.type === 'complexField');
+  const hasProjectedFields = fields.some(field => projectedFieldLengths.has(field));
   const boundaries: CommentBoundary[] = [];
   let offset = 0;
   for (const [index, child] of base.content.entries()) {
-    if (child.type === 'complexField') {
+    if (hasProjectedFields && child.type === 'complexField') {
       const match = fields.findIndex(field => field.instruction === child.instruction);
       const field = match < 0 ? undefined : fields.splice(match, 1)[0];
-      offset += (field && fieldStoryLengths.get(field)?.seeded) ?? paragraphContentLength(child);
+      offset += (field && projectedFieldLengths.get(field)?.seeded) ?? paragraphContentLength(child);
     } else if (child.type !== 'rawXml') {
       offset += paragraphContentLength(child);
     } else if (KEPT_WORD_INLINE.test(child.xml)) {
@@ -3783,6 +3793,8 @@ function withBlockCounts(field: ComplexField, span: FieldBlockSpan): ComplexFiel
     if (field.fieldTree.code) next.fieldTree.code = structuredCode;
     if (field.fieldTree.result) next.fieldTree.result = structuredResult;
   }
+  const lengths = projectedFieldLengths.get(field);
+  if (lengths) projectedFieldLengths.set(next, lengths);
   return next;
 }
 
@@ -3888,7 +3900,8 @@ function restoreSpanningPageReferences(
     const current = live.get(key);
     if (current?.type !== 'paragraph') continue;
     for (const field of spanningFields(block.content)) {
-      if (current.content.some(child => child.type === 'complexField' && child.instruction === field.instruction)) {
+      if (current.content.some(child => child.type === 'complexField' &&
+        projectedFieldLengths.has(child) && child.instruction === field.instruction)) {
         end = Math.max(end, index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult));
       }
     }
@@ -4736,6 +4749,7 @@ class SaveContext {
     const segments = this.session.storySegments(storyId);
     const trailingByParagraph = new Map<string, BlockBreakKind[]>();
     const spanningEmbeds = new Map<string, Attrs[]>();
+    let hasSpanningFieldProjection = false;
     let paragraphSpanning: Attrs[] = [];
     let closing: string | undefined;
     for (const segment of segments) {
@@ -4747,6 +4761,7 @@ class SaveContext {
       } else {
         if (segment.kind === 'embed' && segment.embedKind === 'field' && payloadSpansParagraphs(segment.payload)) {
           paragraphSpanning.push(segment.payload);
+          if (segment.payload.spanningFieldProjection !== undefined) hasSpanningFieldProjection = true;
         }
         const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
         if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
@@ -5060,7 +5075,7 @@ class SaveContext {
     }
     const restored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
     const projected = withKeptBlockCounts(
-      baseBlocks && spanningEmbeds.size ? restoreSpanningPageReferences(restored, baseBlocks, storyId) : restored,
+      baseBlocks && hasSpanningFieldProjection ? restoreSpanningPageReferences(restored, baseBlocks, storyId) : restored,
       storyId,
       spanningEmbeds
     );

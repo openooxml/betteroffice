@@ -3835,6 +3835,17 @@ fn field_to_units(
             json!({"id":projection_id, "children":children}),
         );
     }
+    if ["structuredCode", "structuredResult"]
+        .iter()
+        .any(|key| matches!(part_block_count(value, key), Some(Some(_))))
+    {
+        let projection = if entry_runs > 0 {
+            "unlinkedToc"
+        } else {
+            "standard"
+        };
+        payload.insert("spanningFieldProjection".to_owned(), json!(projection));
+    }
     units.push(embed_unit("field", payload, &marks, 1));
     units
 }
