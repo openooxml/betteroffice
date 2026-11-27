@@ -246,10 +246,15 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
     if (pictureOrigin.current) picker.current?.click();
   }, [presentation]);
   const shapes = usePeerlessShapeGestures(presentation?.store ?? null, { canvas, presentation });
-  const clearPressCursor = (event: PointerEvent<HTMLDivElement>) => {
-    if (event.pointerId !== capturedPointer.current) return;
-    event.currentTarget.style.cursor = '';
+  const clearPressCursor = (stage: HTMLDivElement, pointerId: number) => {
+    if (pointerId !== capturedPointer.current) return;
+    stage.style.cursor = '';
     capturedPointer.current = null;
+  };
+  const clearStalePressCursor = (event: PointerEvent<HTMLDivElement>) => {
+    const stage = event.currentTarget;
+    const pointerId = capturedPointer.current;
+    if (pointerId !== null && !stage.hasPointerCapture?.(pointerId)) clearPressCursor(stage, pointerId);
   };
   useEffect(() => {
     if (canvas.current) canvas.current.style.cursor = insertion.tool !== 'select' ? 'crosshair' : 'default';
@@ -359,6 +364,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (!event.defaultPrevented) navigatePeerlessSlide(event, presentation);
         }}
         onPointerDown={(event) => {
+          clearStalePressCursor(event);
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
           const geometryCursor = insertion.tool === 'select' ? shapes.geometryCursor(event) : null;
           const cursor = geometryCursor === null ? 'crosshair' : shapes.cursorAt(event, geometryCursor);
@@ -370,23 +376,28 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           if (geometryCursor && !overHandle && canvas.current) canvas.current.style.cursor = geometryCursor;
         }}
         onPointerMove={(event) => {
+          clearStalePressCursor(event);
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target) || review.diff) return;
           const cursor = insertion.tool === 'select' ? shapes.hoverCursor(event) : null;
           if (cursor && canvas.current) canvas.current.style.cursor = cursor;
           if (!insertion.onPointerMove(event) && !shapes.onPointerMove(event)) selection.onPointerMove(event);
         }}
+        onPointerLeave={clearStalePressCursor}
         onPointerUp={(event) => {
-          clearPressCursor(event);
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
           if (!pluginEventStore(event.nativeEvent) && !inPluginChrome(event.target) && !review.diff && !insertion.onPointerUp(event) && !shapes.onPointerUp(event)) selection.onPointerUp(event);
         }}
         onPointerCancel={(event) => {
-          clearPressCursor(event);
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return;
           insertion.onPointerCancel(event);
           if (!shapes.onPointerCancel(event)) selection.onPointerCancel(event);
         }}
         onLostPointerCapture={(event) => {
-          clearPressCursor(event);
+          clearStalePressCursor(event);
+          clearPressCursor(event.currentTarget, event.pointerId);
           if (pluginEventStore(event.nativeEvent) || inPluginChrome(event.target)) return;
           insertion.onPointerCancel(event);
           if (!shapes.onLostPointerCapture(event)) selection.onLostPointerCapture(event);
