@@ -7,8 +7,8 @@ import { applyReviewCommand, grantedHostProposal, preflightReviewCommand, review
 import { applyListToggle } from './listCommands';
 import { planResidentListChanges } from './residentCommandLists';
 import { breakRefusedWhileSuggesting, leadingBlockCount } from './sectionBreak';
-import { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
-import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange, YrsStorySegment } from './index';
+import { storyParagraphSpans, type StoryParagraphSpans } from './tableBoundaryDelete';
+import type { YrsInlineFormatDelta, YrsLoc, YrsParagraphAttrs, YrsRunMark, YrsSelectionContext, YrsStoryRange } from './index';
 import {
   commandSelectionRange, mintCommandSelection, readCommandSelection, registerCommandAnchorState, resolveCommandSelection,
 } from './residentCommandAnchors';
@@ -477,11 +477,9 @@ function collapsed(range: YrsStoryRange): boolean {
 
 function deleteRange(
   engine: DocxWorkerCommandEngine, range: YrsStoryRange, backward: boolean, count: number, skipDeleted: boolean,
-  paragraphSegments: DocxWorkerCommandEngine['paragraphSegments']
+  spans: StoryParagraphSpans
 ): YrsStoryRange | null {
-  if (!collapsed(range)) return range;
-  const spans = engine.geometryReader.paragraphSpans(range.story);
-  let index = spans.findIndex(({ paraId }) => paraId === range.start.paraId);
+  let index = spans.indexOf(range.start.paraId);
   if (index < 0) return null;
   let offset = range.start.offset;
   const paragraphs = new Map<number, { text: string; deleted: Array<[number, number]> }>();
@@ -489,7 +487,7 @@ function deleteRange(
     let paragraph = paragraphs.get(index);
     if (paragraph === undefined) {
       paragraph = { text: '', deleted: [] };
-      for (const segment of paragraphSegments(range.story, [index])[0] ?? []) {
+      for (const segment of spans.segmentsAt(index)) {
         const text = segment.kind === 'text' ? segment.text : segment.kind === 'pilcrow' ? '\n' : '\uFFFC';
         if (skipDeleted && !(segment.kind === 'embed' && segment.embedKind === 'table') && (segment.attributes.del != null ||
           (segment.kind === 'pilcrow' && segment.properties.pPrDel != null))) {
@@ -501,19 +499,19 @@ function deleteRange(
     }
     return paragraph;
   };
-  const tableBoundary = () => tableBoundaryDeleteTarget({
-    paragraphSpans: story => story === range.story ? spans : engine.geometryReader.paragraphSpans(story),
-    paragraphSegments,
-  }, { story: range.story, paraId: spans[index]!.paraId, offset }, backward ? 'backward' : 'forward');
-  for (let left = count; left > 0; left -= 1) {
+  const atTableBoundary = () => {
     const text = paragraphAt(index).text;
     const boundary = backward ? offset === 0 || text[offset - 1] === '\uFFFC' :
-      offset === spans[index]!.length || text[offset] === '\uFFFC';
-    if (boundary && tableBoundary()) break;
+      offset === spans.at(index).length || text[offset] === '\uFFFC';
+    return boundary && spans.tableBoundaryTarget(
+      { story: range.story, paraId: spans.at(index).paraId, offset }, backward ? 'backward' : 'forward') !== null;
+  };
+  for (let left = count; left > 0; left -= 1) {
+    if (atTableBoundary()) break;
     if (backward) {
       if (offset === 0) {
         if (index === 0) break;
-        offset = spans[--index]!.length;
+        offset = spans.at(--index).length;
       } else {
         const { text } = paragraphAt(index);
         offset -= 1;
@@ -525,19 +523,19 @@ function deleteRange(
           const deleted = paragraphAt(index).deleted.find(([start, end]) => start <= offset && offset < end);
           if (!deleted) break;
           offset = deleted[1];
-          if (offset > spans[index]!.length) {
-            if (index === spans.length - 1) {
-              offset = spans[index]!.length;
+          if (offset > spans.at(index).length) {
+            if (index === spans.count() - 1) {
+              offset = spans.at(index).length;
               break;
             }
             index += 1;
             offset = 0;
           }
         }
-        if (tableBoundary()) break;
+        if (atTableBoundary()) break;
       }
-      if (offset === spans[index]!.length) {
-        if (index === spans.length - 1) break;
+      if (offset === spans.at(index).length) {
+        if (index === spans.count() - 1) break;
         index += 1;
         offset = 0;
       } else {
@@ -545,7 +543,7 @@ function deleteRange(
       }
     }
   }
-  const target = { paraId: spans[index]!.paraId, offset };
+  const target = { paraId: spans.at(index).paraId, offset };
   const expanded = {
     story: range.story, start: backward ? target : range.start, end: backward ? range.end : target,
   };
@@ -790,35 +788,24 @@ export function preflightDocxCommand(
   let range = resolved.range;
   if ((command.kind === 'insertText' || command.kind === 'replaceSelection' || command.kind === 'lineBreak') && state.storedMarks &&
     (typeof state.storedMarks.clear !== 'boolean' || !validDelta(state.storedMarks.delta))) return refuse('invalid-stored-marks');
-  if (command.kind === 'deleteBackward' || command.kind === 'deleteForward') {
+  if ((command.kind === 'deleteBackward' || command.kind === 'deleteForward') && collapsed(range)) {
     const story = range.story;
-    const segments = new Map<number, YrsStorySegment[]>();
-    const paragraphSegments: DocxWorkerCommandEngine['paragraphSegments'] = (readStory, indices) => {
-      if (readStory !== story) return engine.paragraphSegments(readStory, indices);
-      return indices.map(index => {
-        let paragraph = segments.get(index);
-        if (paragraph === undefined) {
-          paragraph = engine.paragraphSegments(story, [index])[0] ?? [];
-          segments.set(index, paragraph);
-        }
-        return paragraph;
-      });
-    };
-    if (collapsed(range)) {
-      const target = tableBoundaryDeleteTarget({
-        paragraphSpans: story => engine.geometryReader.paragraphSpans(story),
-        paragraphSegments,
-      }, { story: range.story, ...range.start }, command.kind === 'deleteBackward' ? 'backward' : 'forward');
-      if (target) return { status: 'ready', prepared: {
-        command: structuredClone(command), selection: { anchor: target, focus: target },
-        range: {
-          story: target.story, start: { paraId: target.paraId, offset: target.offset },
-          end: { paraId: target.paraId, offset: target.offset },
-        },
-      } };
-    }
-    const expanded = deleteRange(engine, range, command.kind === 'deleteBackward', command.payload.count ?? 1,
-      command.kind === 'deleteForward' && command.payload.suggesting !== undefined, paragraphSegments);
+    const spans = storyParagraphSpans({
+      paragraphSpans: story => engine.geometryReader.paragraphSpans(story),
+      paragraphSegments: (story, indices) => engine.paragraphSegments(story, indices),
+      paragraphUnit: (story, paraId) => engine.paragraphUnit(story, paraId),
+    }, story);
+    const backward = command.kind === 'deleteBackward';
+    const target = spans.tableBoundaryTarget({ story, ...range.start }, backward ? 'backward' : 'forward');
+    if (target) return { status: 'ready', prepared: {
+      command: structuredClone(command), selection: { anchor: target, focus: target },
+      range: {
+        story: target.story, start: { paraId: target.paraId, offset: target.offset },
+        end: { paraId: target.paraId, offset: target.offset },
+      },
+    } };
+    const expanded = deleteRange(engine, range, backward, command.payload.count ?? 1,
+      !backward && command.payload.suggesting !== undefined, spans);
     if (!expanded) return refuse('unsupported-delete-target');
     range = expanded;
   }
