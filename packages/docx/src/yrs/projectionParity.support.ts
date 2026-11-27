@@ -933,12 +933,14 @@ export function checkSourceOrdinals(
   for (const entry of nested) {
     if (!entry.paragraph.repeatedParaId) match(entry, byId.get(entry.paragraph.paraId));
   }
+  const contentKey = (entry: NestedParagraph) => stableStringify(canonicalProjection(entry.paragraph));
   for (const entry of nested) {
-    if (!matched.has(entry)) match(entry, byPosition.get(entry.position));
+    if (matched.has(entry)) continue;
+    const positioned = byPosition.get(entry.position);
+    if (positioned && contentKey(entry) === contentKey(positioned)) match(entry, positioned);
   }
 
   const byContent = new Map<string, NestedParagraph[]>();
-  const contentKey = (entry: NestedParagraph) => stableStringify(canonicalProjection(entry.paragraph));
   for (const entry of nestedSources.reverse()) {
     if (claimed.has(entry)) continue;
     const key = contentKey(entry);
@@ -947,8 +949,17 @@ export function checkSourceOrdinals(
     byContent.set(key, candidates);
   }
   for (const entry of nested) {
+    if (!matched.has(entry)) match(entry, byContent.get(contentKey(entry))?.pop());
+  }
+  for (const entry of nested) {
+    if (matched.has(entry)) continue;
+    const positioned = byPosition.get(entry.position);
+    if (positioned && entry.paragraph.paraId === positioned.paragraph.paraId) match(entry, positioned);
+  }
+
+  for (const entry of nested) {
     const { paragraph, path } = entry;
-    const original = matched.get(entry) ?? byContent.get(contentKey(entry))?.pop();
+    const original = matched.get(entry);
     comparison.compare(original?.paragraph.sourceOrdinal, paragraph.sourceOrdinal, { storyId, paragraph: null }, `${path}.sourceOrdinal`);
   }
   return comparison.differences;

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 
 import { toBytes } from '../docx/rezip/parts';
 import type { BlockContent } from '../types/document';
+import { createdListKey } from './listDefinitionSave';
 import {
   buildDocxFromParts,
   canonicalStories,
@@ -88,6 +89,41 @@ describe('Native DOCX projection depth', () => {
       session.destroy();
     }
   }, 30_000);
+
+  it('defers a session-created list kept only in the previous formatting of a suggested removal', () => {
+    const raw = createEditSession(CLIENT);
+    const session = wrapSession(raw, CLIENT);
+    try {
+      session.seedFromDocx(syntheticDocx('<w:p><w:r><w:t>List item</w:t></w:r></w:p>'));
+      const base = session.materializeDocx()!;
+      const { paraId } = session.paragraphs('body')[0]!;
+      const at = { paraId, offset: 0 };
+      const range = { story: 'body', start: at, end: at };
+      session.setParagraphAttrs(range, session.ensureListDefinition('body', paraId, 'numbered'));
+      const listed = session.paragraphs('body')[0]!.properties;
+      expect(createdListKey(listed)).toBeDefined();
+
+      session.setParagraphAttrs(range, {
+        numPr: null, listIsBullet: null, listNumFmt: null, listMarker: null, other: { listDef: null },
+      }, { name: 'Ada', date: '2026-01-01T00:00:00Z' });
+      const current = session.paragraphs('body')[0]!.properties;
+      expect(createdListKey(current)).toBeUndefined();
+      expect(current.pPrChange).toMatchObject([{
+        previousFormatting: { numPr: listed.numPr, listDef: listed.listDef },
+      }]);
+
+      const { deferred } = nativeProjection(raw, base.originalBuffer!);
+      const defersPreviousList = deferred.some(({ storyId, paragraph, family, kind }) =>
+        storyId === 'body' && paragraph === 0 &&
+        ((family === 'markers' && kind === 'pPrChange') || (family === 'storiesAux' && kind === 'listDef'))
+      );
+      expect(defersPreviousList,
+        'A suggested removal leaves a session-created list in previous formatting and requires markers/pPrChange or storiesAux/listDef'
+      ).toBe(true);
+    } finally {
+      session.destroy();
+    }
+  });
 
   for (const levels of [1, TABLE_LEVELS]) {
     it(`reports all ${levels} session-created tables as deferred`, () => {
