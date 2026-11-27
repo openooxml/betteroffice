@@ -331,9 +331,12 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
 
     case.sites.remove(0);
     let error = check_case(&case, &mut census).unwrap_err();
+    let author = header.replace("/id", "/author");
     assert_eq!(
         error.to_string(),
-        format!("first differing site at index 1: TypeScript None, Rust Some(({header:?}, 1))")
+        format!(
+            "string paths differ: first JSON-only path Some({author:?}), first Rust-only path None"
+        )
     );
 }
 
