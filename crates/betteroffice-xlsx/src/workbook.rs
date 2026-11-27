@@ -14,6 +14,7 @@ mod formula_entry;
 mod geometry;
 #[cfg(test)]
 mod graph_reuse_tests;
+pub(crate) mod hidden_sizes;
 mod preserved_fragments;
 mod proposals;
 pub(crate) mod reads;
@@ -29,6 +30,10 @@ pub(crate) mod target;
 #[cfg(test)]
 mod update_tests;
 
+use self::hidden_sizes::{
+    AuthoredDimensions, HiddenSizes, LocalDimensions, adopt_authored_sizes,
+    derive_replica_hidden_sizes, derive_source_hidden_sizes, dimension_changes, with_shared_model,
+};
 use self::proposals::proposal_edit_is_stale;
 
 use std::borrow::Cow;
@@ -1089,6 +1094,8 @@ impl Workbook {
                     target.hidden_col_widths = source.hidden_col_widths.clone();
                     target.hidden_row_heights = source.hidden_row_heights.clone();
                 }
+            } else {
+                derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, Some(&model));
             }
             validate_model(&projected)?;
             (AuthoritySlot::built(authority), projected, Some(structure))
@@ -1342,7 +1349,7 @@ impl Workbook {
         {
             self.pending_remote_updates.remove(index);
         }
-        let before = self.model.clone();
+        let before = self.with_staged_model(WorkbookModel::clone);
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }
@@ -1425,6 +1432,7 @@ impl Workbook {
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = AuthoritySlot::built(candidate);
         self.preserved.resize(frozen.sheet_keys.len());
+        self.derive_replica_hidden_sizes(&mut model, &structure, None);
         self.install_model(model)?;
         self.rebase_sheet_positions(&frozen.sheet_keys, &structure.sheet_keys);
         self.invalidate_sheet_info();
@@ -1714,6 +1722,7 @@ impl Workbook {
             .get_mut()?
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
+        self.derive_replica_hidden_sizes(&mut model, &new_structure, None);
         self.install_model(model)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -2629,7 +2638,7 @@ impl Workbook {
         self.ensure_cells_writable(sheet, edits.iter().map(|edit| edit.cell), protection)?;
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
-        let mut preview = self.model.clone();
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let names = DefinedFunctionNames::new(&preview.defined_names);
         let mut per_op = Vec::with_capacity(edits.len());
         for (index, edit) in edits.iter().enumerate() {
@@ -2664,7 +2673,9 @@ impl Workbook {
                 ops.push(format);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || self.with_staged_model(|model| models_semantically_equal(&preview, model))
+        {
             return Ok(MutationResult::default());
         }
         let mut inverse = Vec::new();
@@ -2893,10 +2904,11 @@ impl Workbook {
         for op in &ops {
             xlsx_ops::ensure_op_available(op)?;
         }
-        if self.is_collaborative() {
+        let collaborative = self.is_collaborative();
+        if collaborative {
             refuse_collaborative_structure(&ops, self.model.sheets.len())?;
         }
-        let mut preview = self.model.clone();
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let mut origins = self.preserved.origins.clone();
         let mut axes = self.preserved.axes.clone();
         let mut drawings_move = false;
@@ -2997,13 +3009,42 @@ impl Workbook {
         let proposals_changed = self
             .rebased_proposals(&ops)
             .is_some_and(|proposals| proposals != self.proposals.list());
-        if preview == self.model && !proposals_changed && !drawings_move {
+        if !proposals_changed
+            && !drawings_move
+            && self.with_staged_model(|baseline| *baseline == preview)
+        {
+            if collaborative {
+                let dimensions = dimension_changes(&ops);
+                if !dimensions.is_empty() {
+                    for &index in dimensions.keys() {
+                        let prior = &self.model.sheets[index];
+                        let sheet = &mut preview.sheets[index];
+                        sheet
+                            .hidden_row_heights
+                            .clone_from(&prior.hidden_row_heights);
+                        sheet.hidden_col_widths.clone_from(&prior.hidden_col_widths);
+                    }
+                    let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut preview);
+                    for op in &ops {
+                        batch.apply(op)?;
+                    }
+                    for (index, changes) in dimensions {
+                        adopt_authored_sizes(
+                            &mut self.model.sheets[index],
+                            AuthoredDimensions {
+                                sizes: HiddenSizes::take(&mut preview.sheets[index]),
+                                changes,
+                            },
+                        );
+                    }
+                }
+            }
             return Ok(MutationResult::default());
         }
         mark(EditStage::Validated);
         // replicas holding stale results converge only through the full
         // recalculation every one of them runs on each exchange
-        let scope = if self.is_collaborative() {
+        let scope = if collaborative {
             CalculationScope::Full
         } else {
             CalculationScope::of(&self.model, &ops)
@@ -3291,9 +3332,10 @@ impl Workbook {
         }
         let new_structure = history.structure;
         let previous_keys = structure.sheet_keys.clone();
-        let before = self.model.clone();
+        let before = self.with_staged_model(WorkbookModel::clone);
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
+        self.derive_replica_hidden_sizes(&mut restored, &new_structure, None);
         self.install_model(restored)?;
         self.rebase_sheet_positions(&previous_keys, &new_structure.sheet_keys);
         self.mode = WorkbookMode::Collaborative {
@@ -3436,7 +3478,7 @@ impl Workbook {
         let mut touched = Vec::with_capacity(proposal.edits.len());
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut per_op = Vec::with_capacity(proposal.edits.len());
-        let mut preview = self.model.clone();
+        let mut preview = self.with_staged_model(WorkbookModel::clone);
         let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
@@ -3483,7 +3525,9 @@ impl Workbook {
                 ops.push(op);
             }
         }
-        if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
+        if ops.is_empty()
+            || self.with_staged_model(|model| models_semantically_equal(&preview, model))
+        {
             self.proposals.remove(id);
             return Ok(ProposalAcceptance {
                 proposal_id: id.to_string(),
@@ -4589,6 +4633,7 @@ impl Workbook {
             let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             retain_array_formulas(&self.model, &mut model);
+            self.derive_replica_hidden_sizes(&mut model, &new_structure, Some(staged.hidden_sizes));
             self.install_model_with_ops(model, ops, false)?;
             self.mode = WorkbookMode::Collaborative {
                 structure: Box::new(new_structure),
@@ -4678,7 +4723,13 @@ impl Workbook {
         };
         let staged = self
             .authority()?
-            .stage_local_ops_v1(ops, origin, &self.model.styles)
+            .stage_replica_ops_v1(
+                ops,
+                origin,
+                &self.model.styles,
+                None,
+                (&self.model, &structure.sheet_keys),
+            )
             .map_err(authority_error)?;
         if !structure.allows_transition(&staged.structure) {
             return Err(Error::CollaborativeStructureChanged);
@@ -5695,6 +5746,29 @@ impl Workbook {
         self.invalidate_sheet_info();
         self.model = model;
         Ok(())
+    }
+
+    fn with_staged_model<T>(&mut self, read: impl FnOnce(&WorkbookModel) -> T) -> T {
+        if self.is_collaborative() {
+            with_shared_model(&mut self.model, read)
+        } else {
+            read(&self.model)
+        }
+    }
+
+    fn derive_replica_hidden_sizes(
+        &mut self,
+        model: &mut WorkbookModel,
+        next: &WorkbookStructure,
+        authored: Option<LocalDimensions>,
+    ) {
+        if let WorkbookMode::Collaborative { structure } = &self.mode {
+            derive_replica_hidden_sizes(
+                (model, &next.sheet_keys),
+                (&mut self.model, &structure.sheet_keys),
+                authored,
+            );
+        }
     }
 }
 
@@ -7879,12 +7953,17 @@ impl Workbook {
         }
         let mut projected = authority.materialize_oracle().map_err(authority_error)?;
         retain_array_formulas(&model, &mut projected);
-        if client_id.is_none() {
+        let structure = if client_id.is_some() {
+            let structure = authority.structure_oracle().map_err(authority_error)?;
+            derive_source_hidden_sizes(&mut projected, &structure.sheet_keys, Some(&model));
+            Some(structure)
+        } else {
             for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
                 target.hidden_col_widths = source.hidden_col_widths.clone();
                 target.hidden_row_heights = source.hidden_row_heights.clone();
             }
-        }
+            None
+        };
         let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
@@ -7894,9 +7973,9 @@ impl Workbook {
             .map(|chart| (chart.frame_id(), chart.anchor))
             .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
-        let mode = match client_id {
-            Some(_) => WorkbookMode::Collaborative {
-                structure: Box::new(authority.structure_oracle().map_err(authority_error)?),
+        let mode = match structure {
+            Some(structure) => WorkbookMode::Collaborative {
+                structure: Box::new(structure),
             },
             None => WorkbookMode::Standalone,
         };
