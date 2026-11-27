@@ -874,7 +874,7 @@ describe('release wiring', () => {
 
   test('rehearsals and refs that fail the main comparison use a separate concurrency group per ref', () => {
     expect(release.concurrency).toEqual({
-      group: "${{ (github.event_name == 'schedule' || inputs.canary == true) && (github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true') && 'release-canary' || format('release-canary-skip-{0}', github.run_id)) || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}",
+      group: "${{ (github.event_name == 'schedule' || inputs.canary == true) && format('release-canary-{0}', github.run_id) || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}",
       'cancel-in-progress': false
     });
     expect(release.on.workflow_dispatch.inputs.rehearse).toEqual({

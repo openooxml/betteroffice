@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { canarySet, checkPublishable, keepDependencyRanges, nativeDependents, pinToCanaries } from './canary-release.mjs';
+import { canarySet, checkPublishable, keepDependencyRanges, newerCanaries, nativeDependents, pinToCanaries } from './canary-release.mjs';
 import { NATIVE_PACKAGES } from './native-bindings.mjs';
 import { workspaceEntries } from './published-packages.mjs';
 
@@ -38,7 +38,7 @@ describe('canary workflow', () => {
 
   test('never shares a concurrency slot with, or starts, the stable release', () => {
     expect(release.concurrency.group).toStartWith(
-      "${{ (github.event_name == 'schedule' || inputs.canary == true) && (github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true') && 'release-canary' || format('release-canary-skip-{0}', github.run_id)) || "
+      "${{ (github.event_name == 'schedule' || inputs.canary == true) && format('release-canary-{0}', github.run_id) || "
     );
     for (const id of ['plan', 'release']) {
       expect(release.jobs[id].if, id).toContain("github.event_name != 'schedule' && inputs.canary != true");
@@ -151,6 +151,15 @@ describe('canary set', () => {
     expect(() => checkPublishable(stable, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('not a canary version');
     const other = [{ name: '@x/a', version: '1.1.0-alpha-canary.1', directory: '' }];
     expect(() => checkPublishable(other, () => ({ name: '@x/a', version: '1.1.0-alpha-canary.1' }))).toThrow('not a canary version');
+  });
+
+  test('refuses to publish over a later snapshot on the canary tag', () => {
+    const set = [{ name: '@x/a', version: '1.1.0-canary.20261127120000', directory: '' }];
+    expect(newerCanaries(set, () => '1.1.0-canary.20261127130000')).toEqual([
+      '@x/a@canary is already 1.1.0-canary.20261127130000, later than 1.1.0-canary.20261127120000'
+    ]);
+    expect(newerCanaries(set, () => '1.1.0-canary.20261127110000')).toEqual([]);
+    expect(newerCanaries(set, () => undefined)).toEqual([]);
   });
 
   test('keeps the dependency ranges Changesets rewrote, so only versions change', () => {
