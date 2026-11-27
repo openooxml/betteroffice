@@ -44,7 +44,8 @@ function targetKey(shapeId: string, storyId?: string): string { return JSON.stri
 
 /** Overflowing text stays hittable where its glyphs spill past the frame, as the engine's `hit_rect` does. */
 function cacheSpillHit(entry: CommandHitGeometryIndex['hits'][number], box: SlidePrimitive): void {
-  if (box.kind !== 'textBox' || !box.overflow) return;
+  if (box.kind !== 'textBox' || !box.overflow ||
+    entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table')) return;
   let left = box.x; let right = box.x + box.w; let top = box.y; let bottom = box.y + box.h;
   for (const line of box.lines) {
     left = Math.min(left, line.x); right = Math.max(right, line.x + line.width);
