@@ -7,6 +7,7 @@ const root = resolve(import.meta.dirname, '../..');
 const PAGES = 18;
 const FORCE_VISIBLE = '.paged-editor__page, .canvas-page { content-visibility: visible !important; }';
 const SETTLE = '[data-docx-caret], [data-testid="caret"] { visibility: hidden !important; } * { caret-color: transparent !important; }';
+const CLICK_WINDOW_MS = 500;
 type Rect = { x: number; y: number; width: number; height: number };
 
 async function longDocument(): Promise<Buffer> {
@@ -179,7 +180,8 @@ async function interactions(page: Page) {
   await scrollToPage(page, 11);
   let box = await canvasBox(page, 11);
   const word = await selectionAfter(page, { y: box.y + 300 }, () => page.mouse.dblclick(box.x + 200, box.y + 300));
-  await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.dblclick(box.x + 208, box.y + 400));
+  await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.dblclick(box.x + 200, box.y + 400));
+  await page.waitForTimeout(CLICK_WINDOW_MS);
   const paragraph = await selectionAfter(page, { y: box.y + 400 }, () => page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 }));
   await scrollToPage(page, 12, 1200);
   const upper = await canvasBox(page, 11), lower = await canvasBox(page, 12);
