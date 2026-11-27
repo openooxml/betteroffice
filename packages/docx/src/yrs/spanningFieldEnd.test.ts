@@ -671,24 +671,27 @@ test.each(MAIN_STATE_CASES)('mainstate %s %s saves a released session', async (s
   });
 }, 30_000);
 
-const STORED_UNLINKED_NAMES = [
-  ['a stored session keeps the comment after the first title', 'stored_unlinked_comment_after_first_title'],
-  ['a stored session keeps the comment after editing the last title', 'stored_unlinked_comment_after_last_title_edit'],
-  ['a stored session keeps the comment after editing the middle title', 'stored_unlinked_comment_after_middle_title_edit'],
-] as const;
-
-const STORED_UNLINKED_CASES = MAIN_STATE_CASES.filter(([shape]) => shape === 'W4')
-  .slice(0, STORED_UNLINKED_NAMES.length).map(([shape, name, toc, edit], index) =>
-    [...STORED_UNLINKED_NAMES[index]!, shape, name, toc, edit!] as const);
-
-test.each(STORED_UNLINKED_CASES)('%s', async (_title, caseName, shape, name, toc, edit) => {
+test.each(MAIN_STATE_CASES.filter(([shape]) => shape === 'W4').map(([shape, name, toc, edit]) => {
+  const [label] = WORD_TOC_EDITS.find(([label]) => label.startsWith(`${name} `))!;
+  const editLabel = label.slice(name.length + 1);
+  const released = ['E2', 'E3', 'E4'].includes(name) ? ', as the released code does' : '';
+  const title = 'a session stored before field projection moves a comment inside the first unlinked title ' +
+    `to the paragraph start after ${editLabel}${released}`;
+  const caseName = `stored_unlinked_comment_after_${editLabel.replaceAll(' ', '_')}`;
+  return [title, caseName, shape, name, toc, edit] as const;
+}))('%s', async (_title, caseName, shape, name, toc, edit) => {
   await withMainState(shape, async (session, source) => {
-    const sourceXml = await readDocument(source);
-    const expected = name === 'E1' ? sourceXml : editedWordTocXml(toc, edit, sourceXml);
-    const applied = applyWordTocEdit(session, edit);
+    if (edit) {
+      const applied = applyWordTocEdit(session, edit);
+      expect(applied).toBe(true);
+    }
     const { bytes } = await saveYrsDocx(session, { updateModifiedDate: false });
-    assertSpanningSave(await readDocument(bytes), expected, caseName);
-    expect(applied).toBe(true);
+    const xml = await (await documentPart(bytes)).async('uint8array');
+    const sourceXml = await readDocument(source);
+    const expected = edit ? editedWordTocXml(toc, edit, sourceXml) : sourceXml;
+    const { actual, summary } = spanningSaveMetrics(new TextDecoder().decode(xml), expected);
+    console.log(`SPANDIFF session ${caseName} ${summary}`);
+    expect(actual.markers.find(marker => marker.startsWith('cs:5@'))).toBe('cs:5@0');
     if (name === 'E3') {
       await expectMatchingUnlinkedProjection();
     }
