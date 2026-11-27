@@ -8,7 +8,6 @@ const PAGES = 18;
 const FORCE_VISIBLE = '.paged-editor__page, .canvas-page { content-visibility: visible !important; }';
 const SETTLE = '[data-docx-caret], [data-testid="caret"] { visibility: hidden !important; } * { caret-color: transparent !important; }';
 type Rect = { x: number; y: number; width: number; height: number };
-type WorkerProbe = { posted: number; pending: Set<string> };
 
 async function longDocument(): Promise<Buffer> {
   const zip = await JSZip.loadAsync(await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.docx')));
@@ -25,29 +24,6 @@ async function longDocument(): Promise<Buffer> {
 async function open(browser: Browser, worker: boolean) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 2000 } });
   const page = await context.newPage();
-  await page.addInitScript(() => {
-    const probe: WorkerProbe = { posted: 0, pending: new Set() };
-    (window as unknown as { __workerProbe: WorkerProbe }).__workerProbe = probe;
-    let workers = 0;
-    window.Worker = class extends window.Worker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        super(url, options);
-        const worker = workers += 1;
-        const send = this.postMessage.bind(this);
-        this.postMessage = ((message: { id?: unknown; type?: unknown }, ...rest: unknown[]) => {
-          if (typeof message?.id === 'number' && typeof message.type === 'string') {
-            probe.posted += 1;
-            probe.pending.add(`${worker}:${message.id}`);
-          }
-          Reflect.apply(send, this, [message, ...rest]);
-        }) as typeof this.postMessage;
-        this.addEventListener('message', (event) => {
-          const id = (event.data as { id?: unknown } | null)?.id;
-          if (typeof id === 'number') probe.pending.delete(`${worker}:${id}`);
-        });
-      }
-    };
-  });
   await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'visibility.docx',
@@ -174,21 +150,18 @@ const selectionRects = (page: Page) => page.evaluate(() => {
     });
 });
 
-/** Runs `gesture`, waits until the worker has answered every request it caused, then returns the new selection once it holds still. */
-async function selectionAfter(page: Page, gesture: () => Promise<unknown>): Promise<Rect[]> {
+/** Runs `gesture`, then returns the selection once it differs from the one before, reaches the line at `y` and holds still. */
+async function selectionAfter(page: Page, y: number | null, gesture: () => Promise<unknown>): Promise<Rect[]> {
   const before = JSON.stringify(await selectionRects(page));
-  const posted = await page.evaluate(() => (window as unknown as { __workerProbe: WorkerProbe }).__workerProbe.posted);
   await gesture();
-  await page.waitForFunction((since) => {
-    const probe = (window as unknown as { __workerProbe: WorkerProbe }).__workerProbe;
-    return probe.posted > since && probe.pending.size === 0;
-  }, posted, { timeout: 15_000, polling: 'raf' });
   let previous = '';
   let rects: Rect[] = [];
   await expect.poll(async () => {
     rects = await selectionRects(page);
     const key = JSON.stringify(rects);
-    const stable = rects.length > 0 && key !== before && key === previous;
+    const top = y === null ? 0 : y - (await page.locator('[data-docx-pages-host]').boundingBox())!.y;
+    const reached = y === null || rects.some((rect) => rect.y <= top && top <= rect.y + rect.height);
+    const stable = rects.length > 0 && key !== before && reached && key === previous;
     previous = key;
     return stable;
   }, { timeout: 15_000, intervals: [300] }).toBe(true);
@@ -204,11 +177,11 @@ async function interactions(page: Page) {
   const input = page.locator('[data-docx-worker-editor] .paged-editor__input');
   await scrollToPage(page, 11);
   let box = await canvasBox(page, 11);
-  const word = await selectionAfter(page, () => page.mouse.dblclick(box.x + 200, box.y + 300));
-  const paragraph = await selectionAfter(page, () => page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 }));
+  const word = await selectionAfter(page, box.y + 300, () => page.mouse.dblclick(box.x + 200, box.y + 300));
+  const paragraph = await selectionAfter(page, box.y + 400, () => page.mouse.click(box.x + 200, box.y + 400, { clickCount: 3 }));
   await scrollToPage(page, 12, 1200);
   const upper = await canvasBox(page, 11), lower = await canvasBox(page, 12);
-  const drag = await selectionAfter(page, async () => {
+  const drag = await selectionAfter(page, lower.y + 220, async () => {
     await page.mouse.move(upper.x + 150, upper.y + 300);
     await page.mouse.down();
     await page.mouse.move(lower.x + 300, lower.y + 220, { steps: 12 });
@@ -227,7 +200,7 @@ async function interactions(page: Page) {
   await page.mouse.click(box.x + 150, box.y + 150);
   await input.press('ControlOrMeta+f');
   const dialog = page.getByTestId('find-replace-dialog');
-  const found = await selectionAfter(page, async () => {
+  const found = await selectionAfter(page, null, async () => {
     await dialog.getByRole('textbox', { name: 'Find text', exact: true }).fill('Marker16 line 3 ');
     await expect(dialog.locator('.docx-find-replace-dialog-status')).toHaveText('1 of 1 matches');
   });
