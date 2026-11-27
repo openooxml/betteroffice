@@ -230,6 +230,29 @@ pub fn parse_preset_geometry_path(
 ) -> Option<Vec<GeometryPathCommand>> {
     let preset = sp_pr?.child_by_full_name("a:prstGeom")?;
     let shape_type = preset.attribute(None, "prst")?;
+    let adjustments = preset_adjustments(preset);
+    preset_outline(shape_type, &adjustments, aspect_ratio)
+}
+
+pub(crate) fn connector_path_for_rendering(sp_pr: &XmlElement) -> Option<Vec<GeometryPathCommand>> {
+    let (shape_type, adjustments) = connector_guides(sp_pr)?;
+    ooxml_drawingml::connector_geometry_for_rendering(&shape_type, &adjustments)
+}
+
+pub(crate) fn connector_guides(sp_pr: &XmlElement) -> Option<(String, HashMap<String, f64>)> {
+    let preset = sp_pr.child_by_full_name("a:prstGeom")?;
+    let shape_type = preset.attribute(None, "prst")?;
+    if !ooxml_drawingml::is_corrected_connector_preset(shape_type)
+        || parse_custom_geometry_path(sp_pr.child_by_full_name("a:custGeom")).is_some()
+    {
+        return None;
+    }
+    let mut adjustments = preset_adjustments(preset);
+    adjustments.retain(|_, value| value.is_finite());
+    Some((shape_type.to_owned(), adjustments))
+}
+
+fn preset_adjustments(preset: &XmlElement) -> HashMap<String, f64> {
     let mut values = standard_guide_values(PRESET_GUIDE_SPACE, PRESET_GUIDE_SPACE);
     apply_guide_list(Some(preset), "avLst", &mut values);
     let mut adjustments = HashMap::new();
@@ -242,7 +265,7 @@ pub fn parse_preset_geometry_path(
             }
         }
     }
-    preset_outline(shape_type, &adjustments, aspect_ratio)
+    adjustments
 }
 
 /// A preset's outline; a multi-path preset contributes its filled layers, or

@@ -1,3 +1,4 @@
+import { bentConnectorHit, containsBentConnector } from '../../../shared/bentConnectorHit';
 import type {
   DeckSnapshot,
   ShapeRect,
@@ -288,6 +289,8 @@ export function farEdge(origin: number, extent: number): number {
 /** The local point when it lands inside the primitive, else null. */
 function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
   const local = localPoint(primitive, point);
+  const connector = primitive.kind === 'shape' ? bentConnectorHit(primitive) : undefined;
+  if (connector) return containsBentConnector(connector, local) ? local : null;
   return local.x >= Math.fround(primitive.x) &&
     local.x <= farEdge(primitive.x, primitive.w) &&
     local.y >= Math.fround(primitive.y) &&

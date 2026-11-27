@@ -4,6 +4,7 @@ use pptx_edit::{
     CommentFlavor, DeckSession, DeckSnapshot, EditCtx, EditError, PresetShapeDraft, ShapeDraft,
     ShapeKind, ShapeRect, ShapeSnapshot, ShapeStroke, TextStyle, TextStylePatch,
 };
+use yrs::{Map, MapRef, ReadTxn, Transact};
 
 const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
 const GRADIENT_OUTLINE_FIXTURE: &[u8] =
@@ -79,6 +80,43 @@ fn shape_stories(shape: &ShapeSnapshot) -> Vec<&pptx_edit::StorySnapshot> {
 fn an_unedited_deck_saves_part_identical() {
     let session = open_fixture();
     assert_eq!(parts(&session.save().unwrap()), parts(FIXTURE));
+}
+
+#[test]
+fn restored_connector_with_omitted_guide_saves_part_identical() {
+    let mut entries = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    let (_, slide) = entries
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    *slide = br#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+        <p:cSld><p:spTree><p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="2" name="Connector"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="952500" cy="952500"/></a:xfrm>
+        <a:prstGeom prst="bentConnector4"><a:avLst><a:gd name="adj1" fmla="*/ 50000 1 2"/>
+        </a:avLst></a:prstGeom></p:spPr></p:cxnSp></p:spTree></p:cSld></p:sld>"#
+        .to_vec();
+    let source = ooxml_opc::rezip_parts(&entries).unwrap();
+    let session = DeckSession::open(&source, 7).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let connector = &snapshot.slides[0].shapes[0];
+    assert_eq!(connector.adjust_values.get("adj1"), Some(&0.25));
+    {
+        let mut txn = session.yrs_doc().transact_mut();
+        let shape = txn
+            .get_map("pptx:shapes")
+            .unwrap()
+            .get(&txn, &connector.id)
+            .unwrap()
+            .cast::<MapRef>()
+            .unwrap();
+        shape.insert(&mut txn, "adjustValuesJson", r#"{"adj1":0.25}"#);
+    }
+    let restored =
+        DeckSession::open_from_update_with_source(&session.encode_state_as_update_v1(), &source, 8)
+            .unwrap();
+    assert_eq!(parts(&restored.save().unwrap()), parts(&source));
 }
 
 #[test]

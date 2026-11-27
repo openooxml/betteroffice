@@ -286,6 +286,27 @@ describe('pptx interactions', () => {
     expect(hoverTargetAtPoint(frame, { x: 260, y: 338 })).toBeNull();
   });
 
+  it('hovers a rotated bent connector along its painted detour', () => {
+    const connector: SlideDisplayList = {
+      ...frame,
+      primitives: [{
+        kind: 'shape', objectId: 4, shapeId: 'connector', name: 'Connector',
+        x: 100, y: 100, w: 100, h: 100,
+        geometry: 'bentConnector3', transform: { rotationDeg: 90, flipH: true },
+        stroke: { color: '#000000', width: 8 },
+        path: [
+          { type: 'move', x: 0, y: 0 },
+          { type: 'line', x: 1.5, y: 0 },
+          { type: 'line', x: 1.5, y: 1 },
+          { type: 'line', x: 1, y: 1 },
+        ],
+      }],
+    };
+    expect(hoverTargetAtPoint(connector, { x: 150, y: 54 })).toBe('shape');
+    expect(hoverTargetAtPoint(connector, { x: 150, y: 55 })).toBeNull();
+    expect(hoverTargetAtPoint(connector, { x: 150, y: 150 })).toBeNull();
+  });
+
   it('treats a text box with nowhere to put a caret as a movable shape', () => {
     const textBox = frame.primitives[2] as TextBoxPrimitive;
     const only = (patch: Partial<TextBoxPrimitive>): SlideDisplayList => ({
