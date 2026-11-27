@@ -1841,6 +1841,76 @@ fn cell_edits_across_pages_and_beside_another_table_stay_on_the_region_fast_path
 }
 
 #[test]
+fn cell_edits_reuse_untouched_blocks_with_document_grid_and_line_unit_spacing() {
+    cell_edit_reuses_untouched_blocks(
+        9861,
+        r#"<w:docGrid w:type="lines" w:linePitch="480"/>"#,
+        r#"<w:spacing w:beforeLines="50" w:afterLines="75"/>"#,
+        "",
+    );
+}
+
+#[test]
+fn cell_edits_reuse_untouched_tables_with_contextual_spacing() {
+    cell_edit_reuses_untouched_blocks(
+        9862,
+        "",
+        "",
+        r#"<w:spacing w:before="240" w:after="240"/><w:contextualSpacing/>"#,
+    );
+}
+
+fn cell_edit_reuses_untouched_blocks(
+    client_id: u64,
+    grid: &str,
+    body_properties: &str,
+    cell_properties: &str,
+) {
+    use super::lowering_fixture::{Package, run};
+
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let paragraph = |id: u32, properties: &str, text: &str| {
+        format!(
+            r#"<w:p w14:paraId="{id:08X}"><w:pPr>{properties}</w:pPr>{}</w:p>"#,
+            run(text)
+        )
+    };
+    let blocks: String = (0..3)
+        .map(|index| {
+            let id = 0x1A01 + index * 3;
+            let first = paragraph(id, cell_properties, "First cell paragraph");
+            let second = paragraph(id + 1, cell_properties, "Second cell paragraph");
+            let between = paragraph(id + 2, body_properties, "Body paragraph");
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="3600" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid><w:tr><w:tc>{first}{second}</w:tc></w:tr></w:tbl>{between}"#
+            )
+        })
+        .collect();
+    let body = format!(
+        r#"{blocks}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>{grid}</w:sectPr>"#
+    );
+    let bytes = Package::new(&body).bytes();
+    let engine = seeded_engine(client_id, &bytes);
+    let mut request = lowering_pages::region_request(&engine, &bytes, font);
+    let sections = request["regions"]["sections"].as_array_mut().unwrap();
+    sections.truncate(1);
+    repeat_final_section(&mut request);
+    let mut host = CommandHost::open_with(&engine, request.to_string()).seeded(client_id, bytes);
+    let story = cell_holding(&engine, "00001A01");
+    let label = "typing in the first table";
+    BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
+    let (_, passes, pages_held) = cell_command(&mut host, label, &story, (2, 2), Some("x"));
+    let measured = BODY_MEASUREMENT_WORK.with(|work| work.borrow().0.len());
+    println!("MEASURE-COUNT {client_id} full={passes} measured={measured}");
+    assert!(pages_held, "{label}: the page count held");
+    assert_eq!(passes, 0, "{label}: full region passes");
+    host.assert_matches_cold(label);
+    assert_eq!(measured, 1, "{label}: only the edited table is measured");
+}
+
+#[test]
 fn cell_edits_in_a_body_with_a_section_break_keep_the_full_pass() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
@@ -1979,8 +2049,10 @@ fn cell_edits_across_table_classes_lay_out_as_a_full_recompute_does() {
             let label = format!("{case}/{step}");
             let before = page_count(&engine);
             REGION_FULL_PASSES.with(|count| count.set(0));
+            BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.clear());
             assert!(host.command(&story, at + start, at + end, text), "{label}");
             let full = REGION_FULL_PASSES.with(Cell::get);
+            let measured = BODY_MEASUREMENT_WORK.with(|work| work.borrow().0.len());
             if case == "section-break" {
                 assert_eq!(full, 1, "{label}: a section break keeps the full pass");
             } else if page_count(&engine) == before {
@@ -1999,7 +2071,7 @@ fn cell_edits_across_table_classes_lay_out_as_a_full_recompute_does() {
                     (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
                 });
             println!(
-                "LAYOUT-DIGEST {label} {digest:016x} pages={} full={full}",
+                "LAYOUT-DIGEST {label} {digest:016x} pages={} full={full} measured={measured}",
                 pages.len()
             );
             steps += 1;
