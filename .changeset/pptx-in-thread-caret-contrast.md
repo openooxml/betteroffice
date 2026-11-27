@@ -2,4 +2,4 @@
 '@betteroffice/pptx-react': patch
 ---
 
-The text caret is now black or white, whichever reads against the fill behind it, in both the default and the in-thread editor. Over gradients and images it follows the text: black for dark text, white for light.
+The PowerPoint text caret is now black or white, whichever contrasts more with what is painted behind it, as in PowerPoint, instead of taking the text colour. This holds over pictures, gradients, rotated or rounded shapes and table cells. Text being composed keeps its colour.

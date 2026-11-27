@@ -1,13 +1,13 @@
 import { findLine, indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import type { SlidePrimitive } from '@betteroffice/pptx';
 import type { CommandRect } from '@betteroffice/pptx/worker';
-import { useMemo, useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore, type RefObject } from 'react';
 import { useCaretBlink } from '../useCaretBlink';
 import { echoLineClip, measureEchoPosition } from './localEchoPainter';
-import { pptxCaretColors } from './caretColor';
+import { paintedCaretInk, pptxCaretColors } from './caretColor';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 
-export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
+export function PeerlessCaret({ store, canvas }: { store: PeerlessVisualStore; canvas?: RefObject<HTMLCanvasElement | null> }) {
   const view = useSyncExternalStore(store.subscribePresentation, store.getSnapshot, store.getSnapshot);
   const eligible = view.focused && view.caret !== null && view.selection !== null &&
     view.selection.anchor === view.selection.focus;
@@ -16,9 +16,14 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null),
     [view.activeLine, view.confirmed, view.selection]);
   const insertion = view.editState?.toolbar?.formatting?.color;
-  const { caret: color } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
+  const { caret: estimate } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
     view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret, insertion),
     [view.confirmed, active, view.selection, view.caret, insertion]);
+  const { x: caretX, y: caretY, width: caretWidth, height: caretHeight } = view.caret ?? { x: 0, y: 0, width: 0, height: 0 };
+  const painted = useMemo(() => eligible ? paintedCaretInk(canvas?.current, view.confirmed?.displayList,
+    { x: caretX, y: caretY, width: caretWidth, height: caretHeight }) : null,
+    [eligible, canvas, view.confirmed, caretX, caretY, caretWidth, caretHeight]);
+  const color = painted ?? estimate;
   if (!view.confirmed) return null;
   let x = view.caret?.x ?? 0;
   let y = view.caret?.y ?? 0;

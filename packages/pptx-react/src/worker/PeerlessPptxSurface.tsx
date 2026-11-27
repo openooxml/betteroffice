@@ -103,7 +103,7 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
   return { fit, previewFit, current };
 }
 
-function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
+function Overlays({ run, commands, inputRef, canvas, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; canvas: RefObject<HTMLCanvasElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
   const { t } = useTranslation();
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
   const isComposing = () => Boolean(run.store.getSnapshot().composition);
@@ -147,7 +147,7 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
     <div style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none',
       width: confirmed.displayList.width, height: confirmed.displayList.height,
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
-      <PeerlessCaret store={run.visual} />
+      <PeerlessCaret store={run.visual} canvas={canvas} />
     </div>
     <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
@@ -370,7 +370,7 @@ export function PeerlessPptxSurface(props: PptxAsyncEditorInternalProps) {
           width: insertion.preview.width * insertionScale, height: insertion.preview.height * insertionScale, border: '1px dashed #2563eb' }} />}
         {plugins.managed && <PluginOverlays host={plugins.host} activations={plugins.activations} layerRef={plugins.layerRef} claimPointerEvents />}
         {presentation && !failure && props.collaboration?.presence && <PeerlessPresence run={presentation} presence={props.collaboration.presence} />}
-        {presentation && !review.diff && <Overlays run={presentation} commands={commands} inputRef={inputRef} preview={shapes.preview}
+        {presentation && !review.diff && <Overlays run={presentation} commands={commands} inputRef={inputRef} canvas={canvas} preview={shapes.preview}
           insertion={insertion.echo?.rect ?? null} editor={editor} onError={(error) => callbacks.current.onError?.(error)} />}
         </div>
       </div>

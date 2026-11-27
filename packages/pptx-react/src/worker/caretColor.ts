@@ -1,4 +1,4 @@
-import type { GeometryPathCommand, Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
+import type { Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
 import { transformedRect, type CommandRect } from '@betteroffice/pptx/worker';
 
 type Rgb = readonly [number, number, number];
@@ -81,49 +81,10 @@ function fillAt(primitives: readonly SlidePrimitive[], parents: readonly SlidePr
     const box = transformedRect(transforms, { x: primitive.x, y: primitive.y, width: primitive.w, height: primitive.h });
     if (!(x >= box.x && x < box.x + box.width && y >= box.y && y < box.y + box.height)) continue;
     const upright = transforms.every(({ transform }) => !transform?.rotationDeg && !transform?.flipH && !transform?.flipV);
-    if (primitive.kind === 'shape' && upright && primitive.path.length &&
-      !pathCovers(primitive.path, (x - box.x) / box.width, (y - box.y) / box.height, primitive.evenOdd)) continue;
     const exact = primitive.kind === 'shape' && primitive.geometry === 'rect' && upright;
     fill = paint && exact ? paint : { color: fill.color, solid: false, estimate: upright ? paint?.estimate ?? null : null };
   }
   return fill;
-}
-
-/** Whether a path in unit box coordinates covers `(u, v)`, curves flattened. */
-function pathCovers(path: readonly GeometryPathCommand[], u: number, v: number, evenOdd = false): boolean {
-  let winding = 0;
-  let crossings = 0;
-  let start: [number, number] = [0, 0];
-  let at: [number, number] = [0, 0];
-  const edge = (to: [number, number]) => {
-    const [x0, y0] = at;
-    const [x1, y1] = to;
-    if ((y0 <= v) !== (y1 <= v) && u < x0 + (v - y0) / (y1 - y0) * (x1 - x0)) {
-      crossings += 1;
-      winding += y1 > y0 ? 1 : -1;
-    }
-    at = to;
-  };
-  const curve = (point: (t: number) => [number, number]) => {
-    for (let step = 1; step <= 16; step += 1) edge(point(step / 16));
-  };
-  for (const command of path) {
-    if (command.type === 'move') {
-      edge(start);
-      start = at = [command.x, command.y];
-    } else if (command.type === 'line') edge([command.x, command.y]);
-    else if (command.type === 'quad') {
-      const [x0, y0] = at;
-      curve((t) => [(1 - t) ** 2 * x0 + 2 * (1 - t) * t * command.cpx + t * t * command.x,
-        (1 - t) ** 2 * y0 + 2 * (1 - t) * t * command.cpy + t * t * command.y]);
-    } else if (command.type === 'cubic') {
-      const [x0, y0] = at;
-      curve((t) => [(1 - t) ** 3 * x0 + 3 * (1 - t) ** 2 * t * command.cp1x + 3 * (1 - t) * t * t * command.cp2x + t ** 3 * command.x,
-        (1 - t) ** 3 * y0 + 3 * (1 - t) ** 2 * t * command.cp1y + 3 * (1 - t) * t * t * command.cp2y + t ** 3 * command.y]);
-    } else edge(start);
-  }
-  edge(start);
-  return evenOdd ? crossings % 2 === 1 : winding !== 0;
 }
 
 const BLACK = '#000000';
@@ -166,4 +127,31 @@ export function pptxCaretColors(list: SlideDisplayList | null | undefined, line:
   const background = hex(fill);
   if (!text || contrast(text, fill) < 2) return { color: fallback, caret: bar, background };
   return { color: textColor!, caret: bar, background };
+}
+
+/**
+ * Black or white, whichever contrasts more with what `canvas` shows under a
+ * slide-space caret rect: the median luminance of its opaque pixels, so glyph
+ * edges next to the caret do not tip it. `null` when the pixels are unreadable.
+ */
+export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
+  list: Pick<SlideDisplayList, 'width' | 'height'> | null | undefined, caret: CommandRect | null | undefined): string | null {
+  if (!canvas || !list || !caret || !list.width || !list.height || !canvas.width || !canvas.height) return null;
+  const sx = canvas.width / list.width;
+  const sy = canvas.height / list.height;
+  const left = Math.max(0, Math.floor(caret.x * sx));
+  const top = Math.max(0, Math.floor(caret.y * sy));
+  const width = Math.min(canvas.width, Math.max(left + 1, Math.ceil((caret.x + caret.width) * sx))) - left;
+  const height = Math.min(canvas.height, Math.max(top + 1, Math.ceil((caret.y + caret.height) * sy))) - top;
+  if (width <= 0 || height <= 0) return null;
+  let data: Uint8ClampedArray | undefined;
+  try { data = canvas.getContext('2d')?.getImageData(left, top, width, height).data; } catch { return null; }
+  if (!data) return null;
+  const shades: number[] = [];
+  for (let index = 0; index + 3 < data.length; index += 4) {
+    if (data[index + 3] === 255) shades.push(luminance([data[index]!, data[index + 1]!, data[index + 2]!]));
+  }
+  if (!shades.length) return null;
+  shades.sort((a, b) => a - b);
+  return shades[shades.length >> 1]! < 0.18 ? WHITE : BLACK;
 }

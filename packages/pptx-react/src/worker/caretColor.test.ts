@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { Paint, PositionedTextLine, SlideDisplayList, SlidePrimitive } from '@betteroffice/pptx';
-import { pptxCaretColors } from './caretColor';
+import { paintedCaretInk, pptxCaretColors } from './caretColor';
 
 const caret = { x: 120, y: 100, width: 1, height: 20 };
 
@@ -117,13 +117,51 @@ test('the fill, not the text, decides the caret where both shades would show', (
   expect(pptxCaretColors(slide([shape('#808080')]), line({ start: 0, end: 5, color: '#ffffff' }), 2, caret).caret).toBe('#000000');
 });
 
-test('a shape colours the caret only where its outline covers it', () => {
-  const diamond = { ...shape('#000000'), geometry: 'diamond', path: [
-    { type: 'move', x: 0.5, y: 0 }, { type: 'line', x: 1, y: 0.5 }, { type: 'line', x: 0.5, y: 1 }, { type: 'line', x: 0, y: 0.5 }, { type: 'close' },
-  ] } as SlidePrimitive;
-  const text = line({ start: 0, end: 5, color: '#000000' });
   expect(pptxCaretColors(slide([diamond]), text, 2, caret).caret).toBe('#000000');
   expect(pptxCaretColors(slide([diamond]), text, 2, { ...caret, x: 250 }).caret).toBe('#ffffff');
   const rotated = { ...diamond, transform: { rotationDeg: 30 } } as SlidePrimitive;
   expect(pptxCaretColors(slide([rotated]), text, 2, caret).caret).toBe('#000000');
+});
+
+function painted(width: number, height: number, pixel: (x: number, y: number) => readonly number[], fail?: Error) {
+  const reads: number[][] = [];
+  const canvas = { width, height, getContext: () => ({
+    getImageData: (left: number, top: number, w: number, h: number) => {
+      reads.push([left, top, w, h]);
+      if (fail) throw fail;
+      const data = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) data.set(pixel(left + x, top + y), (y * w + x) * 4);
+      return { data, width: w, height: h };
+    },
+  }) } as unknown as HTMLCanvasElement;
+  return { canvas, reads };
+}
+
+const list = { width: 960, height: 540 };
+
+test('the painted caret reads the pixels under its rect at the device pixel ratio and zoom', () => {
+  const { canvas, reads } = painted(960 * 3, 540 * 3, () => [255, 255, 255, 255]);
+  expect(paintedCaretInk(canvas, list, caret)).toBe('#000000');
+  expect(reads).toEqual([[360, 300, 3, 60]]);
+  const half = painted(480, 270, () => [255, 255, 255, 255]);
+  paintedCaretInk(half.canvas, list, { x: 121, y: 101, width: 0, height: 20 });
+  expect(half.reads).toEqual([[60, 50, 1, 11]]);
+});
+
+test('the painted caret is black or white by what is painted behind it, not by a nearby glyph', () => {
+  const photo = (x: number) => x < 1440 ? [16, 16, 16, 255] : [240, 240, 240, 255];
+  expect(paintedCaretInk(painted(2880, 1620, photo).canvas, list, caret)).toBe('#ffffff');
+  expect(paintedCaretInk(painted(2880, 1620, photo).canvas, list, { ...caret, x: 700 })).toBe('#000000');
+  expect(paintedCaretInk(painted(1920, 1080, () => [128, 128, 128, 255]).canvas, list, caret)).toBe('#000000');
+  const glyph = (_x: number, y: number) => y < 215 ? [255, 255, 255, 255] : [11, 31, 75, 255];
+  expect(paintedCaretInk(painted(1920, 1080, glyph).canvas, list, caret)).toBe('#ffffff');
+});
+
+test('unreadable pixels leave the caret to the estimate', () => {
+  const tainted = painted(1920, 1080, () => [0, 0, 0, 255], new DOMException('tainted', 'SecurityError'));
+  expect(paintedCaretInk(tainted.canvas, list, caret)).toBeNull();
+  expect(tainted.reads).toHaveLength(1);
+  expect(paintedCaretInk(painted(1920, 1080, () => [0, 0, 0, 0]).canvas, list, caret)).toBeNull();
+  expect(paintedCaretInk(null, list, caret)).toBeNull();
+  expect(paintedCaretInk(painted(0, 0, () => [0, 0, 0, 255]).canvas, list, caret)).toBeNull();
 });
