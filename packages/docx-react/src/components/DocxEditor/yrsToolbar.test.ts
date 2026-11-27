@@ -139,6 +139,12 @@ function positionMap(session: YrsSession, story: string) {
   return createYrsInputPositionMap(story, session.paragraphSpans(story));
 }
 
+function insertTextCell(session: YrsSession, at: YrsLoc, text: string): string {
+  const { createdStoryIds: [story] } = session.insertTable(at, 1, 1);
+  session.insertText({ story: story!, paraId: session.paragraphs(story!)[0]!.paraId, offset: 0 }, text);
+  return story!;
+}
+
 /** A body paragraph above a table of `texts`, the caret in the `anchor` cell and `anchor`..`head` selected. */
 async function tableSelected(texts: string[][], anchor: [number, number], head: [number, number]) {
   const session = await createYrsSession();
@@ -226,6 +232,43 @@ describe('toolbar formatting over a multi-cell selection', () => {
     expect(withText.map((story) => context(story).bold)).toEqual([false, false, false]);
   });
 
+  test('bold toggles direct and nested cell text in the same direction', async () => {
+    const { session, stories, map, whole } = await tableSelected([['Alpha', 'Beta']], [0, 0], [0, 1]);
+    const [first, second] = stories[0]!;
+    session.formatRange(whole(first!), { bold: true });
+    session.formatRange(whole(second!), { bold: true });
+    const nested = insertTextCell(session, { story: first!, ...whole(first!).start }, 'Nested');
+    session.setSelection({ story: first!, ...whole(first!).start, offset: 1 });
+    const bold = () => [first!, nested, second!].flatMap((story) => session.storySegments(story)
+      .filter((segment) => segment.kind === 'text')
+      .map(({ text, attributes }) => [text, attributes.bold === true]));
+
+    expect(bold()).toEqual([['Alpha', true], ['Nested', false], ['Beta', true]]);
+    expect(applyYrsToolbarFormatting(session, map(), 'bold')).toBe(true);
+    expect(bold()).toEqual([['Alpha', false], ['Nested', false], ['Beta', false]]);
+
+    session.formatRange(whole(first!), { bold: true });
+    session.formatRange(whole(nested), { bold: false });
+    expect(bold()).toEqual([['Alpha', true], ['Nested', false], ['Beta', false]]);
+    expect(applyYrsToolbarFormatting(session, map(), 'bold')).toBe(true);
+    expect(bold()).toEqual([['Alpha', true], ['Nested', true], ['Beta', true]]);
+  });
+
+  test('choosing the current cell font size also sets nested cell text to that size', async () => {
+    const { session, stories, map, whole, context } = await tableSelected([['Alpha', 'Beta']], [0, 0], [0, 1]);
+    const [first, second] = stories[0]!;
+    session.formatRange(whole(first!), { fontSize: 12 });
+    session.formatRange(whole(second!), { fontSize: 12 });
+    const nested = insertTextCell(session, { story: first!, ...whole(first!).start }, 'Nested');
+    session.formatRange(whole(nested), { fontSize: 14 });
+    session.setSelection({ story: first!, ...whole(first!).start, offset: 1 });
+    const sizes = () => [first!, nested, second!].map((story) => context(story).fontSize);
+
+    expect(sizes()).toEqual([24, 28, 24]);
+    expect(applyYrsToolbarFormatting(session, map(), { type: 'fontSize', value: 12 })).toBe(true);
+    expect(sizes()).toEqual([24, 24, 24]);
+  });
+
   test('one toolbar action undoes in one step', async () => {
     const { session, stories, map, whole, context } = await tableSelected([['Alpha', 'Beta'], ['Delta', 'Epsilon']], [0, 0], [1, 1]);
     session.formatRange(whole(stories[0]![0]!), { fontSize: 10 });
@@ -246,6 +289,19 @@ describe('toolbar formatting over a multi-cell selection', () => {
     const part = (start: number, end: number) =>
       session.selectionContext({ story, start: { paraId, offset: start }, end: { paraId, offset: end } }).bold;
     expect([part(0, 3), part(3, 5), context(stories[0]![1]!).bold]).toEqual([true, false, false]);
+  });
+
+  test('a text range in another table takes precedence over a multi-cell selection', async () => {
+    const { session, stories, whole, context } = await tableSelected([['Alpha', 'Beta']], [0, 0], [0, 1]);
+    const story = insertTextCell(session, { story: 'body', ...whole('body').end }, 'Gamma');
+    const { start, end } = whole(story);
+    session.setSelection({ story, ...start }, { story, ...end, offset: 3 });
+    expect(session.cellSelection()).toMatchObject({ anchor: { column: 0 }, head: { column: 1 } });
+
+    expect(applyYrsToolbarFormatting(session, positionMap(session, story), 'bold')).toBe(true);
+    expect(session.selectionContext({ story, start, end: { ...end, offset: 3 } }).bold).toBe(true);
+    expect(session.selectionContext({ story, start: { ...start, offset: 3 }, end }).bold).toBe(false);
+    expect(stories.flat().map((cell) => context(cell).bold)).toEqual([false, false]);
   });
 
   test('a body text range beside a cell selection formats only that range', async () => {

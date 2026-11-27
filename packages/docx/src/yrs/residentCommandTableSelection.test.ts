@@ -313,7 +313,7 @@ function cellText(arm: CommandArm, texts: string[]) {
   });
 }
 
-test('formatting_commands_cover_every_cell_of_a_multi_cell_range_and_undo_once_per_command', async () => {
+test('formatting_commands_cover_every_selected_cell_and_undo_restores_the_original_sizes', async () => {
   const arm = await inCell(paragraph('Before') + table([sized('A', 20) + sized('B', 28), cell('C') + cell('D')]) + paragraph('After'));
   const read = cellText(arm, ['A', 'B', 'C', 'D']);
   const before = arm.engine.paragraphs('body').map((entry) => entry.paraId);
@@ -347,6 +347,76 @@ test('formatting_commands_cover_every_cell_of_a_multi_cell_range_and_undo_once_p
   expect(read().map((context) => [context.strike, context.subscript, context.fontSize])).toEqual(
     [0, 1, 2, 3].map(() => [false, false, null]));
   expect(body()).toEqual(outside);
+}, TIMEOUT);
+
+test('an_explicit_format_range_in_another_row_formats_only_the_requested_text', async () => {
+  const arm = await inCell(paragraph('Before') + table([cell('A') + cell('B'), cell('Charlie') + cell('D')]));
+  const outside = cellText(arm, ['A', 'B', 'D']);
+  const story = tableAnchors(payload(arm)!).anchors[2]!.story;
+  const paraId = arm.engine.paragraphs(story)[0]!.paraId;
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'row' })).status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 1 } });
+
+  expect(execute(arm, command(arm, 'formatRange', {
+    selection: selection(paraId, 1, 4, story), delta: { bold: true },
+  })).status).toBe('applied');
+  expect(arm.engine.storySegments(story).filter((segment) => segment.kind === 'text')
+    .map(({ text, attributes }) => [text, attributes.bold === true]))
+    .toEqual([['C', false], ['har', true], ['lie', false]]);
+  expect(outside().map((context) => context.bold)).toEqual([false, false, false]);
+}, TIMEOUT);
+
+test('bold_toggles_direct_and_nested_cell_text_in_the_same_direction', async () => {
+  const boldParagraph = (text: string) => `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  const nestedTable = table([cell('Nested') + cell('')]);
+  const arm = await inCell(paragraph('Before') + table([
+    `<w:tc><w:tcPr/>${boldParagraph('A')}${nestedTable}<w:p/></w:tc>` +
+    `<w:tc><w:tcPr/>${boldParagraph('B')}</w:tc>`,
+  ]));
+  const [first, second] = tableAnchors(payload(arm)!).anchors;
+  const nested = tableAnchors(arm.engine.tablePayload(first!.story, 0) as unknown as TablePayload).anchors[0]!;
+  const bold = () => [first!, nested, second!].flatMap(({ story }) => arm.engine.storySegments(story)
+    .filter((segment) => segment.kind === 'text')
+    .map(({ text, attributes }) => [text, attributes.bold === true]));
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+
+  expect(bold()).toEqual([['A', true], ['Nested', false], ['B', true]]);
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' } })).status).toBe('applied');
+  expect(bold()).toEqual([['A', false], ['Nested', false], ['B', false]]);
+}, TIMEOUT);
+
+test('suggested_cell_formatting_refuses_in_preflight_when_a_nested_cell_has_an_inline_control', async () => {
+  const control = '<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt>';
+  const nestedTable = table([`<w:tc><w:tcPr/><w:p>${control}</w:p></w:tc>` + cell('')]);
+  const arm = await inCell(paragraph('Before') + table([
+    cell('A') + `<w:tc><w:tcPr/>${paragraph('B')}${nestedTable}<w:p/></w:tc>`,
+  ]));
+  const first = tableAnchors(payload(arm)!).anchors[0]!.story;
+  const before = arm.engine.storySegments(first);
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  const intent = command(arm, 'formatRange', {
+    selection: arm.state.selection!, delta: { fontSize: 12 },
+    suggesting: { name: 'Writer', date: '2026-10-01T12:00:00Z' },
+  });
+
+  expect(preflightDocxCommand(arm.engine, arm.state, intent, context(arm, intent)))
+    .toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(execute(arm, intent)).toMatchObject({ status: 'refused', reason: 'unsupported-suggesting' });
+  expect(arm.engine.storySegments(first)).toEqual(before);
+}, TIMEOUT);
+
+test('formatting_an_empty_multi_cell_selection_keeps_stored_caret_marks', async () => {
+  const empty = '<w:tc><w:tcPr/><w:p/></w:tc>';
+  const arm = await inCell(paragraph('Before') + table([empty + empty]), '');
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'italic' } })).status).toBe('noop');
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  const stored = arm.state.storedMarks;
+  expect(stored?.delta).toEqual({ italic: true });
+
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' } }))).toMatchObject({
+    status: 'noop', editState: { toolbar: { bold: false, italic: true } },
+  });
+  expect(arm.state.storedMarks).toEqual(stored);
 }, TIMEOUT);
 
 test('multi_cell_formatting_converges_with_concurrent_typing_and_undo_preserves_the_insertion', async () => {
