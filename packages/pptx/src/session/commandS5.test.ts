@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
-import type { PositionedTextLine, SlideDisplayList, TextBoxPrimitive } from '../types';
+import type { PositionedTextLine, ShapePrimitive, SlideDisplayList, TextBoxPrimitive } from '../types';
 import * as wasm from '../wasm/loader';
 import { buildCommandFrame, commandFrameMedia } from './commandFrame';
 import { decodeCommandDisplayList, hitGeometry, indexGeometry, indexHitGeometry, navigateGeometry, selectionGeometry } from './commandGeometry';
@@ -22,6 +22,48 @@ function list(text = 'alpha beta\nx\nalpha beta', lines = [line(0, 10, 0), line(
   return { contractVersion: 1, width: 960, height: 540,
     background: { kind: 'solid', color: '#ffffff' }, primitives: [box] };
 }
+
+test('full and compact hit geometry follow a rotated bent connector detour', () => {
+  const connector: ShapePrimitive = {
+    kind: 'shape', objectId: 2, shapeId: 'connector', name: 'Connector', geometry: 'bentConnector3',
+    x: 100, y: 100, w: 100, h: 100, transform: { rotationDeg: 90, flipH: true },
+    stroke: { color: '#ff0000', width: 8 },
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1.5, y: 0 },
+      { type: 'line', x: 1.5, y: 1 }, { type: 'line', x: 1, y: 1 }],
+  };
+  const source = { ...list(), primitives: [connector] };
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(geometry.hits[0]).not.toHaveProperty('connector');
+    expect(hitGeometry(geometry, { x: 150, y: 53.5 })).toEqual({ kind: 'shape', shapeId: 'connector' });
+    expect(hitGeometry(geometry, { x: 150, y: 55 })).toBeNull();
+    expect(hitGeometry(geometry, { x: 150, y: 150 })).toBeNull();
+    const unstroked = index({ ...source, primitives: [{ ...connector, stroke: undefined }] });
+    expect(hitGeometry(unstroked, { x: 150, y: 53.5 })).toBeNull();
+    expect(hitGeometry(unstroked, { x: 150, y: 150 })).toBeNull();
+  }
+});
+
+test('full and compact hit geometry include a wide bent connector miter', () => {
+  const connector: ShapePrimitive = {
+    kind: 'shape', objectId: 2, shapeId: 'connector', name: 'Connector', geometry: 'bentConnector4',
+    x: 100, y: 100, w: 100, h: 100, stroke: { color: '#ff0000', width: 20 },
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 0.25, y: 0 },
+      { type: 'line', x: 0.25, y: 0.5 }, { type: 'line', x: 1, y: 0.5 },
+      { type: 'line', x: 1, y: 1 }],
+  };
+  const source = { ...list(), primitives: [connector] };
+  const miter = { x: 117, y: 158 };
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    const geometry = index(source);
+    expect(hitGeometry(geometry, miter)).toEqual({ kind: 'shape', shapeId: 'connector' });
+    expect(hitGeometry(geometry, { x: 114, y: 158 })).toBeNull();
+    const bevel = index({ ...source, primitives: [{
+      ...connector, stroke: { color: '#ff0000', width: 20, join: 'bevel' },
+    }] });
+    expect(hitGeometry(bevel, miter)).toBeNull();
+  }
+});
 
 test('vertical_goal_worker', () => {
   const index = indexHitGeometry(list());
@@ -65,11 +107,43 @@ for (const [name, lines, point, position] of [
   });
 }
 
+test('overflowing table cell text past its cell selects the table', () => {
+  const source = list('ab', [line(0, 2, 60)]);
+  const cell = source.primitives[0] as TextBoxPrimitive;
+  cell.h = 20;
+  cell.overflow = true;
+  source.primitives = [{ kind: 'table', objectId: 2, shapeId: cell.shapeId,
+    x: 0, y: 0, w: 100, h: 100, name: 'Table', label: '', primitives: [cell] }];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 10, y: 70 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: cell.shapeId! });
+  }
+});
+
 test('top-level text box padding hit keeps shape selection', () => {
   const source = list('ab', [line(0, 2, 20)]);
   for (const index of [indexGeometry, indexHitGeometry]) {
     expect(hitGeometry(index(source), { x: 20, y: 10 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
     expect(hitGeometry(index(source), { x: 20, y: 50 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+  }
+});
+
+test('overflowing text is hittable past its frame, over a shape beneath it', () => {
+  const source = list('alpha beta\nx\nalpha beta');
+  const box = source.primitives[0] as TextBoxPrimitive;
+  box.h = 20;
+  source.primitives = [{ kind: 'shape', objectId: 2, shapeId: 'below', x: 0, y: 30, w: 100, h: 40,
+    name: 'Below', geometry: 'rect', path: [] }, box];
+  for (const index of [indexGeometry, indexHitGeometry]) {
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1)).toMatchObject({ kind: 'shape', shapeId: 'below' });
+    box.overflow = true;
+    expect(hitGeometry(index(source), { x: 31, y: 50 }, undefined, 1))
+      .toMatchObject({ kind: 'text', shapeId: 'box', position: 16 });
+    expect(hitGeometry(index(source), { x: 2, y: 30 }, undefined, 1)).toMatchObject({ kind: 'text', position: 11 });
+    expect(hitGeometry(index(source), { x: 50, y: 18 }, undefined, 1)).toEqual({ kind: 'shape', shapeId: 'box' });
+    box.lines[2] = line(13, 23, 50);
+    expect(hitGeometry(index(source), { x: 31, y: 47 }, undefined, 1)).toMatchObject({ kind: 'text', position: 16 });
+    box.lines[2] = line(13, 23, 40);
+    delete box.overflow;
   }
 });
 

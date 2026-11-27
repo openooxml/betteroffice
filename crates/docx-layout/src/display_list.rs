@@ -2610,7 +2610,6 @@ pub(crate) struct ShapeBlockIn {
     sdt_groups: Vec<SdtGroupIn>,
     pub(crate) id: Value,
     #[serde(default)]
-    #[allow(dead_code)]
     shape_type: Option<String>,
     #[serde(default)]
     geometry_path: Vec<ShapePathCommand>,
@@ -3538,6 +3537,24 @@ pub(crate) struct TableFragmentIn {
     pub(crate) carried_from_prev: Option<bool>,
     #[serde(default)]
     pub(crate) carried_to_next: Option<bool>,
+}
+
+impl TableFragmentIn {
+    fn cell_window(&self, g: &GridCell) -> Option<&crate::types::CellClip> {
+        self.cell_clips
+            .as_ref()?
+            .iter()
+            .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+    }
+
+    fn cell_row_cuts(&self, g: &GridCell) -> (bool, bool) {
+        let cell_end = g.row_index + g.row_span;
+        (
+            g.row_index < self.row_start
+                || (g.row_index == self.row_start && self.clip_top.unwrap_or(0.0) > 0.0),
+            cell_end > self.row_end || (cell_end == self.row_end && self.clip_bottom.is_some()),
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -10586,6 +10603,11 @@ fn emit_shape_fragment_with_clip(
     attrs.effects = block.effects.clone();
     attrs.effect_extent = block.effect_extent.clone().map(Box::new);
     attrs.drawing_scene = block.scene.clone().map(Box::new);
+    attrs.image_shape_type = block
+        .shape_type
+        .as_deref()
+        .filter(|name| ooxml_drawingml::is_corrected_connector_preset(name))
+        .map(str::to_owned);
     attrs.text_body_properties = block.text_body_properties.clone().map(Box::new);
 
     let decorative = block.decorative.unwrap_or_else(|| {
@@ -12013,11 +12035,7 @@ impl TablePaintPlan {
         paint: &CellPaint,
     ) -> (f64, f64, f64) {
         let cy = frag.y + paint.cell_y;
-        if let Some(clip) = frag.cell_clips.as_ref().and_then(|clips| {
-            clips
-                .iter()
-                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
-        }) {
+        if let Some(clip) = frag.cell_window(g) {
             (
                 cy - clip.top,
                 cy.max(self.cell_clip_top(g)),
@@ -12026,6 +12044,27 @@ impl TablePaintPlan {
         } else {
             (cy, self.cell_clip_top(g), self.clip_bottom_y)
         }
+    }
+
+    fn is_header_row(&self, block: &TableBlockIn, row_index: usize) -> bool {
+        row_index < self.semantic_header_count || block.rows[row_index].is_header == Some(true)
+    }
+
+    fn places_cell_shapes(
+        &self,
+        frag: &TableFragmentIn,
+        block: &TableBlockIn,
+        measure: &TableExtentIn,
+        g: &GridCell,
+        frame: &CellContentFrame,
+        nested: bool,
+    ) -> bool {
+        !nested
+            && frag.width >= table_total_width(measure)
+            && !self.is_header_row(block, g.row_index)
+            && frag.cell_window(g).is_none()
+            && frag.cell_row_cuts(g) == (false, false)
+            && frame.rotation == 0.0
     }
 }
 
@@ -12049,6 +12088,17 @@ pub(crate) fn emit_table_fragment(
     block: &TableBlockIn,
     measure: &TableExtentIn,
     ctx: &RenderCtx<'_>,
+) {
+    emit_table_fragment_inner(prims, frag, block, measure, ctx, false);
+}
+
+fn emit_table_fragment_inner(
+    prims: &mut Vec<Primitive>,
+    frag: &TableFragmentIn,
+    block: &TableBlockIn,
+    measure: &TableExtentIn,
+    ctx: &RenderCtx<'_>,
+    nested: bool,
 ) {
     let stamp_from = prims.len();
     let table_id = block_key(&frag.block_id);
@@ -12146,8 +12196,7 @@ pub(crate) fn emit_table_fragment(
         // Grid position stamped on every primitive inside this cell. A vertical
         // merge continuation keeps the anchor cell's row and column and flags
         // itself so consumers know it is a re-paint.
-        let is_header = p.g.row_index < semantic_header_count
-            || block.rows[p.g.row_index].is_header == Some(true);
+        let is_header = plan.is_header_row(block, p.g.row_index);
         let row_headers = semantic_header_count > 0 && block.first_column == Some(true);
         let is_row_header = row_headers
             && !is_header
@@ -12180,8 +12229,7 @@ pub(crate) fn emit_table_fragment(
                 .then(|| {
                     grid.iter().find(|cell| {
                         cell.column_index == 0
-                            && cell.row_index >= semantic_header_count
-                            && block.rows[cell.row_index].is_header != Some(true)
+                            && !plan.is_header_row(block, cell.row_index)
                             && block.rows[cell.row_index].cells[cell.cell_index].merge_continuation
                                 != Some(true)
                             && p.g.row_index >= cell.row_index
@@ -12490,11 +12538,7 @@ pub(crate) fn emit_table_fragment(
         }
 
         let content_stamp_from = prims.len();
-        let cell_window = frag.cell_clips.as_ref().and_then(|clips| {
-            clips
-                .iter()
-                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
-        });
+        let cell_window = frag.cell_window(g);
         let windowed_lines = cell_window.is_some();
         let (content_y, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
@@ -12538,6 +12582,8 @@ pub(crate) fn emit_table_fragment(
         };
         if let Some((frame, cell_measure)) = content_frame {
             let content_cuts = frame.content_cuts(frag, g);
+            let place_cell_shapes =
+                plan.places_cell_shapes(frag, block, measure, g, &frame, nested);
             emit_cell_content(
                 prims,
                 cell,
@@ -12549,6 +12595,7 @@ pub(crate) fn emit_table_fragment(
                 p.selectable,
                 &cell_ref,
                 &block_ref,
+                place_cell_shapes,
             );
         }
         let clip_id = format!(
@@ -12702,10 +12749,7 @@ struct CellContentFrame {
 
 impl CellContentFrame {
     fn content_cuts(&self, frag: &TableFragmentIn, g: &GridCell) -> (bool, bool) {
-        let starts_before = g.row_index < frag.row_start
-            || (g.row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) > 0.0);
-        let ends_after = g.row_index + g.row_span > frag.row_end
-            || (g.row_index + g.row_span == frag.row_end && frag.clip_bottom.is_some());
+        let (starts_before, ends_after) = frag.cell_row_cuts(g);
         (
             starts_before && self.content_top < self.clip_top_y - 1e-6,
             ends_after && self.content_end > self.clip_bottom_y + 1e-6,
@@ -12906,6 +12950,85 @@ fn cell_content_frame<'m>(
     ))
 }
 
+struct CellShape<'a> {
+    index: usize,
+    block: &'a ShapeBlockIn,
+    fragment: ShapeFragmentIn,
+    behind: bool,
+}
+
+fn cell_floating_shapes<'a>(
+    cell: &'a TableCellIn,
+    measure: &TableCellExtentIn,
+    frame: &CellContentFrame,
+    selectable: bool,
+) -> Vec<CellShape<'a>> {
+    let mut shapes = Vec::new();
+    let mut next_block = 0;
+    for (index, (block, extent)) in cell.blocks.iter().zip(&measure.blocks).enumerate() {
+        let (BlockIn::Shape(shape), MeasureIn::Shape(extent)) = (block, extent) else {
+            continue;
+        };
+        let position = shape.position.as_ref();
+        let wrap = shape.wrap_type.as_deref();
+        if !crate::anchor::is_cell_shape_anchor(position, wrap) || shape.inner_text.is_empty() {
+            continue;
+        }
+        if next_block <= index {
+            next_block = index + 1;
+            while let Some(BlockIn::Shape(shape)) = cell.blocks.get(next_block)
+                && (shape.position.is_some()
+                    || shape
+                        .wrap_type
+                        .as_deref()
+                        .is_some_and(|wrap| wrap != "inline"))
+            {
+                next_block += 1;
+            }
+        }
+        if let (Some(BlockIn::Paragraph(paragraph)), Some(MeasureIn::Paragraph(_))) =
+            (cell.blocks.get(next_block), measure.blocks.get(next_block))
+            && let (Some(start), Some(end), Some(shape_start), Some(shape_end)) = (
+                paragraph.pm_start,
+                paragraph.pm_end,
+                shape.pm_start,
+                shape.pm_end,
+            )
+            && start < shape_start
+            && shape_start < shape_end
+            && shape_end < end
+        {
+            let mut fragment = cell_shape_fragment(shape, extent, selectable);
+            (fragment.x, fragment.y) = crate::anchor::cell_shape_position(
+                position,
+                (frame.content_x, frame.content_width),
+                frame.block_tops[next_block],
+                (fragment.width, fragment.height),
+            );
+            fragment.y += frame.content_top;
+            let (x, y, width, height) = frame.physical;
+            if fragment.x >= x + width
+                || fragment.y >= y + height
+                || fragment.x + fragment.width <= x
+                || fragment.y + fragment.height <= y
+            {
+                continue;
+            }
+            shapes.push(CellShape {
+                index,
+                block: shape,
+                fragment,
+                behind: shape
+                    .behind_doc
+                    .or_else(|| position.and_then(|p| p.behind_doc))
+                    == Some(true)
+                    || wrap == Some("behind"),
+            });
+        }
+    }
+    shapes
+}
+
 /// Paints a cell's content into its [`CellContentFrame`].
 #[allow(clippy::too_many_arguments)]
 fn emit_cell_content(
@@ -12919,6 +13042,7 @@ fn emit_cell_content(
     selectable: bool,
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
+    place_cell_shapes: bool,
 ) {
     let stamp_from = prims.len();
     let CellContentFrame {
@@ -12938,8 +13062,30 @@ fn emit_cell_content(
     let reserved_from = ctx
         .reservations
         .map_or(0, |reserved| reserved.borrow().len());
+    let shapes = if place_cell_shapes {
+        cell_floating_shapes(cell, cell_measure, &frame, selectable)
+    } else {
+        Vec::new()
+    };
+    let mut floating_shapes = shapes.iter().peekable();
+    let paint_shapes = |prims: &mut Vec<Primitive>, behind| {
+        let start = prims.len();
+        for shape in shapes.iter().filter(|shape| shape.behind == behind) {
+            emit_shape_fragment(prims, &shape.fragment, shape.block, ctx);
+        }
+        postprocess_cell_primitives(
+            prims,
+            start,
+            cull_top_y,
+            cull_bottom_y,
+            windowed_lines,
+            selectable,
+            Some(cell_ref),
+        );
+    };
 
     // Behind-document floats paint below cell content.
+    paint_shapes(prims, true);
     emit_cell_floating_images(
         prims,
         cell,
@@ -12956,6 +13102,9 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
+        if floating_shapes.next_if(|shape| shape.index == i).is_some() {
+            continue;
+        }
         if let BlockIn::Shape(shape) = cell_block
             && crate::cell_layout::cell_overlay_drawing(
                 shape.position.is_some(),
@@ -13052,7 +13201,7 @@ fn emit_cell_content(
                 carried_to_next: None,
             };
             let before = prims.len();
-            emit_table_fragment(prims, &synthetic, tb, tm, ctx);
+            emit_table_fragment_inner(prims, &synthetic, tb, tm, ctx, true);
             // Preserve the nested table's own inner `cell` refs so the mirror can
             // surface its table semantics; only clip to the outer cell fragment
             // and strip doc positions on a vmerge continuation repaint.
@@ -13137,24 +13286,9 @@ fn emit_cell_content(
                 Some(cell_ref),
             );
         } else if let (BlockIn::Shape(sb), MeasureIn::Shape(sm)) = (cell_block, m) {
-            let shape_y = content_top + block_tops[i];
-            let synthetic = ShapeFragmentIn {
-                block_id: sb.id.clone(),
-                x: content_x,
-                y: shape_y,
-                width: if sm.width > 0.0 { sm.width } else { sb.width },
-                height: if sm.height > 0.0 {
-                    sm.height
-                } else {
-                    sb.height
-                },
-                doc_start: if selectable { sb.doc_start } else { None },
-                doc_end: if selectable { sb.doc_end } else { None },
-                pm_start: if selectable { sb.pm_start } else { None },
-                pm_end: if selectable { sb.pm_end } else { None },
-                is_anchored: None,
-                z_index: None,
-            };
+            let mut synthetic = cell_shape_fragment(sb, sm, selectable);
+            synthetic.x = content_x;
+            synthetic.y = content_top + block_tops[i];
             let before = prims.len();
             emit_shape_fragment(prims, &synthetic, sb, ctx);
             postprocess_cell_primitives(
@@ -13209,6 +13343,7 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    paint_shapes(prims, false);
     if windowed_lines {
         let mut index = stamp_from;
         while index < prims.len() {
@@ -13230,6 +13365,26 @@ fn emit_cell_content(
         (cull_top_y, cull_bottom_y),
         rotated.then_some((physical, rotation)),
     );
+}
+
+fn cell_shape_fragment(sb: &ShapeBlockIn, sm: &BoxExtentIn, selectable: bool) -> ShapeFragmentIn {
+    ShapeFragmentIn {
+        block_id: sb.id.clone(),
+        x: 0.0,
+        y: 0.0,
+        width: if sm.width > 0.0 { sm.width } else { sb.width },
+        height: if sm.height > 0.0 {
+            sm.height
+        } else {
+            sb.height
+        },
+        doc_start: if selectable { sb.doc_start } else { None },
+        doc_end: if selectable { sb.doc_end } else { None },
+        pm_start: if selectable { sb.pm_start } else { None },
+        pm_end: if selectable { sb.pm_end } else { None },
+        is_anchored: None,
+        z_index: None,
+    }
 }
 
 /// Keeps a selectable paint's new reservation rects inside the cull band,
@@ -13729,6 +13884,12 @@ fn visit_table_fragment(
         let repeated_header = inherited.0 || (plan.carried && g.row_index < plan.header_row_count);
         let continuation =
             inherited.1 || !paint.selectable || (row_split && g.row_index == frag.row_start);
+        let shapes = if plan.places_cell_shapes(frag, block, measure, g, &frame, !path.is_empty()) {
+            cell_floating_shapes(cell, cell_measure, &frame, paint.selectable)
+        } else {
+            Vec::new()
+        };
+        let mut shapes = shapes.iter().peekable();
         for (index, (cell_block, cell_block_measure)) in
             cell.blocks.iter().zip(&cell_measure.blocks).enumerate()
         {
@@ -13797,6 +13958,11 @@ fn visit_table_fragment(
                         MeasureIn::Shape(extent) | MeasureIn::Chart(extent) => extent.height,
                         MeasureIn::Unsupported => 0.0,
                     };
+                    let (y, height) = shapes
+                        .next_if(|shape| shape.index == index)
+                        .map_or((y, height), |shape| {
+                            (shape.fragment.y, shape.fragment.height)
+                        });
                     shown(y, height).map(|_| ShownPart::Whole)
                 }
             };
@@ -19626,5 +19792,48 @@ mod tests {
                 "{rotation}"
             );
         }
+    }
+
+    #[test]
+    fn grouped_connector_serializes_without_an_owned_doc_start() {
+        let input = serde_json::json!({
+            "measured": [{"block": {"kind": "shape", "id": "group", "shapeType": "rect",
+                "width": 80, "height": 30, "children": [{"id": "group:child:0",
+                    "shapeType": "bentConnector2", "x": 15, "y": 15, "width": 70, "height": 20,
+                    "geometryPath": [{"type": "move", "x": 0, "y": 0},
+                        {"type": "line", "x": 1, "y": 0}],
+                    "stroke": {"color": "#000000", "width": 1}}]},
+                "measure": {"kind": "shape", "width": 80, "height": 30}}],
+            "options": {}, "layout": {"pages": [{"size": {"w": 800, "h": 1000},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96},
+                "fragments": [{"kind": "shape", "blockId": "group", "x": 100, "y": 35,
+                    "width": 80, "height": 30, "docStart": 10, "docEnd": 11}]}]}
+        });
+        let mut list = build_display_list_value_with_fonts(
+            &input.to_string(),
+            &ooxml_text::FontStore::default(),
+        )
+        .unwrap();
+        let page = serde_json::to_value(&list.pages[0]).unwrap();
+        let child = page["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["blockKey"] == "group:child:0")
+            .unwrap();
+        assert!(child.get("docStart").is_none());
+        assert_eq!(crate::hit::hit_test(&list, 0, 150.0, 50.0), Some(10));
+
+        list.pages[0].header = Some(HfRegion {
+            r_id: "rIdHeader".to_owned(),
+            kind: HfKind::Header,
+            y: px(0.0),
+            height: px(80.0),
+            primitives: Vec::new(),
+        });
+        let hit = crate::hit::hit_test_regions(&list, 0, 150.0, 50.0).unwrap();
+        assert_eq!(hit.region, crate::hit::HitRegion::Body);
+        assert_eq!(hit.target, crate::hit::HoverTarget::Image);
+        assert_eq!(hit.pos, Some(10));
     }
 }

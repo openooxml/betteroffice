@@ -165,6 +165,8 @@ export const editsession_persist_paragraph_ids: (a: number) => [number, number, 
 export const editsession_prime_last_slice_cost: (a: number) => number;
 export const editsession_prime_save_seed_states: (a: number, b: number, c: number) => number;
 export const editsession_prime_save_seed_states_slice: (a: number, b: number, c: number, d: number) => number;
+export const editsession_project_document_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_project_story_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_proposal_revision_ranges_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_paragraphs_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_read_stories_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -196,6 +198,7 @@ export const editsession_revision_stamps_json: (a: number, b: number, c: number)
 export const editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_section_margins_json: (a: number) => [number, number];
+export const editsession_section_save_plan_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];

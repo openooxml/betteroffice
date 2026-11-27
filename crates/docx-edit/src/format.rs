@@ -1,10 +1,11 @@
 //! Inline formatting operations.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use serde_json::Value;
-use yrs::types::text::YChange;
+use yrs::types::text::{Diff, YChange};
 use yrs::types::{Attrs, Delta};
 use yrs::{Any, In, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
@@ -187,6 +188,76 @@ pub(crate) fn merge_language(previous: Option<&Any>, patch: &Any) -> Any {
     Any::Map(Arc::new(slots))
 }
 
+pub(crate) fn merge_font_family(
+    previous: Option<&Any>,
+    patch: &Any,
+    complex_script: Option<&Any>,
+    text: &str,
+    part: (u32, u32),
+) -> Any {
+    let Any::Map(patch) = patch else {
+        return patch.clone();
+    };
+    let mut fonts = match previous {
+        Some(Any::Map(fonts)) => fonts.as_ref().clone(),
+        _ => HashMap::new(),
+    };
+    fonts.extend(
+        patch
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    fonts.remove("asciiTheme");
+    fonts.remove("hAnsiTheme");
+
+    let east_asia = patch.get("eastAsia").or_else(|| {
+        patch.get("ascii").filter(|_| {
+            let flags = run_font_slot_flags(complex_script, previous);
+            uses_east_asian_slot(text, flags, part)
+        })
+    });
+    if let Some(east_asia) = east_asia {
+        fonts.insert("eastAsia".to_owned(), east_asia.clone());
+        fonts.remove("eastAsiaTheme");
+    }
+    Any::Map(Arc::new(fonts))
+}
+
+pub(crate) fn run_font_slot_flags(
+    complex_script: Option<&Any>,
+    fonts: Option<&Any>,
+) -> (bool, bool) {
+    let complex_script = match complex_script {
+        Some(Any::Map(value)) => value.get("enabled") != Some(&Any::Bool(false)),
+        Some(value) => *value != Any::Null && *value != Any::Bool(false),
+        None => false,
+    };
+    let hint = matches!(fonts, Some(Any::Map(fonts))
+        if matches!(fonts.get("hint"), Some(Any::String(hint)) if hint.as_ref() == "eastAsia"));
+    (complex_script, hint)
+}
+
+fn uses_east_asian_slot(
+    text: &str,
+    (complex_script, hint): (bool, bool),
+    (from, to): (u32, u32),
+) -> bool {
+    if complex_script || text.is_ascii() {
+        return false;
+    }
+    let mut offset = 0;
+    for (character, slot) in ooxml_text::font_slot_characters(text, complex_script, hint) {
+        if offset >= to {
+            break;
+        }
+        offset += character.len_utf16() as u32;
+        if offset > from && slot == 2 {
+            return true;
+        }
+    }
+    false
+}
+
 /// Tri-state inline formatting patch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlineFormatDelta {
@@ -310,14 +381,14 @@ impl InlineFormatDelta {
             Patch::Keep => {}
             Patch::Clear => put("fontFamily", Any::Null),
             Patch::Set(patch) => {
-                let h_ansi = patch.h_ansi.clone().unwrap_or_else(|| patch.ascii.clone());
-                put(
-                    "fontFamily",
-                    Any::Map(Arc::new(HashMap::from([
-                        ("ascii".into(), Any::from(patch.ascii.as_str())),
-                        ("hAnsi".into(), Any::from(h_ansi)),
-                    ]))),
-                );
+                let fonts = HashMap::from([
+                    ("ascii".into(), Any::from(patch.ascii.as_str())),
+                    (
+                        "hAnsi".into(),
+                        Any::from(patch.h_ansi.as_deref().unwrap_or(&patch.ascii)),
+                    ),
+                ]);
+                put("fontFamily", Any::Map(Arc::new(fonts)));
             }
         }
         match &self.language {
@@ -812,15 +883,18 @@ fn holds_suggestion_container<T: ReadTxn>(chunks: &[crate::ops::Chunk], txn: &T)
 /// Whether suggested formatting over `start..end` of a story, and over the text its block embeds
 /// hold, would be refused anywhere, so a refusal leaves every part of the selection unchanged.
 fn refuses_suggestion<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> bool {
-    let (spans, children) = block_free_spans(story, txn, start, end, false);
-    spans.into_iter().any(|(at, len)| {
-        holds_suggestion_container(&crate::ops::snapshot_range(story, txn, at, at + len), txn)
-    }) || children.iter().any(|(child, _)| {
-        crate::story_text(txn, child).is_some_and(|text| {
-            let len = text.len(txn);
-            len > 0 && refuses_suggestion(&text, txn, 0, len)
+    let chunks = story_chunks(story.diff(txn, YChange::identity), txn, start..end, false);
+    free_spans_in(&chunks, start, end, false)
+        .into_iter()
+        .any(|(at, len)| {
+            holds_suggestion_container(&crate::ops::snapshot_range(story, txn, at, at + len), txn)
         })
-    })
+        || block_children_in(&chunks, txn).iter().any(|child| {
+            crate::story_text(txn, child).is_some_and(|text| {
+                let len = text.len(txn);
+                len > 0 && refuses_suggestion(&text, txn, 0, len)
+            })
+        })
 }
 
 /// The run attributes that are character formatting, the only ones clearing formatting removes:
@@ -885,50 +959,12 @@ fn block_child_stories<T: ReadTxn>(embed: &MapRef, txn: &T) -> Vec<String> {
     stories
 }
 
-/// The parts of `start..end` outside block embeds, and the stories inside the embeds it covers,
-/// each with whether a block content control holds it.
-fn block_free_spans<T: ReadTxn>(
-    story: &TextRef,
-    txn: &T,
-    start: u32,
-    end: u32,
-    text_only: bool,
-) -> (Vec<(u32, u32)>, Vec<(String, bool)>) {
-    let mut spans = Vec::new();
-    let mut children = Vec::new();
-    let mut from = start;
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let chunk_end = offset + out_len(&diff.insert);
-        if chunk_end.min(end) > offset.max(start) {
-            let block = matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
-                .is_some_and(|kind| crate::segments::is_block_embed(&kind)));
-            let skipped = block || (text_only && !matches!(diff.insert, Out::Any(Any::String(_))));
-            if skipped {
-                let cut = offset.max(start);
-                if cut > from {
-                    spans.push((from, cut - from));
-                }
-                from = chunk_end.min(end);
-                if block && let Out::YMap(embed) = &diff.insert {
-                    let control = map_string(embed, txn, KIND_KEY).as_deref() == Some("blockSdt");
-                    children.extend(
-                        block_child_stories(embed, txn)
-                            .into_iter()
-                            .map(|child| (child, control)),
-                    );
-                }
-            }
-        }
-        offset = chunk_end;
-        if offset >= end {
-            break;
-        }
-    }
-    if end > from {
-        spans.push((from, end - from));
-    }
-    (spans, children)
+fn block_children_in<T: ReadTxn>(chunks: &[StoryChunk], txn: &T) -> Vec<String> {
+    chunks
+        .iter()
+        .filter_map(|chunk| chunk.block.as_ref())
+        .flat_map(|embed| block_child_stories(embed, txn))
+        .collect()
 }
 
 /// Tests whether every text unit carries a non-null attribute, in block embeds too; `saw_text`
@@ -1048,26 +1084,53 @@ struct StoryChunk {
     start: u32,
     end: u32,
     text: bool,
-    block: bool,
+    font_text: Option<Arc<str>>,
+    block: Option<MapRef>,
     pilcrow: bool,
     attrs: Option<Box<Attrs>>,
 }
 
-fn story_chunks<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryChunk> {
+fn story_chunks<T: ReadTxn>(
+    diffs: Vec<Diff<YChange>>,
+    txn: &T,
+    range: Range<u32>,
+    merge_font: bool,
+) -> Vec<StoryChunk> {
     let mut chunks = Vec::new();
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let end = offset + out_len(&diff.insert);
+    for diff in diffs {
+        if offset >= range.end {
+            break;
+        }
+        let start = offset;
+        let utf16_len = out_len(&diff.insert);
+        offset += utf16_len;
+        if offset <= range.start {
+            continue;
+        }
+        let text = matches!(diff.insert, Out::Any(Any::String(_)));
+        let pilcrow = matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn));
+        let (font_text, block) = match diff.insert {
+            Out::Any(Any::String(text)) if merge_font && text.len() != utf16_len as usize => {
+                (Some(text), None)
+            }
+            Out::YMap(embed)
+                if map_string(&embed, txn, KIND_KEY)
+                    .is_some_and(|kind| crate::segments::is_block_embed(&kind)) =>
+            {
+                (None, Some(embed))
+            }
+            _ => (None, None),
+        };
         chunks.push(StoryChunk {
-            start: offset,
-            end,
-            text: matches!(diff.insert, Out::Any(Any::String(_))),
-            block: matches!(&diff.insert, Out::YMap(embed) if map_string(embed, txn, KIND_KEY)
-                .is_some_and(|kind| crate::segments::is_block_embed(&kind))),
-            pilcrow: matches!(&diff.insert, Out::YMap(embed) if crate::is_pilcrow(embed, txn)),
-            attrs: diff.attributes.clone(),
+            start,
+            end: offset,
+            text,
+            font_text,
+            block,
+            pilcrow,
+            attrs: diff.attributes,
         });
-        offset = end;
     }
     chunks
 }
@@ -1080,7 +1143,7 @@ fn chunks_within(chunks: &[StoryChunk], start: u32, end: u32) -> impl Iterator<I
         .filter(move |chunk| chunk.end.min(end) > chunk.start.max(start))
 }
 
-/// [`clearing_attrs`] over `chunks`.
+/// The unprotected formatting set anywhere in `start..end`, each mapped to null.
 fn clearing_attrs_in(chunks: &[StoryChunk], start: u32, end: u32) -> Attrs {
     let mut keys: BTreeMap<String, ()> = BTreeMap::new();
     for chunk in chunks_within(chunks, start, end) {
@@ -1095,9 +1158,15 @@ fn clearing_attrs_in(chunks: &[StoryChunk], start: u32, end: u32) -> Attrs {
         .collect()
 }
 
-/// [`changes_text`] over `chunks`.
-fn changes_text_in(chunks: &[StoryChunk], start: u32, end: u32, attrs: &Attrs) -> bool {
-    changes_units_in(chunks, start, end, attrs, true)
+/// Whether setting `attrs` would change any text in `start..end`.
+fn changes_text_in(
+    chunks: &[StoryChunk],
+    start: u32,
+    end: u32,
+    attrs: &Attrs,
+    font_merge: Option<FontMerge<'_>>,
+) -> bool {
+    changes_units_in(chunks, start, end, attrs, true, font_merge)
 }
 
 /// Whether setting `attrs` would change a unit in `start..end` that a pass writes: text only, or
@@ -1109,26 +1178,140 @@ fn changes_units_in(
     end: u32,
     attrs: &Attrs,
     text_only: bool,
+    font_merge: Option<FontMerge<'_>>,
 ) -> bool {
     chunks_within(chunks, start, end)
-        .filter(|chunk| if text_only { chunk.text } else { !chunk.block })
+        .filter(|chunk| {
+            if text_only {
+                chunk.text
+            } else {
+                chunk.block.is_none()
+            }
+        })
         .any(|chunk| {
-            let current = chunk.attrs.as_deref();
-            attrs.iter().any(
-                |(key, value)| match current.and_then(|current| current.get(key)) {
-                    None if chunk.pilcrow => false,
-                    current => current.unwrap_or(&Any::Null) != value,
-                },
+            attrs_change_chunk(
+                attrs,
+                chunk.attrs.as_deref(),
+                chunk.pilcrow,
+                font_merge,
+                chunk.font_text.as_deref().unwrap_or_default(),
+                (
+                    start.saturating_sub(chunk.start),
+                    end.min(chunk.end) - chunk.start,
+                ),
             )
         })
 }
 
-/// The spans of [`block_free_spans`] over `chunks`.
+fn attrs_change_chunk(
+    attrs: &Attrs,
+    current: Option<&Attrs>,
+    pilcrow: bool,
+    font_merge: Option<FontMerge<'_>>,
+    text: &str,
+    part: (u32, u32),
+) -> bool {
+    attrs.iter().any(|(key, value)| {
+        let previous = current.and_then(|current| current.get(key));
+        if pilcrow && previous.is_none() {
+            return false;
+        }
+        let previous = previous.unwrap_or(&Any::Null);
+        if let Some(font_merge) = font_merge
+            && key.as_ref() == "fontFamily"
+        {
+            let complex_script = attrs
+                .get("complexScript")
+                .or_else(|| current.and_then(|attrs| attrs.get("complexScript")));
+            *previous
+                != merge_font_family(
+                    font_merge.base(Some(previous)),
+                    value,
+                    complex_script,
+                    text,
+                    part,
+                )
+        } else {
+            previous != value
+        }
+    })
+}
+
+fn merge_chunk_format<'a>(
+    patch: &mut Attrs,
+    previous: impl Fn(&str) -> Option<&'a Any>,
+    write_language: bool,
+    font_merge: Option<FontMerge<'_>>,
+    text: &str,
+    part: (u32, u32),
+) {
+    if let Some(language @ Any::Map(_)) = patch.get_mut("language") {
+        if write_language {
+            *language = merge_language(previous("language"), language);
+        } else {
+            patch.remove("language");
+        }
+    }
+    if let Some(merge) = font_merge
+        && let Some(fonts) = patch.get("fontFamily")
+    {
+        let fonts = merge_font_family(
+            merge.base(previous("fontFamily")),
+            fonts,
+            patch
+                .get("complexScript")
+                .or_else(|| previous("complexScript")),
+            text,
+            part,
+        );
+        patch.insert(Arc::from("fontFamily"), fonts);
+    }
+}
+
+fn push_format_retain(
+    deltas: &mut Vec<Delta<In>>,
+    cursor: &mut u32,
+    start: u32,
+    end: u32,
+    attrs: Attrs,
+) {
+    if attrs.is_empty() {
+        return;
+    }
+    if start > *cursor {
+        deltas.push(Delta::Retain(start - *cursor, None));
+    }
+    if let Some(Delta::Retain(len, Some(previous))) = deltas.last_mut()
+        && previous.as_ref() == &attrs
+    {
+        *len += end - start;
+    } else {
+        deltas.push(Delta::Retain(end - start, Some(Box::new(attrs))));
+    }
+    *cursor = end;
+}
+
+fn apply_format_retains(story: &TextRef, txn: &mut TransactionMut<'_>, deltas: Vec<Delta<In>>) {
+    match deltas.as_slice() {
+        [] => {}
+        [Delta::Retain(len, Some(attrs))] => {
+            story.format(txn, 0, *len, attrs.as_ref().clone());
+        }
+        [Delta::Retain(at, None), Delta::Retain(len, Some(attrs))] => {
+            story.format(txn, *at, *len, attrs.as_ref().clone());
+        }
+        _ => {
+            story.apply_delta(txn, deltas);
+        }
+    }
+}
+
+/// The parts of `start..end` outside block embeds.
 fn free_spans_in(chunks: &[StoryChunk], start: u32, end: u32, text_only: bool) -> Vec<(u32, u32)> {
     let mut spans = Vec::new();
     let mut from = start;
     for chunk in chunks_within(chunks, start, end) {
-        if chunk.block || (text_only && !chunk.text) {
+        if chunk.block.is_some() || (text_only && !chunk.text) {
             let cut = chunk.start.max(start);
             if cut > from {
                 spans.push((from, cut - from));
@@ -1152,11 +1335,11 @@ struct StoryParagraph {
 }
 
 /// The paragraphs of a story, in order.
-fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryParagraph> {
+fn story_paragraphs<T: ReadTxn>(diffs: &[Diff<YChange>], txn: &T) -> Vec<StoryParagraph> {
     let mut paragraphs = Vec::new();
     let mut start = 0;
     let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
+    for diff in diffs {
         let end = offset + out_len(&diff.insert);
         if let Out::YMap(embed) = &diff.insert
             && crate::is_pilcrow(embed, txn)
@@ -1187,8 +1370,35 @@ fn story_paragraphs<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<StoryParagraph>
 /// and the table style around it, give; without a source it removes the attributes.
 #[derive(Clone, Copy)]
 enum RunDelta<'a> {
-    Set(&'a Attrs),
+    Set {
+        attrs: &'a Attrs,
+        font_merge: Option<FontMerge<'a>>,
+    },
     Clear(Option<&'a crate::seed::SourceMetadata>),
+}
+
+impl<'a> RunDelta<'a> {
+    fn font_merge(self) -> Option<FontMerge<'a>> {
+        match self {
+            Self::Set { font_merge, .. } => font_merge,
+            Self::Clear(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FontMerge<'a> {
+    Existing,
+    Reset(&'a Any),
+}
+
+impl<'a> FontMerge<'a> {
+    fn base(self, current: Option<&'a Any>) -> Option<&'a Any> {
+        match self {
+            Self::Existing => current,
+            Self::Reset(reset) => Some(reset),
+        }
+    }
 }
 
 /// The run attributes the styles give an unformatted run of a paragraph styled `paragraph_style`
@@ -1230,7 +1440,7 @@ fn paragraph_delta(
     remove: impl FnOnce() -> Attrs,
 ) -> OpResult<Attrs> {
     match delta {
-        RunDelta::Set(attrs) => Ok(attrs.clone()),
+        RunDelta::Set { attrs, .. } => Ok(attrs.clone()),
         RunDelta::Clear(Some(source)) => Ok(reset_to(&styled_run_base(
             source,
             story_id,
@@ -1239,56 +1449,6 @@ fn paragraph_delta(
         )?)),
         RunDelta::Clear(None) => Ok(remove()),
     }
-}
-
-/// Whether setting `attrs` would change any text in `start..end`.
-fn changes_text<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32, attrs: &Attrs) -> bool {
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let chunk_end = offset + out_len(&diff.insert);
-        if chunk_end.min(end) > offset.max(start) && matches!(diff.insert, Out::Any(Any::String(_)))
-        {
-            let current = diff.attributes.as_deref();
-            if attrs.iter().any(|(key, value)| {
-                current
-                    .and_then(|current| current.get(key))
-                    .unwrap_or(&Any::Null)
-                    != value
-            }) {
-                return true;
-            }
-        }
-        offset = chunk_end;
-        if offset >= end {
-            break;
-        }
-    }
-    false
-}
-
-/// The unprotected formatting set anywhere in `start..end`, each mapped to null.
-fn clearing_attrs<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> Attrs {
-    let mut keys: BTreeMap<String, ()> = BTreeMap::new();
-    let mut offset = 0;
-    for diff in story.diff(txn, YChange::identity) {
-        let chunk_end = offset + out_len(&diff.insert);
-        if chunk_end.min(end) > offset.max(start)
-            && let Some(attrs) = diff.attributes.as_deref()
-        {
-            for (key, value) in attrs.iter() {
-                if *value != Any::Null && FORMATTING_ATTRS.contains(&key.as_ref()) {
-                    keys.insert(key.to_string(), ());
-                }
-            }
-        }
-        offset = chunk_end;
-        if offset >= end {
-            break;
-        }
-    }
-    keys.into_keys()
-        .map(|key| (Arc::from(key.as_str()), Any::Null))
-        .collect()
 }
 
 impl EditingDoc {
@@ -1360,7 +1520,10 @@ impl EditingDoc {
             ctx,
             &story,
             &range,
-            RunDelta::Set(&attrs),
+            RunDelta::Set {
+                attrs: &attrs,
+                font_merge: None,
+            },
             &mut keeper,
         )?;
         let loc_range =
@@ -1414,7 +1577,12 @@ impl EditingDoc {
             ctx,
             &story,
             &range,
-            RunDelta::Set(&attrs),
+            RunDelta::Set {
+                attrs: &attrs,
+                font_merge: (matches!(delta.font_family, Patch::Set(_))
+                    && !delta.other.contains_key("fontFamily"))
+                .then_some(FontMerge::Existing),
+            },
             &mut keeper,
         )?;
         let loc_range =
@@ -1505,6 +1673,7 @@ impl EditingDoc {
             .iter()
             .map(|(key, value)| (Arc::from(key.as_str()), value.clone()))
             .collect();
+        let merge_font = set.contains_key("fontFamily");
         let pieces = match clear {
             Some(clear) => self.style_reset_pieces(
                 &txn,
@@ -1520,6 +1689,11 @@ impl EditingDoc {
         let mut keeper = Keeper::new(self);
         let mut revision_ids: Vec<String> = Vec::new();
         for (start, end, mut attrs) in pieces {
+            let reset_fonts = merge_font.then(|| attrs.remove("fontFamily")).flatten();
+            let font_merge = merge_font.then(|| match &reset_fonts {
+                Some(reset) => FontMerge::Reset(reset),
+                None => FontMerge::Existing,
+            });
             attrs.extend(set.iter().map(|(key, value)| (key.clone(), value.clone())));
             let piece = StoryRange::new(range.story.as_str(), start, end);
             for id in self.apply_run_format_through(
@@ -1527,7 +1701,10 @@ impl EditingDoc {
                 ctx,
                 &story,
                 &piece,
-                RunDelta::Set(&attrs),
+                RunDelta::Set {
+                    attrs: &attrs,
+                    font_merge,
+                },
                 &mut keeper,
             )? {
                 if !revision_ids.contains(&id) {
@@ -1671,7 +1848,7 @@ impl EditingDoc {
         Ok((receipt, keeper.kept))
     }
 
-    /// [`Self::apply_run_format`] over `range`, leaving block embeds unmarked and formatting the
+    /// Formats `range`, leaving block embeds unmarked and formatting the
     /// text they hold, so a selection across a table formats its cells and not the table. A
     /// paragraph inside a block, or one of several the range spans, that saving rewritten would
     /// lose content of stays unchanged and is counted in `keeper`, as does a single paragraph
@@ -1686,15 +1863,15 @@ impl EditingDoc {
         keeper: &mut Keeper<'_>,
     ) -> OpResult<Vec<String>> {
         self.prepare_table_styles(delta, &range.story);
-        let (spans, children) = block_free_spans(story, txn, range.start, range.end, false);
-        let paragraphs: Vec<_> = story_paragraphs(story, txn)
+        let diffs = story.diff(txn, YChange::identity);
+        let paragraphs: Vec<_> = story_paragraphs(&diffs, txn)
             .into_iter()
             .filter(|paragraph| paragraph.end > range.start && paragraph.start < range.end)
             .collect();
-        let mut revision_ids = Vec::new();
+        let font_merge = delta.font_merge();
+        let chunks = story_chunks(diffs, txn, range.start..range.end, font_merge.is_some());
+        let mut formatted = Vec::new();
         if paragraphs.len() > 1 {
-            let chunks = story_chunks(story, txn);
-            let mut formatted = Vec::new();
             for paragraph in paragraphs {
                 let (from, to) = (
                     paragraph.start.max(range.start),
@@ -1706,11 +1883,11 @@ impl EditingDoc {
                     })?;
                 if attrs.is_empty()
                     || (matches!(delta, RunDelta::Clear(_))
-                        && !changes_units_in(&chunks, from, to, &attrs, false))
+                        && !changes_units_in(&chunks, from, to, &attrs, false, None))
                 {
                     continue;
                 }
-                if changes_text_in(&chunks, from, to, &attrs)
+                if changes_text_in(&chunks, from, to, &attrs, font_merge)
                     && let Some(reason) = paragraph
                         .key
                         .as_deref()
@@ -1723,48 +1900,36 @@ impl EditingDoc {
                     formatted.push((at, len, attrs.clone()));
                 }
             }
-            revision_ids.extend(self.apply_run_formats(
-                txn,
-                ctx,
-                story,
-                &range.story,
-                formatted,
-            )?);
         } else {
             let paragraph = paragraphs.first();
             let attrs = paragraph_delta(
                 delta,
                 &range.story,
                 paragraph.and_then(|paragraph| paragraph.style.as_deref()),
-                || clearing_attrs(story, txn, range.start, range.end),
+                || clearing_attrs_in(&chunks, range.start, range.end),
             )?;
             let unchanged = matches!(delta, RunDelta::Clear(_))
-                && !changes_units_in(
-                    &story_chunks(story, txn),
-                    range.start,
-                    range.end,
-                    &attrs,
-                    false,
-                );
+                && !changes_units_in(&chunks, range.start, range.end, &attrs, false, None);
             if let Some(key) = paragraph.and_then(|paragraph| paragraph.key.as_deref())
-                && changes_text(story, txn, range.start, range.end, &attrs)
+                && changes_text_in(&chunks, range.start, range.end, &attrs, font_merge)
                 && keeper.rewrite_loss(key) == Some(KeptReason::Field)
             {
                 keeper.keep(KeptReason::Field);
             } else if !unchanged {
-                for (at, len) in spans {
-                    let span = StoryRange::new(range.story.clone(), at, at + len);
-                    revision_ids.extend(self.apply_run_format(
-                        txn,
-                        ctx,
-                        story,
-                        &span,
-                        attrs.clone(),
-                    )?);
+                for (at, len) in free_spans_in(&chunks, range.start, range.end, false) {
+                    formatted.push((at, len, attrs.clone()));
                 }
             }
         }
-        for (child, _) in children {
+        let mut revision_ids = self.apply_run_formats(
+            txn,
+            ctx,
+            story,
+            &range.story,
+            formatted,
+            (&chunks, font_merge),
+        )?;
+        for child in block_children_in(&chunks, txn) {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &child, delta, keeper)?);
         }
         revision_ids.dedup();
@@ -1786,19 +1951,22 @@ impl EditingDoc {
         };
         self.prepare_table_styles(delta, child);
         let mut revision_ids = Vec::new();
-        let chunks = story_chunks(&text, txn);
+        let font_merge = delta.font_merge();
+        let diffs = text.diff(txn, YChange::identity);
+        let paragraphs = story_paragraphs(&diffs, txn);
+        let chunks = story_chunks(diffs, txn, 0..text.len(txn), font_merge.is_some());
         let mut formatted = Vec::new();
         for StoryParagraph {
             start,
             end,
             key,
             style,
-        } in story_paragraphs(&text, txn)
+        } in paragraphs
         {
             let attrs = paragraph_delta(delta, child, style.as_deref(), || {
                 clearing_attrs_in(&chunks, start, end)
             })?;
-            if attrs.is_empty() || !changes_text_in(&chunks, start, end, &attrs) {
+            if attrs.is_empty() || !changes_text_in(&chunks, start, end, &attrs, font_merge) {
                 continue;
             }
             if let Some(reason) = key.as_deref().and_then(|key| keeper.rewrite_loss(key)) {
@@ -1809,9 +1977,15 @@ impl EditingDoc {
                 formatted.push((at, len, attrs.clone()));
             }
         }
-        revision_ids.extend(self.apply_run_formats(txn, ctx, &text, child, formatted)?);
-        let len = text.len(txn);
-        for (nested, _) in block_free_spans(&text, txn, 0, len, true).1 {
+        revision_ids.extend(self.apply_run_formats(
+            txn,
+            ctx,
+            &text,
+            child,
+            formatted,
+            (&chunks, font_merge),
+        )?);
+        for nested in block_children_in(&chunks, txn) {
             revision_ids.extend(self.format_story_paragraphs(txn, ctx, &nested, delta, keeper)?);
         }
         Ok(revision_ids)
@@ -1836,78 +2010,63 @@ impl EditingDoc {
         story: &TextRef,
         story_id: &str,
         spans: Vec<(u32, u32, Attrs)>,
+        (chunks, font_merge): (&[StoryChunk], Option<FontMerge<'_>>),
     ) -> OpResult<Vec<String>> {
-        let one_by_one = ctx.is_suggesting()
-            || spans
-                .iter()
-                .any(|(_, _, attrs)| matches!(attrs.get("language"), Some(Any::Map(_))));
-        if one_by_one {
+        if spans.is_empty() {
+            return Ok(Vec::new());
+        }
+        if ctx.is_suggesting() {
             let mut revision_ids = Vec::new();
             for (at, len, attrs) in spans {
                 let span = StoryRange::new(story_id.to_owned(), at, at + len);
-                revision_ids.extend(self.apply_run_format(txn, ctx, story, &span, attrs)?);
+                revision_ids
+                    .extend(self.suggest_run_format(txn, ctx, story, &span, &attrs, font_merge)?);
             }
             return Ok(revision_ids);
         }
         let mut deltas: Vec<Delta<In>> = Vec::with_capacity(spans.len() * 2);
         let mut cursor = 0;
         for (at, len, attrs) in spans {
-            if attrs.is_empty() {
-                continue;
+            if font_merge.is_some() || matches!(attrs.get("language"), Some(Any::Map(_))) {
+                for chunk in chunks_within(chunks, at, at + len) {
+                    let start = chunk.start.max(at);
+                    let end = chunk.end.min(at + len);
+                    let mut patch = attrs.clone();
+                    merge_chunk_format(
+                        &mut patch,
+                        |key| chunk.attrs.as_deref().and_then(|attrs| attrs.get(key)),
+                        chunk.text,
+                        font_merge,
+                        chunk.font_text.as_deref().unwrap_or_default(),
+                        (start - chunk.start, end - chunk.start),
+                    );
+                    push_format_retain(&mut deltas, &mut cursor, start, end, patch);
+                }
+            } else {
+                push_format_retain(&mut deltas, &mut cursor, at, at + len, attrs);
             }
-            if at > cursor {
-                deltas.push(Delta::Retain(at - cursor, None));
-            }
-            deltas.push(Delta::Retain(len, Some(Box::new(attrs))));
-            cursor = at + len;
         }
-        story.apply_delta(txn, deltas);
+        apply_format_retains(story, txn, deltas);
         Ok(Vec::new())
     }
 
-    fn apply_run_format(
+    fn suggest_run_format(
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
         story: &TextRef,
         range: &StoryRange,
-        delta: Attrs,
+        delta: &Attrs,
+        font_merge: Option<FontMerge<'_>>,
     ) -> OpResult<Vec<String>> {
-        if !ctx.is_suggesting() {
-            if !delta.is_empty() {
-                if let Some(language @ Any::Map(_)) = delta.get("language") {
-                    let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
-                    for chunk in chunks {
-                        let start = chunk.start.max(range.start);
-                        let end = chunk.end().min(range.end);
-                        if start >= end {
-                            continue;
-                        }
-                        let mut patch = delta.clone();
-                        if matches!(chunk.kind, crate::ops::ChunkKind::Text(_)) {
-                            patch.insert(
-                                Arc::from("language"),
-                                merge_language(chunk.attrs.get("language"), language),
-                            );
-                        } else {
-                            patch.remove("language");
-                        }
-                        if !patch.is_empty() {
-                            story.format(txn, start, end - start, patch);
-                        }
-                    }
-                } else {
-                    story.format(txn, range.start, range.end - range.start, delta);
-                }
-            }
-            return Ok(Vec::new());
-        }
         let chunks = crate::ops::snapshot_range(story, txn, range.start, range.end);
         if holds_suggestion_container(&chunks, txn) {
             return Err(OpError::SuggestedFormattingOverContainer);
         }
         let mut revision_ids = Vec::new();
         let mut new_id = None;
+        let mut deltas = Vec::new();
+        let mut cursor = 0;
         for chunk in chunks {
             let start = chunk.start.max(range.start);
             let end = chunk.end().min(range.end);
@@ -1919,15 +2078,21 @@ impl EditingDoc {
             {
                 continue;
             }
-            let mut delta = delta.clone();
-            if let Some(language @ Any::Map(_)) = delta.get("language").cloned() {
-                delta.insert(
-                    Arc::from("language"),
-                    merge_language(chunk.attrs.get("language"), &language),
-                );
-            }
+            let mut patch = delta.clone();
+            let text = match &chunk.kind {
+                crate::ops::ChunkKind::Text(text) => text.as_str(),
+                _ => "",
+            };
+            merge_chunk_format(
+                &mut patch,
+                |key| chunk.attrs.get(key),
+                true,
+                font_merge,
+                text,
+                (start - chunk.start, end - chunk.start),
+            );
             let mut current = chunk.attrs.clone();
-            for (key, value) in &delta {
+            for (key, value) in &patch {
                 if *value == Any::Null {
                     current.remove(key.as_ref());
                 } else {
@@ -1937,7 +2102,6 @@ impl EditingDoc {
             if current == chunk.attrs {
                 continue;
             }
-            let mut patch = delta.clone();
             let mut changes = match chunk.attrs.get(RPR_CHANGE) {
                 Some(Any::Array(changes)) => changes.to_vec(),
                 _ => Vec::new(),
@@ -1982,8 +2146,9 @@ impl EditingDoc {
                 }
             }
             patch.insert(Arc::from(RPR_CHANGE), Any::Array(Arc::from(changes)));
-            story.format(txn, start, end - start, patch);
+            push_format_retain(&mut deltas, &mut cursor, start, end, patch);
         }
+        apply_format_retains(story, txn, deltas);
         Ok(revision_ids)
     }
 }

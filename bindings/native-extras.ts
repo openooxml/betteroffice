@@ -47,6 +47,11 @@ export const docxExtras = {
   },
 } satisfies ExtraReasons<DocxNativeExtras>;
 
+export const docxWasmOnly = {
+  'EditSession.prototype.project_document_json': { reason: 'exposes the WASM document projection for diagnostics', backs: 'the projection parity harness' },
+  'EditSession.prototype.project_story_json': { reason: 'exposes the WASM story projection for diagnostics', backs: 'the projection parity harness' },
+} satisfies Record<string, Extra>;
+
 const WASM_CLASSES = {
   xlsx: { wrapped: ['XlsxDocument'], all: ['XlsxDocument', 'XlsxSnapshotBuilder'] },
   pptx: { wrapped: ['PptxDocument'], all: ['PptxDocument', 'PptxRenderer', 'MetafileConverter'] },
@@ -91,6 +96,10 @@ const NAPI_INTERNALS: Record<string, Internal> = { __napiBindingTarget: { reason
 
 const PANIC_HOOK: Internal = { reason: 'panic-hook installer; runs once when the engine loads' };
 
+const DOCX_WASM_ONLY = {
+  'EditSession.prototype.section_save_plan_json': { reason: 'test-only section save plan parity export', runtimeOnly: true },
+} as const satisfies Record<string, Extra>;
+
 /** Formats whose wasm glue and native binding export install_panic_hook. */
 const PANIC_HOOK_FORMATS: Record<Format, { wasm: boolean; native: boolean }> = {
   xlsx: { wasm: true, native: true },
@@ -115,7 +124,10 @@ export function arityAllowances(format: Format): Record<string, Record<string, E
 /** Allowances for the raw compare: wasm-bindgen glue against the napi binding. */
 export function rawAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
-  const wasmOnly: Record<string, Extra> = { ...disposeFromEngineModule(format) };
+  const wasmOnly: Record<string, Extra> = {
+    ...disposeFromEngineModule(format),
+    ...(format === 'docx' ? { ...docxWasmOnly, ...DOCX_WASM_ONLY } : {}),
+  };
   if (format === 'pptx') wasmOnly.MetafileConverter = { reason: 'metafile conversion runs inside the native engine; no standalone converter', pending: 'item 11' };
   return {
     nativeOnly: flatten(extras),
@@ -132,7 +144,7 @@ export function engineAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
   return {
     nativeOnly: flatten({ functions: {}, members: extras.members }),
-    wasmOnly: {},
+    wasmOnly: format === 'docx' ? { ...docxWasmOnly, ...DOCX_WASM_ONLY } : {},
     internals: { wasm: wasmInternals(format, 'engine'), native: {} },
   };
 }

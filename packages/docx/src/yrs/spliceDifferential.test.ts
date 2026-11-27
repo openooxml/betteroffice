@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { unzipContainer } from '../docx/wasm';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
+import { edit, random } from './projectionParity.support';
 import { captureSessionSave, writeSessionSave } from './saveYrsDocx';
 import { yrsToDocument } from './yrsToDocument';
 
@@ -17,7 +18,6 @@ const FIXTURES = [
 const STORY_PART = /^word\/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$/;
 const TRIALS = Number(process.env.SPLICE_DIFF_TRIALS ?? 4);
 const TIMEOUT = Number(process.env.SPLICE_DIFF_TIMEOUT_MS ?? 60_000);
-const AUTHOR = { name: 'Differential', date: '2026-01-01T00:00:00Z' };
 const decoder = new TextDecoder();
 
 function documents(): string[] {
@@ -34,17 +34,6 @@ function documents(): string[] {
   };
   for (const root of roots) visit(root);
   return found;
-}
-
-function random(seed: string): () => number {
-  let state = 2166136261;
-  for (const character of seed) state = Math.imul(state ^ character.charCodeAt(0), 16777619);
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let value = Math.imul(state ^ (state >>> 15), 1 | state);
-    value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function parts(bytes: Uint8Array | ArrayBuffer): Record<string, string> {
@@ -316,57 +305,6 @@ function unpairedMoves(xml: string): Set<string> {
 
 const strayAmpersands = (xml: string) =>
   (xml.match(/&(?!(#x[0-9a-fA-F]+|#[0-9]+|[A-Za-z][\w.:-]*);)/g) ?? []).length;
-
-function edit(session: YrsSession, next: () => number): string[] {
-  const pick = <T>(items: readonly T[]) => items[Math.floor(next() * items.length)]!;
-  const candidates = session
-    .storyIds()
-    .flatMap((story) =>
-      session
-        .paragraphs(story)
-        .filter((paragraph) => paragraph.text.length > 1)
-        .map((paragraph) => ({ story, paragraph }))
-    );
-  if (candidates.length === 0) return [];
-  const body = candidates.filter(({ story }) => story === 'body');
-  const pool = body.length > 0 && next() < 0.7 ? body : candidates;
-  const structural = next() < 0.15;
-  const count = structural || next() < 0.5 ? 1 : 2 + Math.floor(next() * 4);
-  const targets = new Map<string, (typeof candidates)[number]>();
-  for (let attempt = 0; attempt < count * 4 && targets.size < count; attempt += 1) {
-    const target = pick(pool);
-    targets.set(`${target.story}\u0000${target.paragraph.paraId}`, target);
-  }
-  const applied: string[] = [];
-  for (const { story, paragraph } of targets.values()) {
-    const length = paragraph.text.length;
-    const offset = Math.floor(next() * length);
-    const end = Math.min(length, offset + 1 + Math.floor(next() * 4));
-    const range = {
-      story,
-      start: { paraId: paragraph.paraId, offset },
-      end: { paraId: paragraph.paraId, offset: end },
-    };
-    const kind = structural
-      ? pick(['split', 'merge'] as const)
-      : pick(['insert', 'delete', 'replace', 'bold', 'suggestInsert', 'suggestDelete'] as const);
-    try {
-      if (kind === 'insert') session.insertText({ story, paraId: paragraph.paraId, offset }, 'Q9Z');
-      else if (kind === 'delete') session.deleteRange(range);
-      else if (kind === 'replace') session.replaceRange(range, 'Q9Z');
-      else if (kind === 'bold') session.toggleMark(range, { type: 'bold' });
-      else if (kind === 'suggestInsert')
-        session.insertText({ story, paraId: paragraph.paraId, offset }, 'Q9Z', AUTHOR);
-      else if (kind === 'suggestDelete') session.deleteRange(range, AUTHOR);
-      else if (kind === 'split') session.splitParagraph({ story, paraId: paragraph.paraId, offset });
-      else session.mergeParagraphs(story, paragraph.paraId);
-      applied.push(`${kind}@${story}`);
-    } catch {
-      // An edit the session refuses here (a protected or final paragraph) is not a save case.
-    }
-  }
-  return applied;
-}
 
 const sessions: YrsSession[] = [];
 

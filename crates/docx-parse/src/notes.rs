@@ -51,7 +51,14 @@ pub fn parse_notes(
             continue;
         };
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
+        if parser.budget.preview_connectors.is_some() {
+            parser.budget.connector_story(
+                parser.part,
+                (note_type != "separator").then(|| id.to_string()),
+            );
+        }
         let content = parser.parse_blocks(element, 0, false)?;
+        parser.budget.connector_story = None;
         let bookmarked = has_block_bookmark(element);
         let mut custom_root_bindings = if has_foreign_content(element) {
             note_bindings(root, element)

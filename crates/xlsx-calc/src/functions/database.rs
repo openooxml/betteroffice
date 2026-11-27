@@ -9,10 +9,10 @@ use std::sync::Arc;
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_COLS, MAX_ROWS, SheetId};
 
 use crate::eval::{
-    Area, EvalContext, as_area, bound_area, err, evaluate, format_number, num, parse_cached,
-    resolve_sheet, used_height,
+    Area, EvalContext, as_area, bound_area, err, evaluate, format_number, num, resolve_sheet,
+    used_height,
 };
-use crate::parser::{Expr, parse_formula};
+use crate::parser::Expr;
 use crate::reference::RowRange;
 
 use super::criteria::Criterion;
@@ -407,10 +407,7 @@ fn computed(
     );
     if let Some(source) = ctx.provider.formula(criteria.sheet, at) {
         let source = source.strip_prefix('=').unwrap_or(source);
-        let formula = match ctx.parse_cache {
-            Some(cache) => parse_cached(cache, source),
-            None => parse_formula(source).ok().map(Arc::new),
-        };
+        let formula = ctx.parse_formula(criteria.sheet, source);
         return Some(match formula {
             Some(formula) => Condition::Computed { formula, at },
             None => Condition::Constant(false),

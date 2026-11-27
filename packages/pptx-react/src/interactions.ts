@@ -1,3 +1,4 @@
+import { bentConnectorHit, containsBentConnector } from '../../../shared/bentConnectorHit';
 import type {
   DeckSnapshot,
   ShapeRect,
@@ -248,7 +249,7 @@ export function hoverTargetAtPoint(
   for (let index = frame.primitives.length - 1; index >= 0; index -= 1) {
     const primitive = frame.primitives[index];
     if (!primitive.shapeId) continue;
-    const local = containedPoint(primitive, at);
+    const local = hitPoint(primitive, at);
     if (!local) continue;
     return primitive.kind === 'textBox' && primitive.storyId && hasCaretNear(primitive, local)
       ? 'text'
@@ -285,15 +286,49 @@ export function farEdge(origin: number, extent: number): number {
   return Math.fround(Math.fround(origin) + Math.fround(extent));
 }
 
-/** The local point when it lands inside the primitive, else null. */
-function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
+/** The local point when it lands on the primitive, else null. Overflowing text
+ *  also answers where its glyphs spill past the frame, as the engine's `hit_rect` does. */
+function hitPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
   const local = localPoint(primitive, point);
-  return local.x >= Math.fround(primitive.x) &&
-    local.x <= farEdge(primitive.x, primitive.w) &&
-    local.y >= Math.fround(primitive.y) &&
-    local.y <= farEdge(primitive.y, primitive.h)
+  const connector = primitive.kind === 'shape' ? bentConnectorHit(primitive) : undefined;
+  if (connector) return containsBentConnector(connector, local) ? local : null;
+  if (withinRect(primitive, local)) return local;
+  return primitive.kind === 'textBox' && primitive.overflow &&
+    withinRect(overflowRect(primitive), local)
     ? local
     : null;
+}
+
+function withinRect(rect: PrimitiveGeometry, point: SlidePoint): boolean {
+  return point.x >= Math.fround(rect.x) &&
+    point.x <= farEdge(rect.x, rect.w) &&
+    point.y >= Math.fround(rect.y) &&
+    point.y <= farEdge(rect.y, rect.h);
+}
+
+/** The frame grown to every line and run. Mirrors the engine's `rect_covering_text`. */
+function overflowRect(textBox: TextBoxPrimitive): PrimitiveGeometry {
+  const f32 = Math.fround;
+  let left = f32(textBox.x);
+  let right = farEdge(textBox.x, textBox.w);
+  let top = f32(textBox.y);
+  let bottom = farEdge(textBox.y, textBox.h);
+  for (const line of textBox.lines) {
+    left = Math.min(left, f32(line.x));
+    right = Math.max(right, farEdge(line.x, line.width));
+    top = Math.min(top, f32(line.y));
+    bottom = Math.max(bottom, farEdge(line.y, line.height));
+    for (const run of line.runs) {
+      left = Math.min(left, f32(run.x));
+      right = Math.max(right, farEdge(run.x, run.width));
+    }
+  }
+  return {
+    x: left,
+    y: top,
+    w: Math.max(f32(right - left), f32(textBox.w)),
+    h: Math.max(f32(bottom - top), f32(textBox.h)),
+  };
 }
 
 function hasTextColumns(textBox: TextBoxPrimitive): boolean {
@@ -451,9 +486,11 @@ export function pointerTargetAtPoint(
   for (let index = frame.primitives.length - 1; index >= 0; index -= 1) {
     const primitive = frame.primitives[index];
     if (!primitive.shapeId) continue;
-    const local = containedPoint(primitive, at);
+    const local = hitPoint(primitive, at);
     if (!local) continue;
-    return withinBorderBand(primitive, local, scale) ? 'shape' : 'text';
+    return withinRect(primitive, local) && withinBorderBand(primitive, local, scale)
+      ? 'shape'
+      : 'text';
   }
   return target;
 }

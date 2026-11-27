@@ -2,13 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
-import type { PresentationHandle, SlideDisplayList } from '@betteroffice/pptx';
+import type { PresentationHandle, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import { initWasm, openPresentation } from '@betteroffice/pptx';
-import { farEdge, hoverTargetAtPoint } from './interactions';
+import { farEdge, hoverTargetAtPoint, pointerTargetAtPoint } from './interactions';
 
 const root = resolve(import.meta.dir, '../../..');
 let handle: PresentationHandle;
 let frame: SlideDisplayList;
+let overflowHandle: PresentationHandle;
+let overflowFrame: SlideDisplayList;
 
 beforeAll(async () => {
   const [wasm, sourceDeck, font] = await Promise.all([
@@ -19,7 +21,8 @@ beforeAll(async () => {
   const zip = await JSZip.loadAsync(sourceDeck);
   const slide = zip.file('ppt/slides/slide1.xml');
   if (!slide) throw new Error('fixture slide is missing');
-  const xml = (await slide.async('string'))
+  const source = await slide.async('string');
+  const xml = source
     .replace(
       '<a:xfrm><a:off x="762000" y="533400"/>',
       '<a:xfrm rot="1020000" flipH="1"><a:off x="762000" y="533400"/>'
@@ -30,15 +33,26 @@ beforeAll(async () => {
     );
   zip.file('ppt/slides/slide1.xml', xml);
   const deck = await zip.generateAsync({ type: 'uint8array' });
+  zip.file(
+    'ppt/slides/slide1.xml',
+    source.replace(
+      '<a:off x="762000" y="3276600"/><a:ext cx="5715000" cy="1066800"/>',
+      '<a:off x="762000" y="3276600"/><a:ext cx="5715000" cy="228600"/>'
+    )
+  );
+  const overflowDeck = await zip.generateAsync({ type: 'uint8array' });
   await initWasm(wasm);
-  handle = openPresentation(deck, {
-    clientId: 9101,
-    fonts: [{ family: 'Liberation Sans', bytes: font }],
-  });
+  const fonts = [{ family: 'Liberation Sans', bytes: font }];
+  handle = openPresentation(deck, { clientId: 9101, fonts });
   frame = handle.layoutSlide(0);
+  overflowHandle = openPresentation(overflowDeck, { clientId: 9102, fonts });
+  overflowFrame = overflowHandle.layoutSlide(0);
 }, 30_000);
 
-afterAll(() => handle.dispose());
+afterAll(() => {
+  handle.dispose();
+  overflowHandle.dispose();
+});
 
 describe('hover target parity with the engine', () => {
   test('agrees with hitTest across the slide', () => {
@@ -102,5 +116,29 @@ describe('hover target parity with the engine', () => {
       }
     }
     expect(disagreements).toEqual([]);
+  });
+
+  test('agrees where overflowing text spills past its frame', () => {
+    const overflowing = overflowFrame.primitives.find(
+      (primitive): primitive is TextBoxPrimitive =>
+        primitive.kind === 'textBox' && Boolean(primitive.overflow)
+    );
+    if (!overflowing) throw new Error('fixture text does not overflow');
+    const last = overflowing.lines[overflowing.lines.length - 1];
+    expect(last.y).toBeGreaterThan(overflowing.y + overflowing.h);
+    const disagreements: string[] = [];
+    for (let y = 0; y < overflowFrame.height; y += 3) {
+      for (let x = 0; x < overflowFrame.width; x += 3) {
+        const hovered = hoverTargetAtPoint(overflowFrame, { x, y });
+        const engine = overflowHandle.hitTest(x, y)?.kind ?? null;
+        if (hovered !== engine && disagreements.length < 25) {
+          disagreements.push(`(${x},${y}) hover=${hovered} engine=${engine}`);
+        }
+      }
+    }
+    expect(disagreements).toEqual([]);
+    const spilled = { x: last.x + last.width / 2, y: last.y + last.height / 2 };
+    expect(overflowHandle.hitTest(spilled.x, spilled.y)?.kind).toBe('text');
+    expect(pointerTargetAtPoint(overflowFrame, spilled)).toBe('text');
   });
 });
