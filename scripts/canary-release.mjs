@@ -233,20 +233,6 @@ export function checkPublishable(set, manifestOf) {
   if (problems.length) throw new Error(problems.join('\n'));
 }
 
-function snapshotStamp(version) {
-  return BigInt(version.slice(version.lastIndexOf('.') + 1));
-}
-
-/** Names every package whose canary tag already points at a later snapshot than this set's. */
-export function newerCanaries(set, canaryOf) {
-  return set.flatMap(({ name, version }) => {
-    const current = canaryOf(name);
-    return isCanaryVersion(current) && snapshotStamp(current) > snapshotStamp(version)
-      ? [`${name}@${CANARY_TAG} is already ${current}, later than ${version}`]
-      : [];
-  });
-}
-
 function pause(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -254,8 +240,6 @@ function pause(ms) {
 function publish(destination) {
   const set = plan(destination);
   checkPublishable(set, (entry) => packedManifest(tarball(destination, entry)));
-  const newer = newerCanaries(set, (name) => distTags(name)[CANARY_TAG]);
-  if (newer.length) throw new Error(newer.join('\n'));
   const latest = new Map(set.map(({ name }) => [name, distTags(name).latest]));
   for (const entry of set) {
     if (npmView(`${entry.name}@${entry.version}`, 'version') === entry.version) {
@@ -271,7 +255,13 @@ function publish(destination) {
     if (attempt) pause(10_000);
     problems = [];
     for (const { name, version } of set) {
-      const tags = distTags(name);
+      let tags;
+      try {
+        tags = distTags(name);
+      } catch (error) {
+        problems.push(`${name}: ${error.message}`);
+        continue;
+      }
       const before = latest.get(name);
       if (String(tags.latest ?? '').includes('-') || (tags.latest === undefined && before !== undefined)) {
         problems.push(`${name} latest is ${tags.latest}, was ${before}`);

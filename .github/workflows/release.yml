@@ -765,7 +765,8 @@ jobs:
           name: npm-canary
           path: ${{ runner.temp }}/canary
 
-      # A retry of this job alone runs these checks again.
+      # A retry of this job alone runs these checks again, and a run older than the
+      # newest release run publishes nothing, so a retry never moves the tag back.
       - name: Check that this commit is still main's head and no release is running
         id: gate
         env:
@@ -776,8 +777,12 @@ jobs:
         run: |
           head=$(gh api "repos/$REPO/commits/main" --jq .sha)
           running=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=in_progress&per_page=100" --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          later=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?per_page=100" --jq "[.workflow_runs[] | select(.id > $RUN_ID)] | length")
           if [ "$head" != "$SHA" ]; then
             echo "::notice::main has moved on from $SHA to $head, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif [ "$later" != 0 ]; then
+            echo "::notice::A later release run exists, so this canary is not published."
             echo "go=false" >> "$GITHUB_OUTPUT"
           elif [ "$running" != 0 ]; then
             echo "::notice::A release run is in progress, so this canary is not published."

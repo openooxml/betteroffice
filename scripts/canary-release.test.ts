@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { canarySet, checkPublishable, keepDependencyRanges, newerCanaries, nativeDependents, pinToCanaries } from './canary-release.mjs';
+import { canarySet, checkPublishable, keepDependencyRanges, nativeDependents, pinToCanaries } from './canary-release.mjs';
 import { NATIVE_PACKAGES } from './native-bindings.mjs';
 import { workspaceEntries } from './published-packages.mjs';
 
@@ -76,6 +76,7 @@ describe('canary workflow', () => {
     expect(publisher.steps[3].env.SHA).toBe('${{ github.sha }}');
     expect(publisher.steps[3].run).toContain('repos/$REPO/commits/main');
     expect(publisher.steps[3].run).toContain('runs?status=in_progress');
+    expect(publisher.steps[3].run).toContain('select(.id > $RUN_ID)');
     expect(publisher.steps[4].if).toBe("steps.gate.outputs.go == 'true'");
     expect(publisher.steps[4].run).toBe('node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"');
     expect(canary.outputs.publish).toBe('${{ steps.still-idle.outputs.idle }}');
@@ -151,15 +152,6 @@ describe('canary set', () => {
     expect(() => checkPublishable(stable, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('not a canary version');
     const other = [{ name: '@x/a', version: '1.1.0-alpha-canary.1', directory: '' }];
     expect(() => checkPublishable(other, () => ({ name: '@x/a', version: '1.1.0-alpha-canary.1' }))).toThrow('not a canary version');
-  });
-
-  test('refuses to publish over a later snapshot on the canary tag', () => {
-    const set = [{ name: '@x/a', version: '1.1.0-canary.20261127120000', directory: '' }];
-    expect(newerCanaries(set, () => '1.1.0-canary.20261127130000')).toEqual([
-      '@x/a@canary is already 1.1.0-canary.20261127130000, later than 1.1.0-canary.20261127120000'
-    ]);
-    expect(newerCanaries(set, () => '1.1.0-canary.20261127110000')).toEqual([]);
-    expect(newerCanaries(set, () => undefined)).toEqual([]);
   });
 
   test('keeps the dependency ranges Changesets rewrote, so only versions change', () => {
