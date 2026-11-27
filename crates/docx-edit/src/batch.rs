@@ -1784,7 +1784,9 @@ fn unlinked_toc_entry_ids<T: ReadTxn>(openers: &[ParagraphView], txn: &T) -> BTr
         let Some(field) = field.as_ref().filter(|_| kind == "field") else {
             continue;
         };
-        if crate::map_string(field, txn, "spanningFieldProjection").as_deref() != Some("unlinkedToc") {
+        if crate::map_string(field, txn, "spanningFieldProjection").as_deref()
+            != Some("unlinkedToc")
+        {
             continue;
         }
         let Some(Out::Any(Any::Array(blocks))) = field.get(txn, "fieldSpanBlocks") else {
