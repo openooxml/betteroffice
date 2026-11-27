@@ -209,9 +209,7 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     return true;
   }, [store, presentation, canvas, cancelActive, position, paint]);
 
-  const cursorAt = useCallback((event: PointerEvent<HTMLElement>): string => {
-    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
-    if (handle && RESIZE_HANDLES.includes(handle)) return resizeCursor(handle);
+  const geometryCursor = useCallback((event: PointerEvent<HTMLElement>): 'text' | 'move' | 'default' => {
     const confirmed = presentation?.getVisualSnapshot()?.view.confirmed;
     const point = position(event);
     if (!store || !presentation?.selectionEnabled || !canvas.current || !confirmed || !point) return 'default';
@@ -219,10 +217,15 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     return hit?.kind === 'text' ? 'text' : hit?.kind === 'shape' ? 'move' : 'default';
   }, [store, presentation, canvas, position]);
 
+  const cursorAt = (event: PointerEvent<HTMLElement>, geometry: ReturnType<typeof geometryCursor>): string => {
+    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
+    return handle && RESIZE_HANDLES.includes(handle) ? resizeCursor(handle) : geometry;
+  };
+
   const hoverCursor = useCallback((event: PointerEvent<HTMLElement>): string | null => {
     if (event.buttons !== 0 || (store && peerlessGestureActive(store))) return null;
-    return cursorAt(event);
-  }, [store, cursorAt]);
+    return geometryCursor(event);
+  }, [store, geometryCursor]);
 
   const onPointerMove = useCallback((event: PointerEvent<HTMLElement>): boolean => {
     const current = gesture.current;
@@ -342,6 +345,6 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     cancel();
   }, [cancel]);
 
-  return { preview: preview.current, cursorAt, hoverCursor, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
+  return { preview: preview.current, cursorAt, geometryCursor, hoverCursor, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
     onLostPointerCapture: onPointerCancel };
 }
