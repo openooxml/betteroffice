@@ -115,6 +115,7 @@ class FakeCommandClient implements PresentationCommandClient {
   save = mock((): Promise<Uint8Array> => Promise.resolve(new Uint8Array()));
   read = mock((_request?: PptxReadRequest): Promise<PresentationCommandReadResult> =>
     Promise.reject(new Error('main-thread story read')));
+  previewShapeRect = mock(() => Promise.reject(new Error('Shape preview is not available in this fake client')));
   thumbnail = mock((slideId: string, knownRevision?: number): Promise<PresentationCommandThumbnailResult> =>
     Promise.resolve({ session: 'session', incarnation: 'worker', epoch: 1,
       slideId, slideRevision: knownRevision ?? 0, status: 'unchanged' }));

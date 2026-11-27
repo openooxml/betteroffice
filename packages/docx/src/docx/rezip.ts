@@ -11,9 +11,15 @@
 import type { HeaderFooter } from '../types/content';
 import type { Document } from '../types/document';
 import type { RawDocxContent } from './unzip';
-import { writeDocumentWithRust } from './rustSaveFacade';
+import {
+  modelMatchesSource,
+  modelPartsRewrittenWarning,
+  sameModelSavePackageMetadata,
+} from './modelSave';
+import { preloadParseWasm } from './parseWasm';
+import { writeDocumentWithRust, type RustSaveDeterminism } from './rustSaveFacade';
 import { serializeHeaderFooter } from './serializer';
-import { unzipContainer } from './wasm';
+import { preloadOpcWasm, unzipContainer } from './wasm';
 import { createEmptyDocx } from './rezip/createEmpty';
 import {
   findMaxRId,
@@ -51,7 +57,7 @@ export interface RepackOptions {
 
 /** Repack a public Document through the Rust package writer. */
 export async function repackDocx(doc: Document, options: RepackOptions = {}): Promise<ArrayBuffer> {
-  return (await repackDocxWithWarnings(doc, options)).buffer;
+  return (await repackModel(doc, options, false)).buffer;
 }
 
 export interface RepackResult {
@@ -64,13 +70,53 @@ export async function repackDocxWithWarnings(
   doc: Document,
   options: RepackOptions = {}
 ): Promise<RepackResult> {
-  if (!doc.originalBuffer) {
+  return repackModel(doc, options, true);
+}
+
+async function repackModel(
+  doc: Document,
+  options: RepackOptions,
+  includeWarnings: boolean
+): Promise<RepackResult> {
+  const source = doc.originalBuffer;
+  if (!source) {
     throw new Error(
       'Cannot repack document: no original buffer for round-trip. Use createDocx() for new documents.'
     );
   }
-  const result = await writeDocumentWithRust(doc, doc.originalBuffer, options);
-  return { buffer: result.buffer, warnings: result.warnings };
+  let sourceCopy: ArrayBuffer | undefined;
+  try {
+    sourceCopy = new Uint8Array(source).slice().buffer;
+  } catch {
+    sourceCopy = undefined;
+  }
+
+  let determinism: RustSaveDeterminism | undefined;
+  let matches = false;
+  if (sourceCopy) {
+    await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
+    const digest = await crypto.subtle.digest('SHA-256', sourceCopy);
+    determinism = {
+      seed: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+      now: new Date().toISOString(),
+    };
+    matches = modelMatchesSource(doc, sourceCopy, determinism);
+  }
+  const { buffer, warnings } = await writeDocumentWithRust(doc, source, options, undefined, determinism);
+  if (!sourceCopy) return { buffer, warnings };
+
+  try {
+    if (matches && sameModelSavePackageMetadata(sourceCopy, buffer)) {
+      return { buffer: sourceCopy, warnings };
+    }
+    if (includeWarnings) {
+      const warning = modelPartsRewrittenWarning(sourceCopy, buffer);
+      if (warning) warnings.push(warning);
+    }
+  } catch {
+    return { buffer, warnings };
+  }
+  return { buffer, warnings };
 }
 
 export async function repackDocxFromRaw(
@@ -269,7 +315,7 @@ export function isDocxBuffer(buffer: ArrayBuffer): boolean {
 
 export async function createDocx(doc: Document): Promise<ArrayBuffer> {
   const originalBuffer = await createEmptyDocx();
-  return repackDocx({ ...doc, originalBuffer });
+  return (await writeDocumentWithRust({ ...doc, originalBuffer }, originalBuffer)).buffer;
 }
 
 /** Compatibility helper for callers that update header/footer parts directly. */

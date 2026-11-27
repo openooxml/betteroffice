@@ -7,6 +7,7 @@
  * no allocation of app state and no reads back from the canvas.
  */
 
+import type { CellScriptFamilies, ScriptFontDisplayList } from '../../../../shared/office-session/xlsxScriptFonts';
 import type {
   DisplayList,
   DrawCmd,
@@ -27,6 +28,8 @@ import { wrapLines, wrappedLineY } from './wrap';
 
 const STACKED_LINE_HEIGHT_RATIO = 1.2;
 const STACKED_ASCENT_RATIO = 0.8;
+const WRAPPED_ASCENT_PER_PT = (96 / 72) * 0.7;
+const WRAPPED_DESCENT_PER_PT = (96 / 72) * 0.2;
 
 const ALIGN_TO_TEXT_ALIGN: Record<NonNullable<TextCmd['align']>, CanvasTextAlign> = {
   left: 'left',
@@ -75,7 +78,13 @@ export function paintDisplayList(
   ctx.rect(0, 0, dl.width, dl.height);
   ctx.clip();
   ctx.clearRect(0, 0, dl.width, dl.height);
-  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options);
+  const left = Math.max(0, -origin.x / dpr);
+  const top = Math.max(0, -origin.y / dpr);
+  const right = Math.min(dl.width, ((ctx.canvas?.width ?? Infinity) - origin.x) / dpr);
+  const bottom = Math.min(dl.height, ((ctx.canvas?.height ?? Infinity) - origin.y) / dpr);
+  const bounds = { x: left, y: top, w: right - left, h: bottom - top };
+  const { cellScriptFamilies } = dl as ScriptFontDisplayList;
+  for (const cmd of dl.commands) paintCommand(ctx, cmd, dpr, origin, options, bounds, cellScriptFamilies);
   ctx.restore();
 }
 
@@ -84,7 +93,9 @@ function paintCommand(
   cmd: DrawCmd,
   dpr: number,
   origin: { x: number; y: number },
-  options: PaintOptions
+  options: PaintOptions,
+  bounds: Rect,
+  cellScriptFamilies?: CellScriptFamilies,
 ): void {
   switch (cmd.op) {
     case 'image':
@@ -106,7 +117,7 @@ function paintCommand(
       paintClipped(ctx, cmd.clip, () => paintPath(ctx, cmd));
       return;
     case 'text':
-      paintText(ctx, cmd);
+      paintText(ctx, cmd, bounds, cellScriptFamilies);
       return;
   }
 }
@@ -277,7 +288,7 @@ function strokeSegment(
 // this run so it never bleeds into later commands. underline/strike are drawn
 // as lines positioned off the measured run box, since canvas has no native
 // text-decoration.
-function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
+function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd, bounds: Rect, cellScriptFamilies?: CellScriptFamilies): void {
   ctx.save();
   if (cmd.clip) {
     ctx.beginPath();
@@ -285,15 +296,15 @@ function paintText(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {
     ctx.clip();
   }
   ctx.fillStyle = cmd.color;
-  const font = fontString(cmd);
+  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
+  const font = fontString(cmd, pieces ? undefined : cellScriptFamilies);
   ctx.font = font;
   (ctx as CanvasRenderingContext2D & { textRendering?: string }).textRendering = 'geometricPrecision';
   ctx.textBaseline = 'alphabetic';
-  const pieces = cmd.runs?.length ? runPieces(cmd) : undefined;
   if (pieces && cmd.wrap) {
-    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font));
+    paintWrappedPieces(ctx, cmd, cmd.wrap, pieces, newPiecePaint(font, cellScriptFamilies), bounds);
   } else if (pieces) {
-    paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font));
+    paintPieces(ctx, cmd, pieces, cmd.y, newPiecePaint(font, cellScriptFamilies));
   } else if (cmd.stacked) {
     paintStackedText(ctx, cmd);
   } else if (cmd.rotationDeg !== undefined && cmd.rotationDeg !== null) {
@@ -325,16 +336,17 @@ interface PiecePaint {
   font: string;
   fonts: Map<TextPiece['cmd'], string>;
   widths: Map<string, Map<string, number>>;
+  cellScriptFamilies?: CellScriptFamilies;
 }
 
-function newPiecePaint(font: string): PiecePaint {
-  return { font, fonts: new Map(), widths: new Map() };
+function newPiecePaint(font: string, cellScriptFamilies?: CellScriptFamilies): PiecePaint {
+  return { font, fonts: new Map(), widths: new Map(), cellScriptFamilies };
 }
 
 function pieceFont(paint: PiecePaint, piece: TextPiece): string {
   let font = paint.fonts.get(piece.cmd);
   if (font === undefined) {
-    font = fontString(piece.cmd);
+    font = fontString(piece.cmd, paint.cellScriptFamilies);
     paint.fonts.set(piece.cmd, font);
   }
   return font;
@@ -381,10 +393,62 @@ function paintWrappedPieces(
   wrap: TextWrap,
   pieces: TextPiece[],
   paint: PiecePaint,
+  bounds: Rect,
 ): void {
-  const lines = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
-  const count = Math.min(lines.length, wrap.maxLines ?? lines.length);
-  lines.slice(0, count).forEach((line, index) => paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, count, wrap), paint));
+  const wrapped = wrapRunLines(cmd.text, pieces, wrap.width, (piece, part) => measurePiece(ctx, paint, piece, part));
+  const lines = wrapped.slice(0, Math.max(0, wrap.maxLines ?? wrapped.length));
+  const layout = pieces.some((piece) => piece.cmd.fontSize !== pieces[0]!.cmd.fontSize)
+    ? wrappedLineMetrics(cmd.y, cmd.fontSize, wrap, lines)
+    : undefined;
+  if (!layout) {
+    lines.forEach((line, index) => {
+      paintPieces(ctx, cmd, line, wrappedLineY(cmd.y, index, lines.length, wrap), paint);
+    });
+    return;
+  }
+
+  const clip = cmd.clip ?? bounds;
+  const clipTop = Math.max(clip.y, bounds.y);
+  const clipBottom = Math.min(clip.y + clip.h, bounds.y + bounds.h);
+  const clipLeft = Math.max(clip.x, bounds.x);
+  const clipRight = Math.min(clip.x + clip.w, bounds.x + bounds.w);
+  if (clipTop >= clipBottom || clipLeft >= clipRight) return;
+
+  const { blockTop, metrics } = layout;
+  const baseSized = metrics.every(({ size }) => size === cmd.fontSize);
+  for (const [index, line] of lines.entries()) {
+    const { top, size } = metrics[index]!;
+    const ascent = size * WRAPPED_ASCENT_PER_PT;
+    const baseline = baseSized ? wrappedLineY(cmd.y, index, lines.length, wrap) : blockTop + (top + ascent);
+    const lineTop = baseSized ? baseline - ascent : blockTop + top;
+    if (lineTop >= clipBottom) break;
+    if (baseline + size * WRAPPED_DESCENT_PER_PT > clipTop) paintPieces(ctx, cmd, line, baseline, paint);
+  }
+}
+
+function wrappedLineMetrics(y: number, fontSize: number, wrap: TextWrap, lines: TextPiece[][]) {
+  if (!Number.isFinite(fontSize) || fontSize <= 0 || !Number.isFinite(wrap.lineHeight) || wrap.lineHeight <= 0) {
+    return undefined;
+  }
+
+  const metrics: { top: number; size: number }[] = [];
+  let totalHeight = 0;
+  for (const line of lines) {
+    const size = line.reduce((largest, piece) => Math.max(largest, piece.cmd.fontSize), line[0]?.cmd.fontSize ?? fontSize);
+    const height = wrap.lineHeight * (size / fontSize);
+    if (!Number.isFinite(height) || height <= 0) return undefined;
+    metrics.push({ top: totalHeight, size });
+    totalHeight += height;
+  }
+  const last = metrics[metrics.length - 1];
+  if (!last) return undefined;
+  const lastBaseline = last.top + last.size * WRAPPED_ASCENT_PER_PT;
+  const lastBottom = lastBaseline + last.size * WRAPPED_DESCENT_PER_PT;
+  if (!Number.isFinite(totalHeight) || !Number.isFinite(lastBottom)) return undefined;
+  const topAnchor = y - fontSize * WRAPPED_ASCENT_PER_PT;
+  const bottomAnchor = y + fontSize * WRAPPED_DESCENT_PER_PT - lastBottom;
+  const blockTop = wrap.valign === 'top' ? topAnchor : wrap.valign === 'center' ? topAnchor / 2 + bottomAnchor / 2 : bottomAnchor;
+  return Number.isFinite(blockTop) ? { blockTop, metrics } : undefined;
 }
 
 /** `paintRun` for a piece painted left-aligned at `y`, `width` wide, in a font without highlight or dashed underline. */

@@ -2,11 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::inline::DirectionScope;
 use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
 use crate::xml::ParseError;
 
+use super::paragraph::is_safe_attribute_name;
 use super::s10::SerializerDeterminism;
+use super::xml_writer::escape_xml;
 
 /// The most kept paragraphs one save describes; its count covers them all.
 const KEPT_PARAGRAPH_LIMIT: usize = 200;
@@ -57,6 +60,110 @@ pub struct S13SaveReport {
     pub structure_dropped: Vec<DroppedStructure>,
 }
 
+/// The `w:dir` and `w:bdo` elements open where a paragraph is being written, and how many of
+/// them enclose the wrapper element being written.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DirectionScopes {
+    open: Vec<DirectionScope>,
+    base: usize,
+    /// How many open scopes the next node with width keeps open, as noted before a node without.
+    kept: Option<usize>,
+}
+
+pub(crate) fn shared_direction_prefix(left: &[DirectionScope], right: &[DirectionScope]) -> usize {
+    left.iter().zip(right).take_while(|(a, b)| a == b).count()
+}
+
+impl DirectionScopes {
+    fn close_to(&mut self, len: usize) -> String {
+        self.kept = None;
+        let mut xml = String::new();
+        let at = len.min(self.open.len());
+        for scope in self.open.drain(at..).rev() {
+            xml.push_str("</");
+            xml.push_str(scope.kind.element());
+            xml.push('>');
+        }
+        xml
+    }
+
+    /// The tags that leave exactly the scopes of `target` open for a run, never closing one
+    /// opened outside the wrapper element being written.
+    pub(crate) fn transition(&mut self, target: &[DirectionScope]) -> String {
+        let shared = shared_direction_prefix(&self.open, target);
+        let mut xml = self.close_to(shared.max(self.base));
+        for scope in &target[shared..] {
+            if self
+                .open
+                .iter()
+                .any(|open| open.kind == scope.kind && open.id == scope.id)
+            {
+                continue;
+            }
+            xml.push('<');
+            xml.push_str(scope.kind.element());
+            if let Some(val) = &scope.val {
+                xml.push_str(" w:val=\"");
+                xml.push_str(&escape_xml(val));
+                xml.push('"');
+            }
+            for attribute in &scope.extra {
+                if is_safe_attribute_name(&attribute.name) {
+                    xml.push(' ');
+                    xml.push_str(&attribute.name);
+                    xml.push_str("=\"");
+                    xml.push_str(&escape_xml(&attribute.value));
+                    xml.push('"');
+                }
+            }
+            xml.push('>');
+            self.open.push(scope.clone());
+        }
+        xml
+    }
+
+    /// Whether a scope opened inside the wrapper element being written is open, so the next node
+    /// with width decides which of them a node without width stays inside.
+    pub(crate) fn any_open(&self) -> bool {
+        self.open.len() > self.base
+    }
+
+    /// Notes, before a node without width, the scopes the next node with width keeps open where
+    /// it starts; `None` when no such node follows inside the wrapper element being written.
+    pub(crate) fn look_ahead(&mut self, next: Option<&[DirectionScope]>) {
+        self.kept = next.map(|next| shared_direction_prefix(&self.open, next));
+    }
+
+    /// The tags closing, before a node that carries no scope, each scope opened inside the
+    /// wrapper element being written: before a node without width, only those the next node
+    /// with width does not keep open, as [`Self::look_ahead`] noted.
+    pub(crate) fn unscoped(&mut self, zero_width: bool) -> String {
+        let kept = self.kept.take().filter(|_| zero_width).unwrap_or_default();
+        self.close_to(kept.max(self.base))
+    }
+
+    /// Enters a wrapper element whose runs share `scopes`: closes, before it, each open scope
+    /// they do not share, every one for a wrapper without runs, and keeps the others outside it.
+    pub(crate) fn enter_wrapper(&mut self, scopes: Option<&[DirectionScope]>) -> (String, usize) {
+        let shared = shared_direction_prefix(&self.open, scopes.unwrap_or_default());
+        let xml = self.close_to(shared.max(self.base));
+        let base = std::mem::replace(&mut self.base, self.open.len());
+        (xml, base)
+    }
+
+    /// The tags closing the scopes opened inside the wrapper element being left.
+    pub(crate) fn leave_wrapper(&mut self, base: usize) -> String {
+        let xml = self.close_to(self.base);
+        self.base = base;
+        xml
+    }
+
+    pub(crate) fn close_all(&mut self) -> String {
+        self.base = 0;
+        self.close_to(0)
+    }
+}
+
 /// Per-serialization state. Generated identities are taken only from the
 /// injected seed; serializers never consult ambient randomness or a clock.
 #[derive(Clone, Debug)]
@@ -76,6 +183,7 @@ pub struct SerializerContext {
     pub(crate) in_control: bool,
     pub(crate) in_revision: bool,
     pub(crate) vmerge_continuation: u32,
+    pub(crate) direction: DirectionScopes,
     splice: Option<SpliceRecorder>,
     document_root: Option<String>,
     form_data_token: Option<String>,
@@ -138,6 +246,7 @@ impl SerializerContext {
             in_control: false,
             in_revision: false,
             vmerge_continuation: 0,
+            direction: DirectionScopes::default(),
             splice: None,
             document_root: None,
             form_data_token: None,

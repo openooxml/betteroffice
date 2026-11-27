@@ -346,7 +346,10 @@ describe('command gate', () => {
           alignment: 'center',
           styleId: 'Heading1',
           highlight: 'yellow',
-          paragraphProperties: { numPr: { numId: 1, ilvl: 0 }, lineSpacing: 360, spaceBefore: 240, spaceAfter: 120 },
+          paragraphProperties: {
+            numPr: { numId: 1, ilvl: 0 }, listIsBullet: true, listNumFmt: 'bullet',
+            lineSpacing: 360, spaceBefore: 240, spaceAfter: 120,
+          },
         },
         fontFamily: 'Georgia',
         fontSize: 12,
@@ -369,6 +372,27 @@ describe('command gate', () => {
     expect(evaluateDocxCommand('alignment', { value: 'center' }, env).active).toBe(true);
     expect(evaluateDocxCommand('alignment', { value: 'right' }, env).active).toBe(false);
     expect(evaluateDocxCommand('editingMode', { mode: 'editing' }, env).active).toBe(true);
+  });
+
+  test('the list toggles read the kind of the list the paragraph is on, not its numId', () => {
+    const on = (paragraphProperties: typeof PLAIN_CONTEXT.paragraphProperties) => {
+      const env = testEnvironment({
+        selection: { context: { ...PLAIN_CONTEXT, paragraphProperties }, fontFamily: null, fontSize: null },
+      });
+      return [
+        evaluateDocxCommand('bulletList', undefined, env).active,
+        evaluateDocxCommand('numberedList', undefined, env).active,
+      ];
+    };
+    expect(on({ numPr: { numId: 1, ilvl: 0 }, listIsBullet: false, listNumFmt: 'decimal' })).toEqual([false, true]);
+    expect(on({ numPr: { numId: 2, ilvl: 0 }, listIsBullet: true, listNumFmt: 'bullet' })).toEqual([true, false]);
+    expect(on({
+      numPr: { numId: 1, ilvl: 0 }, listDef: { key: '7:3', numId: 1 }, listIsBullet: true, listNumFmt: 'bullet',
+    })).toEqual([true, false]);
+    expect(on({
+      numPr: { numId: 2, ilvl: 1 }, listDef: { key: '7:4', numId: 2 }, listIsBullet: false, listNumFmt: 'lowerLetter',
+    })).toEqual([false, true]);
+    expect(on({})).toEqual([false, false]);
   });
 
   test('states and reasons are plain JSON', () => {

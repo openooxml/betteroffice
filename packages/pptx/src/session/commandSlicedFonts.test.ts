@@ -1,12 +1,20 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { resolveScriptFallbackFace } from '@betteroffice/fonts';
+import { openSlicedFace } from '../../../fonts/src/progressive-entry';
+import { configureFontCdn as configureTestFontCdn } from '../../../fonts/src/fontCdn';
+import { fontAssetResponse, fontRuntimeWithoutPacks, withBrowserFontGlobals } from '../../../fonts/src/fontAssets.test-support';
+import { spyOnFontFetch } from '../../../fonts/src/fontFetch.test-support';
+import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { paintSlide } from '../render/canvas';
 import { prepareTextFamilies } from '../render/textFamilies';
+import type { SlideDisplayList } from '../types';
 import { createSlicedFontFaces, slicedFacesSupported, type SlicedFontFace } from './commandSlicedFonts';
 
 let added: string[];
 let removed: string[];
 const originals = new Map<string, PropertyDescriptor | undefined>();
 function set(key: string, value: unknown) {
-  originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+  if (!originals.has(key)) originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
   Object.defineProperty(globalThis, key, { configurable: true, value });
 }
 beforeEach(() => {
@@ -50,6 +58,126 @@ function fakeFace(fail: () => boolean = () => false): SlicedFontFace & { asked: 
   };
 }
 
+function unloadedChunkTexts(face: SlicedFontFace): [string, string] {
+  const textByChunk = new Map<number, string>();
+  for (let cp = 0x4e00; cp <= 0x9fff && textByChunk.size < 2; cp += 1) {
+    const text = String.fromCodePoint(cp);
+    const missing = [...new Set(face.chunksOf(text))].filter((chunk) => !face.loadedChunks().has(chunk));
+    if (missing.length === 1) textByChunk.set(missing[0]!, text);
+  }
+  expect(textByChunk.size).toBe(2);
+  return [...textByChunk.values()] as [string, string];
+}
+
+test('T12: a CDN chunk failure cools other chunks and whole-face export until the retry window', async () => {
+  const previous = getFontCdnConfiguration();
+  configureTestFontCdn({ baseUrl: false });
+  const restore = withBrowserFontGlobals();
+  const fetch = globalThis.fetch;
+  const sliced = createSlicedFontFaces();
+  const load = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false }).resolveScriptFallback('cjk-jp', false, false)!;
+  const now = Date.now();
+  const clock = spyOn(Date, 'now').mockReturnValue(now);
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  let fail = false;
+  const failed: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    if (fail && String(input).includes('/fonts-cjk@')) {
+      failed.push(String(input));
+      throw new TypeError('Offline');
+    }
+    return fontAssetResponse(input);
+  }) as typeof fetch;
+  try {
+    setFontCdnConfiguration(undefined);
+    const opened = await openSlicedFace(load.slices!);
+    const [text, otherText] = unloadedChunkTexts(opened);
+    sliced.add('Noto Sans JP', opened, load);
+    fail = true;
+    const painted = await sliced.coverage.prepare('Noto Sans JP', text);
+    expect(failed).toHaveLength(1);
+    await expect(sliced.read('Noto Sans JP', text, null)).resolves.toBeUndefined();
+    await expect(sliced.read('Noto Sans JP', otherText, null)).resolves.toBeUndefined();
+    const korean = fontRuntimeWithoutPacks().createFontProvider().resolveScriptFallback('cjk-kr', false, false)!;
+    await expect(openSlicedFace(korean.slices!)).rejects.toThrow('Offline');
+    const replaceExportFace = mock(() => {});
+    await expect(sliced.completeExport({ replaceExportFace })).rejects.toMatchObject({
+      code: 'font-unavailable', message: expect.stringContaining('Offline'),
+    });
+    expect(replaceExportFace).not.toHaveBeenCalled();
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).not.toEndWith(resolveScriptFallbackFace('cjk-jp', false, false)!.file);
+    expect(painted).toBe('Noto Sans JP');
+    expect(sliced.loadedWhole('Noto Sans JP')).toBeUndefined();
+    fail = false;
+    clock.mockReturnValue(now + 60_000);
+    const read = await sliced.read('Noto Sans JP', text, null);
+    expect(read?.revision).toBeGreaterThan(1);
+    expect(read?.revision).not.toBe(Number.MAX_SAFE_INTEGER);
+  } finally {
+    sliced.dispose();
+    globalThis.fetch = fetch;
+    clock.mockRestore();
+    warn.mockRestore();
+    configureTestFontCdn({ baseUrl: false });
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
+
+test.each(['HTTP 404', 'SHA-256 mismatch'] as const)('a CDN chunk %s draws missing glyphs in a fallback font', async (failure) => {
+  const previous = getFontCdnConfiguration();
+  const restore = withBrowserFontGlobals();
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  const load = fontRuntimeWithoutPacks().createFontProvider(undefined, { retain: false }).resolveScriptFallback('cjk-jp', false, false)!;
+  const location = load.slices!;
+  const requests: string[] = [];
+  let fail = false;
+  const fetch = spyOnFontFetch((input) => {
+    const url = String(input);
+    if (fail && url.includes('/fonts-cjk@')) {
+      requests.push(url);
+      if (failure === 'HTTP 404' && /\/c\d+\.zst$/.test(url)) return Promise.resolve(new Response(null, { status: 404 }));
+    }
+    return fontAssetResponse(input);
+  });
+  try {
+    setFontCdnConfiguration(undefined);
+    const opened = await openSlicedFace({ ...location, async decode(encoded, maxOutput) {
+      const bytes = await location.decode(encoded, maxOutput);
+      if (fail && failure === 'SHA-256 mismatch') new Uint8Array(bytes)[0] ^= 1;
+      return bytes;
+    } });
+    const [first, next] = unloadedChunkTexts(opened);
+    sliced.add(family, opened, load);
+    const revision = await sliced.coverage.prepare(family, first);
+    expect(revision).toBe(`${family} r2`);
+    fail = true;
+    const list = { primitives: [{ kind: 'textBox', lines: [{ runs: [{ text: first + next, fontFamily: family }] }] }] };
+    const families = await prepareTextFamilies(list as never, sliced.coverage);
+    expect(families(family)).toBe(family);
+    expect(await sliced.coverage.prepare(family, first)).toBe(revision);
+    const [chunk] = requests;
+    expect(chunk).toMatch(/\/c\d+\.zst$/);
+    expect(requests).toEqual([chunk!]);
+    expect(added).toEqual([revision]);
+    expect(removed).toEqual([]);
+    await expect(sliced.read(family, next, null)).resolves.toBeUndefined();
+    await expect(sliced.completeExport({ replaceExportFace: () => {} })).rejects.toMatchObject({
+      code: 'font-unavailable', message: expect.stringContaining(failure),
+    });
+    expect(requests).toEqual([chunk!]);
+  } finally {
+    sliced.dispose();
+    fetch.mockRestore();
+    warn.mockRestore();
+    restore();
+    setFontCdnConfiguration(previous);
+  }
+}, 30_000);
+
 test.each([
   ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', true],
   ['Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/149.0.0.0 Safari/537.36', true],
@@ -66,6 +194,44 @@ test('a family that is not sliced draws under its own name without loading anyth
   const sliced = createSlicedFontFaces();
   expect(await sliced.coverage.prepare('Arial', 'text')).toBe('Arial');
   expect(added).toEqual([]);
+});
+
+test.each(['rejected', 'unavailable'] as const)('a worker with a %s FontFace still paints the text', async (failure) => {
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  set('FontFace', failure === 'unavailable' ? undefined : class {
+    async load() { throw new Error('Browser refused the face'); }
+  });
+  sliced.add(family, fakeFace(), async () => new ArrayBuffer(16));
+  await expect(sliced.coverage.prepare(family, '日')).resolves.toBe(family);
+  expect(added).toEqual([]);
+});
+
+test('a second slide paints a new glyph with the browser fallback after the slice CDN goes offline', async () => {
+  const family = 'Noto Sans JP';
+  const sliced = createSlicedFontFaces();
+  const face = fakeFace();
+  const ensure = face.ensureText.bind(face);
+  const offline = Object.assign(new Error('Offline'), { diagnostic: { reason: 'cdn-unavailable' } });
+  const whole = mock(async () => new ArrayBuffer(16));
+  sliced.add(family, face, whole);
+  const drawn: [string, string][] = [];
+  const state = { font: '', fillText: (text: string) => drawn.push([text, state.font]) };
+  const ctx = new Proxy(state, {
+    get(target, key) { return Reflect.get(target, key) ?? (() => {}); },
+  }) as unknown as CanvasRenderingContext2D;
+  const slide = (text: string): SlideDisplayList => ({
+    contractVersion: 1, width: 100, height: 50,
+    primitives: [{ kind: 'textBox', objectId: 1, x: 0, y: 0, w: 100, h: 50, anchor: 'top', paragraphs: [],
+      lines: [{ x: 0, y: 0, width: 20, height: 20, baseline: 20, start: 0, end: text.length, caretStops: [],
+        runs: [{ text, start: 0, end: text.length, fontId: 0, fontFamily: family, fontSizePx: 20,
+          x: 0, width: 20, bold: false, italic: false, underline: false, color: '#000', glyphs: [] }] }] }],
+  });
+  await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: sliced.coverage });
+  face.ensureText = async (text) => { if (text === '語') throw offline; return ensure(text); };
+  await paintSlide(ctx, slide('語'), 1, 1, { fontCoverage: sliced.coverage });
+  expect(drawn).toEqual([['日', '20px "Noto Sans JP r2"'], ['語', '20px "Noto Sans JP"']]);
+  expect(whole).not.toHaveBeenCalled();
 });
 
 test('each revision installs under its own family, only when the text needed new outlines, and old ones are removed', async () => {
@@ -394,3 +560,37 @@ test('what a revision holds is a chunk set, so editing marked text retains nothi
   expect(face.loadedChunks().size).toBeLessThan(6);
 });
 
+
+test('completeExport rejects a sliced face whose strict whole-face load fails', async () => {
+  const sliced = createSlicedFontFaces();
+  const replaceExportFace = mock(() => {});
+  const whole = Object.assign(async () => new ArrayBuffer(4), { slices: {
+    ref: { format: 1, index: 'index.json', indexSha256: '' },
+    base: 'https://cdn.jsdelivr.net/',
+    url: async (file: string) => new URL(file, 'https://cdn.jsdelivr.net/'),
+    decode: async (bytes: ArrayBuffer) => bytes,
+    loadWholeForExport: async () => { throw new Error('Implicit CDN offline'); },
+  } });
+  sliced.add('Noto Sans JP', fakeFace(), whole);
+  await expect(sliced.completeExport({ replaceExportFace })).rejects.toMatchObject({
+    name: 'PngExportError', code: 'font-unavailable', message: expect.stringContaining('Implicit CDN offline'),
+  });
+  expect(replaceExportFace).not.toHaveBeenCalled();
+});
+
+test('a sliced face reports whole-face CDN failures through its session', async () => {
+  const sliced = createSlicedFontFaces();
+  const failure = Object.assign(new Error('Offline'), {
+    diagnostic: { pack: 'cjk', reason: 'cdn-unavailable', detail: 'Offline' },
+  });
+  const reportCdnFailure = mock((_error: unknown) => {});
+  const whole = Object.assign(async () => new ArrayBuffer(4), {
+    slices: { loadWholeForExport: async () => { throw failure; } },
+    reportCdnFailure,
+  });
+  try {
+    sliced.add('Noto Sans JP', fakeFace(), whole);
+    await expect(sliced.whole('Noto Sans JP')).rejects.toBe(failure);
+    expect(reportCdnFailure).toHaveBeenCalledWith(failure);
+  } finally { sliced.dispose(); }
+});

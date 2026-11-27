@@ -72,7 +72,7 @@ export type {
   PresentationCommandOutcome, PresentationCommandPayloads, PresentationCommandReadResult,
   PresentationCommandRefusalReason, PresentationCommandSaveResult, PresentationCommandSelection,
   PresentationCommandSelected, PresentationCommandObjectSelection, PresentationCommandObjectTarget,
-  PresentationCommandSelectionReference, PresentationCommandTextInput,
+  PresentationCommandResizeHandle, PresentationCommandSelectionReference, PresentationCommandTextInput,
   PresentationCommandThumbnailRequest, PresentationCommandThumbnailResult, PresentationCommandToolbarContext,
 } from './session/commandProtocol';
 

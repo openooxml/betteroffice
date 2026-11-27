@@ -1,4 +1,5 @@
 import { getFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
+import { shouldSlicePresentationFonts } from '../../../../shared/office-session/render/pptxSlicedFonts';
 import { attachPptxWorkerRender, pptxWorkerRenderClients } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { presentationCollaborationPipes } from './commandCollaboration';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
@@ -8,7 +9,7 @@ import { SessionFailure } from '../../../../shared/office-session/types';
 import { isWorkerEngineTrap } from '../../../../shared/office-session/trap';
 import { requestWasmCompile, supplyWasmFetch } from '../../../../shared/office-session/client';
 import { sessionWasmAssetUrl, shipsWasmAsset } from '../wasm/asset';
-import { takePresentationFontWorker } from './fontWorker';
+import { fontMode, takePreparedPresentationFontWorker } from './preparedFontWorkers';
 import type { OpenPresentationSessionOptions } from './client';
 import { createSharedPresentationCommandClient } from './commandClient';
 import { presentationSharedInputs } from './commandSharedInput';
@@ -65,9 +66,10 @@ export function createPptxWorkerSession(
   bytes: Uint8Array | ArrayBuffer, options: PptxWorkerSessionOptions = {},
 ): PptxWorkerSession {
   if (options.signal?.aborted) throw new PptxWorkerEditorDisposedError();
+  const slicedFonts = shouldSlicePresentationFonts(options.slicedFonts);
   const cacheUrl = shipsWasmAsset && !options.worker && options.wasm === undefined ? sessionWasmAssetUrl().href : undefined;
   const wasm = options.wasm ?? (cacheUrl ? wasmModules.get(cacheUrl) : undefined);
-  const preparedWorker = options.worker ? undefined : takePresentationFontWorker(bytes);
+  const preparedWorker = options.worker ? undefined : takePreparedPresentationFontWorker(bytes, fontMode(options.defaultFonts, slicedFonts));
   const transport = createWorkerTransport(options.worker ? options.worker() :
     preparedWorker ?? createSessionWorker());
   let stopEngineFetch = () => {};
@@ -81,7 +83,7 @@ export function createPptxWorkerSession(
     fonts: options.fonts, fallbackFonts: options.fallbackFonts,
     initialUpdate: options.collaboration?.initialUpdate ?? options.initialUpdate, wasm,
     observeChanges: options.observeChanges, readOnly: options.readOnly, activeSlideIndex: options.activeSlideIndex,
-    defaultFonts: options.defaultFonts, ...(options.slicedFonts ? { slicedFonts: true } : {}),
+    defaultFonts: options.defaultFonts, ...(slicedFonts ? { slicedFonts } : {}),
   };
   const listeners = new Set<(error: PresentationCommandFailure) => void>();
   const connectionErrors = new Set<(error: unknown) => void>();
@@ -186,6 +188,7 @@ export function createPptxWorkerSession(
       pendingIntents: () => opened.pendingIntents?.() ?? [],
       checkpoint: (options) => perform(() => opened.checkpoint!(options)),
       preparePicture: (bytes) => perform(() => opened.preparePicture!(bytes)),
+      previewShapeRect: (frame, target, rect) => perform(() => opened.previewShapeRect(frame, target, rect)),
       thumbnail: (slideId, knownRevision) => perform(() => opened.thumbnail(slideId, knownRevision)),
       subscribe: (listener) => opened.subscribe(listener),
       subscribeFrame: (listener) => opened.subscribeFrame(listener),
@@ -201,10 +204,11 @@ export function createPptxWorkerSession(
     if (pipe) presentationCollaborationPipes.set(facade, pipe);
     const sharedInput = presentationSharedInputs.get(opened);
     if (sharedInput) presentationSharedInputs.set(facade, {
+      cancel: (ticket) => sharedInput.cancel?.(ticket) ?? false,
       subscribeSent: (listener) => sharedInput.subscribeSent(listener),
-      submit(intent, basis, after) {
+      submit(intent, basis, after, waitForAfter) {
         current();
-        const submission = sharedInput.submit(intent, basis, after);
+        const submission = sharedInput.submit(intent, basis, after, waitForAfter);
         return { ticket: submission.ticket, operation: perform(() => submission.operation) };
       },
     });

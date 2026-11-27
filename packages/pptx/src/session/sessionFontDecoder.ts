@@ -1,4 +1,5 @@
 import type { FontDecoder } from '../../../../shared/office-session/fontDecoder';
+import { importFonts } from '../../../../shared/office-session/fontModules';
 import { engineKind } from '../wasm/engine';
 
 const OUTSIDE_ENGINE_BYTES = 512 * 1024;
@@ -18,5 +19,5 @@ export function decodeLargeFacesOutsideEngine(engine: FontDecoder, outside: () =
 
 export function sessionFontDecoder(engine: FontDecoder): FontDecoder {
   return engineKind === 'wasm' ? decodeLargeFacesOutsideEngine(engine,
-    () => import('@betteroffice/fonts').then((fonts) => fonts.decodeFontFaceOutsideEngine)) : engine;
+    () => importFonts().then((fonts) => fonts.decodeFontFaceOutsideEngine)) : engine;
 }

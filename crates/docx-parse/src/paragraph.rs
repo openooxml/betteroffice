@@ -3,19 +3,19 @@
 use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
-use crate::block::{StoryContext, transparent_children};
+use crate::block::{BudgetScopes, StoryContext, direction_scoped_children};
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
-    ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
-    OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
-    StructuredFieldTree, absorb_beyond_field_nesting, check_container_beyond_field_nesting,
-    field_depth_error, field_run_source, has_bookmark_id, keep_field_run, parse_bookmark_end,
-    parse_bookmark_start, parse_field_type, parse_hyperlink, parse_run, parse_sdt_properties,
-    run_content_length,
+    ContentPosition, DirectionScope, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation,
+    MathType, OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType,
+    StructuredFieldContent, StructuredFieldTree, absorb_beyond_field_nesting,
+    check_container_beyond_field_nesting, field_depth_error, field_run_source, has_bookmark_id,
+    keep_field_run, parse_bookmark_end, parse_bookmark_start, parse_field_type, parse_hyperlink,
+    parse_run, parse_sdt_properties, run_content_length, scope_copy_bytes,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -25,8 +25,9 @@ use crate::section::{SectionProperties, parse_section_properties};
 use crate::shape::{
     Shape, is_shape_drawing, parse_shape_from_drawing, resolve_shape_fill_pictures,
 };
-use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing};
+use crate::smart_art::{SmartArtContext, is_smart_art_drawing, parse_smart_art};
 use crate::styles::{DocDefaults, StyleMap};
+use crate::text_box::with_bookmark_scope;
 use crate::theme::Theme;
 use crate::vml::{parse_horizontal_rule, vml_image_content, vml_image_contents};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode, parse_javascript_integer_prefix};
@@ -411,20 +412,25 @@ pub(crate) fn parse_paragraph_with_story_context(
         smart_art: &mut *context.smart_art,
         group_text_boxes: Some(&mut enrich),
     });
-    paragraph.content = parse_paragraph_contents(
-        element,
-        relationships,
-        theme,
-        styles,
-        doc_defaults,
-        part,
-        budget,
-        drawing.as_mut(),
-        depth,
-        false,
-        false,
-        context.watermark_claimed_separately,
-    )?;
+    let enclosing_scopes = budget.begin_direction_scopes();
+    paragraph.content = with_bookmark_scope(element, || {
+        parse_paragraph_contents(
+            element,
+            relationships,
+            theme,
+            styles,
+            doc_defaults,
+            part,
+            budget,
+            drawing.as_mut(),
+            depth,
+            false,
+            false,
+            context.watermark_claimed_separately,
+            &[],
+        )
+    })?;
+    budget.end_direction_scopes(enclosing_scopes);
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
 }
@@ -574,6 +580,7 @@ fn parse_paragraph_contents(
     deletion: bool,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -585,7 +592,12 @@ fn parse_paragraph_contents(
     let mut fields: Vec<OpenComplexField> = Vec::new();
     let mut beyond_nesting = 0;
     let mut runs = Vec::new();
-    for child in transparent_children(element, false) {
+    let children = direction_scoped_children(element, &mut BudgetScopes { budget, part })?;
+    for (inner, child) in children {
+        if !scopes.is_empty() {
+            budget.charge_direction_scope_bytes(scope_copy_bytes(scopes), part)?;
+        }
+        let scopes = [scopes, inner.as_slice()].concat();
         let normalized;
         let child = if tracked_context == TrackedContext::Deletion
             && (in_control || matches!(child.local_name(), "r" | "sdt"))
@@ -607,7 +619,7 @@ fn parse_paragraph_contents(
                 } else {
                     None
                 };
-                let run = parse_run_with_context(
+                let mut run = parse_run_with_context(
                     child,
                     relationships,
                     theme,
@@ -618,6 +630,7 @@ fn parse_paragraph_contents(
                     in_control || !element.matches_name("w", "p"),
                     watermark_claimed_separately,
                 )?;
+                run.direction_scopes = scopes;
                 let before = output.len();
                 process_field_run(run, &mut fields, &mut beyond_nesting, &mut output, part)?;
                 if let Some(source) = source
@@ -648,6 +661,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
@@ -690,6 +704,7 @@ fn parse_paragraph_contents(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     active.absorb(InlineNode::SimpleField(Box::new(field)));
@@ -714,6 +729,7 @@ fn parse_paragraph_contents(
                         tracked_context == TrackedContext::Deletion,
                         true,
                         watermark_claimed_separately,
+                        &scopes,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -743,6 +759,7 @@ fn parse_paragraph_contents(
                     is_deletion,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?;
                 let content = if in_control {
                     filter_field_inline(content, true)
@@ -809,9 +826,17 @@ fn parse_paragraph_contents(
             ))),
             // Paragraph properties are handled by the orchestrator.
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
+            "smartTagPr" | "customXmlPr" if child.namespace_prefix() == Some("w") => {}
             _ => {
+                let kept = element.matches_name("w", "p");
                 if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
                     output.push(ParagraphContent::Inline(InlineNode::RawXml(Box::new(raw))));
+                } else if let Some(raw) = crate::inline::unmodeled_word_node(child, budget, kept) {
+                    let node = InlineNode::RawXml(Box::new(raw));
+                    match fields.last_mut() {
+                        Some(active) => active.absorb(node),
+                        None => output.push(ParagraphContent::Inline(node)),
+                    }
                 }
             }
         }
@@ -867,6 +892,7 @@ fn process_field_run(
     if let Some(active) = fields.last_mut() {
         active.append_instruction(&instruction);
         active.adopt_formatting(&run);
+        active.share_direction_scopes(&run);
         if (has_begin || has_separate) && !instruction.is_empty() {
             active.absorb_instruction(&run);
         }
@@ -905,6 +931,7 @@ fn parse_simple_field_composed(
     depth: usize,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
         .attribute(Some("w"), "instr")
@@ -924,6 +951,7 @@ fn parse_simple_field_composed(
             false,
             in_control,
             watermark_claimed_separately,
+            scopes,
         )?,
         false,
     );
@@ -974,6 +1002,7 @@ fn parse_hyperlink_composed(
     depth: usize,
     in_control: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let mut hyperlink = parse_hyperlink(
@@ -987,19 +1016,28 @@ fn parse_hyperlink_composed(
     )?;
     let mut children = Vec::new();
     let mut structured = Vec::new();
-    for child in element.child_elements().take(10_000) {
+    let scoped = direction_scoped_children(element, &mut BudgetScopes { budget, part })?;
+    for (inner, child) in scoped.into_iter().take(10_000) {
+        if !scopes.is_empty() {
+            budget.charge_direction_scope_bytes(scope_copy_bytes(scopes), part)?;
+        }
+        let scopes = [scopes, inner.as_slice()].concat();
         let node = match child.local_name() {
-            "r" => Some(InlineNode::Run(parse_run_with_context(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                budget,
-                drawing.as_deref_mut(),
-                true,
-                watermark_claimed_separately,
-            )?)),
+            "r" => {
+                let mut run = parse_run_with_context(
+                    child,
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    budget,
+                    drawing.as_deref_mut(),
+                    true,
+                    watermark_claimed_separately,
+                )?;
+                run.direction_scopes = scopes;
+                Some(InlineNode::Run(run))
+            }
             "bookmarkStart" => has_bookmark_id(child)
                 .then(|| InlineNode::BookmarkStart(parse_bookmark_start(child))),
             "bookmarkEnd" => {
@@ -1018,6 +1056,7 @@ fn parse_hyperlink_composed(
                     depth + 1,
                     in_control,
                     watermark_claimed_separately,
+                    &scopes,
                 )?,
             ))),
             "sdt" => parse_inline_sdt_composed(
@@ -1032,15 +1071,22 @@ fn parse_hyperlink_composed(
                 depth + 1,
                 false,
                 watermark_claimed_separately,
+                &scopes,
             )?
             .map(|sdt| InlineNode::InlineSdt(Box::new(sdt))),
             "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
-            _ => None,
+            "proofErr" | "permStart" | "permEnd" | "smartTagPr" | "customXmlPr"
+            | "commentRangeStart" | "commentRangeEnd" => None,
+            _ => crate::inline::unmodeled_word_node(child, budget, true)
+                .map(|raw| InlineNode::RawXml(Box::new(raw))),
         };
         if let Some(node) = node {
             if matches!(
                 node,
-                InlineNode::Run(_) | InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_)
+                InlineNode::Run(_)
+                    | InlineNode::BookmarkStart(_)
+                    | InlineNode::BookmarkEnd(_)
+                    | InlineNode::RawXml(_)
             ) {
                 children.push(node.clone());
             }
@@ -1068,6 +1114,7 @@ fn parse_inline_sdt_composed(
     depth: usize,
     property_theme: bool,
     watermark_claimed_separately: bool,
+    scopes: &[DirectionScope],
 ) -> Result<Option<InlineSdt>, ParseError> {
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
@@ -1086,6 +1133,7 @@ fn parse_inline_sdt_composed(
             false,
             true,
             watermark_claimed_separately,
+            scopes,
         )?,
         true,
     );
@@ -1491,19 +1539,24 @@ fn parse_drawing_owned_inner(
         DrawingChart::None => {}
     }
     if is_smart_art_drawing(element) {
+        let mut guides = Vec::new();
+        let capture = budget.connector_story.is_some().then_some(&mut guides);
         let shape = match drawing {
-            Some(context) => parse_smart_art_from_drawing(
+            Some(context) => parse_smart_art(
                 element,
                 relationships,
                 Some(context.media),
                 Some(&mut *context.smart_art),
                 budget,
+                false,
+                capture,
             )?,
             None => None,
         };
         return Ok(vec![match shape {
             Some(mut shape) => {
                 apply_shape_metadata(&mut shape, element);
+                budget.record_connector(&shape, guides);
                 RunContent::Shape {
                     shape: Box::new(shape),
                     drawing_properties: None,
@@ -1520,7 +1573,13 @@ fn parse_drawing_owned_inner(
         }]);
     }
     if is_shape_drawing(element) {
-        if let Some(mut shape) = parse_shape_from_drawing(element) {
+        let mut guides = Vec::new();
+        let parsed = if budget.connector_story.is_some() {
+            crate::shape::parse_shape_with_connector_guides(element, &mut guides)
+        } else {
+            parse_shape_from_drawing(element)
+        };
+        if let Some(mut shape) = parsed {
             if shape.scene.is_some()
                 && let Some(context) = drawing.as_deref_mut()
                 && let Some(enrich) = context.group_text_boxes.as_deref_mut()
@@ -1530,6 +1589,7 @@ fn parse_drawing_owned_inner(
             let media = drawing.as_ref().map(|context| context.media);
             resolve_shape_fill_pictures(&mut shape, relationships, media);
             apply_shape_metadata(&mut shape, element);
+            budget.record_connector(&shape, guides);
             crate::text_box::capture_bookmark_source(&mut shape, element);
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
@@ -2096,6 +2156,8 @@ pub fn paragraph_starts_with_rendered_page_break(element: &XmlElement) -> bool {
                     | "sdtContent"
                     | "fldSimple"
                     | "customXml"
+                    | "dir"
+                    | "bdo"
                     | "ins"
                     | "del"
                     | "moveFrom"
@@ -3169,6 +3231,184 @@ mod tests {
         );
         assert_eq!(run_texts(&paragraph), ["a", "b", "c", "d"]);
         assert_eq!(paragraph.content.len(), 4);
+    }
+
+    const FIELD_OPEN: &str = concat!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> SUBJECT </w:instrText></w:r>"#,
+        r#"<w:dir w:val="rtl"><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+    );
+
+    const FIELD_CLOSE: &str = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:dir>"#;
+
+    const SDT_OPEN: &str = concat!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr>"#,
+        r#"<w:sdtContent><w:dir w:val="rtl">"#,
+    );
+
+    const DIRECTION_SCOPES: [(&str, &str, &str, &str); 10] = [
+        ("paragraph", r#"<w:dir w:val="rtl">"#, "", "</w:dir>"),
+        ("bdo", r#"<w:bdo w:val="rtl">"#, "", "</w:bdo>"),
+        (
+            "hyperlink",
+            r#"<w:hyperlink w:anchor="target"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:hyperlink>",
+        ),
+        (
+            "insertion",
+            r#"<w:ins w:id="1" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:ins>",
+        ),
+        (
+            "deletion",
+            r#"<w:del w:id="2" w:author="Ann"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:del>",
+        ),
+        (
+            "content control",
+            SDT_OPEN,
+            "",
+            "</w:dir></w:sdtContent></w:sdt>",
+        ),
+        (
+            "simple field",
+            r#"<w:fldSimple w:instr=" SUBJECT "><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:fldSimple>",
+        ),
+        (
+            "nested",
+            r#"<w:bdo w:val="ltr"><w:dir w:val="rtl">"#,
+            "",
+            "</w:dir></w:bdo>",
+        ),
+        (
+            "adjacent",
+            r#"<w:dir w:val="rtl">"#,
+            r#"</w:dir><w:dir w:val="ltr">"#,
+            "</w:dir>",
+        ),
+        ("complex field", FIELD_OPEN, "", FIELD_CLOSE),
+    ];
+
+    fn direction_scope_paragraph(name: &str, open: &str, middle: &str, close: &str) -> String {
+        let deleted = name == "deletion";
+        let text = if deleted { "w:delText" } else { "w:t" };
+        format!(
+            r#"<w:p xmlns:w="w"><w:r><w:t xml:space="preserve">Before </w:t></w:r>{open}<w:r><{text}>two</{text}></w:r>{middle}<w:r><{text} xml:space="preserve"> runs</{text}></w:r>{close}<w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#
+        )
+    }
+
+    fn push_run_texts(run: &Run, texts: &mut Vec<String>) {
+        for content in &run.content {
+            if let RunContent::Text { text, .. } = content {
+                texts.push(text.clone());
+            }
+        }
+    }
+
+    fn push_node_texts(node: &InlineNode, texts: &mut Vec<String>) {
+        match node {
+            InlineNode::Run(run) => push_run_texts(run, texts),
+            InlineNode::Hyperlink(link) => {
+                for child in &link.children {
+                    push_node_texts(child, texts);
+                }
+            }
+            InlineNode::SimpleField(field) => {
+                for run in &field.content {
+                    push_run_texts(run, texts);
+                }
+            }
+            InlineNode::ComplexField(field) => {
+                for run in &field.field_result {
+                    push_run_texts(run, texts);
+                }
+            }
+            InlineNode::InlineSdt(sdt) => {
+                for child in &sdt.content {
+                    push_node_texts(child, texts);
+                }
+            }
+            InlineNode::Tracked(change) => {
+                for child in &change.content {
+                    push_node_texts(child, texts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn all_texts(paragraph: &Paragraph) -> Vec<String> {
+        let mut texts = Vec::new();
+        for content in &paragraph.content {
+            match content {
+                ParagraphContent::Inline(node) => push_node_texts(node, &mut texts),
+                ParagraphContent::Tracked(change) => {
+                    for child in &change.content {
+                        push_node_texts(child, &mut texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        texts
+    }
+
+    #[test]
+    fn direction_scoped_runs_keep_their_text_in_every_container() {
+        for (name, open, middle, close) in DIRECTION_SCOPES {
+            let paragraph = parse(&direction_scope_paragraph(name, open, middle, close));
+            assert_eq!(
+                all_texts(&paragraph),
+                ["Before ", "two", " runs", " after"],
+                "{name}"
+            );
+            let json = serde_json::to_string(&paragraph).unwrap();
+            assert!(json.contains(r#":"rtl""#), "{name}: {json}");
+            if matches!(name, "nested" | "adjacent") {
+                assert!(json.contains(r#":"ltr""#), "{name}: {json}");
+            }
+        }
+    }
+
+    #[test]
+    fn direction_scopes_inside_smart_tags_keep_their_text() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>a</w:t></w:r>
+              <w:smartTag w:element="place">
+                <w:dir w:val="rtl"><w:r><w:t>b</w:t></w:r></w:dir>
+              </w:smartTag>
+              <w:bdo w:val="rtl">
+                <w:smartTag w:element="date"><w:r><w:t>c</w:t></w:r></w:smartTag>
+              </w:bdo>
+              <w:r><w:t>d</w:t></w:r>
+            </w:p>"#,
+        );
+        assert_eq!(all_texts(&paragraph), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn unmodeled_word_inline_elements_are_kept_as_raw_xml() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>a</w:t></w:r><w:zzz><w:r><w:t>x</w:t></w:r></w:zzz><w:r><w:t>b</w:t></w:r></w:p>"#,
+        );
+        let raw: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::RawXml(raw)) => Some(raw.xml.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw.len(), 1, "{:?}", paragraph.content);
+        assert!(raw[0].starts_with("<w:zzz"), "{}", raw[0]);
+        assert!(raw[0].contains("<w:t>x</w:t>"), "{}", raw[0]);
+        assert_eq!(all_texts(&paragraph), ["a", "b"]);
     }
 
     #[test]

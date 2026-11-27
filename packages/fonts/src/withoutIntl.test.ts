@@ -22,10 +22,11 @@ afterEach(() => {
 });
 
 test('does not import intl for Latin or unknown assets', async () => {
-  const { loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
+  const { fontAssetUrls, loadBundledFontBytes, resolveMetricCompatFace } = await import('./index');
   const face = resolveMetricCompatFace('Arial', false, false)!;
   globalThis.fetch = fontAssetResponse as typeof fetch;
   expect(importIntl).not.toHaveBeenCalled();
+  await fontAssetUrls('decoder');
   expect((await loadBundledFontBytes(face, { baseUrl: 'https://without-intl.example/' })).byteLength)
     .toBe(face.byteLength);
   await expect(loadBundledFontBytes({ ...face, file: 'Unlisted-Regular.ttf.zst' })).rejects.toThrow(
@@ -39,12 +40,20 @@ test('reports the missing intl add-on for every intl face and retries misses', a
   let attempts = 0;
   for (const face of BUNDLED_FONTS.filter((candidate) => candidate.file.endsWith('.ttf.zst') && !isLatinFont(candidate.file))) {
     for (const script of [face.script, undefined]) {
-      await expect(loadBundledFontBytes({ ...face, script })).rejects.toThrow(
+      await expect(loadBundledFontBytes({ ...face, script }, undefined, { strict: true })).rejects.toThrow(
         `Bundled font ${face.file} needs the optional intl add-on - install @betteroffice/fonts-intl`,
       );
       expect(importIntl).toHaveBeenCalledTimes(++attempts);
     }
   }
+});
+
+test('an absent intl pack substitutes the same Latin bytes as an absent CJK pack', async () => {
+  const { loadBundledFontBytes, resolveMetricCompatFace, resolveScriptFallbackFace } = await import('./index');
+  globalThis.fetch = fontAssetResponse as typeof fetch;
+  const thai = resolveScriptFallbackFace('thai', false, false)!;
+  const latin = resolveMetricCompatFace('Arial', false, false)!;
+  await expect(loadBundledFontBytes(thai)).resolves.toEqual(await loadBundledFontBytes(latin));
 });
 
 test('recognizes missing-module errors without hiding dependency or evaluation failures', async () => {
@@ -58,7 +67,7 @@ test('recognizes missing-module errors without hiding dependency or evaluation f
     "Module name, '@betteroffice/fonts-intl' does not resolve",
   ]) {
     importIntl.mockImplementation(() => { throw new Error(message); });
-    await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
+    await expect(loadBundledFontBytes(face, undefined, { strict: true })).rejects.toThrow('install @betteroffice/fonts-intl');
   }
   for (const message of [
     "Cannot find package 'dependency-of-intl'",
@@ -103,15 +112,30 @@ test('custom bases bypass the optional add-on and return owned buffers', async (
   expect(importIntl).not.toHaveBeenCalled();
 });
 
-test('recovers after installing intl and reports missing asset entries', async () => {
-  const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
+test('recovers after installing intl, resolves asset hrefs and reports missing asset entries', async () => {
+  const { loadBundledFontBytes, fontAssetUrls, resolveScriptFallbackFace } = await import('./index');
   const face = resolveScriptFallbackFace('tifinagh', false, false)!;
-  await expect(loadBundledFontBytes(face)).rejects.toThrow('install @betteroffice/fonts-intl');
+  const absolute = 'https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst';
+  const relative = '/_next/static/media/another.zst';
+  expect(await fontAssetUrls('intl')).toBeUndefined();
+  await expect(loadBundledFontBytes(face, undefined, { strict: true })).rejects.toThrow('install @betteroffice/fonts-intl');
   importIntl.mockImplementation(() => ({
     INTL_FONT_ASSET_URLS: {
-      [face.file]: () => new URL('https://intl-installed.example/NotoSansTifinagh-Regular.ttf.zst'),
+      [face.file]: () => new URL(absolute),
+      'another.zst': () => ({ href: relative }) as URL,
+      'cdn.zst': () => ({ href: 'https://CDN.example:443/./cdn.zst' }) as URL,
     },
   }));
+  const location = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { value: { href: 'https://app.example/room/1' }, configurable: true });
+  try {
+    expect(await fontAssetUrls('intl')).toEqual({
+      [face.file]: absolute, 'another.zst': relative, 'cdn.zst': 'https://CDN.example:443/./cdn.zst',
+    });
+  } finally {
+    if (location) Object.defineProperty(globalThis, 'location', location);
+    else Reflect.deleteProperty(globalThis, 'location');
+  }
   globalThis.fetch = fontAssetResponse as typeof fetch;
   expect((await loadBundledFontBytes(face)).byteLength).toBe(face.byteLength);
   const other = resolveScriptFallbackFace('thai', false, false)!;

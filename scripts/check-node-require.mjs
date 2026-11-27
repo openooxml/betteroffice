@@ -3,10 +3,48 @@
 // CommonJS file, each in its own process. Run after the packages are built:
 //   node scripts/check-node-require.mjs <package directory>...
 import { spawnSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { importPlan } from './check-node-import.mjs';
+
+const require = createRequire(import.meta.url);
+const { satisfies, subset, validRange } = createRequire(require.resolve('@changesets/cli'))('semver');
+
+/** The Node versions where require() of an ES module works without a flag. */
+export const REQUIRE_ESM_NODE = '^20.19.0 || >=22.12.0';
+const WITHOUT_REQUIRE_ESM = ['16.20.2', '18.20.8', '19.9.0', '20.18.3', '21.7.3', '22.11.0'];
+
+function rootTarget(manifest) {
+  let entry = manifest.exports;
+  if (entry && typeof entry === 'object' && !Array.isArray(entry) && '.' in entry) entry = entry['.'];
+  while (entry && typeof entry === 'object' && !Array.isArray(entry)) entry = entry.require ?? entry.node ?? entry.default;
+  return typeof entry === 'string' ? entry : manifest.main ?? 'index.js';
+}
+
+/** Whether a CommonJS `require()` of the package root loads an ES module. */
+export function rootIsModule(directory, manifest) {
+  const file = resolve(directory, rootTarget(manifest));
+  if (extname(file) === '.mjs') return true;
+  if (extname(file) === '.cjs') return false;
+  for (let folder = dirname(file); folder.startsWith(resolve(directory)); folder = dirname(folder)) {
+    const scope = join(folder, 'package.json');
+    if (existsSync(scope)) return JSON.parse(readFileSync(scope, 'utf8')).type === 'module';
+    if (folder === resolve(directory)) break;
+  }
+  return false;
+}
+
+/** How `manifest.engines.node` admits Node versions where a `require()` of its ES module root fails. */
+export function requireFloorProblems(manifest, rootModule = true) {
+  const range = manifest.engines?.node;
+  if (!rootModule || typeof range !== 'string') return [];
+  if (!validRange(range)) return [`${manifest.name}: engines.node "${range}" is not a valid range`];
+  if (subset(range, REQUIRE_ESM_NODE)) return [];
+  const example = WITHOUT_REQUIRE_ESM.find((version) => satisfies(version, range));
+  return [`${manifest.name}: engines.node "${range}" admits ${example ? `Node ${example}` : 'versions'} outside ${REQUIRE_ESM_NODE}, where require() of an ES module fails with ERR_REQUIRE_ESM`];
+}
 
 const LOADED = 'betteroffice-entry-loaded';
 const done = `process.stdout.write(${JSON.stringify(LOADED)});`;
@@ -62,7 +100,7 @@ function main() {
   for (const directory of directories.map((entry) => resolve(entry))) {
     const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
     const plan = importPlan(manifest);
-    failures.push(...plan.failures);
+    failures.push(...plan.failures, ...requireFloorProblems(manifest, rootIsModule(directory, manifest)));
     const entries = plan.entries.filter((entry) => !entry.json);
     if (!entries.length) failures.push(`${manifest.name}: no package entries found to load`);
     for (const { specifier } of entries) {

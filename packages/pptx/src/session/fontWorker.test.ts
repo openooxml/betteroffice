@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { sessionWasmFactory } from '../../../../shared/office-session/testing/wasmWorker';
 import { getFontCdnConfiguration, setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { configureFontCdn } from '@betteroffice/fonts';
+import { createPptxWorkerSession } from './commandSession';
+import { preparePresentationFontDecoder, takePresentationFontWorker } from './fontWorker';
 
 type Client = typeof import('./fontWorker');
 let factory: Awaited<ReturnType<typeof sessionWasmFactory<Client>>>;
@@ -129,7 +131,7 @@ async function kanaDeck(): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
 }
 
-const prefetches = (h: ReturnType<typeof factory>) => h.workers[0]!.requests
+const prefetches = (h: ReturnType<typeof factory>, index = 0) => h.workers[index]!.requests
   .filter(message => message.kind === 'call' && message.method === 'prefetchCoverageFonts')
   .map(message => message as { id: number; args: unknown[] });
 
@@ -139,7 +141,7 @@ test('preparation starts the opening slide coverage faces on the prepared worker
   const prepared = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1 });
   try {
     for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
-    expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp']]]);
+    expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], false]]);
   } finally { prepared.release(); }
 });
 
@@ -152,6 +154,121 @@ test('coverage prefetch forwards configured CDN and explicit disable state', asy
       for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
       expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], false, { baseUrl, timeoutMs: 6789 }]]);
     } finally { prepared.release(); }
+  }
+});
+
+function setWorkerRendering(userAgent = 'Chrome/149.0') {
+  const globals = { OffscreenCanvas: class {}, createImageBitmap: () => {},
+    HTMLCanvasElement: class { transferControlToOffscreen() {} }, navigator: { userAgent } };
+  for (const [name, value] of Object.entries(globals)) {
+    const original = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    restorers.push(() => {
+      if (original) Object.defineProperty(globalThis, name, original);
+      else Reflect.deleteProperty(globalThis, name);
+    });
+  }
+  return globals.navigator;
+}
+
+test('prepared workers follow browser support and preserve an explicit whole-face opt-out', async () => {
+  const navigator = setWorkerRendering();
+  for (const [userAgent, capable, slicedFonts, expected] of [
+    ['Chrome/149.0', true, undefined, true],
+    ['Chrome/149.0', true, false, false],
+    ['Version/18.0 Safari/605.1.15', true, undefined, false],
+    ['Version/18.0 Safari/605.1.15', true, true, false],
+    ['Chrome/149.0', false, undefined, false],
+    ['Chrome/149.0', false, true, false],
+  ] as const) {
+    navigator.userAgent = userAgent;
+    if (!capable) Reflect.deleteProperty(globalThis, 'createImageBitmap');
+    const h = factory();
+    const prepared = h.client.preparePresentationFontDecoder(await kanaDeck(), { activeSlideIndex: 1, slicedFonts });
+    try {
+      for (let tick = 0; tick < 200 && !prefetches(h).length; tick++) await new Promise(resolve => setTimeout(resolve, 5));
+      expect(prefetches(h).map(message => message.args)).toEqual([[['cjk-jp'], expected]]);
+    } finally { prepared.release(); }
+  }
+});
+
+test.each([
+  ['default slicing', undefined, undefined],
+  ['without createImageBitmap', 'createImageBitmap', true],
+  ['without canvas transfer', 'HTMLCanvasElement', true],
+] as const)('adopting a prepared worker uses the same font mode %s', (_, missing, slicedFonts) => {
+  setWorkerRendering();
+  if (missing) Reflect.deleteProperty(globalThis, missing);
+  const h = factory();
+  const source = new Uint8Array();
+  const options = slicedFonts === undefined ? undefined : { slicedFonts };
+  const prepared = h.client.preparePresentationFontDecoder(source, options);
+  try {
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[0]);
+  } finally { prepared.release(); h.workers[0]?.terminate(); }
+});
+
+test('the public take and a session with defaults adopt the same font mode', async () => {
+  setWorkerRendering();
+  const workers: TestWorker[] = [];
+  class TestWorker extends EventTarget {
+    readonly requests: unknown[] = [];
+    constructor() { super(); workers.push(this); }
+    postMessage(message: unknown) { this.requests.push(message); }
+    terminate() {}
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+  Object.defineProperty(globalThis, 'Worker', { configurable: true, value: TestWorker });
+  restorers.push(() => {
+    if (original) Object.defineProperty(globalThis, 'Worker', original);
+    else Reflect.deleteProperty(globalThis, 'Worker');
+  });
+
+  const source = new Uint8Array();
+  const whole = preparePresentationFontDecoder(source, { slicedFonts: false });
+  const prepared = preparePresentationFontDecoder(source);
+  let sessionPrepared: typeof prepared | undefined;
+  let session: ReturnType<typeof createPptxWorkerSession> | undefined;
+  const open = expect.objectContaining({ kind: 'call', method: 'openCommandEditor' });
+  try {
+    expect(takePresentationFontWorker(source) as unknown).toBe(workers[1]);
+    sessionPrepared = preparePresentationFontDecoder(source);
+    session = createPptxWorkerSession(source);
+    expect(workers).toHaveLength(3);
+    expect(workers[2]!.requests).toContainEqual(open);
+    expect(Reflect.apply(takePresentationFontWorker, undefined, [source, { slicedFonts: false }])).toBeUndefined();
+
+    await session.dispose();
+    session = createPptxWorkerSession(source, { slicedFonts: false });
+    expect(workers).toHaveLength(3);
+    expect(workers[0]!.requests).toContainEqual(open);
+  } finally {
+    await session?.dispose();
+    sessionPrepared?.release();
+    prepared.release();
+    whole.release();
+  }
+});
+
+test('preparing one file in different font modes keeps the workers and prefetches separate', async () => {
+  setWorkerRendering();
+  const h = factory();
+  const source = await kanaDeck();
+  const disabled = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, defaultFonts: false });
+  const whole = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, slicedFonts: false });
+  const sliced = h.client.preparePresentationFontDecoder(source, { activeSlideIndex: 1, slicedFonts: true });
+  try {
+    expect(h.workers).toHaveLength(3);
+    for (let tick = 0; tick < 200 && (!prefetches(h, 1).length || !prefetches(h, 2).length); tick++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect(h.workers.map((_, index) => prefetches(h, index).map(message => message.args)))
+      .toEqual([[], [[['cjk-jp'], false]], [[['cjk-jp'], true]]]);
+    expect(h.client.takePresentationFontWorker(source) as unknown).toBe(h.workers[2]);
+    expect(whole.take() as unknown).toBe(h.workers[1]);
+  } finally {
+    disabled.release(); whole.release(); sliced.release();
+    for (const worker of h.workers) worker.terminate();
   }
 });
 

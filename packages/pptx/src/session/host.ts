@@ -2,7 +2,7 @@ import { metafileImageBytes } from '../render/browserImage';
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { setFontCdnConfiguration } from '../../../../shared/office-session/fontCdn';
 import { createCommandFontInstallation } from './commandFontInstallation';
-import { deferReply, isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
+import { isHostMessage, transferable, type TransferResult } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import type { MethodHandlers } from '../../../../shared/office-session/types';
 import { compileSessionWasm } from '../../../../shared/office-session/wasm';
@@ -18,6 +18,7 @@ import {
 } from '../wasm/loader';
 import { frameAssetIds } from './frame';
 import { createMetafileSvg } from './metafileSvg';
+import { pngExportReply } from './pngExportReply';
 import { registerPresentationCommandHandlers } from './commandHost';
 import type { listenPptxWorkerRender } from './workerRender';
 import { PPTX_RENDER_REPLY, type PptxRenderReply } from '../../../../shared/office-session/render/pptxWorkerRender';
@@ -142,7 +143,7 @@ export function createPresentationSessionHost(
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
-      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
+      setFontCdnConfiguration(input.fontCdn);
       await (options.initWasm ?? initWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');
       const opened = openPresentation(new Uint8Array(bytes), {
@@ -229,11 +230,7 @@ export function createPresentationSessionHost(
     },
     renderPng(_, target, options = {}) {
       if (editor) throw new PptxPeerHydrationError('stage', 'Editor exports go through the command session');
-      return deferReply(presentation().renderPng(target, options).then((bytes) => {
-        const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
-          bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : new Uint8Array(bytes).buffer;
-        return transferable(buffer, [buffer]);
-      }));
+      return pngExportReply(presentation().renderPng(target, options));
     },
     dispose() {
       presentation();
@@ -245,7 +242,7 @@ export function createPresentationSessionHost(
     async beginEditor(_, bytes, input) {
       if (disposed) throw new Error('Presentation session is disposed');
       if (handle || editor) throw new Error('Presentation session is already open');
-      if (input.fontCdn) setFontCdnConfiguration(input.fontCdn);
+      setFontCdnConfiguration(input.fontCdn);
       editor = true;
       const module = await (options.initEditorWasm ?? initializePresentationEditorWasm)(input.wasm);
       if (disposed) throw new Error('Presentation session is disposed');

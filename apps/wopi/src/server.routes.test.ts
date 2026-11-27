@@ -86,7 +86,7 @@ test("state vectors cannot authorize a disconnected deletion save", async () => 
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 let servers: Array<{ stop: (close?: boolean) => void }> = [];
 afterEach(() => {

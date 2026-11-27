@@ -6,7 +6,7 @@ import type { SessionFailure } from '../../../../shared/office-session/types';
 import type { PresentationHandle } from '../wasm/loader';
 import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
-import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, TextStyle, TextStyleSnapshot } from '../types';
+import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, SlideDisplayList, TextStyle, TextStyleSnapshot } from '../types';
 import type {
   PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame,
 } from './methods';
@@ -45,6 +45,8 @@ export interface PresentationCommandSelection extends PptxStoryTarget {
   focus: number;
   affinity: 'upstream' | 'downstream';
   goalX?: number;
+  /** Whether the selected story's owning shape is an eligible top-level resize target. */
+  canResize?: boolean;
 }
 
 export interface PresentationCommandObjectSelection extends Omit<PresentationCommandSelection, 'kind'> {
@@ -72,6 +74,8 @@ export type PresentationCommandSelectionReference =
 
 export type PresentationCommandMotion = 'left' | 'right' | 'wordLeft' | 'wordRight'
   | 'lineStart' | 'lineEnd' | 'storyStart' | 'storyEnd' | 'up' | 'down' | 'nextCell' | 'previousCell';
+
+export type PresentationCommandResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 export type PresentationCommandFrameTag = Pick<PresentationCommandFrame,
   'slideId' | 'slideRevision' | 'coversThroughSeq' | 'documentEpoch' | 'incarnation'>;
@@ -106,8 +110,10 @@ export type PresentationCommandPayloads = {
   } & ({ target: PresentationCommandObjectTarget; x: number; y: number }
     | { at: PresentationCommandSelectionReference; shapeId: string; delta: { x: number; y: number } });
   setShapeRect: PresentationCommandInput & {
-    frame: PresentationCommandFrameTag; target: PresentationCommandObjectTarget; rect: ShapeRect;
-  };
+    frame: PresentationCommandFrameTag;
+  } & ({ target: PresentationCommandObjectTarget; rect: ShapeRect }
+    | { at: PresentationCommandSelectionReference; shapeId: string; handle: PresentationCommandResizeHandle;
+      delta: { x: number; y: number } });
   undo: PresentationCommandInput;
   redo: PresentationCommandInput;
   activateSlide: Partial<PresentationCommandInput> & { slideId: string };
@@ -286,6 +292,13 @@ export interface PresentationCommandThumbnailRequest extends PresentationCommand
   knownRevision?: number;
 }
 
+export interface PresentationShapeRectPreviewRequest extends PresentationCommandIdentity {
+  basis: PresentationCommandBasis;
+  frame: PresentationCommandFrameTag;
+  target: PresentationCommandObjectTarget;
+  rect: ShapeRect;
+}
+
 export type PresentationCommandThumbnailResult = PresentationCommandIdentity & {
   epoch: number;
   slideId: string;
@@ -317,6 +330,7 @@ export type PresentationCommandMethods = FontDecoderMethods & {
   wholeCoverageFonts(have: string[]): DefaultFontFace[];
   openCommandEditor(bytes: ArrayBuffer, options: PresentationCommandOpenOptions): PresentationCommandOpenResult;
   command(envelope: PresentationCommandEnvelope): PresentationCommandAck;
+  previewShapeRect(request: PresentationShapeRectPreviewRequest): ArrayBuffer;
   thumbnailFrame(request: PresentationCommandThumbnailRequest): PresentationCommandThumbnailResult;
   flushCommandEditor(fence: PresentationCommandFence): PresentationCommandAck;
   saveCommandEditor(fence: PresentationCommandFence): PresentationCommandSaveResult;
@@ -356,6 +370,9 @@ export interface PresentationCommandClient {
   checkpoint?(options?: { rebase?: boolean }): Promise<PresentationCommandSaveResult>;
   preparePicture?(bytes: ArrayBuffer): Promise<ArrayBuffer>;
   read(request?: PptxReadRequest): Promise<PresentationCommandReadResult>;
+  previewShapeRect(
+    frame: PresentationCommandFrameTag, target: PresentationCommandObjectTarget, rect: ShapeRect,
+  ): Promise<SlideDisplayList>;
   thumbnail(slideId: string, knownRevision?: number): Promise<PresentationCommandThumbnailResult>;
   subscribe(listener: (ack: PresentationCommandAck) => void): () => void;
   subscribeFrame(listener: (frame: PresentationCommandFrame) => void): () => void;
@@ -372,6 +389,7 @@ export const PRESENTATION_COMMAND_METHODS = {
   wholeCoverageFonts: true,
   openCommandEditor: true,
   command: true,
+  previewShapeRect: true,
   thumbnailFrame: true,
   flushCommandEditor: true,
   saveCommandEditor: true,

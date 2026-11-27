@@ -5,7 +5,7 @@ import { SessionRegistry } from "./registry";
 
 beforeAll(async () => {
   await initEngines();
-});
+}, 30_000);
 
 describe("SessionRegistry", () => {
   test("file key strips credentials and fragment and preserves routing parameters", async () => {

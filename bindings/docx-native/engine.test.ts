@@ -17,7 +17,7 @@ import {
   nativeBudgetFailure,
 } from '../../shared/office-session/trap';
 import { readClipboardSlice, readTableFragment, type ClipboardTableReader } from '../../packages/docx/src/yrs/clipboardFragment';
-import type { YrsStorySegment } from '../../packages/docx/src/yrs/index';
+import type { DocxParagraphSavePlan, YrsStorySegment } from '../../packages/docx/src/yrs/index';
 import {
   SAVE_SEED_MAX_GROWTH,
   SAVE_SEED_MAX_SLICE_BYTES,
@@ -1226,6 +1226,34 @@ describe('docx native engine parity', () => {
     }
   });
 
+  test('paragraph save plans use local provenance only when requested', () => {
+    const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
+    const part = 'word/document.xml';
+    const xml = new TextDecoder().decode(parts[part]);
+    const runs = '<w:r><w:t>a</w:t></w:r><w:r><w:rPr><w:noProof/></w:rPr><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r>';
+    parts[part] = new TextEncoder().encode(xml.replace('<w:r><w:t>Engine text</w:t></w:r>', runs));
+    const bytes = wasm.rezip_docx(parts);
+    const plans = [wasm, native].map(engine => {
+      const session = new engine.EditSession(17);
+      try {
+        session.open_docx(bytes, true, 'opening');
+        const paraId = paragraphId(session);
+        session.replace_range('body', paraId, 0, paraId, 6, 'bKEEPy');
+        const base = JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan;
+        const recorded = JSON.parse(session.paragraph_save_plan_with_local_provenance()) as DocxParagraphSavePlan;
+        const edits = (plan: DocxParagraphSavePlan) => plan.splicedParts?.find(entry => entry.part === part)
+          ?.paragraphPatches?.[0]?.textEdits.map(({ from, to, insert }) => [from, to, insert.map(run => run.text).join('')]);
+        expect(edits(base)).toEqual([[0, 1, 'b'], [5, 6, 'y']]);
+        expect(edits(recorded)).toEqual([[0, 6, 'bKEEPy']]);
+        expect(recorded).not.toHaveProperty('provenanceNet');
+        return { base, recorded };
+      } finally {
+        session.free();
+      }
+    });
+    expect(plans[1]).toEqual(plans[0]);
+  });
+
   test('an unreadable relationships part warns the same way in both engines', () => {
     const parts = wasm.unzip_docx(fixture) as Record<string, Uint8Array>;
     const damaged = wasm.rezip_docx({ ...parts, 'word/_rels/header1.xml.rels': new TextEncoder().encode('<Relationships><not closed') });
@@ -1334,6 +1362,32 @@ describe('docx native engine parity', () => {
       fresh.free();
     }
   });
+
+  for (const poison of [false, true]) {
+    test(`an observed native session clears both observers and frees ${poison ? 'after hitting its heap limit' : 'while healthy'}`, () => {
+      expect(native.set_wasm_heap_counting(true)).toBe(true);
+      const session = new native.EditSession(21);
+      try {
+        session.open_docx(fixture, true, 'opening');
+        session.start_update_event_observation();
+        session.set_update_observer(() => {});
+        if (poison) {
+          native.set_wasm_heap_limit(0);
+          const budget = caughtValue(() => session.open_docx(fixture, true, 'again'));
+          expect(isEngineTrap(budget)).toBe(true);
+          expectSameBudgetFailure(caughtValue(() => session.version()), budget);
+        }
+        expect(() => session.clear_update_event_observation()).not.toThrow();
+        expect(() => session.clear_update_observer()).not.toThrow();
+        expect(() => session.free()).not.toThrow();
+      } finally {
+        if (poison) native.set_wasm_heap_limit(Infinity);
+        session.free();
+      }
+      expect(() => session.clear_update_event_observation()).toThrow('EditSession was freed');
+      expect(() => session.clear_update_observer()).toThrow('EditSession was freed');
+    });
+  }
 
   test('a limit set while the thread is past it fails the next call that allocates', () => {
     const session = new native.EditSession(20);

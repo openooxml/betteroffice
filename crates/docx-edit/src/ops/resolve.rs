@@ -528,6 +528,7 @@ impl EditingDoc {
         target: &ChangeTarget,
         mode: ResolveMode,
     ) -> OpResult<Receipt> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let mut resolved: Vec<String> = Vec::new();
         match target {

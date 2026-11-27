@@ -103,8 +103,8 @@ describe("blog sources", () => {
     ];
     for (const body of hidden) expect(localImages(parsePost("hidden.md", minimal(BASE_FM, body)), PUBLIC)).toEqual({});
     const reference = parsePost("ref.md", minimal(BASE_FM, "![Logo][logo] and ![Logo]\n\n[logo]: /logo.svg"));
-    expect(localImages(reference, PUBLIC)).toEqual({ "/logo.svg": [276, 206] });
-    expect(postHtml({ ...reference, images: localImages(reference, PUBLIC) })).toContain('<img src="/logo.svg" alt="Logo" width="276" height="206"');
+    expect(localImages(reference, PUBLIC)).toEqual({ "/logo.svg": [540, 490] });
+    expect(postHtml({ ...reference, images: localImages(reference, PUBLIC) })).toContain('<img src="/logo.svg" alt="Logo" width="540" height="490"');
     const missingReference = parsePost("gone.md", minimal(BASE_FM, "![x][gone]\n\n[gone]: /missing.png"));
     expect(() => localImages(missingReference, PUBLIC)).toThrow("image /missing.png is not in public/");
     const rawImage = parsePost("raw-img.md", minimal(BASE_FM, "<p><IMG SRC='/missing.png'></p>"));
@@ -120,7 +120,7 @@ describe("blog sources", () => {
     expect(html).toContain('<h2 id="duis-aute-irure">Duis aute irure</h2>');
     expect(html).toContain('<h3 id="nemo-enim-ipsam">Nemo enim ipsam</h3>');
     expect(html).toContain('<div class="post-table"><table>');
-    expect(html).toContain('<img src="/logo.svg" alt="Lorem ipsum" width="276" height="206" loading="lazy" decoding="async" />');
+    expect(html).toContain('<img src="/logo.svg" alt="Lorem ipsum" width="540" height="490" loading="lazy" decoding="async" />');
     const raw = parsePost("raw.md", minimal(BASE_FM, '<img src="/logo.svg" alt="A > B">'));
     expect(postHtml({ ...raw, images: { "/logo.svg": [276, 206] } })).toContain(
       '<img src="/logo.svg" alt="A > B" width="276" height="206" loading="lazy" decoding="async" />',

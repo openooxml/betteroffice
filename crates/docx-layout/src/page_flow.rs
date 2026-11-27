@@ -164,7 +164,7 @@ pub(crate) fn unequal_column_rectangles(
     gap: f64,
     columns: impl Iterator<Item = (Option<f64>, Option<f64>)>,
 ) -> Vec<(f64, f64)> {
-    let count = count.clamp(1, 45);
+    let count = count.clamp(1, crate::types::MAX_COLUMNS);
     let mut widths = vec![0.0; count];
     let mut gaps = vec![if gap.is_finite() { gap.max(0.0) } else { 0.0 }; count];
     for (index, (width, space)) in columns.take(count).enumerate() {
@@ -369,6 +369,7 @@ impl Paginator {
         columns: ColumnLayout,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
+        let columns = columns.clamped();
         let margins = effective_margins(margins);
         let content_height = (page_size.h - margins.bottom) - margins.top;
         if content_height <= 0.0 {
@@ -512,7 +513,7 @@ impl Paginator {
         paginator.resumed_pending = Some((
             geometry.pending_page_size.clone(),
             geometry.pending_margins.clone(),
-            geometry.pending_columns.clone(),
+            geometry.pending_columns.clone().map(ColumnLayout::clamped),
         ));
         paginator.start_page_number = start_page_number;
         paginator.leading_spacing_spent = geometry.leading_spacing_spent;
@@ -1363,7 +1364,7 @@ impl Paginator {
         let pristine = self.pristine_page();
         self.pending_columns = None;
         self.balanced_page = None;
-        self.columns = new_columns;
+        self.columns = new_columns.clamped();
         self.column_width = calculate_column_width(
             self.page_size.w,
             self.margins.left,
@@ -1398,7 +1399,7 @@ impl Paginator {
     /// Queues a column layout for the next page, leaving the band in force to
     /// finish the sheet in progress.
     pub fn queue_columns(&mut self, new_columns: ColumnLayout) {
-        self.pending_columns = Some(new_columns);
+        self.pending_columns = Some(new_columns.clamped());
     }
 
     /// Applies or queues page geometry for subsequently created pages.

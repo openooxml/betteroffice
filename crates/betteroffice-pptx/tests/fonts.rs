@@ -62,6 +62,42 @@ fn glyphs(presentation: &Presentation) -> Vec<Vec<(u32, f32)>> {
 }
 
 #[cfg(feature = "fonts-latin")]
+#[test]
+fn arabic_in_arial_uses_naskh_in_native_layout() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture(None)).unwrap();
+    let (_, slide) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "ppt/slides/slide1.xml")
+        .unwrap();
+    *slide = String::from_utf8_lossy(slide)
+        .replace(
+            r#"typeface="Calibri""#,
+            r#"typeface="Arial"/><a:cs typeface="Arial""#,
+        )
+        .replace("Office regular", "مرحبا")
+        .replace("Office bold", "بالعالم")
+        .into_bytes();
+    let presentation = Presentation::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let rendered = presentation.render_slide(0).unwrap();
+    let runs: Vec<_> = rendered
+        .display_list
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => Some(lines),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|line| &line.runs)
+        .collect();
+    assert!(!runs.is_empty());
+    assert!(
+        runs.iter()
+            .all(|run| run.font_family == "Noto Naskh Arabic")
+    );
+}
+
+#[cfg(feature = "fonts-latin")]
 fn private_use_font() -> Vec<u8> {
     private_use_font_with_glyph(2)
 }

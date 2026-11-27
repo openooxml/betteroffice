@@ -5,7 +5,8 @@ import { createPresentationCollaborationPipe, presentationCollaborationPipes } f
 import { createSessionClient } from '../../../../shared/office-session/client';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure } from '../../../../shared/office-session/types';
-import { createWorkerEditSession, sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
+import { cancelWorkerEditTicket, createWorkerEditSession,
+  sessionUnacknowledged } from '../../../../shared/office-session/commands/session';
 import type { CommandTicket } from '../../../../shared/office-session/commands/types';
 import type { PptxFontFace } from '../types';
 import type { DefaultFontInstallation, DefaultFontInstallRequest, DefaultFontPayload } from '../../../../shared/pptxDefaultFonts';
@@ -35,6 +36,10 @@ type CommandOpenInput = Omit<PresentationCommandOpenOptions, 'fonts' | 'fallback
   fonts?: readonly CommandFont[];
   fallbackFonts?: readonly CommandFont[];
 };
+
+const familyKey = (family: string) => family.trim().toLowerCase();
+const faceKey = ({ family, bold = false, italic = false }: Omit<PptxFontFace, 'bytes'>) =>
+  JSON.stringify([familyKey(family), bold, italic]);
 
 export async function createPresentationCommandClient(
   bytes: Uint8Array | ArrayBuffer,
@@ -93,14 +98,14 @@ async function createCommandClient(
 
   const transportErrors = new Set<(error: unknown) => void>();
   const outstandingCalls = new Set<number>();
-  const suppliedFamilies = new Set(options.fonts?.map((face) => face.family.trim().toLowerCase()));
+  const suppliedFaces = new Set(options.fonts?.map(faceKey));
   const guarded: SessionTransport = {
     post(message, transfer) {
       if (installDefaultFonts && isClientMessage(message) && message.kind === 'call' &&
         (message.method === 'command' || message.method === 'edit')) {
         const command = message.args[0] as PresentationCommandEnvelope | undefined;
         if (command?.kind === 'registerFont' && typeof command.payload?.font?.family === 'string') {
-          suppliedFamilies.add(command.payload.font.family.trim().toLowerCase());
+          suppliedFaces.add(faceKey(command.payload.font));
         }
       }
       const call = isClientMessage(message) && message.kind === 'call' ? message.id : undefined;
@@ -128,14 +133,15 @@ async function createCommandClient(
           deliver(message); return;
         }
         const request = message.payload as DefaultFontInstallRequest;
-        const allowed = (family: string) => !suppliedFamilies.has(family.trim().toLowerCase());
-        const faces = request.faces.filter((face) => allowed(face.family));
+        const canInstall = (face: (typeof request.faces)[number]) => face.kind === 'coverage' || !suppliedFaces.has(faceKey(face));
+        const faces = request.faces.filter(canInstall);
+        const allowed = (family: string) => faces.some((face) => familyKey(face.family) === familyKey(family) && canInstall(face));
         let finished = false;
         const finish = (installed: ReadonlyArray<(typeof faces)[number]>) => {
           if (finished) return;
           finished = true;
           clearTimeout(timer);
-          const indices = request.faces.flatMap((face, index) => allowed(face.family) && installed.includes(face) ? [index] : []);
+          const indices = request.faces.flatMap((face, index) => canInstall(face) && installed.includes(face) ? [index] : []);
           try { transport.post({ protocol: 1, kind: 'pptx-default-fonts-installed', id: request.id, installed: indices }); }
           catch {}
         };
@@ -299,7 +305,7 @@ async function createCommandClient(
   const unpipe = rpc.on('collaborationPipe', receivePipe);
   const unfailure = rpc.onFailure(fail);
   const fence = (seq = sentThroughSeq) => ({ ...identity, seq });
-  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis };
+  type SharedPayload = { intent: PresentationCommandIntent; basis: PresentationCommandBasis; waitForAfter: boolean };
   const replies = new Map<number, PresentationCommandAck>();
   const unacknowledged = new Map<number, PresentationPendingIntent>();
   const tickets = new Map<number, CommandTicket>();
@@ -318,9 +324,24 @@ async function createCommandClient(
             if (error) return Promise.reject(error);
             sentThroughSeq = envelope.seq;
             notify(sentListeners, undefined);
-            const { basis, intent: draft } = envelope.payload;
+            let { basis, intent: draft } = envelope.payload;
             const reference = 'at' in draft.payload ? draft.payload.at : undefined;
             const afterSeq = envelope.afterSeq ?? (reference?.source === 'afterSeq' ? reference.seq : undefined);
+            if (afterSeq !== undefined && envelope.payload.waitForAfter &&
+              (draft.kind === 'selectObject' && 'shapeId' in draft.payload ||
+                draft.kind === 'setShapeRect' && 'delta' in draft.payload)) {
+              const frame = replies.get(afterSeq)?.frame ??
+                (afterSeq === latestSharedAck!.throughSeq ? latestSharedAck!.frame?.payload : undefined);
+              const previous = draft.payload.frame;
+              if (frame && frame.coversThroughSeq === afterSeq && frame.slideId === previous.slideId &&
+                frame.documentEpoch === previous.documentEpoch && frame.incarnation === previous.incarnation) {
+                const { slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation } = frame;
+                draft = { ...draft, payload: { ...draft.payload, frame: {
+                  slideId, slideRevision, coversThroughSeq, documentEpoch, incarnation,
+                } } } as typeof draft;
+                basis = { epoch: documentEpoch, version: frame.version };
+              }
+            }
             const intent = afterSeq === undefined ? draft : withPredecessor(draft, afterSeq);
             const command = adapter!.envelope({ ...identity, seq: envelope.seq, basis, ...intent,
               ...(afterSeq === undefined ? {} : { afterSeq }) } as PresentationCommandEnvelope);
@@ -359,15 +380,17 @@ async function createCommandClient(
     requestFullFrame: async () => ({ ...latestSharedAck!, outcomes: [], frame: undefined }),
   }) : undefined;
   const sharedInput: PresentationSharedInput | undefined = editSession && {
+    cancel: (ticket) => cancelWorkerEditTicket(editSession, ticket),
     subscribeSent(listener) {
       if (!disposed) sentListeners.add(listener);
       return () => { sentListeners.delete(listener); };
     },
-    submit(intent, basis, after) {
+    submit(intent, basis, after, waitForAfter = false) {
       const reference = 'at' in intent.payload ? intent.payload.at : undefined;
       const predecessor = after ?? (reference?.source === 'afterSeq' ? tickets.get(reference.seq) : undefined);
-      const ticket = editSession.submit(intent.kind, { intent, basis }, {
+      const ticket = editSession.submit(intent.kind, { intent, basis, waitForAfter }, {
         ...(predecessor ? { after: predecessor } : {}),
+        ...(waitForAfter ? { waitForAfter: true } : {}),
       });
       if (ticket.seq !== undefined) {
         tickets.set(ticket.seq, ticket);
@@ -477,6 +500,16 @@ async function createCommandClient(
         install(result);
         return result;
       } catch (error) { return reject(error, position.seq); }
+    },
+    async previewShapeRect(frame, target, rect) {
+      const error = unavailable();
+      if (error) throw error;
+      const bytes = await rpc.call.previewShapeRect({
+        ...identity, basis: { epoch: state.epoch, version: state.version }, frame, target, rect,
+      });
+      const retired = unavailable();
+      if (retired) throw retired;
+      return JSON.parse(new TextDecoder().decode(bytes));
     },
     thumbnail(slideId, knownRevision) {
       const error = unavailable();

@@ -5,11 +5,9 @@ use std::collections::HashMap;
 
 use xlsx_model::{CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::eval::{
-    Area, EvalContext, as_area, bound_area, err, evaluate, num, parse_cached, union_areas,
-};
+use crate::eval::{Area, EvalContext, as_area, bound_area, err, evaluate, num, union_areas};
 use crate::fmath;
-use crate::parser::{Expr, parse_formula};
+use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
 use super::{
@@ -303,7 +301,7 @@ fn contains_nested_aggregate(expr: &Expr) -> bool {
 /// through the same bounded `cells_ref` the unfiltered aggregates used.
 #[derive(Default)]
 struct NestedScan {
-    cache: HashMap<String, bool>,
+    cache: HashMap<SheetId, HashMap<String, bool>>,
 }
 
 impl NestedScan {
@@ -311,17 +309,15 @@ impl NestedScan {
         let Some(src) = ctx.provider.formula(sheet, at) else {
             return false;
         };
-        if let Some(hit) = self.cache.get(src) {
+        let cache = self.cache.entry(sheet).or_default();
+        if let Some(hit) = cache.get(src) {
             return *hit;
         }
         let body = src.strip_prefix('=').unwrap_or(src);
-        let hit = match ctx.parse_cache {
-            Some(cache) => {
-                parse_cached(cache, body).is_some_and(|expr| contains_nested_aggregate(&expr))
-            }
-            None => parse_formula(body).is_ok_and(|expr| contains_nested_aggregate(&expr)),
-        };
-        self.cache.insert(src.to_owned(), hit);
+        let hit = ctx
+            .parse_formula(sheet, body)
+            .is_some_and(|expr| contains_nested_aggregate(&expr));
+        cache.insert(src.to_owned(), hit);
         hit
     }
 }

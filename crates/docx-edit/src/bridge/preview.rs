@@ -941,10 +941,7 @@ pub(crate) fn replay(
         } else {
             env.media.clone()
         },
-        group_pictures: doc
-            .source_index()
-            .map(|index| index.group_picture_sources())
-            .unwrap_or_else(|| env.group_pictures.clone()),
+        group_pictures: super::group_picture_sources(doc, env),
         shape_styles: super::shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
@@ -1085,10 +1082,7 @@ pub(crate) fn relower_body_table(
         } else {
             env.media.clone()
         },
-        group_pictures: doc
-            .source_index()
-            .map(|index| index.group_picture_sources())
-            .unwrap_or_else(|| env.group_pictures.clone()),
+        group_pictures: super::group_picture_sources(doc, env),
         shape_styles: super::shapes::ShapeStyles::new(doc),
         ..env.clone()
     };

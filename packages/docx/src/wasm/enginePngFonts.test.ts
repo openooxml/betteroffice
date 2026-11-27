@@ -1,14 +1,9 @@
-import { expect, mock, test } from 'bun:test';
+import { expect, test } from 'bun:test';
 import * as fonts from '@betteroffice/fonts';
+import { createFontRuntime } from '../../../fonts/src/fontRuntime';
 import { resolveCompleteFontProvider } from '../layout/measure';
 import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/fontRegistry';
 import { faceLoadFailure, recordFaceLoads } from './enginePngFonts';
-
-mock.module('@betteroffice/fonts-intl', () => ({
-  then(_resolve: unknown, reject: (error: unknown) => void) {
-    Promise.resolve().then(() => reject(new Error("Cannot find package '@betteroffice/fonts-intl'")));
-  },
-}));
 
 const hosted = Symbol.for('@betteroffice/docx/hostedFontFamilies');
 const bytes = new ArrayBuffer(8);
@@ -42,6 +37,29 @@ test('each loader is wrapped once, whichever method returns it', () => {
   expect(watched.resolveLastResort!('Arial', false, false, 'word')).toBe(loader);
 });
 
+test('supplied regular Arial keeps the Han script fallback', () => {
+  const loader: BundledFontLoader = async () => bytes;
+  const provider = { ...providerOf(loader), resolveScriptFallback: () => loader };
+  const supplied = [{ family: 'arial', bold: false, italic: false }];
+  const { provider: watched } = recordFaceLoads(provider, fonts, supplied);
+  expect(watched.resolveScriptFallback!('cjk-sc', false, false, 'Arial')).toBeFunction();
+});
+
+test('Arial uses Noto Naskh Arabic for Arabic in PNG exports', async () => {
+  const complete = (await resolveCompleteFontProvider())!;
+  const { provider } = recordFaceLoads(complete, fonts, [{ family: 'Arial', bold: true, italic: true }]);
+  const naskh = fonts.resolveBundledFamilyFace('Noto Naskh Arabic', false, false)!;
+  const fallback = provider.resolveScriptFallback!('arabic', true, true, 'Arial')!;
+  expect(await fallback()).toEqual(await fonts.loadBundledFontBytes(naskh));
+});
+
+test('supplied bold Arial keeps the regular Arial face', () => {
+  const loader: BundledFontLoader = async () => bytes;
+  const supplied = [{ family: 'arial', bold: true, italic: false }];
+  const { provider: watched } = recordFaceLoads(providerOf(loader), fonts, supplied);
+  expect(watched.resolve('Arial', false, false)).toBeFunction();
+});
+
 test('a failed load is recorded with its face and family and still rejects, through the loader and its read-only bytes', async () => {
   const offline = new Error('offline');
   const inner: BundledFontLoader = Object.assign(() => Promise.reject(offline), { readOnlyBytes: () => Promise.reject(offline) });
@@ -62,7 +80,8 @@ test('a failed load is recorded with its face and family and still rejects, thro
 
 test('a face whose optional pack is not installed still rejects but is not recorded', async () => {
   const thai = fonts.BUNDLED_FONTS.find((face) => face.script === 'thai')!;
-  const absent = await fonts.loadBundledFontBytes(thai).then(() => undefined, (error: unknown) => error);
+  const { loadBundledFontBytes } = createFontRuntime(async () => ({}));
+  const absent = await loadBundledFontBytes(thai, undefined, { strict: true }).then(() => undefined, (error: unknown) => error);
   expect(fonts.isMissingFontAddon(absent)).toBe(true);
   expect(fonts.isMissingFontAddon(new Error(`Unknown bundled font asset: ${thai.file}`))).toBe(false);
   const { provider: watched, failures } = recordFaceLoads(providerOf(() => Promise.reject(absent)), fonts);

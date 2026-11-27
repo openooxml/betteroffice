@@ -2529,6 +2529,18 @@ test('a recoverable presentation failure reaches the host without closing the do
   expect(view.queryByText(stall.message)).toBeNull();
 });
 
+test('a collaboration worker crash after open shows the recovery explanation', async () => {
+  surface.mockRestore();
+  realSurface = true;
+  const view = render(<DocxEditor {...peerlessProps} collaboration={{ onReplica() {} }} />);
+  await waitFor(() => expect(view.container.querySelector('.paged-editor__input')).toBeTruthy());
+  act(() => workers[0]!.onerror?.({ message: 'Worker stopped' } as ErrorEvent));
+  const failure = await view.findByRole('alert');
+  expect(failure.textContent).toContain('The editor stopped and could not restore your recent changes. The file itself is not damaged.');
+  expect(failure.textContent).not.toMatch(/The file may be damaged|Couldn't open this document/);
+  expect(workers).toHaveLength(1);
+});
+
 for (const [name, update, message] of [
   ['read-only', { readOnly: true }, 'DOCX read-only transition was rejected'],
   ['render', { showHiddenText: true }, 'DOCX render environment was rejected: stale-version'],
@@ -2547,14 +2559,16 @@ for (const [name, update, message] of [
 }
 
 test('a failed open reaches the host without recoverable metadata', async () => {
+  failWholeOpen = true;
+  surface.mockRestore();
+  realSurface = true;
   const onError = mock((_error: Error, _info?: DocxErrorInfo) => {});
   const view = render(<DocxEditor {...peerlessProps} onError={onError} />);
-  await waitFor(() => expect(view.getByTestId('docx-worker-paged-editor').dataset.opened).toBe('true'));
-  const failure = new Error('worker failed to open');
-  act(() => { surface.mock.calls.at(-1)![0].sessionOptions.onError!(failure); });
-  expect(onError.mock.calls).toEqual([[failure]]);
-  await waitFor(() => expect(view.getByText(failure.message)).toBeTruthy());
-  expect(view.queryByTestId('docx-worker-paged-editor')).toBeNull();
+  const failure = await view.findByRole('alert');
+  expect(failure.textContent).toContain("Couldn't open this document");
+  expect(failure.textContent).toContain('The file may be damaged');
+  expect(failure.textContent).not.toContain('could not restore your recent changes');
+  expect(onError.mock.calls).toEqual([[expect.objectContaining({ message: expect.stringContaining('Whole source failed to open') })]]);
 });
 
 test('a failed Blob read ends opening and reaches the shell error banner', async () => {
@@ -3529,7 +3543,7 @@ test('a worker restart while Paste Options are offered removes the control witho
   const editor = await pasteOptionsSession();
   await editor.paste();
   await editor.offer();
-  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  expect(requests.filter(request => request.type === 'checkpoint')).toHaveLength(0);
   const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
   editor.first.outOfMemory = true;
   await act(async () => { await binding!.session.submit('setReadOnly', { readOnly: false }).ack.catch(() => {}); });
@@ -3555,7 +3569,7 @@ test('while a restarted worker is still opening the Paste Options control is gon
   const editor = await pasteOptionsSession();
   await editor.paste();
   await editor.offer();
-  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  expect(requests.filter(request => request.type === 'checkpoint')).toHaveLength(0);
   const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
   holdInitial = true;
   editor.first.outOfMemory = true;
@@ -3585,7 +3599,7 @@ test('after a worker restart a new paste offers Paste Options again and the choi
   const editor = await pasteOptionsSession();
   await editor.paste();
   await editor.offer();
-  await waitFor(() => expect(editor.first.checkpoints).toHaveLength(1));
+  expect(requests.filter(request => request.type === 'checkpoint')).toHaveLength(0);
   const incarnation = binding!.viewStore.getSnapshot().identity.incarnation;
   act(() => { editor.first.onerror?.({ message: 'Worker crashed' } as ErrorEvent); });
   await waitFor(() => expect(workers).toHaveLength(2));

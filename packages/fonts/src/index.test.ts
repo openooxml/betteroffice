@@ -12,6 +12,7 @@ import {
   maxDigitWidth,
   resolveBundledFamilyFace,
   resolveDigitAdvance,
+  resolveLastResortChoice,
   resolveLastResortFace,
   resolveLightVariantFace,
   resolveGlyphFallbackFace,
@@ -22,6 +23,7 @@ import {
 
 const SFNT_TRUETYPE = 0x00010000;
 const SFNT_CFF = 0x4f54544f;
+const LIGHT_SUFFIXES = ['Thin', 'Hairline', 'Extralight', 'Ultralight', 'Semilight', 'Light', 'Medium'];
 
 function expectLatinSfnt(bytes: ArrayBuffer, file: string, family: string) {
   const entry = latinManifest.faces.find((face) => face.file === file)!;
@@ -148,19 +150,80 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
     expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf.zst');
     expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf.zst');
-    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf.zst');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf.zst');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
   test('light variants resolve only for families we bundle', () => {
     expect(resolveLightVariantFace('Calibri Light', false, false)?.file).toBe('Carlito-Regular.ttf.zst');
-    expect(resolveLightVariantFace(' calibri light ', true, true)?.file).toBe('Carlito-Italic.ttf.zst');
+    expect(resolveLightVariantFace(' calibri light ', true, true)?.file).toBe('Carlito-BoldItalic.ttf.zst');
     expect(resolveLightVariantFace('Segoe UI Semilight', false, false)?.family).toBe('Selawik');
     expect(resolveLightVariantFace('Calibri', false, false)).toBeUndefined();
     expect(resolveLightVariantFace('BIZ UD明朝 Medium', false, false)).toBeUndefined();
     expect(resolveLightVariantFace('Unknown Light', false, false)).toBeUndefined();
     expect(createFontProvider().resolveLightVariant?.('Calibri Light', true, false)).toBeFunction();
     expect(createFontProvider().resolveLightVariant?.('Wingdings', false, false)).toBeUndefined();
+  });
+
+  for (const base of [
+    'Calibri', 'Cambria', 'Arial', 'Times New Roman',
+    'Courier New', 'Georgia', 'Inter', 'Roboto', 'Source Sans Pro', 'DM Sans',
+    'Open Sans', 'Montserrat', 'Poppins', 'Oswald', 'Heebo', 'Comic Sans MS',
+  ]) {
+    test(`lighter members of ${base} use the requested style`, () => {
+      expect(resolveMetricCompatFace(base, true, false)?.weight).toBe(700);
+      for (const suffix of LIGHT_SUFFIXES) {
+        const family = `${base} ${suffix}`;
+        for (const [bold, italic] of [[true, false], [true, true], [false, false], [false, true]]) {
+          const expected = resolveMetricCompatFace(base, bold, italic);
+          expect(resolveLightVariantFace(family, bold, italic)).toBe(expected);
+          for (const office of ['word', 'powerpoint'] as const) {
+            const sans = office === 'word' ? 'Arial' : 'Calibri';
+            const face = expected ?? resolveMetricCompatFace(sans, bold, italic)!;
+            expect(resolveLastResortFace(family, bold, italic, office)).toBe(face);
+            expect(resolveLastResortChoice(family, bold, italic, office)).toEqual({ face, onlyIfPrimaryFails: false });
+          }
+        }
+      }
+    });
+  }
+
+  for (const base of [
+    'DM Serif Display', 'Malgun Gothic', 'Microsoft YaHei', 'Microsoft JhengHei',
+    'SimSun', 'MS Gothic', 'MS PGothic', 'MS UI Gothic',
+  ]) {
+    test(`lighter members of ${base} keep their faces when bold is unavailable`, () => {
+      for (const suffix of LIGHT_SUFFIXES) {
+        const family = `${base} ${suffix}`;
+        for (const italic of [false, true]) {
+          const face = resolveMetricCompatFace(base, false, italic)!;
+          expect(resolveLightVariantFace(family, true, italic)).toBe(face);
+          for (const office of ['word', 'powerpoint'] as const) {
+            expect(resolveLastResortFace(family, true, italic, office)).toBe(face);
+            expect(resolveLastResortChoice(family, true, italic, office)).toEqual({ face, onlyIfPrimaryFails: false });
+          }
+        }
+      }
+    });
+  }
+
+  test('lighter members of Segoe UI keep their light faces when bold', () => {
+    for (const base of ['Segoe UI', 'Segoe UI Semibold']) {
+      for (const suffix of LIGHT_SUFFIXES) {
+        for (const italic of [false, true]) {
+          expect(resolveLightVariantFace(`${base} ${suffix}`, true, italic)).toBe(resolveMetricCompatFace(base, false, italic));
+        }
+        const family = `${base} ${suffix}`;
+        if (resolveMetricCompatFamily(family)) continue;
+        for (const bold of [false, true]) {
+          for (const office of ['word', 'powerpoint'] as const) {
+            const sans = office === 'word' ? 'Arial' : 'Calibri';
+            expect(resolveLastResortFace(family, bold, false, office).family).toBe('Selawik');
+            expect(resolveGlyphFallbackFace(family, bold, false, office)).toBe(resolveMetricCompatFace(sans, false, false));
+          }
+        }
+      }
+    }
   });
 
   test('Word substitutes Arial for an unknown sans family, PowerPoint Calibri', () => {
@@ -297,9 +360,9 @@ describe('resolution', () => {
     });
   }
 
-  test('a trailing light weight on a known family outranks the bold flag', () => {
-    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf.zst');
-    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf.zst');
+  test('a trailing weight on a known family still respects bold', () => {
+    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Bold.ttf.zst');
+    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Bold.ttf.zst');
     expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf.zst');
     expect(resolveLastResortFace('Lato Light', true, false).file).toBe('Carlito-Bold.ttf.zst');
     expect(resolveLastResortFace('Blackadder ITC', true, false).file).toBe('Carlito-Bold.ttf.zst');
@@ -312,9 +375,9 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('Caladea')).toBe('Caladea');
   });
 
-  test('script fallbacks prefer the sans face of the bucket', () => {
+  test('script fallbacks use the default face for each bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
-    expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
+    expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Naskh Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf.zst');
   });
 
@@ -325,10 +388,17 @@ describe('resolution', () => {
       }
       expect(resolveScriptFallbackFace('hebrew', false, false, family)?.file).toBe('NotoSansHebrew-Regular.ttf.zst');
     }
-    expect(resolveScriptFallbackFace('arabic', false, false, 'Arial')?.file).toBe('NotoSansArabic-Regular.ttf.zst');
-    expect(resolveScriptFallbackFace('arabic', true, false, 'Arial')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
-    expect(resolveScriptFallbackFace('arabic', false, false, 'Times New Roman')?.file)
-      .toBe('NotoSansArabic-Regular.ttf.zst');
+  });
+
+  test('Arabic in Latin families uses the same bundled face in every style', () => {
+    for (const family of [undefined, 'Arial', 'Times New Roman']) {
+      for (const bold of [false, true]) for (const italic of [false, true]) {
+        expect(resolveScriptFallbackFace('arabic', bold, italic, family)?.file).toBe('NotoNaskhArabic-Regular.ttf.zst');
+      }
+    }
+    expect(resolveBundledFamilyFace('Noto Sans Arabic', false, false)?.file).toBe('NotoSansArabic-Regular.ttf.zst');
+    expect(resolveBundledFamilyFace('Noto Sans Arabic', true, false)?.file).toBe('NotoSansArabic-Bold.ttf.zst');
+    expect(resolveScriptFallbackFace('arabic', true, true, ' Noto Sans Arabic ')?.file).toBe('NotoSansArabic-Bold.ttf.zst');
   });
 
   test('known heavy family names select the bold face and preserve italics', () => {

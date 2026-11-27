@@ -139,12 +139,14 @@ function FailureState({ title, description, details, action }: {
  * Shown when a document could not be opened. The technical message stays
  * behind the details disclosure.
  */
-export function ParseError({ message, opening = true }: {
+export function ParseError({ message, opening = true, recoveryFailed = false }: {
   message: string;
+  recoveryFailed?: boolean;
   /** False for a failure after the document opened, which says nothing about the file. */
   opening?: boolean;
 }): React.ReactElement {
   const { t } = useTranslation();
+  if (recoveryFailed) return <FailureState title={t('errors.somethingWentWrong')} description={t('errors.recoveryFailedDescription')} details={message} />;
   const kind = opening ? openFailureKind(message) : null;
   const description = kind === 'damaged'
     ? t('errors.failedToLoadDamaged')

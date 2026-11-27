@@ -109,6 +109,7 @@ mod part_metadata;
 mod peer_bootstrap;
 mod policy;
 mod presence;
+mod provenance;
 mod queries;
 mod raw;
 mod read_state;
@@ -213,6 +214,8 @@ pub mod wasm_memory;
 const STORIES: &str = "stories";
 const REMOVED_STORIES: &str = "removed_stories";
 const COMMENTS: &str = "comments";
+/// Kept empty inline elements of the source, each by a sticky anchor into its story.
+const RAW_INLINES: &str = "rawInlines";
 const PILCROW_KIND: &str = "pilcrow";
 const KIND_KEY: &str = "_kind";
 const PARA_ID: &str = "paraId";
@@ -547,6 +550,16 @@ pub struct ResolvedCommentAnchor {
     pub end: u32,
 }
 
+/// A kept empty inline element of the source where its anchor now sits: `offset` in story units,
+/// `ordinal` its order among the story's kept elements in the source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRawMark {
+    pub story: StoryId,
+    pub offset: u32,
+    pub ordinal: u32,
+    pub xml: String,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum EditError {
     StoryExists(String),
@@ -827,6 +840,7 @@ pub struct EditingDoc {
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    provenance: Arc<Mutex<provenance::Provenance>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
     prime_last_slice_cost: AtomicU64,
@@ -877,6 +891,7 @@ impl EditingDoc {
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(REMOVED_STORIES);
         doc.get_or_insert_map(COMMENTS);
+        doc.get_or_insert_map(RAW_INLINES);
         doc.get_or_insert_map(part_metadata::PART_METADATA);
         doc.get_or_insert_map(shape_styles::SHAPE_STYLES);
         doc.get_or_insert_map(document_properties::DOCUMENT_PROPERTIES);
@@ -945,6 +960,7 @@ impl EditingDoc {
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
+            provenance: Arc::default(),
             prime_progress: Mutex::new(None),
             prime_last_slice_cost: AtomicU64::new(0),
             #[cfg(test)]
@@ -1005,6 +1021,20 @@ impl EditingDoc {
     /// transaction's deletions already collected unless this is called before it attaches.
     pub fn keep_deleted(&self) {
         self.keeps_deleted.store(true, Ordering::Relaxed);
+    }
+
+    fn with_retained_deleted<T>(&self, load: impl FnOnce() -> T) -> T {
+        struct ResumeCollection<'a>(&'a AtomicBool);
+
+        impl Drop for ResumeCollection<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        let _resume = (!self.keeps_deleted.swap(true, Ordering::Relaxed))
+            .then(|| ResumeCollection(&self.keeps_deleted));
+        load()
     }
 
     #[doc(hidden)]
@@ -1661,7 +1691,8 @@ impl EditingDoc {
     /// Removes one complete story from the document.
     pub fn delete_story(&self, story_id: &str) -> EditResult<()> {
         let mut txn = self.doc.transact_mut_with(self.client_id);
-        story_ref(&txn, story_id)?;
+        let story = story_ref(&txn, story_id)?;
+        self.mark_provenance_range(&txn, &story, 0, story.len(&txn));
         if self.keeps_deleted() {
             mark_story_removed(&mut txn, story_id);
         } else {
@@ -1917,6 +1948,52 @@ impl EditingDoc {
             .collect()
     }
 
+    /// Where each kept empty inline element of a live story sits now, by story, offset and source
+    /// order. A deletion across one leaves it at the cut; undo follows its anchor to the restored
+    /// content.
+    pub fn resolve_raw_marks(&self) -> Vec<ResolvedRawMark> {
+        let txn = self.doc.transact();
+        let Some(marks) = txn.get_map(RAW_INLINES) else {
+            return Vec::new();
+        };
+        let mut resolved: Vec<ResolvedRawMark> = marks
+            .iter(&txn)
+            .filter_map(|(_, value)| {
+                let Out::Any(Any::Map(mark)) = value else {
+                    return None;
+                };
+                let text = |key: &str| match mark.get(key) {
+                    Some(Any::String(value)) => Some(value.to_string()),
+                    _ => None,
+                };
+                let story = text("story")?;
+                let xml = text("xml")?;
+                let Some(Any::Buffer(at)) = mark.get("at") else {
+                    return None;
+                };
+                let Some(Any::Number(ordinal)) = mark.get("ordinal") else {
+                    return None;
+                };
+                story_ref(&txn, &story).ok()?;
+                let offset = sticky_offset(&StickyIndex::decode_v1(at).ok()?, &txn)?.index;
+                Some(ResolvedRawMark {
+                    story,
+                    offset,
+                    ordinal: *ordinal as u32,
+                    xml,
+                })
+            })
+            .collect();
+        resolved.sort_by(|left, right| {
+            (&left.story, left.offset, left.ordinal).cmp(&(
+                &right.story,
+                right.offset,
+                right.ordinal,
+            ))
+        });
+        resolved
+    }
+
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
         let txn = self.doc.transact();
         match story_ref(&txn, story_id) {
@@ -2106,10 +2183,10 @@ impl EditingDoc {
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
         let state_vector = StateVector::decode_v1(remote_state_vector)
             .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
-        Ok(deterministic::encode_diff_v1(
-            &self.doc.transact(),
-            &state_vector,
-        ))
+        let txn = self.doc.transact();
+        let update = deterministic::encode_diff_v1(&txn, &state_vector);
+        self.bind_edit_provenance(&state_vector, &update);
+        Ok(update)
     }
 
     /// [`Self::encode_diff_v1`] as ordered updates for a sync that must travel in bounded
@@ -2156,7 +2233,8 @@ impl EditingDoc {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.save_story_states.lock().unwrap().clear();
-        self.integrate_update(update, UpdateOrigin::Remote)
+        self.clear_edit_provenance();
+        self.integrate_updates_inner(vec![update], UpdateOrigin::Remote)
     }
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
@@ -2167,6 +2245,15 @@ impl EditingDoc {
     /// Applies updates in order in one transaction, then repairs any paragraph identities
     /// they duplicated.
     fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
+        let _watch = self.watch_provenance(provenance::WatchKind::Unpaired);
+        self.integrate_updates_inner(updates, origin)
+    }
+
+    fn integrate_updates_inner(
+        &self,
+        updates: Vec<Update>,
+        origin: UpdateOrigin,
+    ) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self.yrs_doc());
@@ -2231,6 +2318,7 @@ impl EditingDoc {
     pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let _watch = self.watch_provenance(provenance::WatchKind::Recorded);
         let own_clock = self.own_clock();
         self.doc
             .transact_mut()
@@ -2250,6 +2338,7 @@ impl EditingDoc {
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
         let fork = Self::build(self.client_id, self.keeps_deleted());
         fork.apply_verbatim_v1(state)?;
+        self.invalidate_fork_provenance(&fork);
         fork.ids.adopt(&self.ids);
         if let Some(index) = self.source_index() {
             fork.retain_source(identity::SourcePackage::Ready(index));
@@ -2547,6 +2636,15 @@ fn anchor_value(story: &str, start: &StickyIndex, end: &StickyIndex) -> Any {
         ("story".into(), Any::from(story)),
         ("start".into(), Any::from(start.encode_v1())),
         ("end".into(), Any::from(end.encode_v1())),
+    ])))
+}
+
+fn raw_mark_value(story: &str, at: &StickyIndex, ordinal: u32, xml: &str) -> Any {
+    Any::Map(Arc::new(HashMap::from([
+        ("story".into(), Any::from(story)),
+        ("at".into(), Any::from(at.encode_v1())),
+        ("ordinal".into(), Any::Number(f64::from(ordinal))),
+        ("xml".into(), Any::from(xml)),
     ])))
 }
 

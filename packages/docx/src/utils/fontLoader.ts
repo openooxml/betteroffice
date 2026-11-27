@@ -8,6 +8,7 @@
  * - Font availability detection
  */
 
+import { isImplicitFontCdnError } from '../../../../shared/fontCdnDiagnostics';
 import {
   hasDefaultFontSource,
   hostedFontFamilies,
@@ -286,6 +287,9 @@ function registerBundledFace(
     } catch (error) {
       if (face) document.fonts.delete(face);
       if (error instanceof ImplicitFontAbsentError) return undefined;
+      if (isImplicitFontCdnError(error) && (error.diagnostic.pack === 'cjk' || error.diagnostic.pack === 'intl')) {
+        return undefined;
+      }
       reportFontError(
         error,
         `failed to register bundled "${family}"`,
