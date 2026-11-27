@@ -611,18 +611,23 @@ jobs:
       contents: read
       actions: read # read this commit's CI result and any running release
     env:
-      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != false }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run != false || inputs.rehearse == true) }}
     steps:
-      # Provenance names this run's commit, so the canary is built from no other.
-      - name: Check that CI passed on this commit
+      # Provenance names this run's commit, so the canary is built from no other,
+      # and only while it is main's head: a rerun of an older run builds nothing.
+      - name: Check that this commit is main's head and its CI passed
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
           conclusion=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // empty')
-          if [ "$conclusion" = success ]; then
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice::main has moved on from $SHA to $head, so no canary is built from it."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+          elif [ "$conclusion" = success ]; then
             echo "green=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::CI on $SHA is ${conclusion:-not finished}, so no canary is built from it."

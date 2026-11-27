@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { canarySet, keepDependencyRanges, nativeDependents, pinToCanaries } from './canary-release.mjs';
+import { canarySet, checkPublishable, keepDependencyRanges, nativeDependents, pinToCanaries } from './canary-release.mjs';
 import { NATIVE_PACKAGES } from './native-bindings.mjs';
 import { workspaceEntries } from './published-packages.mjs';
 
@@ -31,7 +31,9 @@ describe('canary workflow', () => {
       "((github.event_name == 'schedule' && vars.CANARY_RELEASE == 'true') ||",
       "(github.event_name == 'workflow_dispatch' && inputs.canary == true))"
     ].join(' '));
-    expect(canary.env.DRY_RUN).toBe("${{ github.event_name == 'workflow_dispatch' && inputs.dry_run != false }}");
+    expect(canary.env.DRY_RUN).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run != false || inputs.rehearse == true) }}"
+    );
   });
 
   test('never shares a concurrency slot with, or starts, the stable release', () => {
@@ -80,12 +82,13 @@ describe('canary workflow', () => {
         expect(candidate.uses ?? '').not.toMatch(/^changesets\/action@/);
       }
     }
-    expect(runs()).not.toMatch(/\bgit\s+(?:push|commit|tag)\b|\bgh\s+(?:pr|release|workflow)\b|\bchangeset\s+publish\b|\bnpm\s+(?:publish|dist-tag)\b|canary-release\.mjs publish/);
+    expect(runs()).not.toMatch(/\bgit\s+(?:push|commit|tag)\b|\bgh\s+(?:pr|release|workflow)\b|\bchangeset\s+publish\b|\bnpm\s+(?:publish|dist-tag)\b|canary-release\.mjs publish\b/);
   });
 
   test('builds this run\'s commit only once its CI passed, and publishes only outside a dry run', () => {
-    const check = step('Check that CI passed on this commit');
+    const check = step("Check that this commit is main's head and its CI passed");
     expect(check.env.SHA).toBe('${{ github.sha }}');
+    expect(check.run).toContain('repos/$REPO/commits/main');
     expect(check.run).toContain('actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=1');
     expect(step('Check that no release is running').if).toBe("steps.commit.outputs.green == 'true'");
     expect(step('Check again that no release is running').if).toBe(
@@ -133,6 +136,14 @@ describe('canary set', () => {
       peerDependencies: { '@x/fonts-cjk': '0.5.1-canary.20261127031700', react: '^19' }
     });
     expect(manifest.peerDependencies['@x/fonts-cjk']).toBe('^0');
+  });
+
+  test('publishes only tarballs that hold the canary the plan names', () => {
+    const set = [{ name: '@x/a', version: '1.1.0-canary.1', directory: '' }];
+    expect(() => checkPublishable(set, () => ({ name: '@x/a', version: '1.1.0-canary.1' }))).not.toThrow();
+    expect(() => checkPublishable(set, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('holds @x/a@1.1.0');
+    const stable = [{ name: '@x/a', version: '1.1.0', directory: '' }];
+    expect(() => checkPublishable(stable, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('not a canary version');
   });
 
   test('keeps the dependency ranges Changesets rewrote, so only versions change', () => {

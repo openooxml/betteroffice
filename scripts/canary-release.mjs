@@ -216,10 +216,32 @@ function distTags(name) {
   return npmView(name, 'dist-tags') ?? {};
 }
 
+function packedManifest(path) {
+  return JSON.parse(execFileSync('tar', ['-xzOf', path, 'package/package.json'], { encoding: 'utf8' }));
+}
+
+/** Refuses any tarball whose manifest is not the canary the plan names. */
+export function checkPublishable(set, manifestOf) {
+  const problems = [];
+  for (const entry of set) {
+    const manifest = manifestOf(entry);
+    if (!isCanaryVersion(entry.version)) problems.push(`${entry.name}@${entry.version} is not a canary version`);
+    if (manifest.name !== entry.name || manifest.version !== entry.version) {
+      problems.push(`the ${entry.name} tarball holds ${manifest.name}@${manifest.version}, not ${entry.version}`);
+    }
+  }
+  if (problems.length) throw new Error(problems.join('\n'));
+}
+
 function publish(destination) {
   const set = plan(destination);
+  checkPublishable(set, (entry) => packedManifest(tarball(destination, entry)));
   const latest = new Map(set.map(({ name }) => [name, distTags(name).latest]));
   for (const entry of set) {
+    if (npmView(`${entry.name}@${entry.version}`, 'version') === entry.version) {
+      console.log(`${entry.name}@${entry.version} is already published.`);
+      continue;
+    }
     npm(['publish', tarball(destination, entry), '--tag', CANARY_TAG, '--access', 'public', '--provenance'], {
       cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit']
     });
@@ -228,8 +250,8 @@ function publish(destination) {
   for (const { name, version } of set) {
     const tags = distTags(name);
     const before = latest.get(name);
-    if (tags.latest !== before && (tags.latest === version || String(tags.latest).includes('-'))) {
-      problems.push(`${name} latest moved from ${before} to ${tags.latest}`);
+    if (String(tags.latest ?? '').includes('-') || (tags.latest === undefined && before !== undefined)) {
+      problems.push(`${name} latest is ${tags.latest}, was ${before}`);
     } else if (tags.latest !== before) {
       console.log(`${name} latest moved from ${before} to ${tags.latest}, a stable release published meanwhile.`);
     }
