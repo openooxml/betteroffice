@@ -874,7 +874,7 @@ describe('release wiring', () => {
 
   test('rehearsals and refs that fail the main comparison use a separate concurrency group per ref', () => {
     expect(release.concurrency).toEqual({
-      group: "${{ github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref) }}",
+      group: "${{ (github.event_name == 'schedule' || inputs.canary == true) && 'release-canary' || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}",
       'cancel-in-progress': false
     });
     expect(release.on.workflow_dispatch.inputs.rehearse).toEqual({
@@ -886,7 +886,7 @@ describe('release wiring', () => {
 
   test('plans before the gate without installing workspace dependencies', () => {
     const plan = release.jobs.plan;
-    expect(plan.if).toBe("github.ref == 'refs/heads/main' || inputs.rehearse == true");
+    expect(plan.if).toBe("github.event_name != 'schedule' && inputs.canary != true && (github.ref == 'refs/heads/main' || inputs.rehearse == true)");
     expect(plan['runs-on']).toBe('ubuntu-latest');
     expect(plan['timeout-minutes']).toBe(20);
     expect(plan.permissions).toEqual({ contents: 'read' });
@@ -949,6 +949,7 @@ describe('release wiring', () => {
     ]);
     expect(job.if).toBe([
       "${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.rehearse != true &&",
+      "github.event_name != 'schedule' && inputs.canary != true &&",
       "needs.plan.result == 'success' &&",
       "(needs.test.result == 'success' || needs.test.result == 'skipped') &&",
       "(needs.native-build.result == 'success' ||",
@@ -1006,9 +1007,12 @@ describe('release wiring', () => {
     }
 
     const publishing = Object.keys(release.jobs).filter((id) => canPublish(release.jobs[id])).sort();
-    expect(publishing).toEqual(['held-npm', 'native-npm', 'python-pypi', 'release', 'wopi-image']);
+    expect(publishing).toEqual(['canary', 'held-npm', 'native-npm', 'python-pypi', 'release', 'wopi-image']);
     for (const id of publishing) {
-      if (id === 'release') {
+      if (id === 'canary') {
+        expect(release.jobs[id].if).toContain("github.ref == 'refs/heads/main'");
+        expect(release.jobs[id].needs).toBeUndefined();
+      } else if (id === 'release') {
         expect(release.jobs[id].if).toContain("github.ref == 'refs/heads/main'");
         expect(release.jobs[id].if).toContain('inputs.rehearse != true');
       } else {
