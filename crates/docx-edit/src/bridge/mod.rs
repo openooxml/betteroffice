@@ -189,6 +189,13 @@ pub(crate) fn source_font_theme(doc: &EditingDoc) -> Option<docx_parse::Theme> {
     package_font_theme(doc.media_table()?.retained_package())
 }
 
+pub(crate) fn group_picture_sources(doc: &EditingDoc, env: &RenderEnv) -> GroupPictureSources {
+    doc.source_index()
+        .map(|index| index.group_picture_sources())
+        .or_else(|| doc.source_metadata()?.preview_shape_sources.clone())
+        .unwrap_or_else(|| env.group_pictures.clone())
+}
+
 pub(crate) fn parse_font_theme(value: Value) -> Result<docx_parse::Theme, serde_json::Error> {
     fn merge(target: &mut Value, source: Value) {
         match (target, source) {
@@ -500,10 +507,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         } else {
             env.media.clone()
         },
-        group_pictures: doc
-            .source_index()
-            .map(|index| index.group_picture_sources())
-            .unwrap_or_else(|| env.group_pictures.clone()),
+        group_pictures: group_picture_sources(doc, env),
         shape_styles: shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
