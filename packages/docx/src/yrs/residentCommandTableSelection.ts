@@ -1,5 +1,6 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
-import type { YrsCellLoc, YrsLoc, YrsTableRange } from './index';
+import type { YrsCellLoc, YrsLoc, YrsStoryRange, YrsTableRange } from './index';
+import { cellSelectionRanges } from './cellSelectionFormatting';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
@@ -163,13 +164,29 @@ export function cellStart(engine: Pick<DocxWorkerCommandEngine, 'geometryReader'
   return first ? { story, paraId: first.paraId, offset: 0 } : null;
 }
 
-export function cellSelectionHeadPosition(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsLoc | null {
+/** The selected range of two or more cells in the table holding the caret at `focus`. */
+function multiCellRange(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsTableRange | null {
   const active = readCellSelection(engine);
   if (!active || (active.anchor.row === active.head.row && active.anchor.column === active.head.column)) return null;
   const caret = resolveLiveCell(engine, focus.story);
   if (!caret || active.anchor.story !== caret.story || active.anchor.tableIndex !== caret.tableIndex ||
     active.head.story !== caret.story || active.head.tableIndex !== caret.tableIndex) return null;
-  const resolved = anchorsOf(engine, caret.story, caret.tableIndex);
+  return active;
+}
+
+/** The whole text of each cell the multi-cell range at `focus` covers, or null without one. */
+export function selectedCellRanges(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsStoryRange[] | null {
+  const active = multiCellRange(engine, focus);
+  return active && cellSelectionRanges({
+    tablePayload: (story, index) => engine.tablePayload(story, index),
+    paragraphSpans: (story) => engine.geometryReader.paragraphSpans(story),
+  }, active);
+}
+
+export function cellSelectionHeadPosition(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsLoc | null {
+  const active = multiCellRange(engine, focus);
+  if (!active) return null;
+  const resolved = anchorsOf(engine, active.head.story, active.head.tableIndex);
   const head = resolved?.anchors.find((entry) => entry.row <= active.head.row && active.head.row < entry.row + entry.rowspan &&
     entry.column <= active.head.column && active.head.column < entry.column + entry.colspan);
   return head ? cellStart(engine, head.story) : null;

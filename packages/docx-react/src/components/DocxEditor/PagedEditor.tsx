@@ -1173,7 +1173,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             }
             return syncYrsInputState(true);
           }
-          if (selection && !selection.context.hasSelection) {
+          if (
+            selection &&
+            !selection.context.hasSelection &&
+            !selection.tableContext?.hasMultiCellSelection
+          ) {
             const storedAction = storedYrsToolbarFormatting(selection.context, action);
             if (storedAction) {
               yrsInputRef.current?.applyStoredFormatting(storedAction);

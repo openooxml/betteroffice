@@ -46,8 +46,8 @@ are refused until then.
 | setSectionMargins | none | engine.setSectionMargins Actions:1028 | n/a | none | explicit-root: a section, not a story |
 | setTabStops | none | setParagraphAttrs Actions:1248 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | removeTabStop | none | setParagraphAttrs Actions:1258 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
-| formatSelection | none | engine.formatRange Actions:1371 | n/a | formattingRangeContainsContainer (Actions:51) reads segment kinds only | selection: resolveCommandSelection, readCommandSelection |
-| toggleStrike | none | engine.formatRange Actions:1364 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
+| formatSelection | reads-payload | engine.formatRange per cell of selectedCellRanges, else the selection | n/a | formattingRangeContainsContainer (Actions:51) reads segment kinds only; selectedCellRanges (TableSelection.ts) reads it for a multi-cell range only; an unavailable table holds no live cell, so the text selection is formatted | selection: resolveCommandSelection, readCommandSelection |
+| toggleStrike | reads-payload | engine.formatRange per cell through toggleAcross, else the selection | n/a | selectedCellRanges (TableSelection.ts) reads it for a multi-cell range only; an unavailable table holds no live cell, so the text selection is formatted | selection: resolveCommandSelection, readCommandSelection |
 | toggleList | none | setParagraphAttrs Actions:1321 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | changeIndent | none | setParagraphAttrs Actions:1321 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | insertImage | none | deleteRange Actions:1326, insertImage :1332 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
@@ -93,9 +93,9 @@ are refused until then.
 | deleteForward | none | as deleteBackward | n/a | forward returns `at` for any table without reading the payload, so Delete before a table is a noop | selection: resolveCommandSelection, readCommandSelection |
 | paragraphBreak | none | deleteRange Actions:1306, splitParagraph :1311 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | lineBreak | none | deleteRange Actions:1289, insertLineBreak :1293 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
-| toggleMark | none | engine.toggleMark Actions:1370 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
-| formatRange | none | engine.formatRange Actions:1371 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
-| clearFormatting | none | engine.clearFormatting Actions:1372 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
+| toggleMark | reads-payload | engine.toggleMark per cell through toggleAcross, else the selection | n/a | selectedCellRanges (TableSelection.ts) reads it for a multi-cell range only; an unavailable table holds no live cell, so the text selection is formatted | selection: resolveCommandSelection, readCommandSelection |
+| formatRange | reads-payload | engine.formatRange per cell of selectedCellRanges, else the selection | n/a | selectedCellRanges (TableSelection.ts) reads it for a multi-cell range only; an unavailable table holds no live cell, so the text selection is formatted | selection: resolveCommandSelection, readCommandSelection |
+| clearFormatting | reads-payload | engine.clearFormatting per cell of selectedCellRanges, else the selection | n/a | selectedCellRanges (TableSelection.ts) reads it for a multi-cell range only; an unavailable table holds no live cell, so the text selection is formatted | selection: resolveCommandSelection, readCommandSelection |
 | setParagraphAttrs | none | engine.setParagraphAttrs Actions:1373 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | applyParagraphStyle | none | engine.applyParagraphStyle Actions:1374 | n/a | none | selection: resolveCommandSelection, readCommandSelection |
 | setReadOnly | none | none | n/a | none | none |

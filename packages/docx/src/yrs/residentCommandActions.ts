@@ -15,7 +15,8 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, readCellSelection, resolveLiveCell, selectedCellRanges, tableRangeFor } from './residentCommandTableSelection';
+import { toggleAcross } from './cellSelectionFormatting';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -50,6 +51,7 @@ import type {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
+const INLINE_FORMATTING = new Set(['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting']);
 
 /** Whether `engine` can put a paragraph on a list, which the list toggle needs. */
 function ensuresLists(
@@ -767,9 +769,10 @@ export function preflightDocxCommand(
   }
   if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
-  if (['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind) &&
+  const cellRanges = INLINE_FORMATTING.has(command.kind) ? selectedCellRanges(engine, resolved.selection.focus) : null;
+  if (INLINE_FORMATTING.has(command.kind) &&
     'suggesting' in command.payload && command.payload.suggesting !== undefined &&
-    formattingRangeContainsContainer(engine, resolved.range)) return refuse('unsupported-suggesting');
+    (cellRanges ?? [resolved.range]).some(range => formattingRangeContainsContainer(engine, range))) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
@@ -823,7 +826,7 @@ export function preflightDocxCommand(
     range = expanded;
   }
   return { status: 'ready', prepared: {
-    command: structuredClone(command), selection: resolved.selection, range,
+    command: structuredClone(command), selection: resolved.selection, range, ...(cellRanges ? { cellRanges } : {}),
   } };
 }
 
@@ -1237,11 +1240,11 @@ function applyPreparedDocxCommand(
     publish(selection, true);
     return result('noop');
   }
-  if (state.storedMarks && (state.storedMarks.story !== selection.focus.story ||
+  if (state.storedMarks && (prepared.cellRanges || state.storedMarks.story !== selection.focus.story ||
     state.storedMarks.paraId !== selection.focus.paraId || !sameSelection(priorSelection, selection) ||
     selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset)) state.storedMarks = null;
   publish(selection);
-  if (collapsed(range) && ['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind)) {
+  if (!prepared.cellRanges && collapsed(range) && INLINE_FORMATTING.has(command.kind)) {
     const current = state.storedMarks;
     const toolbar = command.kind === 'toggleMark' || command.kind === 'toggleStrike' ? engine.selectionContext(range) : undefined;
     const delta = command.kind === 'toggleStrike' ? { strike: withStoredMarks(toolbar!, current).strike !== true } : command.kind === 'toggleMark' ? markDelta(command.payload.mark, withStoredMarks(toolbar!, current)) :
@@ -1269,6 +1272,7 @@ function applyPreparedDocxCommand(
   let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
   let pastedOver: YrsStoryRange | null = null;
   let pastedMarks: DocxStoredMarks | null = null;
+  const ranges = prepared.cellRanges ?? [range];
   switch (command.kind) {
     case 'setTabStops':
       engine.setParagraphAttrs(range, { tabs: command.payload.tabs });
@@ -1390,7 +1394,9 @@ function applyPreparedDocxCommand(
         { caret, repair: () => repairCommandSelection(engine, state) });
       break;
     }
-    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting); break;
+    case 'toggleStrike':
+      toggleAcross(engine, ranges, 'strike', (target, on) => engine.formatRange(target, { strike: on }, command.payload.suggesting));
+      break;
     case 'pasteFragment': {
       pastedMarks = state.storedMarks ? structuredClone(state.storedMarks) : null;
       state.storedMarks = null;
@@ -1420,9 +1426,17 @@ function applyPreparedDocxCommand(
       }
       break;
     }
-    case 'toggleMark': engine.toggleMark(range, command.payload.mark, command.payload.suggesting); break;
-    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta, command.payload.suggesting); break;
-    case 'clearFormatting': engine.clearFormatting(range, command.payload.suggesting); break;
+    case 'toggleMark': {
+      const { mark, suggesting } = command.payload;
+      if (mark.type === 'fontFamily' || mark.type === 'fontSize' || mark.type === 'color') {
+        for (const target of ranges) engine.toggleMark(target, mark, suggesting);
+      } else toggleAcross(engine, ranges, mark.type, (target) => engine.toggleMark(target, mark, suggesting));
+      break;
+    }
+    case 'formatSelection': case 'formatRange':
+      for (const target of ranges) engine.formatRange(target, command.payload.delta, command.payload.suggesting);
+      break;
+    case 'clearFormatting': for (const target of ranges) engine.clearFormatting(target, command.payload.suggesting); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }

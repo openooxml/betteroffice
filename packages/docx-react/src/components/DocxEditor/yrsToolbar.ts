@@ -6,11 +6,18 @@ import type {
   YrsSelectionContext,
   YrsSession,
   YrsStoryRange,
+  YrsToggledMark,
 } from '@betteroffice/docx/yrs';
-import { applyListToggle, compareYrsLocs, listOffAttrs } from '@betteroffice/docx/yrs';
+import {
+  applyListToggle,
+  cellSelectionRanges,
+  compareYrsLocs,
+  listOffAttrs,
+  toggleAcross,
+} from '@betteroffice/docx/yrs';
 import type { YrsStoredFormatting, YrsStoredFormattingAction } from './YrsInput';
 import type { TableContextInfo } from './types';
-import { currentYrsTableContext } from './yrsCommands';
+import { currentYrsTableContext, currentYrsTableTarget } from './yrsCommands';
 
 /** A formatting operation over the current selection. */
 export type FormattingAction =
@@ -93,17 +100,15 @@ function paragraphNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-function effectiveFontSize(context: YrsSelectionContext): number | null {
-  if (context.fontSize != null) return context.fontSize;
-  const defaults = context.paragraphProperties.defaultTextFormatting;
-  if (!defaults || typeof defaults !== 'object') return null;
-  const value = (defaults as { fontSize?: unknown }).fontSize;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (value && typeof value === 'object') {
-    const size = (value as { size?: unknown }).size;
-    if (typeof size === 'number' && Number.isFinite(size)) return size;
+/** Runs `edit` as one undo step although it writes several stories. */
+function inOneUndoStep(session: YrsSession, edit: () => void): void {
+  const mode = session.undoCaptureMode();
+  session.setUndoCaptureMode('manual');
+  try {
+    edit();
+  } finally {
+    session.setUndoCaptureMode(mode);
   }
-  return null;
 }
 
 function paragraphNumPr(value: unknown): { numId?: number; ilvl?: number } | null {
@@ -294,28 +299,34 @@ export function applyYrsToolbarFormatting(
 ): boolean {
   const selection = currentYrsToolbarSelection(session, map);
   if (!selection) return false;
-  const { context, range } = selection;
-
-  if (action === 'bold' || action === 'italic' || action === 'underline') {
-    if (isCollapsed(range)) return false;
-    session.toggleMark(range, { type: action });
+  const { range } = selection;
+  const cells = selection.tableContext?.hasMultiCellSelection
+    ? currentYrsTableTarget(session)?.range
+    : undefined;
+  const ranges = cells ? cellSelectionRanges(session, cells) : isCollapsed(range) ? [] : [range];
+  const format = (edit: () => void): boolean => {
+    if (ranges.length === 0) return false;
+    if (cells) inOneUndoStep(session, edit);
+    else edit();
     return true;
+  };
+  const each = (apply: (target: YrsStoryRange) => void) => format(() => ranges.forEach(apply));
+  const toggle = (mark: YrsToggledMark, apply: (target: YrsStoryRange, on: boolean) => void) =>
+    format(() => toggleAcross(session, ranges, mark, apply));
+
+  if (
+    action === 'bold' ||
+    action === 'italic' ||
+    action === 'underline' ||
+    action === 'superscript' ||
+    action === 'subscript'
+  ) {
+    return toggle(action, (target) => session.toggleMark(target, { type: action }));
   }
   if (action === 'strikethrough') {
-    if (isCollapsed(range)) return false;
-    session.formatRange(range, { strike: context.strike === true ? false : true });
-    return true;
+    return toggle('strike', (target, on) => session.formatRange(target, { strike: on }));
   }
-  if (action === 'superscript' || action === 'subscript') {
-    if (isCollapsed(range)) return false;
-    session.toggleMark(range, { type: action });
-    return true;
-  }
-  if (action === 'clearFormatting') {
-    if (isCollapsed(range)) return false;
-    session.clearFormatting(range);
-    return true;
-  }
+  if (action === 'clearFormatting') return each((target) => session.clearFormatting(target));
   if (action === 'bulletList' || action === 'numberedList') {
     applyListToggle(session, range, action === 'bulletList' ? 'bullet' : 'numbered', suggesting);
     return true;
@@ -348,25 +359,21 @@ export function applyYrsToolbarFormatting(
       session.applyParagraphStyle(range, action.value, suggesting);
       return true;
     case 'fontFamily':
-      if (isCollapsed(range)) return false;
-      session.formatRange(range, {
-        fontFamily: { ascii: action.value, hAnsi: action.value },
-      });
-      return true;
+      return each((target) =>
+        session.formatRange(target, { fontFamily: { ascii: action.value, hAnsi: action.value } })
+      );
     case 'fontSize':
-      if (isCollapsed(range)) return false;
-      if (effectiveFontSize(context) === action.value * 2) return false;
-      session.formatRange(range, { fontSize: action.value });
-      return true;
+      if (ranges.every((target) => session.selectionContext(target).fontSize === action.value * 2)) {
+        return false;
+      }
+      return each((target) => session.formatRange(target, { fontSize: action.value }));
     case 'textColor':
-      if (isCollapsed(range)) return false;
-      session.formatRange(range, { color: textColorDelta(action.value) });
-      return true;
+      return each((target) => session.formatRange(target, { color: textColorDelta(action.value) }));
     case 'highlightColor':
-      if (isCollapsed(range)) return false;
-      session.formatRange(range, {
-        highlight: action.value && action.value !== 'none' ? action.value : null,
-      });
-      return true;
+      return each((target) =>
+        session.formatRange(target, {
+          highlight: action.value && action.value !== 'none' ? action.value : null,
+        })
+      );
   }
 }

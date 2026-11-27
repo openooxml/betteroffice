@@ -128,6 +128,7 @@ export * from './inputPositionMap';
 /** @internal */
 export { subscribeYrsSelection, withYrsSelectionCause, yrsSelectionCause } from './selectionChanges';
 export * from './storyPlainText';
+export * from './cellSelectionFormatting';
 export { tableBoundaryDeleteTarget } from './tableBoundaryDelete';
 export { applyListToggle, LIST_OFF_ATTRS, listOffAttrs } from './listCommands';
 export { isCellHasNoStoryRefusal } from './cellRefusal';
