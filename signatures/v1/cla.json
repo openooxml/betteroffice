@@ -137,6 +137,12 @@
       "id": 200449216,
       "signed_at": "2026-11-26T05:45:02Z",
       "pull_request_no": 2854
+    },
+    {
+      "name": "yoke233",
+      "id": 2161917,
+      "signed_at": "2026-11-27T02:33:43Z",
+      "pull_request_no": 2859
     }
   ]
 }

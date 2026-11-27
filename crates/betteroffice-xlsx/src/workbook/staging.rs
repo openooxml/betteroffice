@@ -128,12 +128,16 @@ impl Workbook {
         }
         let styles = &staged.model.styles;
         let built = self.authority()?;
-        let mut authority = if !self.is_collaborative() {
-            built.stage_standalone_ops_v1(&ops, origin, styles, baseline)
-        } else {
-            match baseline {
-                Some(baseline) => built.stage_local_ops_from_v1(&ops, origin, styles, baseline),
-                None => built.stage_local_ops_v1(&ops, origin, styles),
+        let mut authority = match &self.mode {
+            WorkbookMode::Collaborative { structure } => built.stage_replica_ops_v1(
+                &ops,
+                origin,
+                styles,
+                baseline,
+                (&self.model, &structure.sheet_keys),
+            ),
+            WorkbookMode::Standalone => {
+                built.stage_standalone_ops_v1(&ops, origin, styles, baseline)
             }
         }
         .map_err(authority_error)?;
@@ -187,9 +191,9 @@ impl Workbook {
     ) -> Result<Option<Vec<u8>>> {
         let PreparedCommit {
             ops,
-            model,
+            mut model,
             inverse,
-            authority,
+            mut authority,
             history,
         } = prepared;
         let collaborative = self.is_collaborative();
@@ -200,6 +204,10 @@ impl Workbook {
             _ => None,
         };
         let recorded = history == CommitHistory::Separate;
+        let hidden_sizes = match &mut authority {
+            PreparedAuthority::Staged(authority) => std::mem::take(&mut authority.hidden_sizes),
+            _ => Default::default(),
+        };
         let preserved_before = (!collaborative && recorded).then(|| self.preserved.clone());
         let rebased = self.rebased_proposals(&ops);
         let proposals_before = rebased.as_ref().map(|_| self.proposals.list().to_vec());
@@ -246,6 +254,9 @@ impl Workbook {
         };
         if self.authority.built.get().is_some() {
             self.authority.deferred = None;
+        }
+        if let Some(structure) = &new_structure {
+            self.derive_replica_hidden_sizes(&mut model, structure, Some(hidden_sizes));
         }
         self.install_model_with_ops(model, &ops, cell_inputs && !collaborative)?;
         self.adopt_rebased_proposals(rebased);

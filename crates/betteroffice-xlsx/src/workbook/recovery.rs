@@ -429,7 +429,11 @@ struct RecoveryHiddenSizes {
 }
 
 impl RecoveryCalculation {
-    fn capture(model: &WorkbookModel, projection: WorkbookModel) -> Result<Self> {
+    fn capture(
+        model: &WorkbookModel,
+        projection: WorkbookModel,
+        collaborative: bool,
+    ) -> Result<Self> {
         if model.sheets.len() != projection.sheets.len() {
             return Err(invalid("Recovery authority sheet count mismatch"));
         }
@@ -452,8 +456,8 @@ impl RecoveryCalculation {
             );
             arrays.push(sheet.array_formulas().collect());
         }
-        let hidden_differs =
-            model
+        let hidden_differs = !collaborative
+            && model
                 .sheets
                 .iter()
                 .zip(&projection.sheets)
@@ -479,11 +483,21 @@ impl RecoveryCalculation {
                 Vec::new()
             },
         };
-        let applied = state.apply(projection)?;
+        let mut applied = state.apply(projection)?;
+        if collaborative {
+            for (sheet, applied) in model.sheets.iter().zip(&mut applied.sheets) {
+                applied
+                    .hidden_row_heights
+                    .clone_from(&sheet.hidden_row_heights);
+                applied
+                    .hidden_col_widths
+                    .clone_from(&sheet.hidden_col_widths);
+            }
+        }
         if applied != *model {
             return Err(invalid(format!(
                 "Recovery projection cannot be reconstructed: {}",
-                first_difference(model, &applied)
+                first_difference(model, &applied, collaborative)
             )));
         }
         Ok(state)
@@ -536,7 +550,7 @@ impl RecoveryCalculation {
     }
 }
 
-fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
+fn first_difference(left: &WorkbookModel, right: &WorkbookModel, collaborative: bool) -> String {
     let workbook = [
         ("sheet count", left.sheets.len() != right.sheets.len()),
         ("date system", left.date_system != right.date_system),
@@ -576,11 +590,11 @@ fn first_difference(left: &WorkbookModel, right: &WorkbookModel) -> String {
             ("row heights", left.row_heights != right.row_heights),
             (
                 "hidden column widths",
-                left.hidden_col_widths != right.hidden_col_widths,
+                !collaborative && left.hidden_col_widths != right.hidden_col_widths,
             ),
             (
                 "hidden row heights",
-                left.hidden_row_heights != right.hidden_row_heights,
+                !collaborative && left.hidden_row_heights != right.hidden_row_heights,
             ),
             ("sheet format", left.format != right.format),
             ("column styles", left.col_styles != right.col_styles),
@@ -741,7 +755,8 @@ impl Workbook {
         };
         let projection = built.materialize().map_err(authority_error)?;
         pulse();
-        let calculation = RecoveryCalculation::capture(&self.model, projection)?;
+        let calculation =
+            RecoveryCalculation::capture(&self.model, projection, self.is_collaborative())?;
         pulse();
         let history = if let Some((preserved_undo, preserved_redo)) = history {
             let (undo, redo) = self.undo.recovery_stacks();
@@ -869,6 +884,13 @@ impl Workbook {
         if let Some(styles) = &source_markers {
             model.styles.inherit_xf_xml_markers(styles);
         }
+        let structure = if checkpoint.collaborative {
+            let structure = authority.structure().map_err(authority_error)?;
+            derive_source_hidden_sizes(&mut model, &structure.sheet_keys, source_model);
+            Some(structure)
+        } else {
+            None
+        };
         pulse();
         authority.set_snapshot_projection_valid(true);
         let states = preserved_states
@@ -911,15 +933,9 @@ impl Workbook {
         workbook.graph = Some(DepGraph::build(&model));
         workbook.model = model;
         workbook.authority = AuthoritySlot::built(authority);
-        if checkpoint.collaborative {
+        if let Some(structure) = structure {
             workbook.mode = WorkbookMode::Collaborative {
-                structure: Box::new(
-                    workbook
-                        .authority
-                        .get()?
-                        .structure()
-                        .map_err(authority_error)?,
-                ),
+                structure: Box::new(structure),
             };
         } else if !pending_remote_updates.is_empty() {
             return Err(invalid("Standalone recovery has remote updates"));

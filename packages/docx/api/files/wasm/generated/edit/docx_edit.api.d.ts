@@ -2086,6 +2086,7 @@ export interface InitOutput {
     readonly editsession_run_inheritance: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_section_margins_json: (a: number) => [number, number];
+    readonly editsession_section_save_plan_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_seed_comment_metadata_json: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];
