@@ -4,12 +4,16 @@ import type { Paragraph } from '../types/content/paragraph';
 import type { BlockContent, Document } from '../types/document';
 import type { EditSession } from '../wasm/edit';
 import type { YrsSession } from './index';
+import { projectionAllowlist } from './projectionParity.allowlist';
 import {
   canonicalProjection,
+  canonicalStories,
+  check,
   checkSourceOrdinals,
   checkStory,
   compareSnapshots,
   nativeProjection,
+  type AllowanceUsage,
   type Deferral,
 } from './projectionParity.support';
 
@@ -54,6 +58,37 @@ describe('DOCX projection canonical form', () => {
       deferred: [],
     }) } as unknown as EditSession;
     expect(() => nativeProjection(raw, new ArrayBuffer(0))).toThrow('wire.wireVersion must be 1');
+  });
+
+  it('reports every unlisted native deferral in equal documents and stories', () => {
+    const session = {} as YrsSession;
+    const document = wireDocument() as unknown as Document;
+    const stories = canonicalStories(session, document);
+    const deferred: Deferral[] = [
+      { family: 'fields', kind: 'unlisted', storyId: 'body', paragraph: 0 },
+      { family: 'fields', kind: 'table', storyId: 'body:t0:r0c0', paragraph: null },
+    ];
+    const native = { document, paragraphSessionKeys: [], sessionRevisionPlaceholders: [], createdListSites: [], deferred };
+    const differences = check(session, document, native, stories);
+    expect(differences).toHaveLength(deferred.length);
+    expect(differences[0]).toContain('story body, paragraph 0, deferred: fields/unlisted');
+    expect(differences[1]).toContain('story body:t0:r0c0, paragraph -, deferred: fields/table');
+    expect(checkStory(stories, { ...native, storyId: 'body', blocks: [] }, stories)).toEqual(differences);
+  });
+
+  it('counts a named deferral and leaves unmatched difference allowances stale', () => {
+    const session = {} as YrsSession;
+    const document = wireDocument() as unknown as Document;
+    const stories = canonicalStories(session, document);
+    const table: Deferral = { family: 'tables', kind: 'table', storyId: 'body', paragraph: 0 };
+    const native = { document, paragraphSessionKeys: [], sessionRevisionPlaceholders: [], createdListSites: [], deferred: [table] };
+    const entries = projectionAllowlist.filter(({ family, kind }) => family === table.family && kind === table.kind);
+    const used: AllowanceUsage = new Map();
+    expect(check(session, document, native, stories, undefined, used)).toEqual([]);
+    expect(checkStory(stories, { ...native, storyId: 'body', blocks: [] }, stories, used)).toEqual([]);
+    expect([...used].map(([{ family, kind, path }, count]) => ({ family, kind, path, count })))
+      .toEqual([{ family: 'tables', kind: 'table', path: 'deferred', count: 2 }]);
+    expect(entries.filter((entry) => !used.has(entry))).toEqual(entries.filter(({ path }) => path !== 'deferred'));
   });
 
   it('checks the source ordinal of an edited nested field paragraph', () => {

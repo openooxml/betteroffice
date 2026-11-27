@@ -1416,7 +1416,7 @@ fn apply_host_metadata(document: &mut S9DocumentWire, host: &ProjectionHostMetad
 mod tests {
     use super::*;
     use serde_json::json;
-    use yrs::{Assoc, Map, MapPrelim};
+    use yrs::{Assoc, Map, MapPrelim, Text};
 
     fn seeded_header() -> EditingDoc {
         let parts = [
@@ -1425,11 +1425,88 @@ mod tests {
             ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#),
             ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#),
             ("word/header.xml", r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#),
-        ]
-        .map(|(path, xml)| (path.to_owned(), xml.as_bytes().to_vec()));
+        ];
+        seeded_parts(parts)
+    }
+
+    fn seeded_parts<const N: usize>(parts: [(&str, &str); N]) -> EditingDoc {
+        let parts = parts.map(|(path, xml)| (path.to_owned(), xml.as_bytes().to_vec()));
         let doc = EditingDoc::new(41);
         crate::seed_from_docx(&doc, &ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
         doc
+    }
+
+    fn seeded_body(body: &str) -> EditingDoc {
+        let document = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:test"><w:body>{body}</w:body></w:document>"#
+        );
+        seeded_parts([
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+            ("word/document.xml", &document),
+        ])
+    }
+
+    #[test]
+    fn reports_deferrals_for_retained_tab_and_raw_block() {
+        let doc = seeded_body(r#"<x:extra/><w:p><w:r><w:tab/></w:r></w:p>"#);
+        let output = doc.project_story("body", &ProjectionInput::default()).unwrap();
+        assert!(matches!(output.blocks[0], BlockContent::RawXml(_)));
+        let BlockContent::Paragraph(paragraph) = &output.blocks[1] else {
+            panic!("expected the paragraph after the raw block");
+        };
+        assert!(matches!(
+            paragraph.content.as_slice(),
+            [ParagraphContent::Inline(docx_parse::inline::InlineNode::Run(run))]
+                if run.content == [docx_parse::inline::RunContent::Tab]
+        ));
+        for (family, kind) in [
+            (ProjectionFamily::Fields, "tab"),
+            (ProjectionFamily::Markers, "rawBlock"),
+        ] {
+            assert!(output.deferred.contains(&ProjectionDeferral {
+                family,
+                kind: kind.to_owned(),
+                story_id: "body".to_owned(),
+                paragraph: Some(0),
+            }));
+        }
+    }
+
+    #[test]
+    fn reports_deferred_field_text_marks_and_retained_paragraph_ranges() {
+        let doc = seeded_body(concat!(
+            r#"<w:p><w:moveFromRangeStart w:id="1" w:name="move"/>"#,
+            r#"<w:hyperlink w:anchor="target"><w:r><w:t>Result</w:t></w:r></w:hyperlink>"#,
+            r#"<w:moveFromRangeEnd w:id="1"/></w:p>"#,
+        ));
+        {
+            let mut txn = doc.doc.transact_mut();
+            let body = crate::story_text(&txn, "body").unwrap();
+            let attrs = std::collections::HashMap::from([(
+                Arc::from("fieldResult"),
+                Any::from_json(r#"{"id":0,"index":0}"#).unwrap(),
+            )]);
+            body.format(&mut txn, 0, 6, attrs);
+        }
+        let output = doc.project_story("body", &ProjectionInput::default()).unwrap();
+        let BlockContent::Paragraph(paragraph) = &output.blocks[0] else {
+            panic!("expected the paragraph with marked text");
+        };
+        let kinds: Vec<_> = paragraph.content.iter().map(ParagraphContent::node_type).collect();
+        assert_eq!(kinds, ["moveFromRangeStart", "hyperlink", "moveFromRangeEnd"]);
+        for (family, kind) in [
+            (ProjectionFamily::Fields, "fieldResult"),
+            (ProjectionFamily::Fields, "hyperlink"),
+            (ProjectionFamily::Markers, "revisions"),
+        ] {
+            assert!(output.deferred.contains(&ProjectionDeferral {
+                family,
+                kind: kind.to_owned(),
+                story_id: "body".to_owned(),
+                paragraph: Some(0),
+            }));
+        }
     }
 
     #[test]
