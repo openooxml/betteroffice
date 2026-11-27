@@ -15,7 +15,8 @@ use yrs::Transact;
 
 use crate::comments::{comment_copy_origins, copied_comment_id, derived_guid, seeded_comment_id};
 use crate::deck::baseline_snapshot;
-use crate::paragraph::{SlideParents, find_placeholder};
+use crate::inherit::{SlideContext, layout_geometry, layout_transform};
+use crate::paragraph::find_placeholder;
 use crate::{
     CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
     ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
@@ -82,7 +83,7 @@ fn deck_write(
         .collect();
     let mut slides = Vec::with_capacity(current.slides.len());
     for slide in &current.slides {
-        let context = SlideParents::resolve(
+        let context = SlideContext::new(
             package,
             slide.source_part_path.as_deref(),
             slide.layout_part_path.as_deref(),
@@ -96,7 +97,7 @@ fn deck_write(
                 shapes: shape_writes(
                     &slide.shapes,
                     &base.shapes,
-                    source_shapes(package, slide),
+                    context.source_shapes,
                     autofit,
                     &context,
                     session,
@@ -120,7 +121,7 @@ fn deck_write(
                     shapes: shape_writes(
                         &slide.shapes,
                         &base.shapes,
-                        source_shapes(package, slide),
+                        context.source_shapes,
                         autofit,
                         &context,
                         session,
@@ -135,7 +136,7 @@ fn deck_write(
                 shapes: slide
                     .shapes
                     .iter()
-                    .map(shape_add)
+                    .map(|shape| shape_add(shape, &context))
                     .collect::<EditResult<Vec<_>>>()?,
                 background: slide.background.clone().map(Box::new),
             },
@@ -496,26 +497,12 @@ fn source_part_path(slide: &SlideSnapshot) -> EditResult<String> {
         .ok_or_else(|| EditError::Write(format!("slide {} has no source part", slide.id)))
 }
 
-fn source_shapes<'a>(package: &'a PptxPackage, slide: &SlideSnapshot) -> &'a [ShapeNode] {
-    slide
-        .source_part_path
-        .as_deref()
-        .and_then(|path| {
-            package
-                .slides
-                .iter()
-                .find(|source| source.part_path == path)
-        })
-        .map(|source| source.shapes.as_slice())
-        .unwrap_or_default()
-}
-
 fn shape_writes(
     current: &[ShapeSnapshot],
     baseline: &[ShapeSnapshot],
     source: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
-    context: &SlideParents<'_>,
+    context: &SlideContext<'_>,
     session: &DeckSession,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
@@ -543,7 +530,7 @@ fn shape_writes(
                     )?),
                 }
             }
-            None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
+            None => ShapeWrite::Add(Box::new(shape_add(shape, context)?)),
         };
         writes.push(write);
     }
@@ -585,7 +572,7 @@ fn shape_patch(
     source: &ShapeNode,
     source_children: &[ShapeNode],
     autofit: &HashMap<String, TextAutofit>,
-    context: &SlideParents<'_>,
+    context: &SlideContext<'_>,
     session: &DeckSession,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
@@ -710,7 +697,7 @@ fn node_autofit(node: &ShapeNode) -> Option<&TextAutofit> {
 
 fn inherited_autofit<'a>(
     shape: &ShapeSnapshot,
-    context: &SlideParents<'a>,
+    context: &SlideContext<'a>,
 ) -> Option<&'a TextAutofit> {
     let placeholder = shape.placeholder.as_ref()?;
     [
@@ -853,7 +840,27 @@ fn color_from_hex(color: &str) -> ColorValue {
     }
 }
 
-fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+fn inherits_shape_properties(shape: &ShapeSnapshot, context: &SlideContext<'_>) -> bool {
+    let Some(placeholder) = shape.placeholder.as_ref().filter(|_| shape.source_id == 0) else {
+        return false;
+    };
+    let same_transform = layout_transform(context, placeholder).is_some_and(|transform| {
+        (shape.x, shape.y, shape.width, shape.height)
+            == (transform.x, transform.y, transform.width, transform.height)
+            && shape.rotation_deg == transform.rotation_deg
+            && shape.flip_h == transform.flip_h
+            && shape.flip_v == transform.flip_v
+    });
+    same_transform
+        && match layout_geometry(context, placeholder) {
+            Some(inherited) => {
+                shape.geometry == inherited.geometry && shape.adjust_values == inherited.adjust_values
+            }
+            None => shape.geometry == "rect" && shape.adjust_values.is_empty(),
+        }
+}
+
+fn shape_add(shape: &ShapeSnapshot, context: &SlideContext<'_>) -> EditResult<ShapeAdd> {
     if shape.kind == ShapeKind::Picture {
         return picture_shape_add(shape);
     }
@@ -870,7 +877,11 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         .transpose()?;
     Ok(ShapeAdd {
         name: shape.name.clone(),
-        geometry: shape.geometry.clone(),
+        geometry: if inherits_shape_properties(shape, context) {
+            String::new()
+        } else {
+            shape.geometry.clone()
+        },
         text_box: shape.text_box,
         x: shape.x,
         y: shape.y,

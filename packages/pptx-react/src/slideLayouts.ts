@@ -5,6 +5,7 @@ import type {
 } from '@betteroffice/pptx';
 import type { PresentationSlideLayoutSummary } from '@betteroffice/pptx/worker';
 import type { TFunction, TranslationKey } from '@betteroffice/pptx-i18n';
+import { isTextPlaceholderType } from '../../../shared/pptxPlaceholders';
 
 const LAYOUT_TYPE_KEYS: Record<string, TranslationKey> = {
   title: 'toolbar.layouts.title',
@@ -33,8 +34,6 @@ const STANDARD_LAYOUT_NAME_KEYS: Record<string, TranslationKey> = {
   'title and vertical text': 'toolbar.layouts.vertTx',
   'vertical title and text': 'toolbar.layouts.vertTitleAndTx',
 };
-
-const EDITABLE_PLACEHOLDER_TYPES = new Set(['title', 'ctrTitle', 'subTitle', 'body']);
 
 /** Resolve which layout part path clicking the main "New Slide" action uses. */
 export function defaultInsertLayoutPath(
@@ -125,9 +124,7 @@ export function isEmptyEditablePlaceholder(
       primitive.kind === 'textBox' &&
       primitive.shapeId === shapeId &&
       (storyId === undefined || primitive.storyId === storyId) &&
-      Boolean(
-        primitive.placeholderType && EDITABLE_PLACEHOLDER_TYPES.has(primitive.placeholderType),
-      ) &&
+      isTextPlaceholderType(primitive.placeholderType) &&
       isEmptyTextBox(primitive),
   );
 }
@@ -152,13 +149,15 @@ export function emptyPlaceholderGuides(
     if (
       primitive.kind !== 'textBox' ||
       !primitive.shapeId ||
-      !primitive.placeholderType ||
-      !EDITABLE_PLACEHOLDER_TYPES.has(primitive.placeholderType) ||
+      !isTextPlaceholderType(primitive.placeholderType) ||
       !isEmptyTextBox(primitive)
     ) {
       continue;
     }
     const placeholderType = primitive.placeholderType;
+    const customPrompt = 'placeholderPrompt' in primitive && typeof primitive.placeholderPrompt === 'string'
+      ? primitive.placeholderPrompt
+      : undefined;
     guides.push({
       key: `${primitive.shapeId}:${primitive.storyId ?? ''}`,
       shapeId: primitive.shapeId,
@@ -167,7 +166,7 @@ export function emptyPlaceholderGuides(
       w: primitive.w,
       h: primitive.h,
       placeholderType,
-      prompt: t(placeholderPromptKey(placeholderType)),
+      prompt: customPrompt ?? t(placeholderPromptKey(placeholderType)),
       anchor: primitive.anchor,
       align: primitive.paragraphs[0]?.align,
       transform: primitive.transform,

@@ -25,7 +25,9 @@ use yrs::{
 use crate::comments::{
     baseline_comments, flavor_key, seed_comments, snapshot_comments, snapshot_flavor,
 };
-use crate::inherit::{SlideContext, inherited_transform, layout_transform, record_inherited};
+use crate::inherit::{
+    SlideContext, inherited_transform, layout_geometry, layout_transform, record_inherited,
+};
 use crate::story::{baseline_story, seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN, PendingMedia,
@@ -1394,14 +1396,21 @@ fn layout_placeholder_specs(
                 package.presentation.height_emu,
             )
         };
-        let geometry = if matches!(shape.geometry.as_str(), "" | "custom" | "group") {
+        let geometry_source = if shape.has_preset_geometry || shape.geometry == "custom" {
+            shape
+        } else {
+            layout_geometry(&context, placeholder).unwrap_or(shape)
+        };
+        let geometry = if matches!(geometry_source.geometry.as_str(), "" | "custom" | "group") {
             "rect".to_owned()
         } else {
-            shape.geometry.clone()
+            geometry_source.geometry.clone()
         };
-        let adjust_values_json = if geometry == shape.geometry && !shape.adjust_values.is_empty() {
+        let adjust_values_json = if geometry == geometry_source.geometry
+            && !geometry_source.adjust_values.is_empty()
+        {
             Some(
-                serde_json::to_string(&shape.adjust_values)
+                serde_json::to_string(&geometry_source.adjust_values)
                     .map_err(|error| EditError::Json(error.to_string()))?,
             )
         } else {
@@ -5105,6 +5114,7 @@ mod tests {
         let layout = &mut package.layouts[0];
         if let Some(ShapeNode::Shape(title)) = layout.shapes.first_mut() {
             title.geometry = "roundRect".to_owned();
+            title.has_preset_geometry = true;
             title.adjust_values.insert("adj".to_owned(), 0.25);
         }
         // OOXML omits `type` on default `obj` content placeholders; a colliding master footer

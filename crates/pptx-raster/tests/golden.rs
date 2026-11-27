@@ -173,6 +173,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
         shape_id: Some("text-1".into()),
         story_id: Some("story-1".into()),
         placeholder_type: None,
+        placeholder_prompt: None,
         x,
         y,
         w: width + 8.0,

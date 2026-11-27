@@ -3895,21 +3895,23 @@ fn shape_element(
         )
         .with_child(non_visual_properties)
         .with_child(nv_pr);
-    let transform = shape_add_transform(add, prefixes);
-    let mut adjust_list = XmlElement::new(prefixes.drawing("avLst"));
-    for (name, value) in &add.adjust_values {
-        adjust_list = adjust_list.with_child(
-            XmlElement::new(prefixes.drawing("gd"))
-                .with_attribute("name", name.clone())
-                .with_attribute("fmla", format!("val {}", format_fixed(value * 100_000.0))),
-        );
+    let mut properties = XmlElement::new(prefixes.presentation("spPr"));
+    if add.placeholder.is_none() || !add.geometry.is_empty() {
+        let mut adjust_list = XmlElement::new(prefixes.drawing("avLst"));
+        for (name, value) in &add.adjust_values {
+            adjust_list = adjust_list.with_child(
+                XmlElement::new(prefixes.drawing("gd"))
+                    .with_attribute("name", name.clone())
+                    .with_attribute("fmla", format!("val {}", format_fixed(value * 100_000.0))),
+            );
+        }
+        let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
+            .with_attribute("prst", add.geometry.clone())
+            .with_child(adjust_list);
+        properties = properties
+            .with_child(shape_add_transform(add, prefixes))
+            .with_child(geometry);
     }
-    let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
-        .with_attribute("prst", add.geometry.clone())
-        .with_child(adjust_list);
-    let mut properties = XmlElement::new(prefixes.presentation("spPr"))
-        .with_child(transform)
-        .with_child(geometry);
     if let Some(fill) = &add.fill {
         properties = properties.with_child(fill_element(fill, prefixes, part)?);
     }

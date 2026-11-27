@@ -76,6 +76,7 @@ export function PlaceholderGuides({
               color: '#94a3b8',
               fontSize: Math.max(11, Math.round(promptBaseFontSize(guide.placeholderType) * scale)),
               lineHeight: 1.3,
+              whiteSpace: 'pre-wrap',
               userSelect: 'none',
               ...(transform ? { transform, transformOrigin: 'center center' } : {}),
             }}

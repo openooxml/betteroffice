@@ -1336,6 +1336,10 @@ impl<'a> TextScope<'a> {
             default_style: &self.package.presentation.default_text_style,
             default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
             placeholder,
+            has_custom_prompt: self.layout.zip(nodes[1]).is_some_and(|(layout, node)| {
+                self.package
+                    .layout_placeholder_has_custom_prompt(&layout.part_path, node.id())
+            }),
             style_color: shape_style_color(nodes[0]),
         }
     }
@@ -2125,6 +2129,24 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         let stable_id = shape.id.clone();
+        let inherited_geometry = if shape.placeholder.is_some()
+            && matches!(original, Some(ShapeNode::Shape(source))
+                if !source.has_preset_geometry && source.geometry != "custom")
+        {
+            [layout_node, master_node]
+                .into_iter()
+                .flatten()
+                .find(|node| {
+                    matches!(node, ShapeNode::Shape(source)
+                        if source.has_preset_geometry || source.geometry == "custom")
+                })
+        } else {
+            None
+        };
+        let (geometry, adjust_values) = match inherited_geometry {
+            Some(ShapeNode::Shape(source)) => (&source.geometry, &source.adjust_values),
+            _ => (&shape.geometry, &shape.adjust_values),
+        };
         let transform = Transform {
             rotation_deg: resolved.rotation_deg as f32,
             flip_h: resolved.flip_h,
@@ -2190,13 +2212,13 @@ impl<'a> LayoutBuilder<'a> {
                 });
             match shape.kind {
                 ShapeKind::Shape => {
-                    let paths = custom_paths(original);
+                    let paths = custom_paths(inherited_geometry.or(original));
                     let (path, mut geometry_fallback) = geometry_path_with_fallback(
-                        &shape.geometry,
-                        &shape.adjust_values,
+                        geometry,
+                        adjust_values,
                         f64::from(rect.w) / f64::from(rect.h),
                     );
-                    if shape.geometry == "custom" && !paths.is_empty() {
+                    if geometry == "custom" && !paths.is_empty() {
                         geometry_fallback = false;
                     }
                     let primitive = Primitive::Shape {
@@ -2209,11 +2231,10 @@ impl<'a> LayoutBuilder<'a> {
                         y: rect.y,
                         w: rect.w,
                         h: rect.h,
-                        geometry: shape.geometry.clone(),
+                        geometry: geometry.clone(),
                         path,
                         geometry_fallback,
-                        adjust_values: shape
-                            .adjust_values
+                        adjust_values: adjust_values
                             .iter()
                             .map(|(name, value)| (name.clone(), *value as f32))
                             .collect(),
@@ -2301,7 +2322,12 @@ impl<'a> LayoutBuilder<'a> {
                 rect,
                 transform,
                 space,
-                geometry_text_inset(original, rect),
+                if shape.placeholder.is_some() && shape.kind == ShapeKind::Shape {
+                    preset_text_inset(geometry, adjust_values.get("adj").copied(), rect.w, rect.h)
+                        .unwrap_or_default()
+                } else {
+                    geometry_text_inset(original, rect)
+                },
                 content,
                 body_cascade,
             )?
@@ -2531,6 +2557,7 @@ impl<'a> LayoutBuilder<'a> {
                     default_style: &self.package.presentation.default_text_style,
                     default_paragraph: self.package.presentation.default_text_paragraph.as_deref(),
                     placeholder: base.placeholder.as_ref(),
+                    has_custom_prompt: false,
                     style_color: shape_style_color(Some(shape)),
                 },
             )?
@@ -3502,7 +3529,7 @@ impl<'a> LayoutBuilder<'a> {
         if flow == TextFlow::VertLeftToRight {
             reverse_line_order(&mut laid_out.lines);
         }
-        let display_paragraphs = resolved
+        let display_paragraphs: Vec<_> = resolved
             .paragraphs
             .iter()
             .map(|paragraph| TextParagraph {
@@ -3550,12 +3577,14 @@ impl<'a> LayoutBuilder<'a> {
         let placeholder_type = cascade.placeholder.map(|placeholder| {
             normalize_placeholder_type(placeholder.placeholder_type.as_deref()).to_owned()
         });
+        let placeholder_prompt = cascade.custom_prompt(&display_paragraphs);
         self.primitives.push(Primitive::TextBox {
             text_shadow,
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
             placeholder_type,
+            placeholder_prompt,
             x: text_rect.x,
             y: text_rect.y,
             w: text_rect.w,
@@ -3711,6 +3740,7 @@ fn cell_cascade<'a>(text: &'a TextBody, inherited: &'a TextBody) -> BodyCascade<
         default_style: &[],
         default_paragraph: None,
         placeholder: None,
+        has_custom_prompt: false,
         style_color: None,
     }
 }
@@ -3892,10 +3922,32 @@ struct BodyCascade<'a> {
     /// `p:defaultTextStyle/a:defPPr`, under every level of `default_style`.
     default_paragraph: Option<&'a ParagraphProperties>,
     placeholder: Option<&'a Placeholder>,
+    has_custom_prompt: bool,
     style_color: Option<&'a ColorValue>,
 }
 
 impl<'a> BodyCascade<'a> {
+    fn custom_prompt(&self, paragraphs: &[TextParagraph]) -> Option<String> {
+        if !self.has_custom_prompt
+            || paragraphs.len() > 1
+            || paragraphs.iter().any(|paragraph| {
+                paragraph.runs.iter().any(|run| !run.text.is_empty())
+            })
+        {
+            return None;
+        }
+        let mut prompt = String::new();
+        for (index, paragraph) in self.layout?.paragraphs.iter().enumerate() {
+            if index > 0 {
+                prompt.push('\n');
+            }
+            for run in &paragraph.runs {
+                prompt.push_str(&run.text);
+            }
+        }
+        Some(prompt)
+    }
+
     /// The shadow the body's text is drawn with. PowerPoint keeps one per run;
     /// the first any level declares stands for the whole box, because a body
     /// that shadows one run shadows them all.
@@ -5430,6 +5482,7 @@ fn chart_text_primitive(
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
         placeholder_type: None,
+        placeholder_prompt: None,
         x: box_x,
         y: baseline - line_box.ascent,
         w: box_w.max(x - box_x + width),

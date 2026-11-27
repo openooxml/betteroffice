@@ -1,4 +1,5 @@
 import { bentConnectorHit, containsBentConnector } from '../../../../shared/bentConnectorHit';
+import { isTextPlaceholderType } from '../../../../shared/pptxPlaceholders';
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
 import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
@@ -201,14 +202,9 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
       }
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
-      const editablePlaceholder =
-        primitive.placeholderType === 'title' ||
-        primitive.placeholderType === 'ctrTitle' ||
-        primitive.placeholderType === 'subTitle' ||
-        primitive.placeholderType === 'body';
       const nearest =
         target ||
-        (entry.textLength === 0 && editablePlaceholder) ||
+        (entry.textLength === 0 && isTextPlaceholderType(primitive.placeholderType)) ||
         entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
       const columns = primitive.lines?.some((line, index, lines) => index > 0 &&
         (line.columnOffset ?? 0) !== (lines[index - 1].columnOffset ?? 0));

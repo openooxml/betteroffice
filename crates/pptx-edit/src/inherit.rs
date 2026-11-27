@@ -3,6 +3,7 @@
 
 use pptx_parse::{Placeholder, PptxPackage, ShapeNode, ShapeTransform, SlideLayout, SlideMaster};
 
+use crate::paragraph::{SlideParents, find_placeholder};
 use crate::{InheritedGeometry, ShapeSnapshot};
 
 /// Source shapes and the parts a slide inherits from.
@@ -18,44 +19,25 @@ impl<'a> SlideContext<'a> {
         source_part_path: Option<&str>,
         layout_part_path: Option<&str>,
     ) -> Self {
-        let source_slide = source_part_path
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
-        let source_shapes = source_slide
-            .map(|slide| slide.shapes.as_slice())
-            .unwrap_or_default();
-        let layout = layout_part_path
-            .or_else(|| source_slide.and_then(|slide| slide.layout_part_path.as_deref()))
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
-            .or_else(|| package.layouts.first());
-        let master = layout
-            .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
-            .or_else(|| package.masters.first());
+        let parents = SlideParents::resolve(package, source_part_path, layout_part_path);
         Self {
-            layout,
-            master,
-            source_shapes,
+            layout: parents.layout,
+            master: parents.master,
+            source_shapes: parents
+                .slide
+                .map(|slide| slide.shapes.as_slice())
+                .unwrap_or_default(),
         }
+    }
+
+    fn placeholder_nodes(&self, placeholder: &Placeholder) -> impl Iterator<Item = &'a ShapeNode> {
+        [
+            self.layout.map(|layout| layout.shapes.as_slice()),
+            self.master.map(|master| master.shapes.as_slice()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(move |nodes| find_placeholder(nodes, placeholder))
     }
 }
 
@@ -95,17 +77,24 @@ pub(crate) fn layout_transform<'a>(
     context: &SlideContext<'a>,
     placeholder: &Placeholder,
 ) -> Option<&'a ShapeTransform> {
-    let layout = context
-        .layout
-        .and_then(|layout| find_placeholder(&layout.shapes, placeholder));
-    let master = context
-        .master
-        .and_then(|master| find_placeholder(&master.shapes, placeholder));
-    [layout, master]
-        .into_iter()
-        .flatten()
+    context
+        .placeholder_nodes(placeholder)
         .map(node_transform)
         .find(|transform| transform.width > 0 && transform.height > 0)
+}
+
+pub(crate) fn layout_geometry<'a>(
+    context: &SlideContext<'a>,
+    placeholder: &Placeholder,
+) -> Option<&'a pptx_parse::Shape> {
+    context
+        .placeholder_nodes(placeholder)
+        .find_map(|node| match node {
+            ShapeNode::Shape(shape) if shape.has_preset_geometry || shape.geometry == "custom" => {
+                Some(shape)
+            }
+            _ => None,
+        })
 }
 
 /// Whether the slide's own node spells out any part of a transform, which
@@ -128,24 +117,6 @@ fn find_source_node(nodes: &[ShapeNode], source_id: u32) -> Option<&ShapeNode> {
         }
     }
     None
-}
-
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| value.matches(target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
-fn node_placeholder(node: &ShapeNode) -> Option<&Placeholder> {
-    node_base(node).placeholder.as_ref()
 }
 
 fn node_transform(node: &ShapeNode) -> &ShapeTransform {

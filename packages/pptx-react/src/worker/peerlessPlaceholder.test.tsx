@@ -1,10 +1,11 @@
 import { expect, test } from 'bun:test';
 import { act, fireEvent, waitFor } from '@testing-library/react';
 import JSZip from 'jszip';
-import { zhCN } from '@betteroffice/pptx-i18n';
+import { createT, en, zhCN } from '@betteroffice/pptx-i18n';
 import { decodeCommandDisplayList } from '@betteroffice/pptx/worker';
-import { open } from './peerlessTestHarness';
 import * as wasm from '../../../pptx/src/wasm/loader';
+import { emptyPlaceholderGuides } from '../slideLayouts';
+import { open } from './peerlessTestHarness';
 
 function compose(input: HTMLElement, type: string, data = '') {
   const event = new Event(type, { bubbles: true });
@@ -12,7 +13,10 @@ function compose(input: HTMLElement, type: string, data = '') {
   fireEvent(input, event);
 }
 
-async function deckWithFooterAndContentLayout(): Promise<Uint8Array> {
+async function deckWithFooterAndContentLayout(options: {
+  existingContent?: boolean;
+  customTitle?: boolean;
+} = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const ns = `xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="${rel}"`;
@@ -30,8 +34,55 @@ async function deckWithFooterAndContentLayout(): Promise<Uint8Array> {
   zip.file('ppt/slideLayouts/_rels/slideLayout3.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>`);
   zip.file('ppt/slides/slide1.xml', `<p:sld ${ns}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="4" name="Footer 1"/><p:cNvSpPr/><p:nvPr><p:ph type="ftr" idx="11"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="3000000" y="6200000"/><a:ext cx="4000000" cy="400000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`);
   zip.file('ppt/slides/_rels/slide1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>`);
+  if (options.existingContent) {
+    const path = 'ppt/slides/slide1.xml';
+    const slide = await zip.file(path)!.async('string');
+    const shapes = ['type="title"', 'type="body" idx="1"'].map((ph, index) =>
+      `<p:sp><p:nvSpPr><p:cNvPr id="${index + 2}" name="Placeholder ${index + 2}"/><p:cNvSpPr/><p:nvPr><p:ph ${ph}/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>`);
+    zip.file(path, slide.replace('</p:spTree>', `${shapes.join('')}</p:spTree>`));
+    const relPath = 'ppt/slides/_rels/slide1.xml.rels';
+    const relationship = await zip.file(relPath)!.async('string');
+    zip.file(relPath, relationship.replace('slideLayout1.xml', 'slideLayout2.xml'));
+  }
+  if (options.customTitle) {
+    const path = 'ppt/slideLayouts/slideLayout2.xml';
+    const layout = await zip.file(path)!.async('string');
+    zip.file(path, layout
+      .replace('type="title"', 'type="title" hasCustomPrompt="1"')
+      .replace('<a:bodyPr anchor="ctr"/><a:lstStyle/>',
+        '<a:bodyPr anchor="ctr"/><a:lstStyle/><a:p><a:r><a:t>Enter </a:t></a:r><a:r><a:t>your headline</a:t></a:r></a:p>')
+      .replace('<a:bodyPr anchor="t"/><a:lstStyle/>',
+        '<a:bodyPr anchor="t"/><a:lstStyle/><a:p><a:r><a:t>Unflagged layout text</a:t></a:r></a:p>'));
+  }
   return zip.generateAsync({ type: 'uint8array' });
 }
+
+test('existing empty title and body placeholders show their default guides', async () => {
+  const file = await deckWithFooterAndContentLayout({ existingContent: true });
+  const value = await open({ file });
+  const list = decodeCommandDisplayList(value.client.state.frame!);
+  expect(emptyPlaceholderGuides(list, createT(en)).map(({ placeholderType, prompt }) =>
+    [placeholderType, prompt])).toEqual([
+    ['title', 'Click to add title'],
+    ['body', 'Click to add text'],
+  ]);
+});
+
+test('placeholder guides use flagged layout text and keep the default for unflagged layout text', async () => {
+  const file = await deckWithFooterAndContentLayout({ existingContent: true, customTitle: true });
+  const value = await open({ file });
+  const prompts = () => value.view.getAllByTestId('pptx-placeholder-guide').map((guide) => guide.textContent);
+  await waitFor(() => expect(prompts()).toEqual(['Enter your headline', 'Click to add text']));
+
+  await act(async () => {
+    expect(await value.api.commands.execute('insertSlide', {})).toMatchObject({ ok: true });
+  });
+  await waitFor(() => {
+    expect(value.client.state.slides).toHaveLength(2);
+    expect(value.client.state.frame?.slideId).toBe(value.client.state.slides[1]!.id);
+    expect(prompts()).toEqual(['Enter your headline', 'Click to add text']);
+  });
+});
 
 test('clicking deep inside an empty body placeholder enters text editing, hides guide during IME, and skips footer guides', async () => {
   const bytes = await deckWithFooterAndContentLayout();

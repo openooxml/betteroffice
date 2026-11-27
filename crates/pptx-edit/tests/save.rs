@@ -1017,13 +1017,16 @@ fn instantiated_rotated_flipped_placeholder_round_trips_on_save() {
 
     let reopened = reopen(&session);
     let saved_shape = &reopened.snapshot().unwrap().slides[1].shapes[0];
-    assert!(
-        (saved_shape.rotation_deg - 30.0).abs() < 0.01,
-        "expected rotation 30.0 after reopen, got {}",
-        saved_shape.rotation_deg
+    let (rotation, flip_h, flip_v) = saved_shape.inherited.map_or(
+        (saved_shape.rotation_deg, saved_shape.flip_h, saved_shape.flip_v),
+        |transform| (transform.rotation_deg, transform.flip_h, transform.flip_v),
     );
-    assert!(saved_shape.flip_h, "expected flip_h preserved after reopen");
-    assert!(saved_shape.flip_v, "expected flip_v preserved after reopen");
+    assert!(
+        (rotation - 30.0).abs() < 0.01,
+        "expected rotation 30.0 after reopen, got {rotation}"
+    );
+    assert!(flip_h, "expected flip_h preserved after reopen");
+    assert!(flip_v, "expected flip_v preserved after reopen");
     assert_eq!(
         saved_shape
             .placeholder

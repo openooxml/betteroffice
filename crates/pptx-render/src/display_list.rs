@@ -393,6 +393,9 @@ pub enum Primitive {
         story_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder_type: Option<String>,
+        #[doc(hidden)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder_prompt: Option<String>,
         x: f32,
         y: f32,
         w: f32,
