@@ -12,8 +12,7 @@ export interface CommandGeometryLine {
 }
 
 export interface CommandGeometryIndex {
-  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number;
-    spill?: GeometryBounds }[];
+  hits: { primitive: SlidePrimitive; transforms: readonly SlidePrimitive[]; clips: readonly SlidePrimitive[]; textLength?: number }[];
   lines: Map<string, CommandGeometryLine[]>;
 }
 
@@ -25,12 +24,12 @@ interface NavigationIndex { lines: Map<string, NavigationLine[]> }
 
 export interface CommandHitGeometryIndex extends NavigationIndex {
   size?: { width: number; height: number };
-  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number;
-    spill?: GeometryBounds }[];
+  hits: { primitive: HitPrimitive; transforms: readonly GeometryBounds[]; clips: readonly GeometryBounds[]; textLength?: number }[];
 }
 
 const displayLists = new WeakMap<PresentationCommandFrame, SlideDisplayList>();
 const connectorHits = new WeakMap<CommandHitGeometryIndex['hits'][number], NonNullable<ReturnType<typeof bentConnectorHit>>>();
+const spillHits = new WeakMap<CommandHitGeometryIndex['hits'][number], GeometryBounds>();
 
 export function decodeCommandDisplayList(frame: PresentationCommandFrame): SlideDisplayList {
   let list = displayLists.get(frame);
@@ -44,15 +43,15 @@ export function decodeCommandDisplayList(frame: PresentationCommandFrame): Slide
 function targetKey(shapeId: string, storyId?: string): string { return JSON.stringify([shapeId, storyId]); }
 
 /** Overflowing text stays hittable where its glyphs spill past the frame, as the engine's `hit_rect` does. */
-function spill(box: TextBoxPrimitive): { spill?: GeometryBounds } {
-  if (!box.overflow) return {};
+function cacheSpillHit(entry: CommandHitGeometryIndex['hits'][number], box: SlidePrimitive): void {
+  if (box.kind !== 'textBox' || !box.overflow) return;
   let left = box.x; let right = box.x + box.w; let top = box.y; let bottom = box.y + box.h;
   for (const line of box.lines) {
     left = Math.min(left, line.x); right = Math.max(right, line.x + line.width);
     top = Math.min(top, line.y); bottom = Math.max(bottom, line.y + line.height);
     for (const run of line.runs) { left = Math.min(left, run.x); right = Math.max(right, run.x + run.width); }
   }
-  return { spill: { x: left, y: top, w: right - left, h: bottom - top } };
+  spillHits.set(entry, { x: left, y: top, w: right - left, h: bottom - top });
 }
 
 function textBoxLength(box: TextBoxPrimitive): number {
@@ -72,9 +71,10 @@ export function indexGeometry(list: SlideDisplayList): CommandGeometryIndex {
       const transforms = [...parents, primitive];
       if (primitive.shapeId) {
         const entry = { primitive, transforms, clips,
-          ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive), ...spill(primitive) } : {}) };
+          ...(primitive.kind === 'textBox' ? { textLength: textBoxLength(primitive) } : {}) };
         index.hits.push(entry);
         cacheConnectorHit(entry, primitive);
+        cacheSpillHit(entry, primitive);
       }
       if (primitive.kind === 'textBox' && primitive.shapeId && primitive.storyId) {
         const key = targetKey(primitive.shapeId, primitive.storyId);
@@ -100,9 +100,10 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
       const transforms = [...parents, primitive];
       if (source.shapeId) {
         const entry = { primitive, transforms, clips,
-          ...(source.kind === 'textBox' ? { textLength: textBoxLength(source), ...spill(source) } : {}) };
+          ...(source.kind === 'textBox' ? { textLength: textBoxLength(source) } : {}) };
         index.hits.push(entry);
         cacheConnectorHit(entry, source);
+        cacheSpillHit(entry, source);
       }
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
@@ -204,8 +205,9 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
     const primitive = entry.primitive;
     if (target && (primitive.shapeId !== target.shapeId || primitive.storyId !== target.storyId)) continue;
     const connector = connectorHits.get(entry);
+    const spill = spillHits.get(entry);
     const inside = connector ? containsBentConnector(connector, local) : contains(primitive, local);
-    if (!primitive.shapeId || (!target && (clipped || !(inside || entry.spill && contains(entry.spill, local))))) continue;
+    if (!primitive.shapeId || (!target && (clipped || !(inside || spill && contains(spill, local))))) continue;
     if (!target && inside && borderScale !== undefined) {
       const band = Math.min(6 / borderScale, primitive.w / 3, primitive.h / 3);
       if (local.x - primitive.x <= band || primitive.x + primitive.w - local.x <= band ||
