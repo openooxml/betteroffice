@@ -2,8 +2,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime, sp
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { parseDocx } from '../docx';
-import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
+import { writeDocumentWithRust } from '../docx/rustSaveFacade';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
@@ -170,7 +170,8 @@ async function customXmlNote(): Promise<Uint8Array> {
     paragraph('0000F001', 'Untouched note text') +
     '</w:customXml><w:bookmarkEnd w:id="7"/></w:footnote></w:footnotes>'
   ));
-  const source = await repackDocx(await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false }));
+  const parsed = await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false });
+  const source = (await writeDocumentWithRust(parsed, parsed.originalBuffer!)).buffer;
   return new Uint8Array(source);
 }
 

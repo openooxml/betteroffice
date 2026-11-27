@@ -3,13 +3,14 @@ import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../../sh
 import { pngFontCdnCacheKey } from '../../../../shared/office-session/fontCdnRuntime';
 import { importFonts } from '../../../../shared/office-session/fontModules';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
+import type { PngFontFace } from '../../../../shared/office-session/pngFonts';
 import type { RequestedFontFace } from '../../../../shared/pptxDefaultFonts';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import type { PptxDocument } from './generated/pptx_wasm.js';
 import { PptxRenderer } from './engine';
 import { decodeFontFace } from './loader';
 
-type ExportFace = PptxFontFace & { id: number; fallback?: boolean };
+type ExportFace = PngFontFace & { id: number; fallback?: boolean };
 type Fonts = typeof import('@betteroffice/fonts');
 type InstalledFace = (face: BundledFontFace | undefined) => Promise<BundledFontFace | undefined>;
 
@@ -44,13 +45,13 @@ const faceKey = (family: string, bold = false, italic = false) => JSON.stringify
 const isBold = (face: BundledFontFace) => face.weight === 700;
 const isItalic = (face: BundledFontFace) => face.style === 'italic';
 
-function register(exporter: Exporter, face: PptxFontFace, fallback: boolean): void {
+function register(exporter: Exporter, face: PngFontFace, fallback: boolean): void {
   const bold = face.bold ?? false;
   const italic = face.italic ?? false;
   const id = fallback
     ? exporter.renderer.registerFallbackFont(face.family, bold, italic, face.bytes)
     : exporter.renderer.registerFont(face.family, bold, italic, face.bytes);
-  exporter.faces.push({ id, family: face.family, bold, italic, bytes: face.bytes, fallback });
+  exporter.faces.push({ ...face, id, bold, italic, fallback });
   (fallback ? exporter.fallback : exporter.primary).add(faceKey(face.family, bold, italic));
 }
 
@@ -168,7 +169,8 @@ function registerDefaults(exporter: Exporter, plans: Awaited<ReturnType<typeof l
     for (const [index, face] of faces.entries()) {
       const data = bytes[index];
       if (index === 0 && !primary) {
-        if (data) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes: data }, false);
+        if (data) register(exporter, { family: request.family, bold: request.bold, italic: request.italic, bytes: data,
+          ...(face.script === 'arabic' && { face: { bold: isBold(face), italic: isItalic(face) } }) }, false);
       } else if (!hasFallback(exporter, face)) {
         if (data) register(exporter, { family: face.family, bold: isBold(face), italic: isItalic(face), bytes: data }, true);
       }

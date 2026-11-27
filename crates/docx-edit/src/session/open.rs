@@ -210,6 +210,7 @@ impl EditSessionCore {
         let (envelope, parts, media) =
             crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
+        self.engine.doc().clear_edit_provenance();
         // Only stories seeded into an empty replica are what a fresh seed of the package holds.
         let fresh_seed = seed_stories && self.engine.doc().holds_nothing();
         let fonts = if seed_stories {
@@ -293,7 +294,7 @@ impl EditSessionCore {
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some((envelope, media, budget_stopped)) =
+        let Some((envelope, media, budget_stopped, document_path, connectors)) =
             crate::seed::parse_docx_preview(bytes.into(), blocks, paragraph_budget)?
         else {
             return Ok(None);
@@ -301,7 +302,13 @@ impl EditSessionCore {
         let host_envelope = thin_docx_envelope(&envelope);
         let whole_body =
             !budget_stopped && envelope.document.package.document.content.len() < blocks;
-        let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
+        let fonts = crate::seed::seed_preview_envelope(
+            self.engine.doc(),
+            envelope,
+            media,
+            &document_path,
+            connectors,
+        )?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
         self.engine.set_relayout_trigger(RelayoutTrigger::Open);

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -135,7 +135,7 @@ describe('native package registry', () => {
       fetchImpl: async (url: string, options: RequestInit) => {
         const name = packageName(url);
         requested.push(name);
-        expect(options.headers).toEqual({ Accept: 'application/vnd.npm.install-v1+json' });
+        expect(options.headers).toMatchObject({ Accept: 'application/vnd.npm.install-v1+json' });
         expect(options.signal).toBeInstanceOf(AbortSignal);
         return name === '@betteroffice/pptx-native' || !roots.some((root) => root.name === name)
           ? Response.json({ versions: {} })
@@ -182,16 +182,40 @@ describe('native package registry', () => {
     expect(requested.sort()).toEqual(packages.map(({ name }) => name).sort());
   });
 
-  test('registry errors stop release detection', async () => {
+  test.each(['HTTP 503', 'timeout'])('retries a transient registry %s', async (failure) => {
+    const target = '@betteroffice/docx-native';
+    let attempts = 0;
+    const pending = await pendingPublishNames({
+      fetchImpl: async (url: string) => {
+        const name = packageName(url);
+        if (name !== target) return published(name);
+        if (++attempts === 1) {
+          if (failure === 'timeout') throw new DOMException('registry timed out', 'TimeoutError');
+          return new Response('unavailable', { status: 503, headers: { 'Retry-After': '0' } });
+        }
+        return Response.json({ versions: {} });
+      }
+    });
+    expect(pending).toEqual(['docx']);
+    expect(attempts).toBe(2);
+  });
+
+  test('persistent registry errors stop release detection after five attempts', async () => {
     for (const failed of ['@betteroffice/docx-native', '@betteroffice/docx-native-linux-x64-gnu']) {
+      let attempts = 0;
       await expect(
         pendingPublishNames({
           fetchImpl: async (url: string) => {
             const name = packageName(url);
-            return name === failed ? new Response('unavailable', { status: 503 }) : published(name);
+            if (name !== failed) return published(name);
+            attempts += 1;
+            return new Response('unavailable', { status: 503, headers: { 'Retry-After': '0' } });
           }
         })
-      ).rejects.toThrow(`npm answered 503 for ${failed}`);
+      ).rejects.toThrow(
+        `cannot read npm for ${failed}: https://registry.npmjs.org/${encodeURIComponent(failed)} returned 503`
+      );
+      expect(attempts).toBe(5);
     }
   });
 });
@@ -212,6 +236,9 @@ describe('native version synchronization', () => {
 
 describe('native package release wiring', () => {
   const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
+  const dispatchStep = release.jobs['native-npm'].steps.find(
+    (step: any) => step.name === 'Dispatch a publish per format, then wait for each'
+  );
   const publish = Bun.YAML.parse(readFileSync(publishWorkflow, 'utf8')) as any;
   const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
   const ci = Bun.YAML.parse(
@@ -220,14 +247,74 @@ describe('native package release wiring', () => {
   const packages = Bun.YAML.parse(
     readFileSync(new URL('../.github/workflows/native-packages.yml', import.meta.url), 'utf8')
   ) as any;
+  const sha = '9b3f0c1d2e4a5b6c7d8e9f0a1b2c3d4e5f607182';
+  const runIds = NATIVE_FORMATS.map((_, index) => 4200 + index);
+  const pendingCall = 'pending ["--pending"]';
+  const post = (name: string) =>
+    `api --method POST -H X-GitHub-Api-Version: 2026-03-10 repos/openooxml/betteroffice/actions/workflows/publish-native.yml/dispatches -f ref=main -f inputs[binding]=${name} -f inputs[sha]=${sha} -F inputs[dry_run]=false --jq .workflow_run_id`;
+  const watchRun = (id: number) => `run watch ${id} --exit-status`;
+
+  function dispatch({
+    publish = JSON.stringify(NATIVE_FORMATS), pending = publish, pendingStatus = 0, failCheckAt = 0, dispatchStatus
+  }: { publish?: string; pending?: string; pendingStatus?: number; failCheckAt?: number; dispatchStatus?: number } = {}) {
+    const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
+    try {
+      const log = join(directory, 'gh.log');
+      writeFileSync(log, '');
+      writeFileSync(
+        join(directory, 'gh'),
+        [
+          '#!/bin/sh',
+          `echo "$@" >> "${log}"`,
+          'case "$*" in',
+          ...NATIVE_FORMATS.map((name, index) => {
+            const response = index === 1 && dispatchStatus !== undefined ? `exit ${dispatchStatus}` : `echo ${runIds[index]}`;
+            return `  *"inputs[binding]=${name}"*) ${response} ;;`;
+          }),
+          'esac'
+        ].join('\n'),
+        { mode: 0o755 }
+      );
+      writeFileSync(join(directory, 'timeout'), '#!/bin/sh\n[ "$1" = 125m ] || exit 2\nshift\nexec "$@"\n', { mode: 0o755 });
+      const check = join(directory, 'check-publisher-files.sh');
+      writeFileSync(check, [
+        `echo check-publisher-files >> "${log}"`,
+        `[ "$(grep -c '^check-publisher-files$' "${log}")" -ne ${failCheckAt} ]`
+      ].join('\n'));
+      const bindings = join(directory, 'native-bindings.mjs');
+      writeFileSync(bindings, [
+        "import { appendFileSync } from 'node:fs';",
+        `appendFileSync(${JSON.stringify(log)}, 'pending ' + JSON.stringify(process.argv.slice(2)) + '\\n');`,
+        `console.log(${JSON.stringify(pending)});`,
+        `process.exitCode = ${pendingStatus};`
+      ].join('\n'));
+      const result = spawnSync('bash', ['-eo', 'pipefail', '-c', dispatchStep.run], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          GH_REPO: 'openooxml/betteroffice',
+          PUBLISH: publish,
+          SHA: sha,
+          GITHUB_SERVER_URL: 'https://github.com',
+          CHECK_PUBLISHER_FILES: check,
+          NATIVE_BINDINGS: bindings
+        }
+      });
+      return { ...result, log: readFileSync(log, 'utf8').trim().split('\n').filter(Boolean) };
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
 
   test('keeps native publishing outside the main release job', () => {
     const job = structuredClone(release.jobs.release);
     const npmCheck = job.steps.find((step: any) => step.name === 'Check npm publish targets');
-    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ vars.RELEASE_SKIP_NATIVE }}' });
+    expect(npmCheck.env).toEqual({ RELEASE_SKIP_NATIVE: '${{ needs.plan.outputs.skip_native }}' });
     delete npmCheck.env;
     expect(job['timeout-minutes']).toBe(180);
-    expect(JSON.stringify(job)).not.toContain('native');
+    expect(job.steps.some((step: any) => step.run?.includes('publish-native.yml'))).toBe(false);
     expect(JSON.stringify(job)).not.toContain('withhold');
     expect(JSON.stringify(job)).not.toContain('RELEASE_SKIP_NATIVE');
     const steps = job.steps.map((step: any) => step.name);
@@ -239,56 +326,142 @@ describe('native package release wiring', () => {
     );
   });
 
+  test('release gates publishing on the native build matrix for this commit', () => {
+    const job = release.jobs['native-build'];
+    expect(job.needs).toBe('plan');
+    expect(job.if).toBe(
+      "needs.plan.outputs.publishing == 'true' && needs.plan.outputs.native != '[]' && needs.plan.outputs.skip_native != 'true'"
+    );
+    expect(job.strategy).toEqual({
+      'fail-fast': false,
+      matrix: { binding: '${{ fromJSON(needs.plan.outputs.native) }}' }
+    });
+    expect(job.uses).toBe('./.github/workflows/native-dist.yml');
+    expect(job.with).toEqual({ binding: '${{ matrix.binding }}', sha: '${{ github.sha }}' });
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job['continue-on-error']).toBeUndefined();
+  });
+
+  test('release retries the whole native build matrix once after failure or cancellation', () => {
+    const job = release.jobs['native-build'];
+    const retry = release.jobs['native-build-retry'];
+    expect(retry.needs).toEqual(['plan', 'native-build']);
+    expect(retry.if).toBe("${{ !cancelled() && (needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') }}");
+    for (const key of ['strategy', 'uses', 'with', 'permissions', 'secrets']) {
+      expect(retry[key]).toEqual(job[key]);
+    }
+    expect(retry['continue-on-error']).toBeUndefined();
+  });
+
   test('publishes held packages after the release and native publishing', () => {
     const job = release.jobs['held-npm'];
-    expect(job.needs).toEqual(['release', 'native-npm']);
+    expect(job.needs).toEqual(['plan', 'release', 'native-npm']);
     expect(job.permissions['id-token']).toBe('write');
-    expect(job.if).toContain("&& (needs.native-npm.result == 'success' || needs.native-npm.result == 'skipped')");
+    expect(job.if).toContain("(needs.native-npm.result == 'skipped' && needs.plan.outputs.skip_native == 'true')");
   });
 
-  test('release dispatches and waits for the dedicated publisher', () => {
+  test('release dispatches and waits for the dedicated publisher after the native gate passes', () => {
     const job = release.jobs['native-npm'];
-    expect(job.needs).toBe('release');
-    expect(job.if).toBe(
-      "needs.release.result == 'success' && needs.release.outputs.publishing == 'true' && vars.RELEASE_SKIP_NATIVE != 'true'"
-    );
+    expect(job.needs).toEqual(['plan', 'release', 'native-build', 'native-build-retry']);
+    expect(job.if).toBe([
+      "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publishing == 'true' &&",
+      "needs.plan.outputs.skip_native != 'true' &&",
+      "(needs.native-build.result == 'success' ||",
+      "((needs.native-build.result == 'failure' || needs.native-build.result == 'cancelled') && needs.native-build-retry.result == 'success') ||",
+      "(needs.native-build.result == 'skipped' && needs.plan.outputs.native == '[]')) }}"
+    ].join(' '));
     expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job['timeout-minutes']).toBe(120);
+    expect(job['timeout-minutes']).toBe(135);
     expect(job.permissions).toEqual({ contents: 'read', actions: 'write' });
-    expect(job.steps[0].uses).toBe('actions/checkout@v7.0.1');
-    const step = job.steps[1];
+    const step = dispatchStep;
     expect(step.env.SHA).toBe('${{ github.sha }}');
-    expect(step.run).toStartWith('set -euo pipefail\n');
-    expect(step.run).toContain('pending=$(node scripts/native-bindings.mjs --pending)');
-    expect(step.run).toContain('publish-native.yml/dispatches');
-    expect(step.run).toContain('X-GitHub-Api-Version: 2026-03-10');
-    expect(step.run).toContain('-f ref=main');
-    expect(step.run).toContain('inputs[binding]=$binding');
-    expect(step.run).toContain('inputs[sha]=$SHA');
-    expect(step.run).toContain('inputs[dry_run]=false');
-    expect(step.run).toContain("--jq '.workflow_run_id'");
-    expect(step.run).toContain('gh run watch "$run" --exit-status');
-    expect(step.run).toContain('@betteroffice/$binding-native');
-    expect(step.run).toContain('exit $status');
+    expect(step.env.PUBLISH).toBe('${{ needs.release.outputs.native }}');
+    expect(release.jobs.release.outputs.native).toBe('${{ needs.plan.outputs.native }}');
+    const watch = Number(step.run.match(/dispatch-publishers\.sh publish-native\.yml (\d+)/)?.[1]);
+    const build = Math.max(
+      ...dist.jobs.bindings.strategy.matrix.platform.map((platform: any) => platform.timeout ?? 45)
+    );
+    expect(dist.jobs.bindings['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
+    expect(watch).toBe(125);
+    const smoke = Math.max(
+      dist.jobs['musl-smoke']['timeout-minutes'],
+      dist.jobs['windows-arm64-smoke']['timeout-minutes']
+    );
+    expect(watch).toBeGreaterThanOrEqual(build + smoke + publish.jobs.publish['timeout-minutes'] + 20);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(watch + 10);
   });
 
-  test('a failed registry lookup fails before dispatch', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'native-dispatch-'));
-    try {
-      writeFileSync(join(directory, 'node'), '#!/bin/sh\nexit 42\n', { mode: 0o755 });
-      writeFileSync(join(directory, 'gh'), '#!/bin/sh\necho unexpected-dispatch\nexit 99\n', {
-        mode: 0o755
-      });
-      const step = release.jobs['native-npm'].steps[1];
-      const result = spawnSync('bash', ['-c', step.run], {
-        encoding: 'utf8',
-        env: { ...process.env, PATH: `${directory}:${process.env.PATH}` }
-      });
-      expect(result.status).toBe(42);
-      expect(result.stdout).not.toContain('unexpected-dispatch');
-    } finally {
-      rmSync(directory, { recursive: true, force: true });
+  test('checks publisher files before each native dispatch and watches every run', () => {
+    const result = dispatch();
+    expect(result.status, result.stderr).toBe(0);
+    const calls = [pendingCall, ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log.slice(calls.length).sort()).toEqual(runIds.map(watchRun));
+  });
+
+  test('a native version published since the plan is not dispatched again', () => {
+    const result = dispatch({ pending: JSON.stringify(NATIVE_FORMATS.slice(1)) });
+    expect(result.status, result.stderr).toBe(0);
+    const calls = [pendingCall, ...NATIVE_FORMATS.slice(1).flatMap((name) => ['check-publisher-files', post(name)])];
+    expect(result.log.slice(0, calls.length)).toEqual(calls);
+    expect(result.log).not.toContain(post(NATIVE_FORMATS[0]!));
+  });
+
+  test('a binding the gate did not build is never dispatched', () => {
+    const result = dispatch({ publish: JSON.stringify(NATIVE_FORMATS.slice(0, 1)), pending: JSON.stringify(NATIVE_FORMATS) });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log.filter((line) => line.startsWith('api --method POST'))).toEqual([post(NATIVE_FORMATS[0]!)]);
+  });
+
+  test('an empty publish list runs no check and dispatches nothing', () => {
+    const result = dispatch({ publish: '[]' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([]);
+  });
+
+  test('an empty fresh pending list runs no check and dispatches nothing', () => {
+    const result = dispatch({ pending: '[]' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.log).toEqual([pendingCall]);
+  });
+
+  test('a failed pending lookup fails before checking publisher files or dispatching', () => {
+    const result = dispatch({ pendingStatus: 2 });
+    expect(result.status).toBe(2);
+    expect(result.log).toEqual([pendingCall]);
+  });
+
+  test('a failed publisher file check for the first native binding dispatches and watches nothing', () => {
+    const result = dispatch({ failCheckAt: 1 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[0]}-native failed.`);
+    expect(result.log).toEqual([pendingCall, 'check-publisher-files']);
+  });
+
+  test('a failed publisher file check stops native dispatches and still watches the first run', () => {
+    const result = dispatch({ failCheckAt: 2 });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
+    expect(result.log).toEqual([
+      pendingCall, 'check-publisher-files', post(NATIVE_FORMATS[0]!), 'check-publisher-files', watchRun(runIds[0]!)
+    ]);
+  });
+
+  test.each([['returns an error', 1], ['returns an empty run ID', 0]] as const)(
+    'other native runs dispatch and are watched when a POST %s', (_, dispatchStatus) => {
+      const result = dispatch({ dispatchStatus });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain(`::error::Dispatching the publish of @betteroffice/${NATIVE_FORMATS[1]}-native failed.`);
+      const calls = [pendingCall, ...NATIVE_FORMATS.flatMap((name) => ['check-publisher-files', post(name)])];
+      expect(result.log.slice(0, calls.length)).toEqual(calls);
+      expect(result.log.slice(calls.length).sort()).toEqual(runIds.filter((_, index) => index !== 1).map(watchRun));
     }
+  );
+
+  test('an invalid publish list fails before dispatch', () => {
+    const result = dispatch({ publish: 'invalid' });
+    expect(result.status).not.toBe(0);
+    expect(result.log).toEqual([]);
   });
 
   test('publisher is dispatch-only and uses token-free OIDC', () => {
@@ -384,7 +557,21 @@ describe('native package release wiring', () => {
       );
       expect([...targets].sort()).toEqual([...manifest.napi.targets].sort());
     }
-    expect(job.steps[0].with.ref).toBe('${{ inputs.sha }}');
+    expect(job.steps[0]).toEqual({
+      uses: 'actions/checkout@v7.0.1',
+      with: { ref: '${{ inputs.sha }}' }
+    });
+    expect(job.steps[1]).toEqual({
+      uses: 'actions/checkout@v7.0.1',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      with: {
+        ref: '${{ github.workflow_sha }}',
+        path: '.glibc-tools',
+        'sparse-checkout': 'scripts/cargo-glibc.sh\nscripts/glibc-floor.mjs\n',
+        'sparse-checkout-cone-mode': false,
+        'persist-credentials': false
+      }
+    });
     expect(job['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
     expect(job.strategy.matrix.platform.filter((platform: any) => platform.timeout)).toEqual([
       { os: 'macos-15-intel', target: 'x86_64-apple-darwin', timeout: 75 }
@@ -397,26 +584,52 @@ describe('native package release wiring', () => {
     expect(publish.jobs.publish.steps[0].with.ref).toBe('${{ inputs.sha }}');
     const toolchain = job.steps.find((step: any) => step.uses === 'dtolnay/rust-toolchain@stable');
     expect(toolchain.with.targets).toBe('${{ matrix.platform.target }}');
+    const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
+    expect(cache.with).toEqual({
+      workspaces: 'bindings',
+      key:
+        "${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && " +
+        "format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, " +
+        "hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}",
+      'save-if': "${{ github.ref == 'refs/heads/main' }}"
+    });
     const build = job.steps.find((step: any) => step.name === 'Build binding');
     expect(build.run).toBe(
       "bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked"
     );
   });
 
-  test('dist builds GNU Linux binaries natively on pinned Ubuntu 24.04 images and checks their glibc floor', () => {
+  test('dist builds GNU Linux binaries with zig at the glibc floor and checks it', () => {
     const job = dist.jobs.bindings;
     expect(job.strategy.matrix.platform.filter((platform: any) => platform.target.endsWith('-linux-gnu'))).toEqual([
-      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu' },
-      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu' }
+      { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-gnu', zig: true },
+      { os: 'ubuntu-24.04', target: 'x86_64-unknown-linux-gnu', zig: true }
     ]);
+    const cache = job.steps.find((step: any) => step.uses === 'Swatinem/rust-cache@v2');
+    expect(cache.with.key).toBe(
+      "${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && " +
+      "format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, " +
+      "hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}"
+    );
     const build = job.steps.findIndex((step: any) => step.name === 'Build binding');
+    expect(job.steps[build - 1]).toEqual({
+      name: 'Pin the glibc floor',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: 'echo "CARGO=$PWD/.glibc-tools/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"'
+    });
+    const wrapper = readFileSync(new URL('./cargo-glibc.sh', import.meta.url), 'utf8');
+    expect(wrapper).toContain('import { GLIBC_FLOOR }');
+    expect(wrapper).toContain('*-unknown-linux-gnu) arg="$arg.$floor"');
+    expect(wrapper).toContain('unset CARGO');
+    expect(statSync(new URL('./cargo-glibc.sh', import.meta.url)).mode & 0o111).not.toBe(0);
     expect(job.steps[build + 1]).toEqual({
       name: 'Check glibc floor',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
+      run: 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node'
     });
-    expect(GLIBC_FLOOR).toBe('2.35');
+    expect(GLIBC_FLOOR).toBe('2.17');
   });
 
   test('dist cross-compiles musl with zig and Windows arm64 with MSVC on GitHub-hosted runners', () => {
@@ -431,7 +644,11 @@ describe('native package release wiring', () => {
     const zigbuild = steps.find((step: any) => step.uses?.startsWith('taiki-e/install-action@'));
     expect(zig.if).toBe('matrix.platform.zig');
     expect(zigbuild.if).toBe('matrix.platform.zig');
-    expect(zigbuild.with.tool).toStartWith('cargo-zigbuild@');
+    const lastZig = steps.findLastIndex((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
+    expect(steps.indexOf(zigbuild)).toBeGreaterThan(lastZig);
+    expect(steps.findIndex((step: any) => step.name === 'Build binding')).toBeGreaterThan(steps.indexOf(zigbuild));
+    expect(zig.with.version).toBe('${{ env.ZIG_VERSION }}');
+    expect(zigbuild.with.tool).toBe('cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}');
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.if).toBe('${{ !matrix.platform.cross }}');
     const config = readFileSync(new URL('../bindings/.cargo/config.toml', import.meta.url), 'utf8');
@@ -440,25 +657,89 @@ describe('native package release wiring', () => {
     }
   });
 
+  test('dist bounds the zig setup and tries it a second time unless the pinned zig is already installed', () => {
+    const steps = dist.jobs.bindings.steps;
+    const setups = steps.filter((step: any) => step.uses?.startsWith('mlugg/setup-zig@'));
+    expect(setups).toHaveLength(2);
+    const [first, second] = setups;
+    for (const setup of setups) {
+      expect(setup.uses).toMatch(/^mlugg\/setup-zig@[0-9a-f]{40}$/);
+      expect(setup['timeout-minutes']).toBe(8);
+      expect(setup.with).toEqual({ version: '${{ env.ZIG_VERSION }}' });
+    }
+    expect(first.id).toBe('setup-zig');
+    expect(first['continue-on-error']).toBe(true);
+    expect(second['continue-on-error']).toBeUndefined();
+    const check = steps[steps.indexOf(first) + 1];
+    expect(steps[steps.indexOf(first) + 2]).toBe(second);
+    expect(check).toEqual({
+      name: 'Check the installed Zig',
+      id: 'zig-installed',
+      if: "matrix.platform.zig && steps.setup-zig.outcome != 'success'",
+      shell: 'bash',
+      run: 'if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then\n  echo "usable=true" >> "$GITHUB_OUTPUT"\nfi\n'
+    });
+    expect(second.if).toBe(
+      "matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'"
+    );
+    expect(dist.jobs.bindings.env.ZIG_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(dist.jobs.bindings['timeout-minutes']).toBe('${{ matrix.platform.timeout || 45 }}');
+  });
+
   test('dist loads each musl binary in Node on Alpine', () => {
     const job = dist.jobs['musl-smoke'];
     expect(job.needs).toBe('bindings');
+    expect(job.if).toBeUndefined();
+    expect(job['continue-on-error']).toBeUndefined();
     expect(job.strategy.matrix.include).toEqual([
       { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-musl' },
       { os: 'ubuntu-24.04-arm', target: 'aarch64-unknown-linux-musl' }
     ]);
     const steps = job.steps;
+    for (const step of steps) expect(step.if).toBeUndefined();
     expect(steps[0].with.ref).toBe('${{ inputs.sha }}');
     const binary = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native.${{ matrix.target }}');
     const loader = steps.find((step: any) => step.with?.name === '${{ inputs.binding }}-native-loader');
     expect(binary.with.path).toBe('bindings/${{ inputs.binding }}-native');
     expect(loader.with.path).toBe('bindings/${{ inputs.binding }}-native');
     const smoke = steps.find((step: any) => step.name === 'Smoke test on Alpine');
+    expect(smoke['continue-on-error']).toBeUndefined();
     expect(smoke.run).toContain('node:24-alpine');
     expect(smoke.run).toContain('node scripts/native-raw-smoke.mjs ${{ inputs.binding }}');
   });
 
-  test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12', () => {
+  test('dist loads the Windows arm64 binary in Node on Windows arm64', () => {
+    const job = dist.jobs['windows-arm64-smoke'];
+    expect(job.needs).toBe('bindings');
+    expect(job.if).toBeUndefined();
+    expect(job['continue-on-error']).toBeUndefined();
+    expect(job['runs-on']).toBe('windows-11-arm');
+    expect(job['timeout-minutes']).toBe(15);
+    expect(job.defaults.run.shell).toBe('bash');
+    expect(job.steps).toEqual([
+      { uses: 'actions/checkout@v7.0.1', with: { ref: '${{ inputs.sha }}' } },
+      {
+        uses: 'actions/download-artifact@v8',
+        with: {
+          name: '${{ inputs.binding }}-native.aarch64-pc-windows-msvc',
+          path: 'bindings/${{ inputs.binding }}-native'
+        }
+      },
+      {
+        uses: 'actions/download-artifact@v8',
+        with: {
+          name: '${{ inputs.binding }}-native-loader',
+          path: 'bindings/${{ inputs.binding }}-native'
+        }
+      },
+      { uses: 'actions/setup-node@v7.1.0', with: { 'node-version': '24', architecture: 'arm64' } },
+      { name: 'Smoke test on Windows ARM64', run: 'node scripts/native-raw-smoke.mjs ${{ inputs.binding }}' }
+    ]);
+    for (const step of job.steps) expect(step.if).toBeUndefined();
+    expect(publish.jobs.publish.needs).toBe('dist');
+  });
+
+  test('dist checks the glibc floor and loads each GNU Linux artifact on Debian 12 and Debian 11', () => {
     expect(dist.jobs['gnu-smoke']).toBeUndefined();
     const steps = dist.jobs.bindings.steps;
     const entries = steps.findIndex((step: any) => step.name === 'Build the JS entries');
@@ -466,7 +747,13 @@ describe('native package release wiring', () => {
       name: 'Smoke test on Debian 12',
       if: "endsWith(matrix.platform.target, '-linux-gnu')",
       shell: 'bash',
-      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+      run: `docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
+    });
+    expect(steps[entries + 2]).toEqual({
+      name: 'Smoke test on Debian 11',
+      if: "endsWith(matrix.platform.target, '-linux-gnu')",
+      shell: 'bash',
+      run: `docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/\${{ inputs.binding }}-native/betteroffice-\${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs \${{ inputs.binding }}'`
     });
   });
 
@@ -481,7 +768,8 @@ describe('native package release wiring', () => {
     expect(loader.with).toEqual({
       name: '${{ inputs.binding }}-native-loader',
       path: 'bindings/${{ inputs.binding }}-native/index.js\nbindings/${{ inputs.binding }}-native/dist\n',
-      'if-no-files-found': 'error'
+      'if-no-files-found': 'error',
+      overwrite: true
     });
     const binary = steps.find(
       (step: any) =>
@@ -490,6 +778,8 @@ describe('native package release wiring', () => {
     );
     const testing = steps.find((step: any) => step.name === 'Test binding');
     expect(testing.run).toBe("bun test bindings/${{ inputs.binding }}-native/index.test.ts ${{ inputs.binding != 'xlsx' && format('bindings/{0}-native/png.test.ts', inputs.binding) || '' }}");
+    expect(testing['continue-on-error']).toBeUndefined();
+    expect(dist.jobs.bindings['continue-on-error']).toBeUndefined();
     const entries = steps.find((step: any) => step.name === 'Build the JS entries');
     const fontPackages = steps.find((step: any) => step.name === 'Build the font packages');
     expect(fontPackages.run).toContain('(cd packages/fonts && bunx tsup)');
@@ -503,6 +793,17 @@ describe('native package release wiring', () => {
     expect(steps.indexOf(fonts)).toBeLessThan(steps.indexOf(testing));
     expect(steps.indexOf(loader)).toBe(steps.indexOf(binary) + 1);
     expect(steps.indexOf(loader)).toBeGreaterThan(steps.indexOf(testing));
+  });
+
+  test('every native dist upload can replace the first attempt artifact', () => {
+    const uploads = Object.values(dist.jobs).flatMap((job: any) =>
+      (job.steps ?? []).filter((step: any) => step.uses?.startsWith('actions/upload-artifact@'))
+    );
+    expect(uploads).toHaveLength(2);
+    for (const upload of uploads) {
+      expect(upload.uses).toBe('actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9');
+      expect(upload.with.overwrite).toBe(true);
+    }
   });
 
   test('CI builds every path and checks declarations and all three runtimes', () => {
@@ -646,6 +947,7 @@ describe('native package release wiring', () => {
       'scripts/native-bindings-smoke.mjs',
       'scripts/native-raw-smoke.mjs',
       'scripts/glibc-floor.mjs',
+      'scripts/cargo-glibc.sh',
       'scripts/native-engine.ts',
       'packages/xlsx/src/**',
       'packages/xlsx/package.json',

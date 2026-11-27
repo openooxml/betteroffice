@@ -35,6 +35,7 @@ mod work {
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -173,7 +174,7 @@ pub(crate) fn patch_paragraph_v1(
     patch: &ParagraphPatchV1,
     context: &PatchContext,
 ) -> Result<String, ParagraphPatchError> {
-    patch_inner(source_paragraph, patch, context).map_err(|failure| ParagraphPatchError {
+    patch_inner(source_paragraph, patch, context, None).map_err(|failure| ParagraphPatchError {
         part: context.part.clone(),
         ordinal: Some(patch.ordinal),
         code: failure.code,
@@ -181,10 +182,178 @@ pub(crate) fn patch_paragraph_v1(
     })
 }
 
+#[doc(hidden)]
+pub struct ParagraphPatchSource {
+    xml: String,
+    scopes: OnceLock<NamespaceScopes>,
+}
+
+impl ParagraphPatchSource {
+    pub fn new(xml: String) -> Self {
+        Self {
+            xml,
+            scopes: OnceLock::new(),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.xml
+    }
+
+    pub fn paragraph_xml(&self, start: usize) -> Option<&str> {
+        let paragraph = self.xml.get(start..)?;
+        Some(&paragraph[super::s13::element_span(paragraph, &[])?])
+    }
+
+    pub fn base_preserving_more_runs(
+        &self,
+        start: usize,
+        base: &ParagraphPatchV1,
+        recorded: &ParagraphPatchV1,
+    ) -> Option<String> {
+        if base.result_sha256 != recorded.result_sha256 {
+            return None;
+        }
+        let source = self.paragraph_xml(start)?;
+        let context = self
+            .scopes
+            .get_or_init(|| NamespaceScopes::new(&self.xml))
+            .context("", start);
+        let (base_xml, base) = preview(source, base, &context)?;
+        let Some((_, recorded)) = preview(source, recorded, &context) else {
+            return Some(base_xml);
+        };
+        if base.kept.len() <= recorded.kept.len()
+            || !base.kept.is_superset(&recorded.kept)
+            || base.cell_runs.len() != recorded.cell_runs.len()
+            || base.enclosing_markup != recorded.enclosing_markup
+        {
+            return None;
+        }
+        let mut previous_pair = None;
+        for (&base_run, &recorded_run) in base.cell_runs.iter().zip(&recorded.cell_runs) {
+            if previous_pair.replace((base_run, recorded_run)) == Some((base_run, recorded_run)) {
+                continue;
+            }
+            if base.run_properties[base_run] != recorded.run_properties[recorded_run] {
+                return None;
+            }
+        }
+        Some(base_xml)
+    }
+}
+
+struct Preview {
+    kept: BTreeSet<usize>,
+    cell_runs: Vec<usize>,
+    run_properties: Vec<String>,
+    enclosing_markup: Vec<(Range<usize>, String)>,
+}
+
+fn preview(
+    source: &str,
+    patch: &ParagraphPatchV1,
+    context: &PatchContext,
+) -> Option<(String, Preview)> {
+    let mut preview = None;
+    let output = patch_inner(source, patch, context, Some(&mut preview)).ok()?;
+    Some((output, preview?))
+}
+
+impl Preview {
+    fn new(
+        source: &str,
+        before: &lower::Lowered,
+        output: &str,
+        after: &lower::Lowered,
+        patch: &ParagraphPatchV1,
+    ) -> Option<Self> {
+        if before.xml.nodes.iter().any(|node| {
+            node.namespace == lower::WORD
+                && match node.local.as_str() {
+                    "proofErr" | "smartTag" => true,
+                    "r" => node
+                        .attributes
+                        .iter()
+                        .any(|attribute| !attribute.identifier && !attribute.run_revision),
+                    "t" => node
+                        .attributes
+                        .iter()
+                        .any(|attribute| !attribute.identifier && attribute.name != "xml:space"),
+                    _ => false,
+                }
+        }) {
+            return None;
+        }
+        let mut edits = patch.text_edits.iter().peekable();
+        let mut shift = 0;
+        let kept = before
+            .runs
+            .iter()
+            .enumerate()
+            .filter_map(|(original, run)| {
+                while let Some(edit) = edits.next_if(|edit| edit.to <= run.from) {
+                    let inserted = edit
+                        .insert
+                        .iter()
+                        .map(|insert| insert.text.encode_utf16().count() as i64)
+                        .sum::<i64>();
+                    shift += inserted - i64::from(edit.to - edit.from);
+                }
+                if run.from == run.to || edits.peek().is_some_and(|edit| edit.from < run.to) {
+                    return None;
+                }
+                let from = u32::try_from(i64::from(run.from) + shift).ok()?;
+                let to = from.checked_add(run.to - run.from)?;
+                let at = after.runs.partition_point(|candidate| candidate.to <= from);
+                let candidate = after.runs.get(at)?;
+                (candidate.from == from
+                    && candidate.to == to
+                    && source[before.xml.nodes[run.node].span.clone()]
+                        == output[after.xml.nodes[candidate.node].span.clone()])
+                .then_some(original)
+            })
+            .collect();
+        let cell_at = |byte| after.cells.partition_point(|cell| cell.raw.start < byte);
+        let enclosing_markup = after
+            .xml
+            .nodes
+            .iter()
+            .skip(1)
+            .filter_map(|node| {
+                if (node.word("r") || node.word("t"))
+                    && !node.attributes.iter().any(|attribute| attribute.identifier)
+                {
+                    return None;
+                }
+                let from = cell_at(node.span.start);
+                let to = cell_at(node.span.end);
+                (from < to || node.is_range_marker())
+                    .then(|| (from..to, output[node.open.clone()].to_owned()))
+            })
+            .collect();
+        Some(Self {
+            kept,
+            cell_runs: after.cells.iter().map(|cell| cell.run).collect(),
+            run_properties: after
+                .runs
+                .iter()
+                .map(|run| {
+                    run.properties
+                        .map(|at| output[after.xml.nodes[at].span.clone()].to_owned())
+                        .unwrap_or_default()
+                })
+                .collect(),
+            enclosing_markup,
+        })
+    }
+}
+
 fn patch_inner(
     source: &str,
     patch: &ParagraphPatchV1,
     context: &PatchContext,
+    preview: Option<&mut Option<Preview>>,
 ) -> Result<String, Failure> {
     let mut lowered = lower::lower(
         source,
@@ -251,6 +420,9 @@ fn patch_inner(
         &properties,
         PatchErrorCode::ResultMismatch,
     )?;
+    if let Some(preview) = preview {
+        *preview = Preview::new(source, &lowered, &output, &verified, patch);
+    }
     let actual: Vec<_> = verified.cells.into_iter().map(|cell| cell.unit).collect();
     if !same_content(&actual, &units) {
         return Err(Failure::new(

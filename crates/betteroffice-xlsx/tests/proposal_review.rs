@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, CellAddress, CellRef, EditRequest, Error, Op, ProposalEditInput,
-    ProposalRequest, Sheet, SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellAddress, CellRef, CellValue, DefinedName, EditRequest, Error, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetId, Workbook, WorkbookModel,
 };
 
 fn cell(value: &str) -> CellRef {
@@ -240,6 +240,61 @@ fn assert_stale(workbook: &mut Workbook, id: &str, target: &str, force: bool) {
         result => panic!("expected stale target, got {result:?}"),
     }
     assert_eq!(workbook.proposals().len(), 1);
+}
+
+#[test]
+fn proposed_defined_name_range_joins_rebase_as_in_the_release() {
+    let mut source = model();
+    source.defined_names.push(DefinedName {
+        name: "Start_1".into(),
+        formula: "Data!$A$1".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    for (address, value) in [("A1", 10.0), ("B2", 20.0)] {
+        source.sheets[0].set_cell(
+            cell(address),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    let input = "=SUM(Start_1:Data!B2)";
+    let mut renamed = Workbook::from_model(source.clone()).unwrap();
+    let id = stage(&mut renamed, input);
+    assert_eq!(renamed.proposals()[0].edits[0].new_text, "30");
+    apply(
+        &mut renamed,
+        Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Sales".into(),
+        },
+    );
+    assert_eq!(
+        renamed.proposals()[0].edits[0].input,
+        "=SUM(Start_1:Sales!B2)"
+    );
+    renamed
+        .accept_proposal(&id, false, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        renamed.model().sheets[0].cell(cell("C1")).unwrap().value,
+        CellValue::Number { value: 30.0 }
+    );
+
+    let mut inserted = Workbook::from_model(source).unwrap();
+    let id = stage(&mut inserted, input);
+    apply(
+        &mut inserted,
+        Op::InsertRows {
+            sheet: SheetId(0),
+            at: 0,
+            count: 1,
+        },
+    );
+    assert_eq!(inserted.proposals()[0].edits[0].stale, Some(true));
+    assert_stale(&mut inserted, &id, "C2", false);
 }
 
 #[test]

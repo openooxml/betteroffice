@@ -548,7 +548,7 @@ fn pattern_border_style_match_compares_background_and_border_tokens() {
 }
 
 /// One sheet plus a table part reached through the worksheet relationships.
-fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
+pub(super) fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
     let mut parts = package("<sheetData/>", &[], false);
     parts.push((
         "xl/worksheets/_rels/sheet1.xml.rels".to_string(),

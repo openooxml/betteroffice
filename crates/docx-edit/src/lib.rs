@@ -109,6 +109,7 @@ mod part_metadata;
 mod peer_bootstrap;
 mod policy;
 mod presence;
+mod provenance;
 mod queries;
 mod raw;
 mod read_state;
@@ -839,6 +840,7 @@ pub struct EditingDoc {
     segment_indexes: Mutex<EpochCache<SegmentIndex>>,
     paragraph_indexes: Mutex<EpochCache<ParagraphIndex>>,
     save_story_states: Arc<Mutex<identity::StoryStateCache>>,
+    provenance: Arc<Mutex<provenance::Provenance>>,
     /// A save seed state prime in progress; see [`EditingDoc::prime_save_seed_states_slice`].
     prime_progress: Mutex<Option<identity::PrimeProgress>>,
     prime_last_slice_cost: AtomicU64,
@@ -958,6 +960,7 @@ impl EditingDoc {
             segment_indexes: Mutex::default(),
             paragraph_indexes: Mutex::default(),
             save_story_states,
+            provenance: Arc::default(),
             prime_progress: Mutex::new(None),
             prime_last_slice_cost: AtomicU64::new(0),
             #[cfg(test)]
@@ -1018,6 +1021,20 @@ impl EditingDoc {
     /// transaction's deletions already collected unless this is called before it attaches.
     pub fn keep_deleted(&self) {
         self.keeps_deleted.store(true, Ordering::Relaxed);
+    }
+
+    fn with_retained_deleted<T>(&self, load: impl FnOnce() -> T) -> T {
+        struct ResumeCollection<'a>(&'a AtomicBool);
+
+        impl Drop for ResumeCollection<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        let _resume = (!self.keeps_deleted.swap(true, Ordering::Relaxed))
+            .then(|| ResumeCollection(&self.keeps_deleted));
+        load()
     }
 
     #[doc(hidden)]
@@ -1762,7 +1779,8 @@ impl EditingDoc {
     /// Removes one complete story from the document.
     pub fn delete_story(&self, story_id: &str) -> EditResult<()> {
         let mut txn = self.doc.transact_mut_with(self.client_id);
-        story_ref(&txn, story_id)?;
+        let story = story_ref(&txn, story_id)?;
+        self.mark_provenance_range(&txn, &story, 0, story.len(&txn));
         if self.keeps_deleted() {
             mark_story_removed(&mut txn, story_id);
         } else {
@@ -2253,10 +2271,10 @@ impl EditingDoc {
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
         let state_vector = StateVector::decode_v1(remote_state_vector)
             .map_err(|error| EditError::InvalidStateVector(error.to_string()))?;
-        Ok(deterministic::encode_diff_v1(
-            &self.doc.transact(),
-            &state_vector,
-        ))
+        let txn = self.doc.transact();
+        let update = deterministic::encode_diff_v1(&txn, &state_vector);
+        self.bind_edit_provenance(&state_vector, &update);
+        Ok(update)
     }
 
     /// [`Self::encode_diff_v1`] as ordered updates for a sync that must travel in bounded
@@ -2303,7 +2321,8 @@ impl EditingDoc {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.save_story_states.lock().unwrap().clear();
-        self.integrate_update(update, UpdateOrigin::Remote)
+        self.clear_edit_provenance();
+        self.integrate_updates_inner(vec![update], UpdateOrigin::Remote)
     }
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
@@ -2314,6 +2333,15 @@ impl EditingDoc {
     /// Applies updates in order in one transaction, then repairs any paragraph identities
     /// they duplicated.
     fn integrate_updates(&self, updates: Vec<Update>, origin: UpdateOrigin) -> EditResult<()> {
+        let _watch = self.watch_provenance(provenance::WatchKind::Unpaired);
+        self.integrate_updates_inner(updates, origin)
+    }
+
+    fn integrate_updates_inner(
+        &self,
+        updates: Vec<Update>,
+        origin: UpdateOrigin,
+    ) -> EditResult<()> {
         let _host_edit = matches!(origin, UpdateOrigin::Host)
             .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self.yrs_doc());
@@ -2378,6 +2406,7 @@ impl EditingDoc {
     pub(crate) fn apply_verbatim_v1(&self, bytes: &[u8]) -> EditResult<()> {
         let update = Update::decode_v1(bytes)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        let _watch = self.watch_provenance(provenance::WatchKind::Recorded);
         let own_clock = self.own_clock();
         self.doc
             .transact_mut()
@@ -2397,6 +2426,7 @@ impl EditingDoc {
     pub(crate) fn fork(&self, state: &[u8]) -> EditResult<Self> {
         let fork = Self::build(self.client_id, self.keeps_deleted());
         fork.apply_verbatim_v1(state)?;
+        self.invalidate_fork_provenance(&fork);
         fork.ids.adopt(&self.ids);
         if let Some(index) = self.source_index() {
             fork.retain_source(identity::SourcePackage::Ready(index));

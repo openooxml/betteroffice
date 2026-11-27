@@ -131,6 +131,12 @@
       "id": 130706097,
       "signed_at": "2026-11-19T23:51:32Z",
       "pull_request_no": 2698
+    },
+    {
+      "name": "bored-again",
+      "id": 200449216,
+      "signed_at": "2026-11-26T05:45:02Z",
+      "pull_request_no": 2854
     }
   ]
 }

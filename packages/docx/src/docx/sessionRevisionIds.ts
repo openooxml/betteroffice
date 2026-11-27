@@ -16,6 +16,11 @@ const XML_ID = /\bw:id\s*=\s*["'](\d+)["']/g;
 const sessionInfos = new WeakSet<object>();
 let marked = false;
 
+/** Whether the writer will assign this revision an ID. @internal */
+export function isSessionRevisionInfo(info: object): boolean {
+  return sessionInfos.has(info);
+}
+
 /** Notes `info` for the save; a `session` info's id is a placeholder until then. @internal */
 export function markRevisionInfo<T extends object>(info: T, session: boolean): T {
   if (session) sessionInfos.add(info);

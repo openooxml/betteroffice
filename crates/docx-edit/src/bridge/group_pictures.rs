@@ -5,13 +5,18 @@ use docx_parse::media::MediaTable;
 use docx_parse::paragraph::{apply_shape_metadata, parse_alternate_content_branch};
 use docx_parse::relationships::{RelationshipMap, parse_relationships};
 use docx_parse::shape::{
-    parse_shape_from_drawing, resolve_shape_fill_pictures, shape_for_rendering,
+    Shape, parse_shape_from_drawing, resolve_shape_fill_pictures, shape_for_rendering,
+    shape_with_rendered_connectors,
+};
+use docx_parse::smart_art::{
+    SmartArtContext, is_smart_art_drawing, parse_smart_art_from_drawing, smart_art_for_rendering,
 };
 use docx_parse::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
 use ooxml_opc::{PackageBytes, RetainedPackage};
 use serde_json::Value;
 
 use crate::identity::SourceStory;
+use crate::structured::source::{ENDNOTES_PART, FOOTNOTES_PART, relationship_part};
 
 type StoryShapes = BTreeMap<String, BTreeMap<String, Vec<Value>>>;
 
@@ -36,25 +41,45 @@ pub(crate) fn source_shapes(
     bytes: PackageBytes,
     roots: &std::collections::HashMap<String, SourceStory>,
 ) -> GroupPictureSources {
-    let mut sources = BTreeMap::new();
     let Ok(package) = RetainedPackage::from_bytes(bytes) else {
         return GroupPictureSources::default();
     };
-    let Ok(table) = MediaTable::new(package.clone()) else {
+    let Ok(table) = MediaTable::new(package) else {
         return GroupPictureSources::default();
     };
+    let mut sources = BTreeMap::new();
+    let package = table.retained_package();
     let media = table.media_map();
     let parts: BTreeMap<_, _> = package
         .parts()
         .enumerate()
         .map(|(index, (path, _))| (path.to_owned(), index))
         .collect();
+    let mut smart_art = SmartArtContext::default();
+    smart_art.parts = package
+        .parts()
+        .enumerate()
+        .filter(|(_, (path, _))| path.to_ascii_lowercase().starts_with("word/diagrams/"))
+        .filter_map(|(index, (path, _))| Some((path.to_owned(), package.read(index).ok()?)))
+        .collect();
+    if !smart_art
+        .parts
+        .values()
+        .any(|bytes| has_connector_preset(bytes))
+    {
+        smart_art.parts.clear();
+    }
     let mut by_part: BTreeMap<&str, Vec<_>> = BTreeMap::new();
     for (story, source) in roots {
         by_part
             .entry(source.part_uri.trim_start_matches('/'))
             .or_default()
-            .push((story, source));
+            .push((story.as_str(), source.item_id.as_deref()));
+    }
+    for (part, story) in [(FOOTNOTES_PART, "footnote"), (ENDNOTES_PART, "endnote")] {
+        if parts.contains_key(part) {
+            by_part.entry(part).or_default().push((story, None));
+        }
     }
     let limits = ParseLimits::default();
     for (path, stories) in by_part {
@@ -63,9 +88,11 @@ pub(crate) fn source_shapes(
             continue;
         };
         let has = |needle: &[u8]| bytes.windows(needle.len()).any(|window| window == needle);
-        if !(has(b":pic") || has(b"<pic") || has(b"txbx"))
-            || !(has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"))
-        {
+        let picture_group = (has(b":pic") || has(b"<pic") || has(b"txbx"))
+            && (has(b"wgp") || has(b"wpc") || has(b"grpSp") || has(b"spTree"));
+        let connectors =
+            has_connector_preset(&bytes) || (!smart_art.parts.is_empty() && has(b"relIds"));
+        if !(picture_group || connectors) {
             continue;
         }
         let Ok(document) = parse_xml(&bytes, path, &mut budget) else {
@@ -74,17 +101,23 @@ pub(crate) fn source_shapes(
         let Some(root) = document.root() else {
             continue;
         };
-        let Some((directory, filename)) = path.rsplit_once('/') else {
-            continue;
-        };
-        let rel_path = format!("{directory}/_rels/{filename}.rels");
+        let rel_path = relationship_part(path);
         let relationships = parts
             .get(&rel_path)
             .and_then(|index| package.read(*index).ok())
             .and_then(|bytes| parse_relationships(&bytes, &rel_path, &mut budget).ok())
             .unwrap_or_default();
-        for (story, source) in stories {
-            let story_root = if let Some(id) = &source.item_id {
+        for (story, item_id) in stories {
+            let separator = matches!(story, "footnote" | "endnote");
+            let story_root = if separator {
+                let Some(item) = root
+                    .child_elements()
+                    .find(|item| item.attribute(Some("w"), "type") == Some("separator"))
+                else {
+                    continue;
+                };
+                item
+            } else if let Some(id) = item_id {
                 let Some(item) = root
                     .child_elements()
                     .find(|item| item.attribute(Some("w"), "id") == Some(id))
@@ -96,9 +129,17 @@ pub(crate) fn source_shapes(
                 root
             };
             let mut shapes = BTreeMap::new();
-            collect(story_root, &relationships, &media, &mut shapes, &mut budget);
+            collect(
+                story_root,
+                &relationships,
+                &media,
+                &mut shapes,
+                &mut smart_art,
+                &mut budget,
+                !separator,
+            );
             if !shapes.is_empty() {
-                sources.insert(story.clone(), shapes);
+                sources.insert(story.to_owned(), shapes);
             }
         }
     }
@@ -108,42 +149,134 @@ pub(crate) fn source_shapes(
     }
 }
 
+fn has_connector_preset(bytes: &[u8]) -> bool {
+    [b"bentConnector".as_slice(), b"curvedConnector2"]
+        .into_iter()
+        .any(|name| bytes.windows(name.len()).any(|window| window == name))
+}
+
+pub(crate) fn preview_connector_sources(
+    connectors: docx_parse::s9::PreviewConnectorSources,
+    roots: impl Iterator<Item = (String, SourceStory)>,
+) -> GroupPictureSources {
+    let mut shapes = BTreeMap::new();
+    let roots = roots.map(|(story, source)| (story, (source.part_uri, source.item_id)));
+    for (story, (path, item)) in roots.chain([
+        ("footnote".to_owned(), (FOOTNOTES_PART.to_owned(), None)),
+        ("endnote".to_owned(), (ENDNOTES_PART.to_owned(), None)),
+    ]) {
+        let key = (path.trim_start_matches('/').to_owned(), item);
+        let drawings = connectors.get(&key).or_else(|| {
+            connectors.iter().find_map(|((path, item), drawings)| {
+                (item == &key.1 && path.eq_ignore_ascii_case(&key.0)).then_some(drawings)
+            })
+        });
+        if let Some(drawings) = drawings {
+            let mut by_id: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+            for (baseline, guides) in drawings {
+                by_id
+                    .entry(baseline.id.clone().unwrap_or_default())
+                    .or_default()
+                    .push(serde_json::json!({"baseline": baseline, "guides": guides}));
+            }
+            shapes.insert(story, by_id);
+        }
+    }
+    GroupPictureSources {
+        shapes: Arc::new(shapes),
+        media: None,
+    }
+}
+
+fn has_connector(shape: &Shape) -> bool {
+    ooxml_drawingml::is_corrected_connector_preset(&shape.shape_type)
+        || shape.children.iter().flatten().any(has_connector)
+}
+
 fn collect(
     node: &XmlElement,
     relationships: &RelationshipMap,
     media: &docx_parse::media::MediaMap,
     shapes: &mut BTreeMap<String, Vec<Value>>,
+    smart_art: &mut SmartArtContext,
     budget: &mut ParseBudget<'_>,
+    include_pictures: bool,
 ) {
     if node.name == "w:drawing" {
-        if let Some(mut baseline) = parse_shape_from_drawing(node)
-            && baseline
-                .scene
-                .as_ref()
-                .and_then(|scene| scene.root.as_ref())
-                .is_some_and(has_picture_or_text)
-            && let Some(mut projected) = shape_for_rendering(node)
+        if let Some(mut baseline) = parse_shape_from_drawing(node) {
+            let mut projected = if include_pictures
+                && baseline
+                    .scene
+                    .as_ref()
+                    .and_then(|scene| scene.root.as_ref())
+                    .is_some_and(has_picture_or_text)
+            {
+                shape_for_rendering(node)
+            } else {
+                None
+            };
+            let connectors = has_connector(&baseline)
+                .then(|| shape_with_rendered_connectors(node))
+                .flatten();
+            if projected.is_some() || connectors.is_some() {
+                resolve_shape_fill_pictures(&mut baseline, Some(relationships), Some(media));
+                if let Some(projected) = &mut projected {
+                    resolve_shape_fill_pictures(projected, Some(relationships), Some(media));
+                }
+                apply_shape_metadata(&mut baseline, node);
+                shapes
+                    .entry(baseline.id.clone().unwrap_or_default())
+                    .or_default()
+                    .push(serde_json::json!({
+                        "baseline": baseline, "projected": projected, "connectors": connectors
+                    }));
+            }
+        } else if !smart_art.parts.is_empty()
+            && is_smart_art_drawing(node)
+            && let Ok(Some(connectors)) =
+                smart_art_for_rendering(node, relationships, media, smart_art, budget)
+            && has_connector(&connectors)
+            && let Ok(Some(mut baseline)) = parse_smart_art_from_drawing(
+                node,
+                Some(relationships),
+                Some(media),
+                Some(smart_art),
+                &mut budget.clone(),
+            )
         {
-            resolve_shape_fill_pictures(&mut baseline, Some(relationships), Some(media));
-            resolve_shape_fill_pictures(&mut projected, Some(relationships), Some(media));
             apply_shape_metadata(&mut baseline, node);
             shapes
                 .entry(baseline.id.clone().unwrap_or_default())
                 .or_default()
-                .push(serde_json::json!({"baseline": baseline, "projected": projected}));
+                .push(serde_json::json!({"baseline": baseline, "connectors": connectors}));
         }
-        return;
     }
     if node.local_name() == "AlternateContent" {
         if let Ok(Some((branch, _))) =
             parse_alternate_content_branch(node, Some(relationships), budget, None, false)
         {
-            collect(branch, relationships, media, shapes, budget);
+            collect(
+                branch,
+                relationships,
+                media,
+                shapes,
+                smart_art,
+                budget,
+                include_pictures,
+            );
         }
         return;
     }
     for child in node.child_elements() {
-        collect(child, relationships, media, shapes, budget);
+        collect(
+            child,
+            relationships,
+            media,
+            shapes,
+            smart_art,
+            budget,
+            include_pictures,
+        );
     }
 }
 
@@ -266,29 +399,75 @@ pub(super) fn project(
                     .is_some_and(|suffix| suffix.starts_with(':'))
         })
         .max_by_key(|(root, _)| root.len())?;
-    let source = shapes
-        .get(shape.get("id").and_then(Value::as_str).unwrap_or_default())?
-        .iter()
-        .find(|source| {
-            let baseline = &source["baseline"];
-            ["scene", "children", "size", "transform"]
-                .iter()
-                .all(|key| same_model(shape.get(*key), baseline.get(*key)))
-        })?;
-    let mut projected = shape.clone();
-    projected["children"] = source["projected"]["children"].clone();
-    let mut bodies = BTreeMap::new();
-    text_bodies(&shape["children"], &mut bodies);
-    let mut targets = BTreeMap::new();
-    text_bodies(&projected["children"], &mut targets);
-    if !bodies.keys().eq(targets.keys()) {
-        return None;
+    let candidates = shapes.get(shape.get("id").and_then(Value::as_str).unwrap_or_default())?;
+    let matches = |source: &Value, keys: &[&str]| {
+        let baseline = &source["baseline"];
+        keys.iter()
+            .all(|key| same_model(shape.get(*key), baseline.get(*key)))
+    };
+    if let Some(children) = candidates.iter().find_map(|source| {
+        matches(source, &["scene", "children", "size", "transform"])
+            .then(|| source.pointer("/projected/children"))
+            .flatten()
+    }) {
+        let mut bodies = BTreeMap::new();
+        text_bodies(&shape["children"], &mut bodies);
+        let mut targets = BTreeMap::new();
+        text_bodies(children, &mut targets);
+        if bodies.keys().eq(targets.keys()) {
+            let mut projected = shape.clone();
+            projected["children"] = children.clone();
+            apply_text_bodies(&mut projected["children"], &bodies, &mut 0);
+            if !media_tokens && let Some(table) = &sources.media {
+                resolve_data_urls(&mut projected["children"], table);
+            }
+            return Some(projected);
+        }
     }
-    apply_text_bodies(&mut projected["children"], &bodies, &mut 0);
-    if !media_tokens && let Some(table) = &sources.media {
-        resolve_data_urls(&mut projected["children"], table);
+    let source = candidates.iter().find(|source| {
+        (source["connectors"].is_object() || source["guides"].is_array())
+            && matches(source, &["children", "shapeType", "geometryPath"])
+            && same_model(
+                shape.pointer("/scene/root"),
+                source["baseline"].pointer("/scene/root"),
+            )
+    })?;
+    let mut projected = raw_projection(shape);
+    if let Some(guides) = source.get("guides") {
+        let guides: docx_parse::s9::PreviewConnectorGuides =
+            serde_json::from_value(guides.clone()).ok()?;
+        for (indices, preset, adjustments) in guides {
+            let child = indices.iter().try_fold(&mut projected, |shape, index| {
+                shape.get_mut("children")?.get_mut(*index)
+            });
+            if let Some(child) = child
+                && let Some(path) =
+                    ooxml_drawingml::connector_geometry_for_rendering(&preset, &adjustments)
+            {
+                child["geometryPath"] = serde_json::json!(path);
+            }
+        }
+    } else {
+        copy_connector_paths(&mut projected, &source["connectors"], &source["baseline"]);
     }
     Some(projected)
+}
+
+fn copy_connector_paths(shape: &mut Value, connectors: &Value, baseline: &Value) {
+    if let Some(path) = connectors.get("geometryPath")
+        && Some(path) != baseline.get("geometryPath")
+    {
+        shape["geometryPath"] = path.clone();
+    }
+    if let Some(children) = shape.get_mut("children").and_then(Value::as_array_mut) {
+        for ((shape, connectors), baseline) in children
+            .iter_mut()
+            .zip(connectors["children"].as_array().into_iter().flatten())
+            .zip(baseline["children"].as_array().into_iter().flatten())
+        {
+            copy_connector_paths(shape, connectors, baseline);
+        }
+    }
 }
 
 pub(super) fn raw_projection(shape: &Value) -> Value {

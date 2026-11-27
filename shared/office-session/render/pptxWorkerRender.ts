@@ -1,6 +1,9 @@
 import type { SessionTransport } from '../transport';
+import type { DefaultFontFace } from '../../pptxDefaultFonts';
 import { createBitmapOwnership } from './ownership';
 import type { DeviceRect } from './types';
+
+export type DefaultFontPaintFace = DefaultFontFace & { paintFamily?: string };
 
 export interface PptxPaintFont {
   family: string;

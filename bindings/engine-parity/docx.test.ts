@@ -3663,6 +3663,7 @@ const rows: Row<Docx>[] = [
 
 const HEAP = 'heap accounting of the calling thread; the native and wasm allocators differ by design';
 const OBSERVER = 'a JS callback crosses the napi and wasm-bindgen boundaries differently; what the observer delivers is compared through the drain_update_event and has_pending_update rows';
+const PROVENANCE_TRANSFER = 'provenance transfer is exercised on both engines by packages/docx/src/yrs/paragraphPatchSave.test.ts';
 const exclusions: Exclusion[] = [
   { method: 'set_wasm_heap_limit', reason: HEAP },
   { method: 'set_wasm_heap_counting', reason: HEAP },
@@ -3681,6 +3682,10 @@ const exclusions: Exclusion[] = [
   { method: 'EditSession.set_update_observer', reason: OBSERVER },
   { method: 'EditSession.clear_update_observer', reason: OBSERVER },
   { method: 'EditSession.take_base_latin_miss', reason: 'a read-and-reset font-cache flag, not a document result' },
+  { method: 'EditSession.apply_local_update_with_provenance', reason: PROVENANCE_TRANSFER },
+  { method: 'EditSession.bootstrap_peer_with_provenance', reason: PROVENANCE_TRANSFER },
+  { method: 'EditSession.encode_edit_provenance_for_transfer', reason: PROVENANCE_TRANSFER },
+  { method: 'EditSession.paragraph_save_plan_with_local_provenance', reason: 'compared against the base plan on both engines in bindings/docx-native/engine.test.ts' },
 ];
 
 const knownDifferences: KnownDifference[] = [];

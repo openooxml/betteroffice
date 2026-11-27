@@ -3,7 +3,7 @@ import { absoluteHref } from './assetHref';
 import { chunkEntries, parseSkeleton, textChunks, type SliceSkeleton } from './slices';
 import { sha256 } from './sha256';
 import { checkImplicitSliceCooldown, loadImplicitFontAsset } from './fontCdn';
-import { isImplicitFontCdnError, reportImplicitCdnFailure } from '../../../shared/fontCdnDiagnostics';
+import { isImplicitFontCdnError, reportImplicitCdnFailure, type FontCdnReporter } from '../../../shared/fontCdnDiagnostics';
 
 /**
  * A sliced face that loads its outlines as they are needed. Its layout tables
@@ -152,10 +152,10 @@ async function readChecked<T>(
     checkCooldown && (() => checkCooldown(url)));
 }
 
-async function reportSliceFailure<T>(pending: Promise<T>): Promise<T> {
+async function reportSliceFailure<T>(pending: Promise<T>, report: FontCdnReporter): Promise<T> {
   try { return await pending; }
   catch (error) {
-    if (isImplicitFontCdnError(error)) reportImplicitCdnFailure(error);
+    if (isImplicitFontCdnError(error)) report(error);
     throw error;
   }
 }
@@ -175,19 +175,23 @@ function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Arr
 }
 
 /** @internal Loads a sliced face's index, skeleton and core; chunks follow on demand. */
-export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
+export function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace>;
+export async function openProgressiveFace(
+  ref: SliceRef, transport: SliceTransport & { reportCdnFailure?: FontCdnReporter },
+): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
+  const report = transport.reportCdnFailure ?? reportImplicitCdnFailure;
   const index = await reportSliceFailure(readChecked(transport, ref.index, async (indexBytes) => {
     if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
     const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
     if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
     return index;
-  }, checkImplicitSliceCooldown));
+  }, checkImplicitSliceCooldown), report);
   const skeletonFile = readFile(transport, index.skeleton);
   const sequential = transport.url?.implicitCdn?.(index.skeleton.file) || transport.url?.implicitCdn?.(index.core.file);
   const [skeletonBytes, core] = await reportSliceFailure(Promise.all([
     skeletonFile, sequential ? skeletonFile.then(() => readFile(transport, index.core)) : readFile(transport, index.core),
-  ]));
+  ]), report);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
   const outlines = new Map<number, Uint8Array>();
@@ -240,7 +244,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     const failure = results.find((result) => result.status === 'rejected');
     const next = publish();
     if (failure?.status === 'rejected') {
-      if (isImplicitFontCdnError(failure.reason)) reportImplicitCdnFailure(failure.reason);
+      if (isImplicitFontCdnError(failure.reason)) report(failure.reason);
       throw failure.reason;
     }
     return next;

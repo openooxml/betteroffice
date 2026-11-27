@@ -1437,6 +1437,22 @@ impl EditSession {
             .map_err(|error| map_error(env, error))
     }
 
+    /// @internal
+    #[napi(catch_unwind, js_name = "apply_local_update_with_provenance")]
+    pub fn apply_local_update_with_provenance(
+        &self,
+        env: Env,
+        update: Uint8Array,
+        sidecar: Uint8Array,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        let update = update.to_vec();
+        let sidecar = sidecar.to_vec();
+        self.document(env)?
+            .apply_local_update_with_provenance(&update, &sidecar)
+            .map_err(|error| map_error(env, error))
+    }
+
     #[napi(catch_unwind, js_name = "apply_paragraph_style")]
     pub fn apply_paragraph_style(
         &self,
@@ -1552,6 +1568,27 @@ impl EditSession {
         let _call = EngineCall::new(env);
         self.document_unclocked(env)?
             .bootstrap_peer(&state, &metadata, source.map(|bytes| bytes.to_vec()))
+            .map_err(|error| map_error(env, error))
+    }
+
+    /// @internal
+    #[napi(catch_unwind, js_name = "bootstrap_peer_with_provenance")]
+    pub fn bootstrap_peer_with_provenance(
+        &self,
+        env: Env,
+        state: Uint8Array,
+        metadata: Uint8Array,
+        source: Option<Uint8Array>,
+        sidecar: Uint8Array,
+    ) -> Result<()> {
+        let _call = EngineCall::new(env);
+        self.document_unclocked(env)?
+            .bootstrap_peer_with_provenance(
+                &state,
+                &metadata,
+                source.map(|bytes| bytes.to_vec()),
+                &sidecar,
+            )
             .map_err(|error| map_error(env, error))
     }
 
@@ -1844,6 +1881,22 @@ impl EditSession {
             .encode_diff(&remote_state_vector)
             .map_err(|error| map_error(env, error))
             .and_then(|bytes| byte_result(env, bytes))
+    }
+
+    /// @internal
+    #[napi(catch_unwind, js_name = "encode_edit_provenance_for_transfer")]
+    pub fn encode_edit_provenance_for_transfer(
+        &self,
+        env: Env,
+        bytes: Uint8Array,
+        base: Option<Uint8Array>,
+    ) -> Result<Uint8Array> {
+        let _call = EngineCall::new(env);
+        let core = self.document_unclocked(env)?;
+        byte_result(
+            env,
+            core.encode_edit_provenance_for_transfer(&bytes, base.as_deref()),
+        )
     }
 
     #[napi(catch_unwind, js_name = "encode_peer_metadata")]
@@ -2537,7 +2590,16 @@ impl EditSession {
     pub fn paragraph_save_plan(&self, env: Env) -> Result<String> {
         let _call = EngineCall::new(env);
         self.document(env)?
-            .paragraph_save_plan()
+            .paragraph_save_plan_with_local_provenance(false)
+            .map_err(|error| map_error(env, error))
+    }
+
+    /// @internal
+    #[napi(catch_unwind, js_name = "paragraph_save_plan_with_local_provenance")]
+    pub fn paragraph_save_plan_with_local_provenance(&self, env: Env) -> Result<String> {
+        let _call = EngineCall::new(env);
+        self.document(env)?
+            .paragraph_save_plan_with_local_provenance(true)
             .map_err(|error| map_error(env, error))
     }
 

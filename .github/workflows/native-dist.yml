@@ -17,6 +17,9 @@ jobs:
     name: ${{ matrix.platform.target }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: ${{ matrix.platform.timeout || 45 }}
+    env:
+      ZIG_VERSION: '0.14.1'
+      ZIGBUILD_VERSION: '0.23.4'
     strategy:
       fail-fast: false
       matrix:
@@ -28,8 +31,10 @@ jobs:
             timeout: 75
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            zig: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            zig: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: ubuntu-latest
@@ -48,6 +53,17 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
 
+      - uses: actions/checkout@v7.0.1
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .glibc-tools
+          sparse-checkout: |
+            scripts/cargo-glibc.sh
+            scripts/glibc-floor.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
@@ -59,20 +75,48 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings
-          key: ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') && format('-{0}', matrix.platform.os) || '' }}
+          key: >-
+            ${{ inputs.binding }}-native-${{ matrix.platform.target }}${{ endsWith(matrix.platform.target, '-linux-gnu') &&
+            format('-zig-{0}-{1}-{2}-{3}', matrix.platform.os, env.ZIG_VERSION, env.ZIGBUILD_VERSION, hashFiles('.glibc-tools/scripts/cargo-glibc.sh', '.glibc-tools/scripts/glibc-floor.mjs')) || '' }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: mlugg/setup-zig@v2
+      - name: Set up Zig
+        id: setup-zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         if: matrix.platform.zig
+        timeout-minutes: 8
+        continue-on-error: true
         with:
-          version: 0.14.1
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Check the installed Zig
+        id: zig-installed
+        if: matrix.platform.zig && steps.setup-zig.outcome != 'success'
+        shell: bash
+        run: |
+          if version=$(zig version 2>/dev/null) && [ "$version" = "$ZIG_VERSION" ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Zig a second time
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.platform.zig && steps.setup-zig.outcome != 'success' && steps.zig-installed.outputs.usable != 'true'
+        timeout-minutes: 8
+        with:
+          version: ${{ env.ZIG_VERSION }}
 
       - uses: taiki-e/install-action@v2
         if: matrix.platform.zig
         with:
-          tool: cargo-zigbuild@0.23.4
+          tool: cargo-zigbuild@${{ env.ZIGBUILD_VERSION }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Pin the glibc floor
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: echo "CARGO=$PWD/.glibc-tools/scripts/cargo-glibc.sh" >> "$GITHUB_ENV"
 
       - name: Build binding
         run: bunx napi build --cwd bindings/${{ inputs.binding }}-native --platform --target ${{ matrix.platform.target }} --release ${{ matrix.platform.zig && '--cross-compile' || '' }} -- --locked
@@ -80,7 +124,7 @@ jobs:
       - name: Check glibc floor
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
+        run: node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
 
       - name: Build the font packages
         shell: bash
@@ -96,7 +140,12 @@ jobs:
       - name: Smoke test on Debian 12
         if: endsWith(matrix.platform.target, '-linux-gnu')
         shell: bash
-        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+        run: docker run --rm -v "$PWD:/work" -w /work node:24-bookworm-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
+
+      - name: Smoke test on Debian 11
+        if: endsWith(matrix.platform.target, '-linux-gnu')
+        shell: bash
+        run: docker run --rm -v "$PWD:/work" -w /work node:22-bullseye-slim sh -c 'node .glibc-tools/scripts/glibc-floor.mjs bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node && node scripts/native-raw-smoke.mjs ${{ inputs.binding }}'
 
       - name: Test binding
         if: ${{ !matrix.platform.cross }}
@@ -107,6 +156,7 @@ jobs:
           name: ${{ inputs.binding }}-native.${{ matrix.platform.target }}
           path: bindings/${{ inputs.binding }}-native/betteroffice-${{ inputs.binding }}-native.*.node
           if-no-files-found: error
+          overwrite: true
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: matrix.platform.target == 'x86_64-unknown-linux-gnu'
@@ -116,6 +166,7 @@ jobs:
             bindings/${{ inputs.binding }}-native/index.js
             bindings/${{ inputs.binding }}-native/dist
           if-no-files-found: error
+          overwrite: true
 
   musl-smoke:
     name: ${{ matrix.target }} on Alpine
@@ -150,3 +201,34 @@ jobs:
 
       - name: Smoke test on Alpine
         run: docker run --rm -v "$PWD:/work" -w /work node:24-alpine node scripts/native-raw-smoke.mjs ${{ inputs.binding }}
+
+  windows-arm64-smoke:
+    name: Smoke test on Windows ARM64
+    needs: bindings
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.binding }}-native.aarch64-pc-windows-msvc
+          path: bindings/${{ inputs.binding }}-native
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.binding }}-native-loader
+          path: bindings/${{ inputs.binding }}-native
+
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+          architecture: arm64
+
+      - name: Smoke test on Windows ARM64
+        run: node scripts/native-raw-smoke.mjs ${{ inputs.binding }}

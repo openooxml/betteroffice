@@ -631,7 +631,7 @@ def held_sleep_control():
         return None
     try:
         ctypes.PyDLL(None).usleep
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, TypeError):
         try:
             ctypes.PyDLL("kernel32").Sleep
         except (OSError, AttributeError):

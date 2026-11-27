@@ -711,6 +711,7 @@ impl StoryParser<'_, '_> {
         // from the document the save writes.
         let ids = self.ids.clone();
         let budget = self.budget.clone();
+        self.budget.connector_story = None;
         let content = self.parse_text_box_content(container, depth);
         *self.ids = ids;
         *self.budget = budget;

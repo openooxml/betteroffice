@@ -290,7 +290,9 @@ fn geometry_path(
         .iter()
         .map(|(key, value)| (key.clone(), f64::from(*value)))
         .collect();
-    match ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+    match ooxml_drawingml::connector_geometry_for_rendering(geometry, &adjustments)
+        .or_else(|| ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio))
+    {
         Some(path) => (path, false),
         None => (
             ooxml_drawingml::preset_geometry_to_path("rect", &Default::default(), aspect_ratio)

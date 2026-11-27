@@ -88,6 +88,30 @@ function bounded<T>(promise: Promise<T>): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
+test('worker selectObject admits a rotated connector detour and rejects its empty frame', async () => {
+  const source = await JSZip.loadAsync(await deck(['alpha']));
+  const part = 'ppt/slides/slide1.xml';
+  const slide = await source.file(part)!.async('string');
+  source.file(part, slide.replace('</p:spTree>', `<p:cxnSp>
+    <p:nvCxnSpPr><p:cNvPr id="3" name="Connector"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+    <p:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="952500" y="2857500"/><a:ext cx="952500" cy="952500"/></a:xfrm>
+    <a:prstGeom prst="bentConnector3"><a:avLst><a:gd name="adj1" fmla="val 150000"/></a:avLst></a:prstGeom>
+    <a:ln w="76200"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></p:spPr>
+  </p:cxnSp></p:spTree>`));
+  const session = await open(await source.generateAsync({ type: 'uint8array' }));
+  try {
+    const shape = session.handle().snapshot().slides[0]!.shapes.find((shape) => shape.name === 'Connector')!;
+    const miss = await session.command(session.state, 1, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, x: 150, y: 350, scale: 1,
+    } });
+    expect(miss.outcomes[0]).toMatchObject({ reason: 'bad-target' });
+    const hit = await session.command(miss, 2, { kind: 'selectObject', payload: {
+      ...input, frame: session.state.frame, x: 150, y: 253.5, scale: 1,
+    } });
+    expect(hit.selection).toMatchObject({ kind: 'object', shapeId: shape.id });
+  } finally { await session.dispose(); }
+});
+
 test('stale_target_removed_or_replaced', async () => {
   for (const replacement of [false, true]) {
     const session = await open();

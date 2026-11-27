@@ -75,6 +75,8 @@ export declare class EditSession {
   apply_edits_json(request: string): string
   apply_host_update(update: Uint8Array): void
   apply_local_update(update: Uint8Array): void
+  /** @internal */
+  apply_local_update_with_provenance(update: Uint8Array, sidecar: Uint8Array): void
   apply_paragraph_style(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, styleId: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
   apply_raw_ops(story: string, opsJson: string): void
   apply_seed_raw_ops(story: string, opsJson: string): void
@@ -84,6 +86,8 @@ export declare class EditSession {
   begin_opening(generation?: string | undefined | null): void
   begin_shared_reads(): void
   bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | undefined | null): void
+  /** @internal */
+  bootstrap_peer_with_provenance(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | undefined | null, sidecar: Uint8Array): void
   can_redo(): boolean
   can_undo(): boolean
   cell_selection(): string
@@ -108,6 +112,8 @@ export declare class EditSession {
   edit_text_resident_marked(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text: string, deltaJson: string): string | undefined
   encode_diff_chunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Array<any>
   encode_diff(remoteStateVector: Uint8Array): Uint8Array
+  /** @internal */
+  encode_edit_provenance_for_transfer(bytes: Uint8Array, base?: Uint8Array | undefined | null): Uint8Array
   encode_peer_metadata(): Uint8Array
   encode_state(): Uint8Array
   encode_state_vector(): Uint8Array
@@ -171,6 +177,8 @@ export declare class EditSession {
   prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   prime_last_slice_cost(): number
   paragraph_save_plan(): string
+  /** @internal */
+  paragraph_save_plan_with_local_provenance(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
   paragraphs(story: string): string

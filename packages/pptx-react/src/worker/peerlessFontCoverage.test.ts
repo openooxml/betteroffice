@@ -1,11 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, beforeEach, expect, mock, test } from 'bun:test';
+import { paintSlide, type SlideDisplayList } from '@betteroffice/pptx';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
-const { createPeerlessFontCoverage, createWholeFontInstaller } = await import('./peerlessFontCoverage');
+const { createPeerlessFontCoverage } = await import('./peerlessFontCoverage');
 import type { PresentationCommandClient } from '@betteroffice/pptx/worker';
 
 let added: string[];
@@ -56,6 +57,28 @@ test('a sliced family under a named font asks too, and a worker with no face dra
   expect(readCoverageFont.mock.calls).toEqual([['MS Gothic', 'abc', null]]);
 });
 
+test.each(['rejected face', 'missing FontFace', 'missing font set'] as const)('the page uses the browser font with a %s', async (failure) => {
+  const fontFace = Object.getOwnPropertyDescriptor(globalThis, 'FontFace')!;
+  const fontSet = Object.getOwnPropertyDescriptor(document, 'fonts')!;
+  if (failure === 'missing font set') Object.defineProperty(document, 'fonts', { configurable: true, value: undefined });
+  else Object.defineProperty(globalThis, 'FontFace', { configurable: true,
+    value: failure === 'missing FontFace' ? undefined : class {
+      async load() { throw new Error('Browser refused the face'); }
+    },
+  });
+  const coverage = createPeerlessFontCoverage({
+    state: sliced, readCoverageFont: async () => ({ revision: 2, bytes: new ArrayBuffer(8) }),
+  }, () => true);
+  try {
+    await expect(coverage.prepare('Noto Sans JP', '日')).resolves.toBe('Noto Sans JP');
+    expect(added).toEqual([]);
+  } finally {
+    coverage.dispose();
+    Object.defineProperty(globalThis, 'FontFace', fontFace);
+    Object.defineProperty(document, 'fonts', fontSet);
+  }
+});
+
 test('two editors on one page never share a revision family', async () => {
   const read = async () => ({ revision: 2, bytes: new ArrayBuffer(8) });
   const one = createPeerlessFontCoverage({ readCoverageFont: read, state: sliced }, () => true);
@@ -71,6 +94,50 @@ test('a family the worker stops slicing drops its page faces, so nothing draws f
   expect(await coverage.prepare('Noto Sans JP', '日')).toBe('Noto Sans JP');
   expect(removed).toEqual([first]);
   expect(coverage.latest!('Noto Sans JP')).toBeUndefined();
+});
+
+test('a page paint uses the base family for a null reply or a removed revision', async () => {
+  const family = 'Noto Sans JP';
+  const state = { slicedFamilies: [family] } as PresentationCommandClient['state'];
+  let started!: (have: number | null) => void;
+  let reply!: (value: { revision: number }) => void;
+  const requested = new Promise<number | null>((resolve) => { started = resolve; });
+  const pending = new Promise<{ revision: number }>((resolve) => { reply = resolve; });
+  const coverage = createPeerlessFontCoverage({ state, async readCoverageFont(_, text, have) {
+    if (text === '日') return have === 2 ? { revision: 2 } : { revision: 2, bytes: new ArrayBuffer(8) };
+    if (text === '語') return null;
+    started(have);
+    return pending;
+  } }, () => true);
+  const drawn: [string, string][] = [];
+  const context = { font: '', fillText: (text: string) => drawn.push([text, context.font]) };
+  const ctx = new Proxy(context, {
+    get(target, key) { return Reflect.get(target, key) ?? (() => {}); },
+  }) as unknown as CanvasRenderingContext2D;
+  const slide = (text: string): SlideDisplayList => ({
+    contractVersion: 1, width: 100, height: 50,
+    primitives: [{ kind: 'textBox', objectId: 1, x: 0, y: 0, w: 100, h: 50, anchor: 'top', paragraphs: [],
+      lines: [{ x: 0, y: 0, width: 20, height: 20, baseline: 20, start: 0, end: text.length, caretStops: [],
+        runs: [{ text, start: 0, end: text.length, fontId: 0, fontFamily: family, fontSizePx: 20,
+          x: 0, width: 20, bold: false, italic: false, underline: false, color: '#000', glyphs: [] }] }] }],
+  });
+  try {
+    await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: coverage });
+    const [revision] = added;
+    expect(revision).toMatch(/ r2$/);
+    await paintSlide(ctx, slide('日'), 1, 1, { fontCoverage: coverage });
+    await paintSlide(ctx, slide('語'), 1, 1, { fontCoverage: coverage });
+    const painting = paintSlide(ctx, slide('本'), 1, 1, { fontCoverage: coverage });
+    const have = await requested;
+    state.slicedFamilies = [];
+    await coverage.thumbnails.prepare(family, '本');
+    reply({ revision: 2 });
+    await painting;
+    expect(have).toBe(2);
+    expect(removed).toEqual([revision]);
+    expect(drawn).toEqual([['日', `20px "${revision}"`], ['日', `20px "${revision}"`],
+      ['語', `20px "${family}"`], ['本', `20px "${family}"`]]);
+  } finally { coverage.dispose(); }
 });
 
 test('the slide being edited never waits for a chunk only a thumbnail needs', async () => {
@@ -96,32 +163,6 @@ test('a case variant of a sliced family is sliced too', async () => {
   expect(asked).toEqual(['noto sans jp']);
 });
 
-test('whole faces load once for callers at the same moment, and not again once installed', async () => {
-  const reads: string[][] = [];
-  const installs: string[][] = [];
-  const ensure = createWholeFontInstaller(async (have) => {
-    reads.push(have);
-    return have.includes('Noto Sans JP') ? [] : [{ family: 'Noto Sans JP' }];
-  }, async (faces) => { installs.push(faces.map((face) => face.family)); return faces; }, () => false);
-  await Promise.all([ensure(), ensure(), ensure()]);
-  expect(installs).toEqual([['Noto Sans JP']]);
-  await ensure();
-  expect(reads[0]).toEqual([]);
-  expect(reads.slice(1).every((have) => have.includes('Noto Sans JP'))).toBe(true);
-  expect(installs).toHaveLength(1);
-});
-
-test('a whole face arriving after the host supplied its family is dropped', async () => {
-  const supplied = new Set<string>();
-  const installs: string[] = [];
-  const ensure = createWholeFontInstaller(async () => {
-    supplied.add('Noto Sans JP');
-    return [{ family: 'Noto Sans JP' }];
-  }, async (faces) => { installs.push(...faces.map((face) => face.family)); return faces; }, (family) => supplied.has(family));
-  await ensure();
-  expect(installs).toEqual([]);
-});
-
 test('toolbar PNG export paints through coverage, so it never depends on a whole face loading', async () => {
   const { readFile } = await import('node:fs/promises');
   const source = await readFile(new URL('./peerlessFrameSource.ts', import.meta.url), 'utf8');
@@ -139,27 +180,6 @@ test('a right-to-left page asks for its text as right-to-left, since a page canv
   document.documentElement.dir = 'rtl';
   try { await coverage.prepare('Noto Sans JP', '\u2208'); } finally { document.documentElement.dir = ''; }
   expect(asked).toEqual(['\u2208\u200f']);
-});
-
-test('a family that arrives during a whole-face load is installed before that load settles', async () => {
-  const available = ['Noto Sans JP'];
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const installs: string[] = [];
-  let reads = 0;
-  const ensure = createWholeFontInstaller(async (have) => {
-    const faces = available.filter((family) => !have.includes(family)).map((family) => ({ family }));
-    reads += 1;
-    if (reads === 1) await held;
-    return faces;
-  }, async (faces) => { installs.push(...faces.map((face) => face.family)); return faces; }, () => false);
-  const first = ensure();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  available.push('Noto Sans SC');
-  const second = ensure();
-  release();
-  await Promise.all([first, second]);
-  expect(installs).toEqual(['Noto Sans JP', 'Noto Sans SC']);
 });
 
 test('a style that loaded whole under a sliced family is not covered, and the rest of the family is', () => {

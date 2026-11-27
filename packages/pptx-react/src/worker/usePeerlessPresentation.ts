@@ -84,8 +84,6 @@ export interface PeerlessPresentation {
   settlePrerendered?(slideId: string): void;
   /** Prepares a main-thread paint's text in the worker's sliced faces. */
   readonly fontCoverage?: PaintFontCoverage & { readonly thumbnails: PaintFontCoverage };
-  /** Installs complete faces for the paints that do not prepare their text: present mode and proposal review. */
-  ensureWholeFonts?(): Promise<void>;
   installFont(face: PptxFontFace): Promise<void>;
   setReadOnly(readOnly: boolean): void;
   setChangeObserver(enabled: boolean): void;
@@ -124,8 +122,8 @@ export function usePeerlessPresentation(
     initialUpdate.current.length !== update.length || !initialUpdate.current.every((byte, index) => byte === update[index]))) {
     initialUpdate.current = update;
   }
-  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.clientId, Boolean(collaboration),
-    collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
+  const fileGeneration = useMemo(() => ({}), [props.file, fonts, props.defaultFonts, props.experimentalSlicedFonts,
+    props.clientId, Boolean(collaboration), collaboration?.roomId, collaboration?.clientId, initialUpdate.current]);
   const warnFonts = useFontWarning(fileGeneration);
   const latestFile = useRef(fileGeneration);
   latestFile.current = fileGeneration;
@@ -602,10 +600,6 @@ export function usePeerlessPresentation(
         if (fontCoverage) disposers.push(() => fontCoverage.dispose());
         run = {
           fontCoverage,
-          ensureWholeFonts: sliced?.createWholeFontInstaller(
-            async (have) => await client.wholeCoverageFonts?.(have) ?? [],
-            (faces) => installDefaultFonts(faces, installedFonts, current, warnFonts, (family) => !suppliedFamilies.has(family.trim().toLowerCase())),
-            (family) => suppliedFamilies.has(family.trim().toLowerCase())),
           fileGeneration, session: owner, client, store, images, thumbnailImages, collaborationClientId: sessionCollaboration?.clientId,
           visual: { subscribePresentation: subscribeVisual, getSnapshot: () => failedView ?? paintedView ?? getSnapshot() },
           getVisualSnapshot: () => visual,
@@ -651,8 +645,8 @@ export function usePeerlessPresentation(
             const journal = recovery.journal.slice();
             let source: Uint8Array | undefined = await readRecoveryBase();
             if (!currentFile()) throw new PptxWorkerEditorDisposedError();
-            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: callbacks.current.defaultFonts,
-              slicedFonts: callbacks.current.experimentalSlicedFonts,
+            const recovering = peerlessSessionOpener.open(source, { fonts, defaultFonts: props.defaultFonts,
+              slicedFonts: props.experimentalSlicedFonts,
               ...(baseline.kind === 'update' ? { initialUpdate: baseline.update } : {}) });
             source = undefined;
             try {
