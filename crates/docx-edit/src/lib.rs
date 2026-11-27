@@ -656,6 +656,30 @@ struct StoryRevisions {
     /// Text inserted without revision marks leaves the story's paragraphs,
     /// their properties and its tracked changes as they were.
     marked: HashMap<Arc<str>, u64>,
+    /// Changes with every commit that changes `structure`, except a deletion its caller proved
+    /// removed only text inside one paragraph ([`EditingDoc::keep_table_structure`]): the
+    /// stories' tables, cells and embeds are then as they were. A value is never reused, so two
+    /// equal values always mean the same table structure.
+    table_structure: u64,
+    /// The last value `table_structure` was given.
+    tables_minted: u64,
+    /// What the latest commit that changed `table_structure` did to the stories.
+    table_commit: Option<TableCommit>,
+}
+
+/// One commit's changes to the stories, as far as [`StoryRevisions::keep_table_structure`] needs
+/// them. Several stamps of one commit (one per observed root) add up here.
+struct TableCommit {
+    /// The committed epoch the commit started from: commits run their observers before the epoch
+    /// moves on.
+    epoch: u64,
+    /// `table_structure` before the commit.
+    before: u64,
+    /// The one story whose own text the commit deleted from, and how many units it deleted.
+    deleted: Option<(Arc<str>, u32)>,
+    /// The commit did more than delete from that story's text: it inserted an embed, changed a
+    /// table key or a story entry, or deleted from another story or a nested type.
+    structural: bool,
 }
 
 /// Inserts plain text into a story's own text and nothing else: no deletion,
@@ -679,7 +703,7 @@ fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> b
 }
 
 impl StoryRevisions {
-    fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
+    fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events, epoch: u64) {
         self.current += 1;
         if events.iter().any(|event| matches!(event, yrs::types::Event::Map(event)
             if event.keys(txn).keys().any(|key| matches!(key.as_ref(), "sectPr" | "_sectionProperties" | "sectionBreakType")))) {
@@ -713,23 +737,50 @@ impl StoryRevisions {
         }) {
             self.geometry += 1;
         }
-        if events.iter().any(|event| match event {
-            yrs::types::Event::Text(event) => event.delta(txn).iter().any(|delta| match delta {
-                Delta::Inserted(Out::Any(Any::String(_)), _) | Delta::Retain(_, _) => false,
-                Delta::Inserted(_, _) | Delta::Deleted(_) => true,
-            }),
-            yrs::types::Event::Map(event) => {
-                event.path().is_empty()
-                    || event.keys(txn).keys().any(|key| {
-                        matches!(
-                            key.as_ref(),
-                            KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
-                        )
-                    })
+        // Text deletions are told apart from the rest: a deleted embed (a paragraph mark, a
+        // table) arrives as the same `Deleted` as deleted text.
+        let mut structural = false;
+        let mut deleted: Vec<(Option<Arc<str>>, u32)> = Vec::new();
+        for event in events.iter() {
+            match event {
+                yrs::types::Event::Text(event) => {
+                    let mut units = 0u32;
+                    for delta in event.delta(txn) {
+                        match delta {
+                            Delta::Inserted(Out::Any(Any::String(_)), _) | Delta::Retain(_, _) => {}
+                            Delta::Deleted(len) => units = units.saturating_add(*len),
+                            Delta::Inserted(_, _) => structural = true,
+                        }
+                    }
+                    if units > 0 {
+                        let path = event.path();
+                        let story = match path.front() {
+                            Some(yrs::types::PathSegment::Key(story)) if path.len() == 1 => {
+                                Some(Arc::clone(story))
+                            }
+                            _ => None,
+                        };
+                        deleted.push((story, units));
+                    }
+                }
+                yrs::types::Event::Map(event) => {
+                    if event.path().is_empty()
+                        || event.keys(txn).keys().any(|key| {
+                            matches!(
+                                key.as_ref(),
+                                KIND_KEY | "tblPr" | "grid" | "rows" | "cells" | "story"
+                            )
+                        })
+                    {
+                        structural = true;
+                    }
+                }
+                _ => structural = true,
             }
-            _ => true,
-        }) {
+        }
+        if structural || !deleted.is_empty() {
             self.structure += 1;
+            self.note_table_change(epoch, structural, deleted);
         }
         for event in events.iter() {
             match event.path().front() {
@@ -750,6 +801,57 @@ impl StoryRevisions {
                 }
             }
         }
+    }
+}
+
+impl StoryRevisions {
+    /// Gives `table_structure` a new value for a commit that changed `structure`.
+    fn note_table_change(
+        &mut self,
+        epoch: u64,
+        structural: bool,
+        deleted: Vec<(Option<Arc<str>>, u32)>,
+    ) {
+        let before = self.table_structure;
+        let commit = match &mut self.table_commit {
+            Some(commit) if commit.epoch == epoch => commit,
+            slot => slot.insert(TableCommit {
+                epoch,
+                before,
+                deleted: None,
+                structural: false,
+            }),
+        };
+        commit.structural |= structural;
+        for (story, units) in deleted {
+            match (story, &mut commit.deleted) {
+                (Some(story), None) => commit.deleted = Some((story, units)),
+                (Some(story), Some((seen, total))) if *seen == story => {
+                    *total = total.saturating_add(units);
+                }
+                _ => commit.structural = true,
+            }
+        }
+        self.tables_minted += 1;
+        self.table_structure = self.tables_minted;
+    }
+
+    /// Takes back the new `table_structure` of the commit from `epoch` when that commit only
+    /// deleted `units` units from `story`'s own text, which its caller proved were text inside
+    /// one paragraph. Returns whether it did.
+    fn keep_table_structure(&mut self, epoch: u64, story: &str, units: u32) -> bool {
+        let kept = self.table_commit.as_ref().is_some_and(|commit| {
+            commit.epoch == epoch
+                && !commit.structural
+                && commit
+                    .deleted
+                    .as_ref()
+                    .is_some_and(|(seen, total)| seen.as_ref() == story && *total == units)
+        });
+        if kept {
+            self.table_structure = self.table_commit.take().unwrap().before;
+        }
+        kept
     }
 }
 
@@ -930,18 +1032,28 @@ impl EditingDoc {
         let save_story_states = Arc::new(Mutex::new(identity::StoryStateCache::default()));
         let stamped = Arc::clone(&story_revisions);
         let cached = Arc::clone(&save_story_states);
+        // yrs runs deep observers before the after_transaction observer above, so they read the
+        // epoch the commit started from.
+        let committed = Arc::clone(&epoch);
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
             .observe_deep(move |txn, events| {
-                stamped.lock().unwrap().stamp(txn, events);
+                stamped
+                    .lock()
+                    .unwrap()
+                    .stamp(txn, events, committed.load(Ordering::Relaxed));
                 identity::StoryStateCache::evict_root_changes(&cached, txn, events);
             });
         let stamped = Arc::clone(&story_revisions);
         let cached = Arc::clone(&save_story_states);
+        let committed = Arc::clone(&epoch);
         let removed_story_sub =
             doc.get_or_insert_map(REMOVED_STORIES)
                 .observe_deep(move |txn, events| {
-                    stamped.lock().unwrap().stamp(txn, events);
+                    stamped
+                        .lock()
+                        .unwrap()
+                        .stamp(txn, events, committed.load(Ordering::Relaxed));
                     identity::StoryStateCache::evict_root_changes(&cached, txn, events);
                 });
         let seen = identity::SeenCell::default();
@@ -1308,7 +1420,36 @@ impl EditingDoc {
                 indexes.insert(story_id, after, segments);
             }
         }
+        drop(indexes);
+        self.keep_table_structure(story_id, before, after, end.saturating_sub(start));
         self.advance_table_membership(before, after);
+    }
+
+    /// Keeps the table structure revision through the one commit from `before` to `after`, when
+    /// the caller proved it deleted `units` units of text inside one paragraph of `story_id` (a
+    /// plain deletion, or the deletion half of a plain replacement) and the commit did nothing
+    /// else to the stories' structure.
+    pub(crate) fn keep_table_structure(&self, story_id: &str, before: u64, after: u64, units: u32) {
+        if before.checked_add(1) != Some(after) || units == 0 {
+            return;
+        }
+        self.story_revisions
+            .lock()
+            .unwrap()
+            .keep_table_structure(before, story_id, units);
+    }
+
+    /// Whether `[start, end)` of `story_id` holds only text: no paragraph mark, embed or table.
+    pub(crate) fn holds_only_text(&self, story_id: &str, start: u32, end: u32) -> bool {
+        let txn = self.doc.transact();
+        let Some(story) = story_text(&txn, story_id) else {
+            return false;
+        };
+        start < end
+            && end <= story.len(&txn)
+            && ops::snapshot_range(&story, &txn, start, end)
+                .iter()
+                .all(|chunk| matches!(chunk.kind, ops::ChunkKind::Text(_)))
     }
 
     fn advance_table_membership(&self, before: u64, after: u64) {
@@ -2902,6 +3043,118 @@ mod tests {
             stories,
             ["fn:1", "header:rId7"],
             "created and deleted stories"
+        );
+    }
+
+    /// `(structure, table_structure)` of `doc`.
+    fn structure_revisions(doc: &EditingDoc) -> (u64, u64) {
+        let revisions = doc.story_revisions.lock().unwrap();
+        (revisions.structure, revisions.table_structure)
+    }
+
+    #[test]
+    fn table_structure_revision_survives_text_deleted_inside_a_paragraph() {
+        let core = crate::session::EditSessionCore::new(5, crate::session::Host::deterministic());
+        let doc = core.engine.doc();
+        doc.create_story("body", "Before", "Normal", "left")
+            .unwrap();
+        let table = doc
+            .insert_table(&local("A"), Position::new("body", 0), 1, 2)
+            .unwrap();
+        let cell = table.created_story_ids[0].clone();
+        let para = doc.paragraphs(&cell).unwrap()[0].para_id.clone();
+        core.insert_text(&cell, &para, 0, "abcdef", None, None)
+            .unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let (structure, tables) = structure_revisions(doc);
+        seen.insert(tables);
+        let unchanged = |edit: &str, structure: &mut u64| {
+            let (now, now_tables) = structure_revisions(doc);
+            assert!(
+                now > *structure,
+                "{edit} still changes the structure revision"
+            );
+            assert_eq!(
+                now_tables, tables,
+                "{edit} keeps the table structure revision"
+            );
+            *structure = now;
+        };
+        let mut structure = structure;
+        core.delete_range(&cell, &para, 5, &para, 6, None, None)
+            .unwrap();
+        unchanged("a backspace", &mut structure);
+        core.delete_range(&cell, &para, 1, &para, 3, None, None)
+            .unwrap();
+        unchanged("a selection delete", &mut structure);
+        core.replace_range(&cell, &para, 0, &para, 1, "가나", None, None)
+            .unwrap();
+        unchanged("a composition step", &mut structure);
+        core.replace_range(&cell, &para, 0, &para, 2, "한", None, None)
+            .unwrap();
+        unchanged("a composition replacing its own text", &mut structure);
+        core.edit_text_resident(&cell, &para, 0, &para, 1, None)
+            .unwrap();
+        unchanged("a resident delete", &mut structure);
+        assert_eq!(doc.paragraphs(&cell).unwrap()[0].text, "de");
+
+        let mut changed = |edit: &str, apply: &dyn Fn()| {
+            apply();
+            let (_, now) = structure_revisions(doc);
+            assert!(
+                seen.insert(now),
+                "{edit} gives a new table structure revision"
+            );
+        };
+        changed("a delete without proof", &|| {
+            let at = doc
+                .paragraph_index(&cell)
+                .unwrap()
+                .para_span(&para)
+                .unwrap()
+                .0;
+            doc.delete_range(&local(""), StoryRange::new(&cell, at + 1, at + 2))
+                .unwrap();
+        });
+        changed("a paragraph break", &|| {
+            core.split_paragraph(&cell, &para, 0, None, None).unwrap();
+        });
+        changed("a paragraph merge inside the cell", &|| {
+            let paragraphs = doc.paragraphs(&cell).unwrap();
+            let (first, second) = (&paragraphs[0].para_id, &paragraphs[1].para_id);
+            core.delete_range(&cell, first, 0, second, 0, None, None)
+                .unwrap();
+        });
+        changed("an inserted row", &|| {
+            let at = crate::ops::table::CellLoc {
+                story: "body".into(),
+                table_index: 0,
+                row: 0,
+                column: 0,
+            };
+            doc.insert_row(&local(""), &at, false).unwrap();
+        });
+        changed("a deleted table embed", &|| {
+            doc.delete_range(&local(""), StoryRange::new("body", 0, 1))
+                .unwrap();
+        });
+        let (_, tables) = structure_revisions(doc);
+
+        let peer = EditingDoc::new(6);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        let before = peer.encode_state_vector_v1();
+        let peer_tables = structure_revisions(&peer).1;
+        let para = doc.paragraphs("body").unwrap()[0].para_id.clone();
+        core.delete_range("body", &para, 0, &para, 1, None, None)
+            .unwrap();
+        assert_eq!(structure_revisions(doc).1, tables, "a local backspace");
+        peer.apply_update_v1(&doc.encode_diff_v1(&before).unwrap())
+            .unwrap();
+        assert_ne!(
+            structure_revisions(&peer).1,
+            peer_tables,
+            "a remote delete is not proved to be text"
         );
     }
 

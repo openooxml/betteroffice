@@ -75,6 +75,9 @@ test('no live table names a hidden or missing cell story after any step of rando
     const KNOWN_UNFIXED_VALID_SEEDS = new Set([23]);
     const familyTotals: Record<string, { danglingSteps: number; violations: number; projectionThrows: number; peerMissingSteps: number; invalidSeeds: number; peerSkipped: number; reused: number; built: number }> = {};
     const cacheCounts = () => (selection as { cellLocationCacheCounts?: () => { built: number; reused: number } }).cellLocationCacheCounts?.() ?? { built: 0, reused: 0 };
+    /** Local edits that applied and left the cell structure key as it was, per family and op. */
+    const keptKeys: Record<string, Record<string, number>> = {};
+    let merged = 0;
     for (const family of ['valid', 'adversarial'] as const) {
     const totals = familyTotals[family] = { danglingSteps: 0, violations: 0, projectionThrows: 0, peerMissingSteps: 0, invalidSeeds: 0, peerSkipped: 0, reused: 0, built: 0 };
     const familyStart = cacheCounts();
@@ -118,6 +121,7 @@ test('no live table names a hidden or missing cell story after any step of rando
           return message.startsWith('cell location cache differs') ? `shadow: ${message.slice(0, 200)}` : `throw: ${message.slice(0, 120)}`;
         }
       };
+      const cellKey = () => (local as { cellStructureKey?: () => string }).cellStructureKey?.() ?? '';
       const seen = new Set<string>();
       let checks = 0;
       let answered = 0;
@@ -132,7 +136,59 @@ test('no live table names a hidden or missing cell story after any step of rando
       const textStories = () => liveStories().filter((story) => {
         try { return engine.paragraphs(story).length > 0; } catch { return false; }
       });
+      /**
+       * The paragraphs of `story` in its own offset units, where an embed (a table, a note
+       * reference, an image) counts one: each paragraph's length and the ranges of its text runs.
+       */
+      const paragraphUnits = (story: string) => {
+        const found: { paraId: string; length: number; runs: [number, number][] }[] = [];
+        let offset = 0;
+        let runs: [number, number][] = [];
+        for (const segment of engine.geometryReader.storySegments(story)) {
+          if (segment.kind === 'pilcrow') { found.push({ paraId: segment.paraId, length: offset, runs }); offset = 0; runs = []; continue; }
+          if (segment.kind === 'text' && segment.text.length > 0) runs.push([offset, offset + segment.text.length]);
+          offset += units(segment);
+        }
+        return found;
+      };
+      /** A paragraph of a random text story whose paragraphs `fits`. */
+      const paragraphIn = (fits: (paragraphs: ReturnType<typeof paragraphUnits>) => boolean = (paragraphs) => paragraphs.length > 0) => {
+        const story = pick(textStories().filter((id) => { try { return fits(paragraphUnits(id)); } catch { return false; } }));
+        if (!story) return undefined;
+        const paragraphs = paragraphUnits(story);
+        const index = Math.floor(next() * paragraphs.length);
+        return { story, paragraphs, index, paragraph: paragraphs[index]! };
+      };
+      /** A range of one to two text units inside one text run of a paragraph of a random text story. */
+      const textRange = () => {
+        const at = paragraphIn((paragraphs) => paragraphs.some((paragraph) => paragraph.runs.length > 0));
+        if (!at) return undefined;
+        const [runStart, runEnd] = pick(at.paragraph.runs) ?? [0, 0];
+        if (runEnd === runStart) return undefined;
+        const start = runStart + Math.floor(next() * (runEnd - runStart));
+        const end = Math.min(runEnd, start + 1 + Math.floor(next() * 2));
+        const paraId = at.paragraph.paraId;
+        return { story: at.story, start: { paraId, offset: start }, end: { paraId, offset: end } };
+      };
       const steps: Record<string, () => unknown> = {
+        typeText: () => {
+          const at = paragraphIn();
+          return at && engine.insertText({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.length + 1)) }, next() < 0.5 ? 'x' : '가');
+        },
+        deleteText: () => { const range = textRange(); return range && engine.deleteRange(range); },
+        replaceText: () => { const range = textRange(); return range && engine.replaceRange(range, next() < 0.5 ? '한' : 'yz'); },
+        splitParagraph: () => {
+          const at = paragraphIn();
+          return at && engine.splitParagraph({ story: at.story, paraId: at.paragraph.paraId, offset: Math.floor(next() * (at.paragraph.length + 1)) });
+        },
+        mergeParagraphs: () => {
+          const at = paragraphIn((paragraphs) => paragraphs.length > 1); if (!at) return undefined;
+          const index = Math.min(at.index, at.paragraphs.length - 2);
+          const [first, second] = [at.paragraphs[index]!, at.paragraphs[index + 1]!];
+          engine.deleteRange({ story: at.story, start: { paraId: first.paraId, offset: first.length }, end: { paraId: second.paraId, offset: 0 } });
+          // Across a block embed (a table, a block control) the delete leaves both paragraphs: not a merge.
+          return engine.paragraphs(at.story).length < at.paragraphs.length ? true : undefined;
+        },
         insertRow: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertRow({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'above' : 'below'); },
         insertColumn: () => { const t = pick(tables()); const c = t && pick(t.cells); return c && engine.insertColumn({ story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }, next() < 0.5 ? 'left' : 'right'); },
         deleteRow: () => { const t = pick(tables()); const c = t && pick(t.cells); const at = c && { story: t.story, tableIndex: t.tableIndex, row: c.row, column: c.column }; return at && engine.deleteRow({ anchor: at, head: at }); },
@@ -287,9 +343,13 @@ test('no live table names a hidden or missing cell story after any step of rando
         const remote = peer !== null && next() < 0.5;
         engine = remote && peer ? peer : local;
         if (remote) { syncToPeer(); remoteSteps++; }
+        const keyBefore = remote ? null : cellKey();
         try {
           const result = steps[op]!();
-          if (result === undefined || result === false) refused++; else { applied++; ops[op] = (ops[op] ?? 0) + 1; history.push(`${step}:${remote ? 'remote:' : ''}${op}`); }
+          if (result === undefined || result === false) refused++; else {
+            applied++; ops[op] = (ops[op] ?? 0) + 1; if (op === 'mergeParagraphs') merged++; history.push(`${step}:${remote ? 'remote:' : ''}${op}`);
+            if (keyBefore !== null && cellKey() === keyBefore) { const kept = keptKeys[family] ??= {}; kept[op] = (kept[op] ?? 0) + 1; }
+          }
         } catch (error) {
           if (isEngineTrap(error)) throw error;
           refused++;
@@ -316,7 +376,14 @@ test('no live table names a hidden or missing cell story after any step of rando
       console.log(`INVARIANT-FAMILY ${family} ${JSON.stringify(totals)} reuseRate=${rate}`);
     }
     for (const line of violations.slice(0, 12)) console.log(`VIOLATION ${line}`);
+    console.log(`KEY-KEPT ${JSON.stringify(keptKeys)}`);
     expect(violations).toEqual([]);
+    // Text deleted or replaced inside one paragraph keeps the projected tables.
+    expect(keptKeys.valid?.deleteText ?? 0).toBeGreaterThan(0);
+    expect(keptKeys.valid?.replaceText ?? 0).toBeGreaterThan(0);
+    // A merge removes a paragraph mark, so it never keeps the key.
+    expect([keptKeys.valid?.mergeParagraphs ?? 0, keptKeys.adversarial?.mergeParagraphs ?? 0]).toEqual([0, 0]);
+    expect(merged).toBeGreaterThan(0);
     expect(familyTotals.valid!.peerMissingSteps).toBe(0);
     console.log(`PROJECTION-THROWS ${JSON.stringify(Object.fromEntries(Object.entries(familyTotals).map(([family, totals]) => [family, totals.projectionThrows])))}`);
     expect(familyTotals.valid!.projectionThrows).toBe(0);
