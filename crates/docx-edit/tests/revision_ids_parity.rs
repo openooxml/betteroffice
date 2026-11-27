@@ -233,8 +233,9 @@ fn check_case(case: &Case, census: &mut DocumentCensus) -> Result<(), Box<dyn st
 fn detects_dropped_reservation_with_matching_used_ids_and_max() {
     let placeholder = (1u64 << 53) - 1;
     let path = "/document/content/1/content/0/propertyChanges/0";
-    let witness = format!("{path}/previousAttributes/witness");
-    let request = json!({
+    let attributes = format!("{path}/previousAttributes");
+    let witness = format!("{attributes}/witness");
+    let mut request = json!({
         "determinism": {"seed": "0".repeat(64), "now": "2030-01-02T03:04:05.006Z"},
         "document": {"content": [
             {"type": "rawXml", "xml": "<w:customXml w:id='40'/>"},
@@ -252,7 +253,7 @@ fn detects_dropped_reservation_with_matching_used_ids_and_max() {
     let path = format!("{path}/info/id");
     let mut wire = request.clone();
     *wire.pointer_mut(&path).unwrap() = json!(41);
-    let case = Case {
+    let mut case = Case {
         document: "dropped-reservation".to_owned(),
         request: request.to_string(),
         session: BTreeSet::from([placeholder]),
@@ -277,6 +278,10 @@ fn detects_dropped_reservation_with_matching_used_ids_and_max() {
         out_of_range: BTreeSet::new(),
         skipped_views: BTreeSet::new(),
     };
+    check_case(&case, &mut DocumentCensus::default()).unwrap();
+    *request.pointer_mut(&attributes).unwrap() = Value::Null;
+    case.request = request.to_string();
+
     let mut census = DocumentCensus::default();
     let error = check_case(&case, &mut census).unwrap_err();
     assert_eq!(

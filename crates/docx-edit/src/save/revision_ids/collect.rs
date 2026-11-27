@@ -212,31 +212,52 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
         }
     }
 
-    fn json_record<'v>(&mut self, get: impl Fn(&str) -> Option<&'v Value>) {
+    fn json_record<'v>(&mut self, get: impl Fn(&str) -> Option<&'v Value>, model: bool) -> bool {
         let id = get("id").and_then(Value::as_f64);
+        let revision_id = || get("revisionId").and_then(Value::as_f64);
+        let revision_without_id = if id.is_none() { revision_id() } else { None };
+        if id.is_none() && revision_without_id.is_none() {
+            return false;
+        }
         if get("author").is_some_and(Value::is_string) {
-            let raises_base = !get("content").is_some_and(Value::is_array);
+            if model && let Some(placeholder) = id.and_then(|id| self.session.placeholder(id)) {
+                self.site(placeholder);
+                return true;
+            }
+            let mut comment = get("content").is_some_and(Value::is_array);
+            if comment && !self.skipped_views.is_empty() {
+                comment = false;
+                self.at("content", |_| comment = true);
+            }
             if let Some(id) = id {
-                self.number("id", id, raises_base);
+                self.number("id", id, !comment);
             }
-            if let Some(id) = get("revisionId").and_then(Value::as_f64) {
-                self.number("revisionId", id, raises_base);
+            if let Some(id) = id.map_or(revision_without_id, |_| revision_id()) {
+                self.number("revisionId", id, !comment);
             }
-        } else if let (Some(id), Some(node_type)) = (id, get("type").and_then(Value::as_str)) {
+        } else if let Some(id) = id
+            && let Some(node_type) = get("type").and_then(Value::as_str)
+        {
             self.annotation(node_type, id);
         }
+        false
     }
 
     fn json(&mut self, value: &Value, model: Option<ModelKind>) {
         match value {
             Value::Object(record) => {
-                if model.is_some()
-                    && let Some(id) = self.session.model_placeholder(record)
-                {
-                    self.site(id);
+                let get = |key: &str| {
+                    #[cfg(test)]
+                    count_work(|work| match key {
+                        "id" => work.model_id_lookups += 1,
+                        "author" => work.model_author_lookups += 1,
+                        _ => {}
+                    });
+                    record.get(key)
+                };
+                if self.json_record(get, model.is_some()) {
                     return;
                 }
-                self.json_record(|key| record.get(key));
                 let kind = model.map(|kind| kind.for_record(record));
                 let fields = kind.map_or(&[][..], |kind| kind.fields(record));
                 for &key in fields {
@@ -370,7 +391,7 @@ impl Visit for Value {
 
 impl Visit for docx_parse::paragraph_patch::Attrs {
     fn visit<const PATHS: bool>(&self, collector: &mut Collector<PATHS>) {
-        collector.json_record(|key| self.get(key));
+        collector.json_record(|key| self.get(key), false);
         for (key, child) in self {
             collector.field(key, child);
         }
@@ -1180,6 +1201,7 @@ record!(docx_parse::inline::RunPropertyChange {
     info,
     previous_formatting => "previousFormatting",
     current_formatting => "currentFormatting",
+    previous_attributes => "previousAttributes",
 } tags { node_type => "type" });
 
 record!(docx_parse::inline::RawInlineXml {

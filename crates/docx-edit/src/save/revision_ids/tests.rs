@@ -234,7 +234,7 @@ fn bases_assignments_on_kept_raw_xml_and_starts_at_one_without_reservations() {
 }
 
 #[test]
-fn ignores_dropped_run_property_attributes_when_assigning_ids() {
+fn reserves_ids_from_previous_run_property_attributes() {
     let mut request = request(json!([{
         "type": "paragraph",
         "content": [{
@@ -251,21 +251,15 @@ fn ignores_dropped_run_property_attributes_when_assigning_ids() {
             }]
         }]
     }]));
-    let typed = serde_json::to_value(&request).unwrap();
-    assert!(
-        typed
-            .pointer("/document/content/0/content/0/content/0/propertyChanges/0/previousAttributes")
-            .is_none()
-    );
     let assigned = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST])).unwrap();
-    assert_eq!(assigned, BTreeMap::from([(FIRST, 1)]));
+    assert_eq!(assigned, BTreeMap::from([(FIRST, 41)]));
 
     let document = write_document(request);
     assert_eq!(
         document_ids(&document),
         BTreeMap::from([
-            ("p/ins".to_owned(), vec!["1".to_owned()]),
-            ("p/ins/r/rPr/rPrChange".to_owned(), vec!["1".to_owned()]),
+            ("p/ins".to_owned(), vec!["41".to_owned()]),
+            ("p/ins/r/rPr/rPrChange".to_owned(), vec!["41".to_owned()]),
         ])
     );
     let insertion = document
@@ -1282,6 +1276,24 @@ fn model_shape(content: Value) -> Value {
     })
 }
 
+#[test]
+fn probes_model_record_ids_once_and_author_only_when_needed() {
+    let mut shape: Shape = serde_json::from_value(model_shape(json!([]))).unwrap();
+    shape.drawing_model = Some(json!([
+        {"label": "No annotation"},
+        {"id": 23, "author": "Source"},
+        {"revisionId": 24, "author": "Source"},
+        {"id": FIRST, "author": "Session"}
+    ]));
+    WORK.with_borrow_mut(|work| *work = Work::default());
+    let found = collect_for_test(&shape, &BTreeSet::from([FIRST]));
+    assert_eq!(found.used, [23, 24].into_iter().collect());
+    assert_eq!(found.site_count, 1);
+    let work = WORK.with_borrow(|work| *work);
+    assert_eq!(work.model_id_lookups, 4);
+    assert_eq!(work.model_author_lookups, 3);
+}
+
 fn assert_text_box_model_order(child: Value, placeholders: &[u64]) {
     let shape = model_shape(json!([{"type": "paragraph", "content": [child]}]));
     let mut request = request(json!([{"type": "paragraph", "content": [{
@@ -1395,6 +1407,56 @@ fn assigns_model_revision_infos_under_arbitrary_keys() {
         Some(&json!(1))
     );
     assert_eq!(body[1]["content"][0]["info"]["id"].as_f64(), Some(2.0));
+}
+
+#[test]
+fn assigns_arbitrary_model_keys_in_wire_order() {
+    let mut request = serde_json::from_str(
+        r#"{
+            "determinism": {
+                "seed": "0000000000000000000000000000000000000000000000000000000000000000",
+                "now": "2030-01-02T03:04:05.006Z"
+            },
+            "document": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "content": [{"type": "shape", "shape": {
+                    "type": "shape", "shapeType": "rect", "size": {"width": 1, "height": 1},
+                    "drawingModel": {"frame": {
+                        "z": {"id": 9007199254740991, "author": "A"},
+                        "a": {"id": 1099511627776, "author": "B"}
+                    }, "otherSha256": ""}
+                }}]
+            }]}]}
+        }"#,
+    )
+    .unwrap();
+    let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST, SECOND])).unwrap();
+    assert_eq!(ids, BTreeMap::from([(FIRST, 1), (SECOND, 2)]));
+}
+
+#[test]
+fn reserves_parent_id_above_base_when_content_is_a_skipped_view() {
+    let mut shape = model_shape(json!([]));
+    shape["drawingModel"] = json!({"frame": {"entries": [
+        {"id": 90, "author": "Source", "content": []},
+        {"id": FIRST, "author": "Reviewer"}
+    ]}, "otherSha256": ""});
+    let mut request = request(json!([{"type": "paragraph", "content": [{
+        "type": "run", "content": [{"type": "shape", "shape": shape}]
+    }]}]));
+    let skipped_views = BTreeSet::from([
+        "/document/content/0/content/0/content/0/shape/drawingModel/frame/entries/0/content"
+            .to_owned(),
+    ]);
+    let session = BTreeSet::from([FIRST]);
+    let mut paths = Vec::new();
+    let ids = assign_session_revision_ids_with_paths_skipping_views(
+        &mut request,
+        &session,
+        &mut paths,
+        &skipped_views,
+    )
+    .unwrap();
+    assert_eq!(ids, BTreeMap::from([(FIRST, 91)]));
 }
 
 #[test]

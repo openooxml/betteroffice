@@ -324,6 +324,8 @@ pub struct RunPropertyChange {
     pub previous_formatting: Option<TextFormatting>,
     #[serde(rename = "currentFormatting", skip_serializing_if = "Option::is_none")]
     pub current_formatting: Option<TextFormatting>,
+    #[serde(rename = "previousAttributes", skip_serializing_if = "Option::is_none")]
+    pub previous_attributes: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +448,7 @@ fn parse_run_property_changes(
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
+                previous_attributes: None,
             }
         })
         .collect();

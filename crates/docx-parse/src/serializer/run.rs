@@ -317,6 +317,12 @@ fn replay_run_properties(
         &mut ParseBudget::new(&limits),
     )?;
     let saved = crate::inline::parse_run(saved.root().expect("replayed run"), None, None, None).run;
+    let mut property_changes = serde_json::to_value(&run.property_changes);
+    if let Ok(serde_json::Value::Array(changes)) = &mut property_changes {
+        for change in changes {
+            change.as_object_mut().unwrap().remove("previousAttributes");
+        }
+    }
     for (field, before, current, saved) in [
         (
             "formatting",
@@ -327,7 +333,7 @@ fn replay_run_properties(
         (
             "propertyChanges",
             serde_json::to_value(&baseline.property_changes),
-            serde_json::to_value(&run.property_changes),
+            property_changes,
             serde_json::to_value(&saved.property_changes),
         ),
     ] {

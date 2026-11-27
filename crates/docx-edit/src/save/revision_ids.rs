@@ -50,6 +50,8 @@ struct Work {
     make_mut: usize,
     id_probes: usize,
     verified: usize,
+    model_id_lookups: usize,
+    model_author_lookups: usize,
 }
 
 #[cfg(test)]
@@ -218,8 +220,9 @@ impl SessionIds {
     }
 
     fn model_placeholder(&self, record: &Map<String, Value>) -> Option<u64> {
+        let id = self.placeholder(record.get("id").and_then(Value::as_f64)?)?;
         record.get("author").and_then(Value::as_str)?;
-        self.placeholder(record.get("id").and_then(Value::as_f64)?)
+        Some(id)
     }
 }
 

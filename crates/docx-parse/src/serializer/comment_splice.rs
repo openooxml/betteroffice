@@ -1448,6 +1448,7 @@ mod tests {
                 },
                 previous_formatting: None,
                 current_formatting: run.formatting.clone(),
+                previous_attributes: None,
             }]);
         }
         assert_eq!(
