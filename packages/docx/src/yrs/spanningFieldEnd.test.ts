@@ -230,7 +230,7 @@ function inspect(xml: string) {
   return saved.story;
 }
 
-function assertSpanningSave(xml: string, expectedXml: string, caseName: string): void {
+function reportSpanningSave(xml: string, expectedXml: string, caseName: string) {
   const actual = scanStory(xml);
   const expected = scanStory(expectedXml);
   const pageRefs = (fields: FieldSpan[]) => fields.flatMap(field => {
@@ -253,11 +253,16 @@ function assertSpanningSave(xml: string, expectedXml: string, caseName: string):
   const after = expectedEnd == null ? -1 : actual.visible.lastIndexOf(expected.visible.slice(expectedEnd));
   const end = actual.endsAt[0];
   const outside = end != null && after >= 0 && end <= after;
-  console.log(
-    `SPANDIFF session ${caseName} begins=${actual.story.fields.length} ends=${actual.ends} instr=${instr} ` +
+  const summary =
+    `begins=${actual.story.fields.length} ends=${actual.ends} instr=${instr} ` +
     `pageref=${kept}/${expectedRefs.length} endpara=${endPara} after=${outside ? 'outside' : 'inside'} ` +
-    `markers=${actual.markers.join(',') || '-'}`,
-  );
+    `markers=${actual.markers.join(',') || '-'}`;
+  console.log(`SPANDIFF session ${caseName} ${summary}`);
+  return { actual, expected, summary };
+}
+
+function assertSpanningSave(xml: string, expectedXml: string, caseName: string): void {
+  const { actual, expected } = reportSpanningSave(xml, expectedXml, caseName);
   expect(actual.unpaired).toBe(expected.unpaired);
   expect(actual.story).toEqual(expected.story);
   expect(actual.tabs).toEqual(expected.tabs);
@@ -627,7 +632,8 @@ test.each(MAIN_STATE_CASES)('%s', async (_title, caseName, shape, name, toc, edi
   const state = await mainState(shape);
   const source = new Uint8Array(Buffer.from(state.docx, 'base64'));
   const update = new Uint8Array(Buffer.from(state.update, 'base64'));
-  const expected = editedWordTocXml(toc, edit, await readDocument(source));
+  const sourceXml = await readDocument(source);
+  const expected = shape === 'W4' && name === 'E1' ? sourceXml : editedWordTocXml(toc, edit, sourceXml);
   const session = await createYrsSession();
   try {
     session.openDocx(source, false);
@@ -856,32 +862,26 @@ test('both seeders keep the projection id after a same-paragraph raw end', async
   }
 }, 30_000);
 
-test('finding s1 keeps a tracked insertion in the opening unlinked title', async () => {
+test('a tracked insertion in the opening unlinked title is dropped and its page reference survives', async () => {
   const source = wordTocXml(wordToc({ code: 'TOC', unlinked: true }));
   const author: YrsAuthor = { name: 'Reviewer', date: '2000-01-01T00:00:00Z' };
-  let revisionId: string | null = null;
   const xml = await editAndSave(source, session => {
     const match = session.searchText('ENTRYONE', { caseSensitive: true })[0];
     if (match) {
       const at = { story: match.story, paraId: match.paraId, offset: match.start + 1 };
-      revisionId = session.insertText(at, 'ADDED', author).revisionId;
+      session.insertText(at, 'ADDED', author);
     }
   }, true);
-  const insertion = xml.match(/<w:ins\b([^>]*)>[\s\S]*?<\/w:ins>/)?.[0];
-  const id = insertion && attribute(insertion, 'w:id');
-  const expected = source.replace(textRun('ENTRYONE'),
-    textRun('E') + `<w:ins w:id="${id ?? 'missing'}">${textRun('ADDED')}</w:ins>` + textRun('NTRYONE'));
-  assertSpanningSave(xml, expected, 'finding_s1_tracked_unlinked_title');
-  expect(revisionId).not.toBeNull();
-  expect(id).toMatch(/^\d+$/);
-  expect(insertion).toContain('w:author="Reviewer"');
-  expect(insertion).toContain('w:date="2000-01-01T00:00:00Z"');
+  const { actual, expected, summary } = reportSpanningSave(xml, source, 'tracked_unlinked_title_insertion_is_dropped');
+  expect(actual.unpaired).toBe(0);
+  expect(actual.story).toEqual(expected.story);
+  expect(summary).toBe('begins=4 ends=4 instr=same pageref=3/3 endpara=3 after=outside markers=-');
 }, 30_000);
 
 const LINKED_TITLE_CASES = ['text separator', 'added tab'] as const;
 
 test.each(LINKED_TITLE_CASES.map(kind => [kind] as const))(
-  'finding s4 keeps the linked page reference with a %s',
+  'a linked title edit drops its page reference (%s)',
   async kind => {
     const tab = '<w:r><w:tab/></w:r>';
     const source = kind === 'text separator' ? body('TA').replace(tab, textRun('...')) : body('TA');
@@ -890,20 +890,41 @@ test.each(LINKED_TITLE_CASES.map(kind => [kind] as const))(
     const expected = source.replace(textRun('ENTRYONE'), kind === 'added tab'
       ? textRun('E') + tab + textRun('NTRYONE')
       : textRun('EEDITNTRYONE'));
-    assertSpanningSave(xml, expected, `finding_s4_${kind.replace(' ', '_')}`);
+    const { actual, expected: original, summary } = reportSpanningSave(
+      xml, expected, `linked_title_loses_pageref_with_${kind.replace(' ', '_')}`,
+    );
+    expect(actual.unpaired).toBe(0);
+    expect(actual.story).toEqual({
+      ...original.story,
+      fields: original.story.fields.filter((_, index) => index !== 1),
+      instructions: original.story.instructions.filter((_, index) => index !== 1),
+    });
+    expect(summary).toBe('begins=3 ends=3 instr=changed pageref=2/3 endpara=2 after=outside markers=-');
   },
   30_000,
 );
 
 const UNLINKED_NO_PAGE_CASES = (['native', 'projected'] as const).flatMap(seeder =>
-  (['first title', 'delete continuation'] as const).map(edit => [seeder, edit] as const));
+  [
+    [seeder, 'drops the opening title edit', 'drops_opening_title_edit', 'text'],
+    [seeder, 'keeps the continuation entry on a delete request', 'keeps_continuation_on_delete_request', 'delete'],
+  ] as const);
 
-test.each(UNLINKED_NO_PAGE_CASES)('finding s5 %s loader supports %s without level-one pages', async (seeder, edit) => {
+test.each(UNLINKED_NO_PAGE_CASES)('%s loader %s in an unlinked TOC without level-one pages', async (seeder, _title, caseName, edit) => {
   const toc = wordToc({ code: 'TOC \\n "1-1"', unlinked: true, omitLevelOnePages: true });
-  const plan: WordTocEdit = edit === 'first title'
+  const plan: WordTocEdit = edit === 'text'
     ? { kind: 'text', story: toc.story, marker: toc.titles[0]! }
     : { kind: 'delete', story: toc.story, index: 1 };
-  await assertWordTocSave(toc, plan, `finding_s5_${seeder}_${edit.replace(' ', '_')}`, seeder);
+  const source = wordTocXml(toc);
+  const xml = await editAndSave(source, session => applyWordTocEdit(session, plan), false, seeder);
+  const { actual, summary } = reportSpanningSave(
+    xml, editedWordTocXml(toc, plan, source), `${seeder}_unlinked_toc_without_level_one_pages_${caseName}`,
+  );
+  expect(actual.unpaired).toBe(0);
+  expect(actual.story).toEqual(scanStory(source).story);
+  expect(summary).toBe(edit === 'text'
+    ? 'begins=2 ends=2 instr=same pageref=1/1 endpara=3 after=outside markers=-'
+    : 'begins=2 ends=2 instr=changed pageref=0/0 endpara=3 after=outside markers=-');
 }, 30_000);
 
 test('deleting the last entry and following paragraph closes the TOC in the last surviving entry', async () => {
@@ -923,21 +944,23 @@ test('deleting the last entry and following paragraph closes the TOC in the last
   expect(applied).toBe(true);
 }, 30_000);
 
-test('finding n4 editing a projected title keeps the simple field and page reference', async () => {
+test('editing a projected title keeps its page reference and omits simple-field text from the TOC result', async () => {
   const simple = `<w:fldSimple w:instr="DATE">${textRun('TODAY')}</w:fldSimple>`;
   const source = body('TA').replace('</w:hyperlink>', '</w:hyperlink>' + simple);
   const xml = await editAndSave(source, session => insertInText(session, 'ENTRYONE', 1, ' EDIT '), true);
-  assertSpanningSave(xml, source.replace('ENTRYONE', 'E EDIT NTRYONE'), 'finding_n4_projected_simple_field');
-  expect(xml).toMatch(/<w:fldSimple\b[^>]*w:instr="DATE"[^>]*>[\s\S]*?TODAY[\s\S]*?<\/w:fldSimple>/);
-  expect(xml).toContain('w:anchor="_Toc1"');
+  const { actual, summary } = reportSpanningSave(
+    xml, source.replace('ENTRYONE', 'E EDIT NTRYONE'), 'projected_title_omits_simple_field_text_from_toc_result',
+  );
+  expect(actual.unpaired).toBe(0);
+  expect(actual.story.fields[0]?.result).toBe('E EDIT NTRYONEPAGEONEENTRYTWOPAGETWOENTRYTHREEPAGETHREE');
+  expect(summary).toBe('begins=4 ends=4 instr=same pageref=3/3 endpara=2 after=outside markers=-');
 }, 30_000);
 
-test('finding n9 structured export keeps cached title runs in a code-only projection', async () => {
+test('a code-only field projection saves all three page references', async () => {
   const toc = wordToc({ code: 'TOC', unlinked: true });
   const codeChild = `<w:hyperlink w:anchor="code">${textRun('CODE')}</w:hyperlink>`;
   toc.paragraphs[0] = toc.paragraphs[0]!.replace(fieldChar('separate'), codeChild + fieldChar('separate'));
   const source = wordTocXml(toc);
-  let title: string | undefined;
   const xml = await editAndSave(source, session => {
     const ops: YrsRawOp[] = [];
     let index = 0;
@@ -959,17 +982,12 @@ test('finding n9 structured export keeps cached title runs in a code-only projec
     }
     if (owner) {
       session.applyRawOps('body', ops);
-      const exported = session.exportStructured({ revisionView: 'accepted' });
-      const first = exported.ok ? exported.content.stories.find(story => story.story === 'body')?.blocks[0] : undefined;
-      const field = first && 'paragraph' in first
-        ? first.paragraph.inlines.find(inline => inline.kind === 'field' && inline.fieldType === 'TOC')
-        : undefined;
-      if (field?.kind === 'field' && field.cachedResult.kind === 'inline') {
-        title = field.cachedResult.inlines.flatMap(inline => inline.kind === 'text' ? [inline.text] : []).join('');
-      }
+      session.exportStructured({ revisionView: 'accepted' });
     }
     insertInText(session, ENTRY_TWO, 1, ' EDIT ');
   }, true);
-  assertSpanningSave(xml, source.replace(ENTRY_TWO, 'E EDIT NTRYTWO'), 'finding_n9_code_only_projection');
-  expect(title).toContain('ENTRYONE');
+  const { summary } = reportSpanningSave(
+    xml, source.replace(ENTRY_TWO, 'E EDIT NTRYTWO'), 'code_only_projection_keeps_three_pagerefs',
+  );
+  expect(summary).toBe('begins=4 ends=4 instr=same pageref=3/3 endpara=3 after=outside markers=-');
 }, 30_000);

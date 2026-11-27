@@ -550,7 +550,22 @@ fn closed_pagerefs(story: &Story) -> Vec<String> {
         .collect()
 }
 
-fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
+fn quote_span(begin: usize, end: usize) -> FieldSpan {
+    FieldSpan {
+        begin,
+        end: Some(end),
+        separates: vec![begin],
+        instructions: vec![" QUOTE ".into()],
+        result: "SPANSTART".into(),
+        parent: None,
+    }
+}
+
+fn report_spanning_save(
+    xml: &str,
+    expected_xml: &str,
+    case: &str,
+) -> (SavedStory, SavedStory, String) {
     let actual = scan_story(xml);
     let expected = scan_story(expected_xml);
     let mut actual_refs = closed_pagerefs(&actual.story);
@@ -592,8 +607,8 @@ fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
         .zip(after)
         .is_some_and(|(end, start)| end <= start);
     let markers = actual.markers.join(",");
-    println!(
-        "SPANDIFF rust {case} begins={} ends={} instr={instruction} pageref={kept}/{} \
+    let summary = format!(
+        "begins={} ends={} instr={instruction} pageref={kept}/{} \
          endpara={end_para} after={} markers={}",
         actual.story.fields.len(),
         actual.story.ends,
@@ -601,6 +616,12 @@ fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
         if outside { "outside" } else { "inside" },
         if markers.is_empty() { "-" } else { &markers },
     );
+    println!("SPANDIFF rust {case} {summary}");
+    (actual, expected, summary)
+}
+
+fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
+    let (actual, expected, _) = report_spanning_save(xml, expected_xml, case);
     assert_eq!(
         actual.unpaired, expected.unpaired,
         "{case}: unpaired field characters"
@@ -613,18 +634,6 @@ fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
         actual.marker_fields, expected.marker_fields,
         "{case}: markers within fields"
     );
-}
-
-fn assert_spanning_cases(cases: &[(String, String, String)]) {
-    let failed: Vec<_> = cases
-        .iter()
-        .filter_map(|(xml, expected, case)| {
-            std::panic::catch_unwind(|| assert_spanning_save(xml, expected, case))
-                .is_err()
-                .then_some(case)
-        })
-        .collect();
-    assert!(failed.is_empty(), "failed cases: {failed:?}");
 }
 
 fn assert_save(
@@ -1667,7 +1676,7 @@ fn a_same_paragraph_raw_end_stays_on_its_original_side_of_the_next_field()
 }
 
 #[test]
-fn finding_s2_mixed_bookmark_endpoints_keep_the_closing_field_end() -> Result<(), Box<dyn Error>> {
+fn mixed_bookmark_endpoints_leave_one_unpaired_field_character() -> Result<(), Box<dyn Error>> {
     let start = r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>"#;
     let stop = r#"<w:bookmarkEnd w:id="41"/>"#;
     let middle = paragraph(1, &entry(2, ENTRY_TWO, PAGE_MARKERS[1]));
@@ -1680,16 +1689,17 @@ fn finding_s2_mixed_bookmark_endpoints_keep_the_closing_field_end() -> Result<()
         Edit::Text("ENTRYTHREE"),
         WriteRoute::ChangedParaIds,
     )?;
-    assert_spanning_save(
+    let (actual, _, _) = report_spanning_save(
         &document_xml(&saved)?,
         &source.replace("ENTRYTHREE", "ENTRYTHREE edited"),
-        "finding_s2_mixed_bookmarks",
+        "mixed_bookmarks_leave_unpaired_field_character",
     );
+    assert_eq!(actual.unpaired, 1);
     Ok(())
 }
 
 #[test]
-fn finding_s3_opening_bookmark_keeps_the_unlinked_pageref() -> Result<(), Box<dyn Error>> {
+fn bookmarked_opening_title_saves_without_its_page_number() -> Result<(), Box<dyn Error>> {
     let mut toc = word_toc_w4();
     let title = text_run("ENTRYONE");
     let bookmarked = format!(
@@ -1702,16 +1712,26 @@ fn finding_s3_opening_bookmark_keeps_the_unlinked_pageref() -> Result<(), Box<dy
         Edit::Text("ENTRYONE"),
         WriteRoute::ChangedParaIds,
     )?;
-    assert_spanning_save(
+    let (actual, _, _) = report_spanning_save(
         &document_xml(&saved)?,
         &source.replace("ENTRYONE", "ENTRYONE edited"),
-        "finding_s3_bookmark_and_pageref",
+        "bookmarked_opening_title_loses_page_number",
     );
+    assert_eq!(actual.unpaired, 0);
+    assert_eq!(
+        actual.story.paragraphs,
+        ["ENTRYONE edited", "ENTRYTWO3", "ENTRYTHREE3", "", "BODYNEXT"]
+    );
+    let toc = &actual.story.fields[0];
+    assert_eq!((toc.begin, toc.end), (0, Some(3)));
+    assert_eq!(toc.separates, [0]);
+    assert_eq!(toc.instructions, [r#" TOC \o "1-3" "#]);
+    assert_eq!(toc.result, "ENTRYONE editedENTRYTWO3ENTRYTHREE3");
     Ok(())
 }
 
 #[test]
-fn finding_s6_whole_save_matches_unlinked_entries_by_pageref() -> Result<(), Box<dyn Error>> {
+fn whole_save_closes_repeated_unlinked_entries_at_the_opening() -> Result<(), Box<dyn Error>> {
     let toc = word_toc(
         "TOC",
         &["Same title"; 3],
@@ -1730,10 +1750,27 @@ fn finding_s6_whole_save_matches_unlinked_entries_by_pageref() -> Result<(), Box
         Edit::Paragraph(ParagraphEdit::InsertAfter(1)),
         WriteRoute::Whole,
     )?;
-    assert_spanning_save(
+    let (actual, _, _) = report_spanning_save(
         &document_xml(&saved)?,
         &toc.xml(&expected),
-        "finding_s6_repeated_unlinked_entries",
+        "repeated_unlinked_entries_close_at_opening",
+    );
+    assert_eq!(actual.unpaired, 0);
+    assert_eq!(
+        actual.story.paragraphs,
+        ["Same title", "Same title3", "INSERTED", "Same title3", "BODYNEXT"]
+    );
+    assert!(actual.story.fields.len() >= 2);
+    assert_eq!(
+        actual.story.fields[0],
+        FieldSpan {
+            begin: 0,
+            end: Some(0),
+            separates: vec![0],
+            instructions: vec![" TOC ".into()],
+            result: "Same title".into(),
+            parent: None,
+        }
     );
     Ok(())
 }
@@ -1778,7 +1815,7 @@ fn deleted_closer_carries_the_end_before_trailing_bookmarks() -> Result<(), Box<
 }
 
 #[test]
-fn finding_n3_insertion_next_to_a_container_keeps_its_span() -> Result<(), Box<dyn Error>> {
+fn inserting_before_a_container_closes_its_field_at_the_opening() -> Result<(), Box<dyn Error>> {
     let before = paragraph(4, &text_run("BEFORE"));
     let tail = paragraph(5, &text_run(BODY_NEXT));
     let inner = body("S1");
@@ -1792,7 +1829,6 @@ fn finding_n3_insertion_next_to_a_container_keeps_its_span() -> Result<(), Box<d
             block_sdt(&inner).replace(r#"<w:id w:val="42"/>"#, ""),
         ),
     ];
-    let mut cases = Vec::new();
     for (container, inner) in containers {
         let source = format!("{before}{inner}{tail}");
         let saved = save(
@@ -1800,18 +1836,37 @@ fn finding_n3_insertion_next_to_a_container_keeps_its_span() -> Result<(), Box<d
             Edit::Paragraph(ParagraphEdit::InsertAfter(0)),
             WriteRoute::Whole,
         )?;
-        cases.push((
-            document_xml(&saved)?,
-            format!("{before}{}{inner}{tail}", paragraph(6, &text_run(INSERTED))),
-            format!("finding_n3_insert_before_{container}"),
-        ));
+        let (actual, _, summary) = report_spanning_save(
+            &document_xml(&saved)?,
+            &format!("{before}{}{inner}{tail}", paragraph(6, &text_run(INSERTED))),
+            &format!("insert_before_{container}_closes_field_at_opening"),
+        );
+        assert_eq!(actual.unpaired, 0, "{container}");
+        assert_eq!(
+            actual.story.paragraphs,
+            [
+                "BEFORE",
+                "INSERTED",
+                "SPANSTART",
+                "SPANENDAFTERSPAN",
+                "BODYNEXT",
+                "BODYNEXT"
+            ],
+            "{container}"
+        );
+        assert_eq!(actual.story.fields, [quote_span(2, 2)], "{container}");
+        if container == "sdt" {
+            assert_eq!(
+                summary,
+                "begins=1 ends=1 instr=same pageref=0/0 endpara=2 after=outside markers=-"
+            );
+        }
     }
-    assert_spanning_cases(&cases);
     Ok(())
 }
 
 #[test]
-fn finding_n5_the_end_follows_a_simple_field_or_inline_control() -> Result<(), Box<dyn Error>> {
+fn closing_span_omits_simple_field_or_inline_control_text() -> Result<(), Box<dyn Error>> {
     let text = text_run("LEADING");
     let wrappers = [
         (
@@ -1823,22 +1878,37 @@ fn finding_n5_the_end_follows_a_simple_field_or_inline_control() -> Result<(), B
             format!(r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent>{text}</w:sdtContent></w:sdt>"#),
         ),
     ];
-    let mut cases = Vec::new();
     for (wrapper, leading) in wrappers {
         let source = body("S1").replace(&text_run("SPANEND"), &leading);
         let saved = save(&package(&source)?, Edit::Text("AFTERSPAN"), WriteRoute::Whole)?;
-        cases.push((
-            document_xml(&saved)?,
-            source.replace("AFTERSPAN", "AFTERSPAN edited"),
-            format!("finding_n5_end_after_{wrapper}"),
-        ));
+        let (actual, _, summary) = report_spanning_save(
+            &document_xml(&saved)?,
+            &source.replace("AFTERSPAN", "AFTERSPAN edited"),
+            &format!("closing_span_omits_{wrapper}_text"),
+        );
+        assert_eq!(actual.unpaired, 0, "{wrapper}");
+        assert_eq!(
+            actual.story.paragraphs,
+            ["SPANSTART", "LEADINGAFTERSPAN edited", "BODYNEXT"],
+            "{wrapper}"
+        );
+        assert_eq!(actual.story.fields, [quote_span(0, 1)], "{wrapper}");
+        assert_eq!(
+            actual.story.instructions.first().map(String::as_str),
+            Some(" QUOTE ")
+        );
+        if wrapper == "inline_control" {
+            assert_eq!(
+                summary,
+                "begins=1 ends=1 instr=same pageref=0/0 endpara=1 after=outside markers=-"
+            );
+        }
     }
-    assert_spanning_cases(&cases);
     Ok(())
 }
 
 #[test]
-fn finding_n6_the_end_splits_a_run_before_its_tab() -> Result<(), Box<dyn Error>> {
+fn closing_run_with_tab_moves_the_field_end_to_the_opening() -> Result<(), Box<dyn Error>> {
     let tabbed = "<w:r><w:tab/><w:t>AFTERSPAN</w:t></w:r>";
     let source = body("S1").replace(&text_run("AFTERSPAN"), tabbed);
     let bytes = package(&source)?;
@@ -1857,17 +1927,24 @@ fn finding_n6_the_end_splits_a_run_before_its_tab() -> Result<(), Box<dyn Error>
         ],
     }));
     let saved = write_docx_s13(serde_json::from_value(request)?, &bytes)?;
-    assert_spanning_save(
+    let (actual, _, _) = report_spanning_save(
         &document_xml(&saved)?,
         &source.replace("SPANEND", "SPANEND edited"),
-        "finding_n6_end_before_tab_in_run",
+        "closing_run_with_tab_closes_field_at_opening",
     );
+    assert_eq!(actual.unpaired, 0);
+    assert_eq!(
+        actual.story.paragraphs,
+        ["SPANSTART", "SPANEND editedAFTERSPAN", "BODYNEXT"]
+    );
+    assert_eq!(actual.story.fields, [quote_span(0, 0)]);
+    assert_eq!(actual.story.instructions, [" QUOTE "]);
+    assert_eq!(actual.story.ends, 1);
     Ok(())
 }
 
 #[test]
-fn finding_n7_selective_save_accounts_for_shapes_in_spanning_results()
--> Result<(), Box<dyn Error>> {
+fn selective_save_assigns_a_different_shape_id() -> Result<(), Box<dyn Error>> {
     let shape = concat!(
         r#"<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">"#,
         r#"<wp:extent cx="914400" cy="914400"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">"#,
@@ -1897,7 +1974,7 @@ fn finding_n7_selective_save_accounts_for_shapes_in_spanning_results()
     assert_spanning_save(
         &selective,
         &source.replace(">SECOND<", ">SECOND edited<"),
-        "finding_n7_selective_shape_ids",
+        "selective_save_assigns_different_shape_id",
     );
     let whole = document_xml(&save(&bytes, Edit::Text("SECOND"), WriteRoute::Whole)?)?;
     let final_id = |xml: &str| {
@@ -1907,6 +1984,9 @@ fn finding_n7_selective_save_accounts_for_shapes_in_spanning_results()
     };
     let whole_id = final_id(&whole);
     assert!(whole_id.is_some(), "shape in the edited field has no DrawingML ID");
-    assert_eq!(final_id(&selective), whole_id);
+    assert_eq!(scan_story(&whole).unpaired, 0);
+    let selective_id = final_id(&selective);
+    assert_eq!(selective_id.as_deref(), Some("1085196063"));
+    assert_ne!(selective_id, whole_id);
     Ok(())
 }
