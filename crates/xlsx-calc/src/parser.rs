@@ -1,9 +1,12 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
+use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::lexer::{ParseError, TokKind, Token, lex};
+use crate::lexer::{
+    ParseError, SheetSpan, TokKind, Token, lex, lex_for_evaluation, lex_for_rewrite,
+    lex_released_definition,
+};
 use crate::{ColumnRange, RowRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -117,14 +120,75 @@ pub enum BinaryOp {
 
 /// public entry point: parse a formula body (no leading `=`) into an ast.
 pub fn parse_formula(src: &str) -> Result<Expr, ParseError> {
-    let tokens = lex(src)?;
+    parse_with_sheet_span(src, None)
+}
+
+#[doc(hidden)]
+pub fn parse_formula_for_cell(
+    src: &str,
+    provider: &dyn CellProvider,
+    owner: SheetId,
+) -> Result<Expr, ParseError> {
+    parse_with_sheet_span(
+        src,
+        Some(&|first, last| {
+            provider.sheet_id(first).is_some()
+                && provider.sheet_id(last).is_some()
+                && provider.defined_name(owner, first).is_none()
+        }),
+    )
+}
+
+#[doc(hidden)]
+pub fn parse_definition_for_cell(
+    src: &str,
+    provider: &dyn CellProvider,
+    owner: SheetId,
+) -> Result<Expr, ParseError> {
+    parse_formula_for_cell(src, provider, owner).or_else(|_| parse_released_definition(src))
+}
+
+pub(crate) fn parse_with_sheet_span(
+    src: &str,
+    is_sheet_span: Option<&SheetSpan<'_>>,
+) -> Result<Expr, ParseError> {
+    parse_source(
+        src,
+        &lex_for_evaluation(src, is_sheet_span)?,
+        ParseMode::Evaluation,
+    )
+}
+
+#[doc(hidden)]
+pub fn parse_formula_for_rewrite(src: &str) -> Result<Expr, ParseError> {
+    parse_source(src, &lex_for_rewrite(src)?, ParseMode::Rewrite)
+}
+
+#[doc(hidden)]
+pub fn is_formula_source(src: &str) -> bool {
+    lex(src).is_ok_and(|tokens| parse_source(src, &tokens, ParseMode::FormulaSource).is_ok())
+}
+
+pub(crate) fn parse_released_definition(src: &str) -> Result<Expr, ParseError> {
+    parse_source(src, &lex_released_definition(src)?, ParseMode::Evaluation)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParseMode {
+    Evaluation,
+    Rewrite,
+    FormulaSource,
+}
+
+fn parse_source(src: &str, tokens: &[Token], mode: ParseMode) -> Result<Expr, ParseError> {
     if tokens.is_empty() {
         return Err(ParseError::new(0, "empty formula"));
     }
     let mut p = Parser {
-        tokens: &tokens,
+        tokens,
         pos: 0,
-        src_len: src.len(),
+        source: src,
+        mode,
     };
     let expr = p.expr_bp(0, 0)?;
     if let Some(tok) = p.peek() {
@@ -147,15 +211,16 @@ impl ParsedExpr {
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
-    src_len: usize,
+    source: &'a str,
+    mode: ParseMode,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
     }
 
-    fn advance(&mut self) -> Option<&Token> {
+    fn advance(&mut self) -> Option<&'a Token> {
         let t = self.tokens.get(self.pos);
         if t.is_some() {
             self.pos += 1;
@@ -165,7 +230,7 @@ impl Parser<'_> {
 
     /// byte offset for error reporting at the current position (or end).
     fn here(&self) -> usize {
-        self.peek().map(|t| t.start).unwrap_or(self.src_len)
+        self.peek().map(|t| t.start).unwrap_or(self.source.len())
     }
 
     fn expect(&mut self, want: &TokKind, what: &str) -> Result<(), ParseError> {
@@ -244,7 +309,8 @@ impl Parser<'_> {
             let pos = self.here();
             self.advance();
             let rhs = self.postfix(depth + 1)?;
-            if !reference_operand(&lhs.expr) || !reference_operand(&rhs.expr) {
+            if !reference_operand(&lhs.expr, self.mode) || !reference_operand(&rhs.expr, self.mode)
+            {
                 return Err(ParseError::new(pos, "':' joins two references"));
             }
             let ast_depth = lhs.depth.max(rhs.depth) + 1;
@@ -256,6 +322,12 @@ impl Parser<'_> {
                 },
                 depth: ast_depth,
             };
+        }
+        if matches!(self.peek().map(|t| &t.kind), Some(TokKind::Intersection)) {
+            return Err(ParseError::new(
+                self.here(),
+                "reference intersection is unsupported",
+            ));
         }
         Ok(lhs)
     }
@@ -280,7 +352,11 @@ impl Parser<'_> {
         let Some(tok) = self.advance() else {
             return Err(ParseError::new(pos, "unexpected end of formula"));
         };
-        match tok.kind.clone() {
+        let kind = match tok.kind.clone() {
+            TokKind::ExternalRef(reference) => self.external_reference(*reference, tok)?,
+            other => other,
+        };
+        match kind {
             TokKind::Num(n) => Ok(ParsedExpr::leaf(Expr::Number(n))),
             TokKind::Str(s) => Ok(ParsedExpr::leaf(Expr::Text(s))),
             TokKind::Bool(b) => Ok(ParsedExpr::leaf(Expr::Bool(b))),
@@ -293,9 +369,26 @@ impl Parser<'_> {
             TokKind::RowRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::RowRange { sheet, range }))
             }
-            TokKind::TableRef { table, spec } => {
-                Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
+            TokKind::TableRef {
+                sheet: None,
+                table,
+                spec,
+            } if !table.is_empty() => Ok(ParsedExpr::leaf(Expr::TableRef { table, spec })),
+            TokKind::TableRef { sheet: Some(_), .. } => Err(ParseError::new(
+                pos,
+                "sheet-qualified structured references are unsupported",
+            )),
+            TokKind::TableRef { .. } => Err(ParseError::new(
+                pos,
+                "local structured references are unsupported",
+            )),
+            TokKind::ThreeDRef { .. } => {
+                Err(ParseError::new(pos, "3-D references are unsupported"))
             }
+            TokKind::Intersection => Err(ParseError::new(
+                pos,
+                "reference intersection is unsupported",
+            )),
             TokKind::LParen => {
                 let start = self.here();
                 let inner = self.expr_bp(0, depth + 1)?;
@@ -320,6 +413,38 @@ impl Parser<'_> {
             }
             TokKind::Name { scope, name } => Ok(ParsedExpr::leaf(Expr::Name { scope, name })),
             other => Err(ParseError::new(pos, format!("unexpected token {other:?}"))),
+        }
+    }
+
+    fn external_reference(&self, kind: TokKind, token: &Token) -> Result<TokKind, ParseError> {
+        let pos = token.start;
+        let err = || ParseError::new(pos, "external references are unsupported");
+        if self.source[pos..].starts_with('\'') {
+            return Ok(kind);
+        }
+        if self.mode != ParseMode::FormulaSource
+            || !crate::deps::names_other_workbook(&self.source[pos..])
+        {
+            return Err(err());
+        }
+        match kind {
+            TokKind::Name {
+                scope: None,
+                ref name,
+            } if CellRef::parse_a1(&name.to_ascii_uppercase()).is_ok()
+                || !name.starts_with(|ch: char| ch.is_alphabetic() || matches!(ch, '_' | '\\'))
+                || self.source[token.end..]
+                    .trim_start()
+                    .starts_with(['!', ':', '(']) =>
+            {
+                Err(err())
+            }
+            TokKind::TableRef { table, spec, .. } => Ok(TokKind::TableRef {
+                sheet: None,
+                table,
+                spec,
+            }),
+            other => Ok(other),
         }
     }
 
@@ -456,9 +581,12 @@ impl Parser<'_> {
 /// what `:` accepts as an end: something that already designates cells, a
 /// call that may resolve to one, or the `#REF!` excel leaves behind when a
 /// deletion takes an end away.
-fn reference_operand(expr: &Expr) -> bool {
+fn reference_operand(expr: &Expr, mode: ParseMode) -> bool {
     if let Expr::Name { name, .. } = expr {
         return !address_shaped(name);
+    }
+    if matches!(expr, Expr::RowRange { sheet: Some(_), .. }) {
+        return mode != ParseMode::Evaluation;
     }
     matches!(
         expr,
@@ -764,6 +892,180 @@ mod tests {
                 },
             )
         );
+    }
+
+    #[test]
+    fn unsupported_reference_shapes_report_positioned_errors() {
+        for (source, pos, message) in [
+            ("SUM(Sales:Q2!#REF!)", 4, "3-D references"),
+            ("Amounts:Other!B5", 0, "3-D references"),
+            ("'It''s':'Other'!A1", 0, "3-D references"),
+            ("[Book.xlsx]Sheet1:Sheet2!A1", 0, "external references"),
+            ("[1]Sheet1:Sheet2!#REF!", 0, "external references"),
+            ("[1]Sheet1!A1", 0, "external references"),
+            ("[1]!Name", 0, "external references"),
+            (
+                "Sheet1!Table1[Col]",
+                0,
+                "sheet-qualified structured references",
+            ),
+            ("[@Col]", 0, "local structured references"),
+            ("[#This Row]", 0, "local structured references"),
+            ("[Col]", 0, "local structured references"),
+            ("A1 B1", 2, "reference intersection"),
+        ] {
+            let error = parse_formula(source).unwrap_err();
+            assert_eq!(error.pos, pos, "{source}");
+            assert!(error.message.contains(message), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn path_qualified_references_are_not_sheet_spans() {
+        for source in [
+            r"'C:\Program Files\Addin.xlam'!MyFunc(A1)",
+            r"'C:\Books\Data.xlsx'!MyName",
+            r"'C:\Books\Data.xlsx'!A1",
+            "'https://example.com/book.xlsx'!MyName",
+            "'https://example.com:8443/book.xlsx'!A1",
+        ] {
+            assert_eq!(
+                parse_formula_for_rewrite(source).unwrap().to_formula(),
+                source
+            );
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(
+                    0,
+                    "workbook path qualifiers are unsupported"
+                )),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            crate::lexer::rewrite_table_column(
+                r"'C:\Addin.xlam'!MyFunc(T[Old])",
+                "T",
+                "Data",
+                false,
+                "Old",
+                "New",
+            ),
+            Ok(Some(r"'C:\Addin.xlam'!MyFunc(T[New])".into())),
+        );
+    }
+
+    #[test]
+    fn quoted_sheet_span_endpoints_cannot_themselves_be_spans() {
+        for source in ["'A:B':'C'!A1", "'A':'B:C'!A1", "Sheet1:'B:C'!A1"] {
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(0, "invalid 3-D sheet qualifier")),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn address_shaped_range_operands_keep_their_own_qualifiers() {
+        for source in ["A1:Sheet2!B2", "$A$1:Sheet2!B2:C3", "LOG10:Sheet2!B2"] {
+            let Expr::RangeJoin { start, .. } = parse_formula(source).unwrap() else {
+                panic!("expected a range join: {source}");
+            };
+            assert!(matches!(*start, Expr::Ref { sheet: None, .. }), "{source}");
+        }
+        for source in ["Sheet1:B2!A1", "1:2!A1", "$1:$2!A1"] {
+            assert!(parse_formula(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn unquoted_address_shaped_sheet_names_print_quoted() {
+        for (sheet, address) in [
+            ("A1", "B2"),
+            ("TRUE", "A1"),
+            ("FALSE", "A1"),
+            ("R", "A1"),
+            ("C", "A1"),
+            ("RC", "A1"),
+            ("R1", "A1"),
+            ("C1", "A1"),
+            ("R2C3", "A1"),
+        ] {
+            let source = format!("{sheet}!{address}");
+            let quoted = format!("'{sheet}'!{address}");
+            let parsed = parse_formula(&source).unwrap();
+            assert!(matches!(&parsed, Expr::Ref { sheet: Some(name), .. } if name == sheet));
+            assert_eq!(parsed.to_formula(), quoted);
+            assert_eq!(parse_formula(&quoted).unwrap(), parsed);
+        }
+    }
+
+    #[test]
+    fn excel_parameter_range_joins_accept_unquoted_reference_shaped_sheet_names() {
+        for (source, quoted) in [
+            ("_xlpm.c:R2C3!A2", "_xlpm.c:'R2C3'!A2"),
+            ("_xlpm.c:A1!B2", "_xlpm.c:'A1'!B2"),
+            ("_xlpm.c:TRUE!A2", "_xlpm.c:'TRUE'!A2"),
+        ] {
+            assert_eq!(
+                parse_formula(source).unwrap(),
+                parse_formula(quoted).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn cell_shaped_calls_are_not_range_endpoints() {
+        for source in [
+            "A1:LOG10(1)",
+            "Sheet1!A1:LOG10(1)",
+            "A1:'Sheet1'!LOG10(1)",
+            "Sheet1:Sheet2!LOG10(1)",
+        ] {
+            let Expr::RangeJoin { end, .. } = parse_formula_for_rewrite(source).unwrap() else {
+                panic!("expected a range join: {source}");
+            };
+            assert!(matches!(*end, Expr::FuncCall { .. }), "{source}");
+            assert!(parse_formula(source).is_err(), "{source}");
+        }
+        assert!(matches!(
+            parse("LOG10(1)"),
+            Expr::FuncCall { name, .. } if name == "LOG10"
+        ));
+        for source in ["A1:INDEX(A1:A10,5)", "A1: LOG10(1)", "A1:B2:LOG10(1)"] {
+            assert!(matches!(parse(source), Expr::RangeJoin { .. }), "{source}");
+        }
+    }
+
+    #[test]
+    fn spaced_cell_ranges_inherit_the_sheet_qualifier() {
+        let qualified = parse("Sheet1!A1:B2");
+        assert_eq!(
+            parse_formula_for_rewrite("Sheet1!A1 : B2").unwrap(),
+            qualified
+        );
+        assert!(matches!(parse("Sheet1!A1 : B2"), Expr::RangeJoin { .. }));
+        for source in ["Sheet1 ! A1 : B2", "'Sheet1' ! A1 : B2"] {
+            assert_eq!(parse_formula_for_rewrite(source).unwrap(), qualified);
+            assert!(parse_formula(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn quoted_spans_are_unsupported_but_single_sheet_external_references_keep_their_ast() {
+        for source in ["'Jan:Mar'!A1", "'A1:Sheet2'!B2", "'Jan:Mar'!#REF!"] {
+            assert_eq!(
+                parse_formula(source),
+                Err(ParseError::new(0, "3-D references are unsupported")),
+                "{source}"
+            );
+        }
+        assert!(matches!(
+            parse("'[1]Sheet1'!A1"),
+            Expr::Ref { sheet: Some(sheet), .. } if sheet == "[1]Sheet1"
+        ));
+        assert_eq!(parse("'[1]Rates'!#REF!"), Expr::Error(ErrorValue::Ref));
     }
 
     #[test]

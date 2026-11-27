@@ -16,7 +16,7 @@ use yrs::{
 use crate::control_source::safety_key;
 use crate::identity::{
     OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC, SeededParagraph, SourceIndex,
-    SourcePackage, SourcePartInput, SourceStoryKind,
+    SourcePackage, SourcePartInput, SourceStory, SourceStoryKind,
 };
 use crate::script_fonts::ScriptFontUse;
 use crate::structured::source::{
@@ -336,6 +336,8 @@ pub(crate) struct SourceMetadata {
     peer_patch_table_styles: OnceLock<PatchTableStyles>,
     #[serde(skip)]
     patch_paragraph_styles: OnceLock<Option<PatchParagraphStyles>>,
+    #[serde(skip)]
+    pub(crate) preview_shape_sources: Option<crate::bridge::GroupPictureSources>,
 }
 
 struct PatchParagraphStyles {
@@ -7484,6 +7486,7 @@ struct LoweredDocx {
     roots: Vec<SourceRoot>,
     relationships: Vec<(String, docx_parse::Relationship)>,
     read: ReadSource,
+    preview_shape_sources: Option<crate::bridge::GroupPictureSources>,
 }
 
 /// Lowers `envelope`, resolving source provenance against `parts` when the package's parts are
@@ -7671,6 +7674,7 @@ fn lower_docx_with(
         roots,
         relationships,
         read,
+        preview_shape_sources: None,
     })
 }
 
@@ -7722,6 +7726,7 @@ fn seed_lowered(
         mut referenced_fonts,
         mut script_fonts,
         mut read,
+        preview_shape_sources,
         ..
     } = lowered;
     let scan_sequences = context.opaque_sequences.is_empty() && {
@@ -7809,6 +7814,7 @@ fn seed_lowered(
             read,
             peer_patch_table_styles: OnceLock::new(),
             patch_paragraph_styles: OnceLock::new(),
+            preview_shape_sources,
         },
         0,
     );
@@ -8005,6 +8011,7 @@ pub(crate) fn replica_source(
             read,
             peer_patch_table_styles: OnceLock::new(),
             patch_paragraph_styles: OnceLock::new(),
+            preview_shape_sources: None,
         },
         index,
         referenced_fonts.into_iter().collect(),
@@ -8161,27 +8168,12 @@ fn build_source_index(
             roots: root.into_iter().collect(),
         });
     };
-    for (story_id, kind, item) in roots {
-        let path = match kind {
-            SourceStoryKind::Body => Some(document_path.clone()),
-            SourceStoryKind::Footnote => Some(FOOTNOTES_PART.to_owned()),
-            SourceStoryKind::Endnote => Some(ENDNOTES_PART.to_owned()),
-            SourceStoryKind::Comment => Some(COMMENTS_PART.to_owned()),
-            SourceStoryKind::Header | SourceStoryKind::Footer => relationships
-                .iter()
-                .find(|(id, _)| Some(id) == item.as_ref())
-                .and_then(|(_, relationship)| {
-                    match docx_parse::resolve_relationship_target(document_path, relationship) {
-                        Ok(docx_parse::RelationshipTarget::Internal(path)) => Some(path),
-                        _ => None,
-                    }
-                }),
-        };
-        let item =
-            item.filter(|_| matches!(kind, SourceStoryKind::Footnote | SourceStoryKind::Endnote));
-        if let Some(path) = path {
-            add(&path, kind, Some((story_id, item)));
-        }
+    for (story_id, source) in source_story_roots(roots, document_path, relationships) {
+        add(
+            &source.part_uri,
+            source.kind,
+            Some((story_id, source.item_id)),
+        );
     }
     add(FOOTNOTES_PART, SourceStoryKind::Footnote, None);
     add(ENDNOTES_PART, SourceStoryKind::Endnote, None);
@@ -8194,6 +8186,42 @@ fn build_source_index(
         ids.comment_references,
         paragraphs,
     )
+}
+
+fn source_story_roots<'a>(
+    roots: Vec<SourceRoot>,
+    document_path: &'a str,
+    relationships: &'a [(String, docx_parse::Relationship)],
+) -> impl Iterator<Item = (String, SourceStory)> + 'a {
+    use crate::structured::source::{COMMENTS_PART, ENDNOTES_PART, FOOTNOTES_PART};
+
+    roots.into_iter().filter_map(move |(story_id, kind, item)| {
+        let part_uri = match kind {
+            SourceStoryKind::Body => Some(document_path.to_owned()),
+            SourceStoryKind::Footnote => Some(FOOTNOTES_PART.to_owned()),
+            SourceStoryKind::Endnote => Some(ENDNOTES_PART.to_owned()),
+            SourceStoryKind::Comment => Some(COMMENTS_PART.to_owned()),
+            SourceStoryKind::Header | SourceStoryKind::Footer => relationships
+                .iter()
+                .find(|(id, _)| Some(id) == item.as_ref())
+                .and_then(|(_, relationship)| {
+                    match docx_parse::resolve_relationship_target(document_path, relationship) {
+                        Ok(docx_parse::RelationshipTarget::Internal(path)) => Some(path),
+                        _ => None,
+                    }
+                }),
+        }?;
+        let item_id =
+            item.filter(|_| matches!(kind, SourceStoryKind::Footnote | SourceStoryKind::Endnote));
+        Some((
+            story_id,
+            SourceStory {
+                part_uri,
+                kind,
+                item_id,
+            },
+        ))
+    })
 }
 
 /// The identity index of a package, lowered without seeding.
@@ -8311,10 +8339,12 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some((envelope, media, _)) = parse_docx_preview(bytes.into(), blocks, None)? else {
+    let Some((envelope, media, _, document_path, connectors)) =
+        parse_docx_preview(bytes.into(), blocks, None)?
+    else {
         return Ok(false);
     };
-    seed_preview_envelope(document, envelope, media).map(|_| true)
+    seed_preview_envelope(document, envelope, media, &document_path, connectors).map(|_| true)
 }
 
 /// The parse [`seed_docx_preview`] seeds from and the media its images name,
@@ -8328,12 +8358,14 @@ pub(crate) fn parse_docx_preview(
         docx_parse::S9WireEnvelope,
         docx_parse::media::MediaTable,
         bool,
+        String,
+        docx_parse::s9::PreviewConnectorSources,
     )>,
     String,
 > {
     let (parts, media) =
         docx_parse::media_table_parts_bytes(&bytes).map_err(|error| error.to_string())?;
-    let envelope = docx_parse::parse_docx_s9_preview_with_media_table_with_budget(
+    let envelope = docx_parse::s9::parse_docx_preview_with_connectors(
         &parts,
         &media,
         blocks,
@@ -8346,7 +8378,22 @@ pub(crate) fn parse_docx_preview(
         paragraph_budget,
     )
     .map_err(|error| error.to_string())?;
-    Ok(envelope.map(|(envelope, budget_stopped)| (envelope, media, budget_stopped)))
+    let Some((envelope, budget_stopped, connectors)) = envelope else {
+        return Ok(None);
+    };
+    let limits = docx_parse::xml::ParseLimits::default();
+    let document_path = docx_parse::relationships::office_document_path(
+        &parts,
+        &mut docx_parse::xml::ParseBudget::new(&limits),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(Some((
+        envelope,
+        media,
+        budget_stopped,
+        document_path,
+        connectors,
+    )))
 }
 
 /// Seeds a preview parse and keeps the media its images name; returns the
@@ -8356,9 +8403,21 @@ pub(crate) fn seed_preview_envelope(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
     media: docx_parse::media::MediaTable,
+    document_path: &str,
+    connectors: docx_parse::s9::PreviewConnectorSources,
 ) -> Result<SeededFonts, String> {
     let mut lowered = lower_docx(envelope, None)?;
     retain_referenced_body_stories(&mut lowered.context.plans);
+    if !connectors.is_empty() {
+        let roots = source_story_roots(
+            std::mem::take(&mut lowered.roots),
+            document_path,
+            &lowered.relationships,
+        );
+        lowered.preview_shape_sources = Some(
+            crate::bridge::group_pictures::preview_connector_sources(connectors, roots),
+        );
+    }
     let fonts = seed_lowered(document, lowered, None, SeedMedia::AsParsed, true)?;
     document.install_media(media);
     Ok(fonts)

@@ -2899,11 +2899,29 @@ describe('font coverage before text paints', () => {
   });
 
   test('document text gets its font and is drawn only where the coverage families apply', async () => {
+    const { ctx, events } = recording();
+    const family = 'Simplified Arabic';
+    const paintFontFamily = 'bo-pptx-editor-simplified arabic';
+    const aliased = (text: string, x: number) => ({ ...run(text, family, x), paintFontFamily });
+    const slide: SlideDisplayList = { contractVersion: 1, width: 320, height: 180, primitives: [textBox([
+      aliased('plain', 0),
+      { ...aliased('bold', 100), bold: true },
+      { ...aliased('export', 180), fontId: 2 },
+    ], 1)] };
+    await paintSlide(ctx, slide, 1, 1, {
+      fontCoverage: { async prepare(name) { return `${name} r2`; }, covers: (_, bold) => !bold },
+      fontFamily: ({ id }) => id === 2 ? 'Export Family' : undefined,
+    });
+    expect(events).toEqual([
+      'draw plain 20px "Simplified Arabic r2"',
+      `draw bold bold 20px "${paintFontFamily}", "Simplified Arabic"`,
+      'draw export 20px "Export Family"',
+    ]);
     const { readFile } = await import('node:fs/promises');
     const canvas = await readFile(new URL('./canvas.ts', import.meta.url), 'utf8');
     const fonts = [...canvas.matchAll(/ctx\.font = ([^;]+);/g)].map((match) => match[1]);
     expect(canvas.includes('?? families(run.fontFamily, run.bold, run.italic);')).toBe(true);
-    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`', "'12px sans-serif'"]);
+    expect(fonts).toEqual(['`${style}${weight}${run.fontSizePx}px ${stack}`', "'12px sans-serif'"]);
     const chunks = await readFile(new URL('./textChunks.ts', import.meta.url), 'utf8');
     expect(chunks.includes('.font =')).toBe(false);
   });
