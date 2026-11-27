@@ -1,10 +1,12 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use docx_edit::projection::{ProjectionError, ProjectionFamily, ProjectionInput, ProjectionOutput};
-use docx_edit::{EditCtx, EditingDoc, FormatPolicy, Position, seed_from_docx};
+use docx_edit::{EditCtx, EditingDoc, FormatPolicy, ListKind, Position, seed_from_docx};
 use docx_parse::BlockContent;
 use docx_parse::inline::{InlineNode, Run, RunContent};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
+use yrs::Any;
 
 const WORD: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 
@@ -127,6 +129,140 @@ fn restores_authored_run_properties_and_boundaries() {
     assert_eq!(language.latin.as_deref(), Some("en-US"));
     assert_eq!(language.east_asia.as_deref(), Some("ja-JP"));
     assert_eq!(run(second).formatting.as_ref().unwrap().bold, Some(true));
+}
+
+#[test]
+fn projects_live_language_on_runs_of_new_paragraphs() {
+    let doc = seeded("<w:p><w:r><w:t>AB</w:t></w:r></w:p>");
+    let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
+    let split = doc
+        .split_paragraph(&ctx, Position::new("body", 2), None)
+        .unwrap();
+    doc.insert_text(
+        &ctx,
+        Position::new("body", 3),
+        "New",
+        FormatPolicy::Inherit,
+    )
+    .unwrap();
+    let id = &split.second_para_id;
+    assert!(
+        !doc.paragraphs("body").unwrap()[1]
+            .properties
+            .contains_key("_originalRunBoundaries")
+    );
+    let original = Any::from(HashMap::from([(
+        "runProperties".to_owned(),
+        Any::from(HashMap::from([(
+            "language".to_owned(),
+            Any::from(HashMap::from([
+                ("latin".to_owned(), Any::from("en-US")),
+                ("eastAsia".to_owned(), Any::from("ja-JP")),
+                ("bidi".to_owned(), Any::from("ar-SA")),
+            ])),
+        )])),
+    )]));
+    for (formatting, east_asia) in [(Any::Null, None), (original, Some("ja-JP"))] {
+        doc.set_paragraph_attr(id, "_originalFormatting", formatting)
+            .unwrap();
+        doc.set_paragraph_attr(
+            id,
+            "language",
+            Any::from(HashMap::from([
+                ("latin".to_owned(), Any::from("fr-FR")),
+                ("bidi".to_owned(), Any::Null),
+            ])),
+        )
+        .unwrap();
+        let output = doc.project_document(&ProjectionInput::default()).unwrap();
+        let projected = paragraph(&body(&output)[1]);
+        assert_eq!(projected.source_ordinal, None);
+        let language = run(&projected.content[0])
+            .formatting
+            .as_ref()
+            .and_then(|format| format.language.as_ref())
+            .unwrap();
+        assert_eq!(language.latin.as_deref(), Some("fr-FR"));
+        assert_eq!(language.east_asia.as_deref(), east_asia);
+        assert_eq!(language.bidi, None);
+    }
+}
+
+#[test]
+fn defers_boundary_only_breaks_and_note_number_marks() {
+    let doc = seeded(concat!(
+        r#"<w:p><w:r><w:br w:type="page"/><w:t>Leading</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:footnoteRef/></w:r><w:r><w:t>Note</w:t></w:r></w:p>"#,
+    ));
+    let output = doc.project_document(&ProjectionInput::default()).unwrap();
+    for (kind, paragraph) in [("pageBreak", 0), ("noteMarks", 1)] {
+        assert!(
+            output.deferred.iter().any(|entry| {
+                entry.family == ProjectionFamily::Fields
+                    && entry.kind == kind
+                    && entry.story_id == "body"
+                    && entry.paragraph == Some(paragraph)
+            }),
+            "missing {kind} deferral"
+        );
+    }
+}
+
+#[test]
+fn removes_cleared_source_paragraph_markers() {
+    let doc = seeded(concat!(
+        r#"<w:p><w:pPr><w:rPr><w:ins w:id="1" w:author="Ada"/><w:del w:id="2" w:author="Ada"/></w:rPr>"#,
+        r#"<w:pPrChange w:id="3" w:author="Ada"><w:pPr><w:jc w:val="right"/></w:pPr></w:pPrChange></w:pPr>"#,
+        r#"<w:bookmarkStart w:id="4" w:name="keep"/><w:r><w:t>Text</w:t></w:r><w:bookmarkEnd w:id="4"/></w:p>"#,
+    ));
+    let input = ProjectionInput::default();
+    let source = doc.project_document(&input).unwrap();
+    let original = paragraph(&body(&source)[0]);
+    assert!(original.p_pr_ins.is_some());
+    assert!(original.p_pr_del.is_some());
+    assert!(original.property_changes.is_some());
+    assert!(
+        original
+            .content
+            .iter()
+            .any(|entry| entry.node_type() == "bookmarkStart")
+    );
+
+    let id = &doc.paragraphs("body").unwrap()[0].para_id;
+    for kind in ["pPrIns", "pPrDel"] {
+        doc.set_paragraph_attr(id, kind, Any::Null).unwrap();
+    }
+    for kind in ["pPrChange", "bookmarks"] {
+        doc.set_paragraph_attr(id, kind, Any::Array(Arc::from([])))
+            .unwrap();
+    }
+    let output = doc.project_document(&input).unwrap();
+    let projected = paragraph(&body(&output)[0]);
+    assert!(projected.p_pr_ins.is_none());
+    assert!(projected.p_pr_del.is_none());
+    assert!(projected.property_changes.is_none());
+    assert_eq!(text(projected), "Text");
+}
+
+#[test]
+fn defers_the_referenced_session_list_definition() {
+    let doc = seeded("<w:p><w:r><w:t>List text</w:t></w:r></w:p>");
+    let id = &doc.paragraphs("body").unwrap()[0].para_id;
+    let ctx = EditCtx::local("Ada", "2026-09-24T00:00:00Z");
+    let attrs = doc
+        .ensure_list_definition(&ctx, "body", id, ListKind::Bullet)
+        .unwrap();
+    assert_eq!(doc.created_list_definitions().len(), 1);
+    for (key, value) in attrs {
+        doc.set_paragraph_attr(id, key, value).unwrap();
+    }
+    let output = doc.project_document(&ProjectionInput::default()).unwrap();
+    assert!(output.deferred.iter().any(|entry| {
+        entry.family == ProjectionFamily::StoriesAux
+            && entry.kind == "listDef"
+            && entry.story_id == "body"
+            && entry.paragraph == Some(0)
+    }));
 }
 
 #[test]

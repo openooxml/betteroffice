@@ -7,8 +7,10 @@ import type { YrsSession } from './index';
 import {
   canonicalProjection,
   checkSourceOrdinals,
+  checkStory,
   compareSnapshots,
   nativeProjection,
+  type Deferral,
 } from './projectionParity.support';
 
 function wireDocument(content: readonly BlockContent[] = []) {
@@ -18,7 +20,7 @@ function wireDocument(content: readonly BlockContent[] = []) {
   } };
 }
 
-function fieldWithParagraph(paragraph: Paragraph): Paragraph {
+function fieldWithParagraph(paragraph: Paragraph, ...rest: Paragraph[]): Paragraph {
   return {
     type: 'paragraph',
     content: [{
@@ -27,7 +29,7 @@ function fieldWithParagraph(paragraph: Paragraph): Paragraph {
       instruction: 'IF',
       fieldCode: [],
       fieldResult: [],
-      structuredResult: { blocks: [paragraph] },
+      structuredResult: { blocks: [paragraph, ...rest] },
     }],
   };
 }
@@ -53,6 +55,65 @@ describe('DOCX projection canonical form', () => {
     });
     expect(checkSourceOrdinals('body', [edited], [source]).join('\n'))
       .toContain('structuredResult.blocks[0].sourceOrdinal');
+  });
+
+  it('keeps nested position when a field paragraph is edited to match its neighbour', () => {
+    const first: Paragraph = { type: 'paragraph', sourceOrdinal: 3, content: [] };
+    const second: Paragraph = {
+      type: 'paragraph', sourceOrdinal: 4,
+      content: [{ type: 'run', content: [{ type: 'text', text: 'Same' }] }],
+    };
+    const source = fieldWithParagraph(first, second);
+    const edited = { ...first, content: second.content };
+    expect(checkSourceOrdinals('body', [fieldWithParagraph(edited, second)], [source])).toEqual([]);
+    expect(checkSourceOrdinals('body', [fieldWithParagraph(second, second)], [source]).join('\n'))
+      .toContain('structuredResult.blocks[0].sourceOrdinal: TS 3; native 4');
+  });
+
+  it('checks nested ordinals after a table or block control shifts past a new paragraph', () => {
+    const first: Paragraph = { type: 'paragraph', sourceOrdinal: 3, content: [] };
+    const second: Paragraph = { ...first, sourceOrdinal: 4 };
+    const inserted: Paragraph = { type: 'paragraph', content: [] };
+    const table = (content: Paragraph[]): BlockContent => ({
+      type: 'table', rows: [{ type: 'tableRow', cells: [{ type: 'tableCell', content }] }],
+    });
+    const control = (content: Paragraph[]): BlockContent => ({
+      type: 'blockSdt', properties: { sdtType: 'richText' }, content,
+    });
+    for (const [container, path] of [[table, 'rows[0].cells[0].content'], [control, 'content']] as const) {
+      const source = [container([first, second])];
+      expect(checkSourceOrdinals('body', [inserted, ...source], source, ['new'])).toEqual([]);
+      const wrong = [inserted, container([second, second])];
+      expect(checkSourceOrdinals('body', wrong, source, ['new']).join('\n'))
+        .toContain(`blocks[1].${path}[0].sourceOrdinal: TS 3; native 4`);
+    }
+  });
+
+  it('matches unaligned duplicate nested paragraphs in source order', () => {
+    const first: Paragraph = { type: 'paragraph', sourceOrdinal: 3, content: [] };
+    const second: Paragraph = { ...first, sourceOrdinal: 4 };
+    const source = fieldWithParagraph(first, second);
+    const moved = (paragraph: Paragraph, ...rest: Paragraph[]): Paragraph => ({
+      ...source,
+      content: [{ type: 'run', content: [] }, ...fieldWithParagraph(paragraph, ...rest).content],
+    });
+    expect(checkSourceOrdinals('body', [moved(first, second)], [source])).toEqual([]);
+    expect(checkSourceOrdinals('body', [moved(second)], [source]).join('\n'))
+      .toContain('content[1].structuredResult.blocks[0].sourceOrdinal: TS 3; native 4');
+  });
+
+  it('rejects paragraph keys on a deferred auxiliary story', () => {
+    const storyId = 'hf:header';
+    const blocks: BlockContent[] = [];
+    const stories = new Map([[storyId, { content: blocks, blocks, keys: [] }]]);
+    const deferred: Deferral[] = [{ family: 'storiesAux', kind: 'headerFooterStory', storyId, paragraph: null }];
+    const native = {
+      storyId, blocks, paragraphSessionKeys: [], sessionRevisionPlaceholders: [], createdListSites: [],
+      deferred,
+    };
+    expect(checkStory(stories, native, stories)).toEqual([]);
+    expect(checkStory(stories, { ...native, paragraphSessionKeys: ['unexpected'] }, stories).join('\n'))
+      .toContain('paragraphSessionKeys[0]');
   });
 
   it('detects a nested source ordinal change between snapshots', () => {
