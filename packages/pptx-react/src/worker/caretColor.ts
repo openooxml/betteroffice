@@ -165,7 +165,8 @@ function ink(shade: number): string {
  * Black or white, whichever contrasts more with what `canvas` shows along a
  * caret bar from `from` to `to` (its centre line, in slide space): the median
  * luminance of opaque backing pixels whose centres are within half a slide
- * pixel of the line or whose squares it crosses. `null` when unreadable.
+ * pixel of the line or whose squares it passes through (those it only touches
+ * when there are none). `null` when unreadable.
  */
 export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
   list: Pick<SlideDisplayList, 'width' | 'height'> | null | undefined,
@@ -197,23 +198,24 @@ export function paintedCaretInk(canvas: HTMLCanvasElement | null | undefined,
   const dy = to.y - from.y;
   const lengthSquared = dx * dx + dy * dy;
   const shades: number[] = [];
+  const touched: number[] = [];
   for (let row = 0; row < height; row += 1) {
     for (let column = 0; column < width; column += 1) {
       const index = (row * width + column) * 4;
       if (data[index + 3] !== 255) continue;
       const cx = left + column + 0.5;
       const cy = top + row + 0.5;
-      const crosses = Math.max(minX - cx, cx - maxX, minY - cy, cy - maxY) <= 0.5
-        && Math.abs((cx - ax) * pixelDy - (cy - ay) * pixelDx) <= squareLimit;
-      if (!crosses) {
-        const x = (cx - ax) / sx;
-        const y = (cy - ay) / sy;
-        const t = lengthSquared ? Math.min(1, Math.max(0, (x * dx + y * dy) / lengthSquared)) : 0;
-        if (Math.hypot(x - t * dx, y - t * dy) > 0.5) continue;
-      }
-      shades.push(luminance([data[index]!, data[index + 1]!, data[index + 2]!]));
+      const box = Math.max(minX - cx, cx - maxX, minY - cy, cy - maxY);
+      const cross = Math.abs((cx - ax) * pixelDy - (cy - ay) * pixelDx);
+      const shade = luminance([data[index]!, data[index + 1]!, data[index + 2]!]);
+      const x = (cx - ax) / sx;
+      const y = (cy - ay) / sy;
+      const t = lengthSquared ? Math.min(1, Math.max(0, (x * dx + y * dy) / lengthSquared)) : 0;
+      if ((box < 0.5 && cross < squareLimit) || Math.hypot(x - t * dx, y - t * dy) <= 0.5) shades.push(shade);
+      else if (box <= 0.5 && cross <= squareLimit) touched.push(shade);
     }
   }
+  if (!shades.length) shades.push(...touched);
   if (!shades.length) return null;
   shades.sort((a, b) => a - b);
   return ink(shades[shades.length >> 1]!);

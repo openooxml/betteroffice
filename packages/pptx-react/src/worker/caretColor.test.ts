@@ -190,6 +190,16 @@ test('a diagonal caret at half zoom samples crossed pixels and skips neighboring
   expect(paintedCaretInk(stripe.canvas, list, { x: 201, y: 201.25 }, { x: 229, y: 229.25 }, stripe.read)).toBe('#ffffff');
 });
 
+test('a diagonal caret at half zoom skips pixels touched only at their corners', () => {
+  const stripe = painted(480, 270, (x, y) => x === y ? [16, 16, 16, 255] : [255, 255, 255, 255]);
+  expect(paintedCaretInk(stripe.canvas, list, { x: 201, y: 201 }, { x: 229, y: 229 }, stripe.read)).toBe('#ffffff');
+});
+
+test('an upright caret on a pixel edge at half zoom samples the pixels it touches', () => {
+  const edge = painted(480, 270, (x) => x === 99 || x === 100 ? [16, 16, 16, 255] : [255, 255, 255, 255]);
+  expect(paintedCaretInk(edge.canvas, list, { x: 200, y: 100 }, { x: 200, y: 140 }, edge.read)).toBe('#ffffff');
+});
+
 test('the painted caret uses the exact contrast crossover', () => {
   const grey = painted(960, 540, () => [0x77, 0x75, 0x75, 255]);
   expect(paintedCaretInk(grey.canvas, list, ...bar(120), grey.read)).toBe('#000000');
