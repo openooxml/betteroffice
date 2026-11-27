@@ -187,6 +187,16 @@ describe('raw engine surface declarations', () => {
       .toEqual(['Doc.prototype.extra: method on native at runtime but not in its declarations']);
   });
 
+  test('a runtime-only member passes undeclared and fails when declared', () => {
+    const native = discover(nativeModule((proto) => { proto.extra = () => 0; }));
+    const allow = none();
+    allow.nativeOnly['Doc.prototype.extra'] = { reason: 'test-only export', runtimeOnly: true };
+    expect(compareDeclarations(discover(wasmModule()), native, declared(WASM_D_TS), declared(NATIVE_D_TS), allow)).toEqual([]);
+    const leaked = NATIVE_D_TS.replace('  sheetCount(): number\n', '  sheetCount(): number\n  extra(): number\n');
+    expect(compareDeclarations(discover(wasmModule()), native, declared(WASM_D_TS), declared(leaked), allow))
+      .toContain('Doc.prototype.extra: runtime-only member is declared on native');
+  });
+
   test('a declared member absent at runtime fails', () => {
     const native = discover(nativeModule((proto) => { delete proto.sheetCount; }));
     expect(compareDeclarations(discover(wasmModule()), native, declared(WASM_D_TS), declared(NATIVE_D_TS), none()))

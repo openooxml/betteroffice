@@ -19,6 +19,7 @@ import { checkedProjection } from './commentRangeCheck';
 import { resolveCommentMedia } from './hostMedia';
 import { editorSaveKeys, noteSeparatorKeys } from './editorSaveKeys';
 import { savedCommentIds } from './residentCommentProjection';
+import { sectionSavePlanTestSeam, type SectionPlanInputObserver } from './sectionSavePlanTestSeam';
 import { sessionMaterializedSource, sessionSourceNoteSeparators, sessionSourcePackage } from './sessionInternals';
 import { refuseUnavailableTables } from './tableUnavailable';
 import type {
@@ -467,9 +468,15 @@ function sectionsModeled(xml: string): boolean {
  * paragraphs the model does not list, which the ordinary save would rewrite.
  * Undefined when the session changed no section.
  */
-async function sectionSavePlan(session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
+async function sectionSavePlan(
+  session: YrsSession, output: Document, capture: DocxSessionSave, originalBuffer: ArrayBuffer,
+  observeInput?: SectionPlanInputObserver
+): Promise<{ plan?: NonNullable<RustParagraphIds['sectionEdits']>; lossy: boolean; strict?: boolean } | undefined> {
   const source = sessionMaterializedSource(session);
-  if (!source) return undefined;
+  if (!source) {
+    observeInput?.(source, []);
+    return undefined;
+  }
   const plannedSplices = [...(capture.plan.splicedParts ?? []), ...(capture.plan.sectionSplicedParts ?? [])];
   const sourceParagraphs: Paragraph[] = [];
   const outputParagraphs: Paragraph[] = [];
@@ -488,12 +495,16 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const structural = plannedSplices.some(part => part.inserted?.length || part.removed?.length);
   const contiguous = sourceParagraphs.every((paragraph, index) => (paragraph.sourceOrdinal ?? index) === index);
   const originalByKey = new Map(capture.identities.paragraphs.flatMap(identity => identity.session && identity.source && identity.session.story === 'body' ? [[identity.session.paraId, identity.source.paragraphOrdinal] as const] : []));
-  const sectionChanges = session.listSections?.().some(section => {
+  const sections = session.listSections?.() ?? [];
+  const sectionChanges = sections.some(section => {
     const before = section.closingParagraphId === 'final' ? source.package.document.finalSectionProperties ?? {}
       : byOrdinal.get(originalByKey.get(section.closingParagraphId) ?? -1)?.sectionProperties;
     return !sectionPropertiesEqual(before, section.authored);
   });
-  if (!sectionChanges) return undefined;
+  if (!sectionChanges) {
+    observeInput?.(source, sections);
+    return undefined;
+  }
   const edits: NonNullable<RustParagraphIds['sectionEdits']>['edits'] = [];
   const bodyParagraphs = output.package.document.content.filter(block => block.type === 'paragraph');
   const sourcePositions = new Map<object, number>();
@@ -503,6 +514,7 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   const part = partUri?.replace(/^\//, '') ?? 'word/document.xml';
   await preloadOpcWasm();
   const bytes = unzipContainer(new Uint8Array(originalBuffer))[part];
+  observeInput?.(source, sections, bytes);
   const lossy = () => addedBoundary && !(bytes instanceof Uint8Array && sectionsModeled(new TextDecoder().decode(bytes)));
   const ordinary = (message: string) => {
     if (lossy()) throw new DocxSectionError('unsupported', message);
@@ -565,6 +577,10 @@ async function sectionSavePlan(session: YrsSession, output: Document, capture: D
   return { plan: { onlySections, sha256: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''), edits: placed }, lossy: lossy(), strict: structural && !contiguous && edits.some(edit => edit.paragraph !== null) };
 }
 
+sectionSavePlanTestSeam.reference = {
+  plan: sectionSavePlan, metadata: sectionSaveMetadata, withoutSynthetic: withoutSyntheticParagraphs,
+};
+
 /**
  * Writes `document`, projected from `session` when `capture` was taken, and
  * records the Word paragraph IDs the bytes hold as saved. `patches` selects
@@ -617,7 +633,10 @@ export async function writeSessionSave(
     [...(capture.plan.splicedParts ?? []), ...(edits ? capture.plan.sectionSplicedParts ?? [] : [])].filter(({ part, sha256 }) =>
       (splices(part) && !rewritten(part)) || (edits && part === bodyPart && sha256 === edits.sha256)
     );
-  const sectionPlan = options.commentDeletion ? undefined : await sectionSavePlan(session, output, capture, sourceBuffer);
+  const sectionPlan = options.commentDeletion ? undefined : await (
+    sectionSavePlanTestSeam.hook?.check(session, output, capture, sourceBuffer)
+    ?? sectionSavePlan(session, output, capture, sourceBuffer)
+  );
   if (yieldSave) await yieldSave();
   engineProgress();
   const refuse = (message: string) => new DocxSectionError('unsupported', message);
