@@ -1621,6 +1621,142 @@ fn tables_after_a_typed_cell_shift_with_their_measurements_and_lay_out_as_a_full
     }
 }
 
+/// A short table, then a table with a repeated header row long enough to
+/// break over the next pages, then one-line paragraphs: the pages after the
+/// first start inside the long table, where no checkpoint is.
+fn split_table_engine(client_id: u64) -> (EngineSession, Vec<u8>) {
+    use super::lowering_fixture::{Package, para, run};
+    let cell = |id: String, text: &str| {
+        format!(
+            r#"<w:tc><w:tcPr><w:tcW w:w="2500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            para(&id, &run(text))
+        )
+    };
+    let table = |base: u32, rows: u32, header: bool| {
+        let rows: String = (0..rows)
+            .map(|row| {
+                let id = |column: u32| format!("{:08X}", base + row * 2 + column);
+                let properties = if header && row == 0 {
+                    "<w:trPr><w:tblHeader/></w:trPr>"
+                } else {
+                    ""
+                };
+                format!(
+                    "<w:tr>{properties}{}{}</w:tr>",
+                    cell(id(0), &format!("Row {row} left")),
+                    cell(id(1), &format!("Row {row} right"))
+                )
+            })
+            .collect();
+        format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2500"/><w:gridCol w:w="2500"/></w:tblGrid>{rows}</w:tbl>"#
+        )
+    };
+    let lines: String = (0..60)
+        .map(|index| {
+            para(
+                &format!("{:08X}", 0x3000 + index),
+                &run(&format!("Line {index}")),
+            )
+        })
+        .collect();
+    let body = format!(
+        "{}{}{}{}{lines}",
+        para("00000E01", &run("Before the tables")),
+        table(0x1000, 2, false),
+        para("00000E02", &run("Between the tables")),
+        table(0x2000, 150, true),
+    );
+    let bytes = Package::new(&body).bytes();
+    (seeded_engine(client_id, &bytes), bytes)
+}
+
+#[test]
+fn pages_a_split_table_carries_over_stay_retained_when_an_edit_above_leaves_them_as_they_were() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let client_id = 9815;
+    let (engine, bytes) = split_table_engine(client_id);
+    let request = lowering_pages::region_request(&engine, &bytes, font).to_string();
+    let mut host = CommandHost::open_with(&engine, request).seeded(client_id, bytes);
+    let pages_of = |engine: &EngineSession, table: usize| {
+        let pagination = engine.pagination.borrow();
+        let measured = &pagination.input.as_ref().unwrap().measured[table];
+        let id = measured.block.block_id().unwrap().clone();
+        pagination
+            .layout
+            .as_ref()
+            .unwrap()
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| {
+                page.fragments.iter().any(|fragment| {
+                    matches!(fragment, docx_layout::types::Fragment::Table(table) if table.block_id == id)
+                })
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
+    };
+    let short = measured_table_holding(&engine, "00001000");
+    let long = measured_table_holding(&engine, "00002000");
+    assert_eq!(
+        pages_of(&engine, short),
+        [0],
+        "the short table sits on the first page"
+    );
+    assert!(
+        pages_of(&engine, long).len() >= 3,
+        "the long table breaks over three pages: {:?}",
+        pages_of(&engine, long)
+    );
+    let at = |id: &str| {
+        let story = cell_holding(&engine, id);
+        let offset = engine
+            .doc()
+            .paragraph_index(&story)
+            .unwrap()
+            .para_span(id)
+            .unwrap()
+            .0
+            + 2;
+        (story, offset)
+    };
+    let (short_cell, short_at) = at("00001000");
+    for (key, text) in [Some("x"), Some("한"), None].into_iter().enumerate() {
+        let (start, end) = match text {
+            Some(_) => (short_at + key as u32, short_at + key as u32),
+            None => (short_at + 1, short_at + 2),
+        };
+        let work = keystroke_work(&engine, || {
+            assert!(host.command(&short_cell, start, end, text), "key {key}");
+        });
+        assert_eq!(
+            (work.paginated_pages, work.rebuilt_display_pages),
+            (1, 1),
+            "key {key}: only the edited table's page is placed afresh and rebuilt, {work:?}"
+        );
+        host.assert_matches_cold(&format!("short table, key {key}"));
+    }
+    // Edits that change what the later pages show still rebuild them.
+    let wide = " that runs long enough to wrap its narrow cell over several lines";
+    assert!(host.command(&short_cell, short_at, short_at, Some(wide)));
+    host.assert_matches_cold("a short table row grows");
+    let (header, header_at) = at("00002000");
+    assert!(host.command(&header, header_at, header_at, Some("h")));
+    host.assert_matches_cold("the repeated header row");
+    let (carried, carried_at) = at(&format!("{:08X}", 0x2000 + 120 * 2));
+    assert!(host.command(&carried, carried_at, carried_at, Some("c")));
+    host.assert_matches_cold("a row the long table carries over");
+    let before = paragraph_start(&engine, "00000E01") + 2;
+    assert!(host.command("body", before, before, Some("b")));
+    host.assert_matches_cold("the body before the tables");
+    let (short_cell, short_at) = at("00001003");
+    assert!(host.command(&short_cell, short_at, short_at, Some("y")));
+    host.assert_matches_cold("the short table after the others");
+}
+
 #[test]
 fn page_text_headings_are_reused_until_the_body_changes() {
     let fonts = docx_layout::MeasureFonts::default();
