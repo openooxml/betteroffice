@@ -1,4 +1,4 @@
-use super::{NamespaceScopes, PatchContext, patch_paragraph_v1};
+use super::{NamespaceScopes, ParagraphPatchSource, PatchContext, patch_paragraph_v1};
 use crate::paragraph_patch::{
     AttrDeltaV1, Attrs, DonorV1, InheritanceV1, InsertedTextV1, ParagraphPatchV1, PatchErrorCode,
     RunEditV1, SeedV1, SlotV1, TextEditV1, UnitV1, result_sha256, unit_sha256,
@@ -66,6 +66,84 @@ fn write(
     plan: &ParagraphPatchV1,
 ) -> Result<String, crate::paragraph_patch::ParagraphPatchError> {
     patch_paragraph_v1(source, plan, &PatchContext::word_document())
+}
+
+fn word_replacement_plans() -> (ParagraphPatchV1, ParagraphPatchV1) {
+    let mut base = patch(
+        vec![text("aKEEPz", json!({}))],
+        vec![text("bKEEPy", json!({}))],
+    );
+    let mut recorded = base.clone();
+    replace(&mut base, 0, 1, "b", json!({}));
+    replace(&mut base, 5, 6, "y", json!({}));
+    replace(&mut recorded, 0, 6, "bKEEPy", json!({}));
+    (base, recorded)
+}
+
+#[test]
+fn base_preserving_more_runs_refuses_different_smart_tag_ancestry() {
+    let source = concat!(
+        r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+        r#"<w:smartTag w:uri="urn:test" w:element="name"><w:r><w:t>a</w:t></w:r></w:smartTag>"#,
+        "<w:r><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r></w:p>"
+    );
+    let (base, recorded) = word_replacement_plans();
+    let base_xml = write(source, &base).unwrap();
+    let recorded_xml = write(source, &recorded).unwrap();
+    assert!(base_xml.contains("<w:t>b</w:t></w:r></w:smartTag>"));
+    assert!(recorded_xml.contains("<w:t>bKEEPy</w:t></w:r></w:smartTag>"));
+    let source = ParagraphPatchSource::new(source.to_owned());
+    assert!(
+        source
+            .base_preserving_more_runs(0, &base, &recorded)
+            .is_none()
+    );
+}
+
+fn assert_word_replacement_keeps_recorded(body: &str) {
+    let (base, recorded) = word_replacement_plans();
+    let word = super::lower::WORD;
+    let source = ParagraphPatchSource::new(format!(
+        r#"<w:p xmlns:w="{word}" xmlns:x="urn:test">{body}</w:p>"#
+    ));
+    let base_xml = write(source.as_str(), &base).unwrap();
+    let recorded_xml = write(source.as_str(), &recorded).unwrap();
+    assert!(base_xml.contains("<w:t>KEEP</w:t>"));
+    assert!(!recorded_xml.contains("<w:t>KEEP</w:t>"));
+    assert!(
+        source
+            .base_preserving_more_runs(0, &base, &recorded)
+            .is_none()
+    );
+}
+
+#[test]
+fn base_preserving_more_runs_refuses_proof_errors() {
+    assert_word_replacement_keeps_recorded(concat!(
+        "<w:r><w:t>a</w:t></w:r>",
+        r#"<w:proofErr w:type="spellStart"/><w:r><w:t>KEEP</w:t></w:r>"#,
+        r#"<w:proofErr w:type="spellEnd"/><w:r><w:t>z</w:t></w:r>"#
+    ));
+}
+
+#[test]
+fn base_preserving_more_runs_refuses_extension_run_attributes() {
+    assert_word_replacement_keeps_recorded(concat!(
+        "<w:r><w:t>a</w:t></w:r><w:r><w:t>KEEP</w:t></w:r>",
+        r#"<w:r x:rsidR="second"><w:t>z</w:t></w:r>"#
+    ));
+}
+
+#[test]
+fn base_preserving_more_runs_refuses_adjacent_smart_tags_with_properties() {
+    assert_word_replacement_keeps_recorded(concat!(
+        r#"<w:smartTag w:uri="urn:test" w:element="name">"#,
+        r#"<w:smartTagPr><w:attr w:name="k" w:val="first"/></w:smartTagPr>"#,
+        "<w:r><w:t>a</w:t></w:r><w:r><w:t>KEEP</w:t></w:r><w:r><w:t>z</w:t></w:r></w:smartTag>",
+        r#"<w:smartTag w:uri="urn:test" w:element="name">"#,
+        r#"<w:smartTagPr><w:attr w:name="k" w:val="second"/></w:smartTagPr>"#,
+        "<w:r><w:t/></w:r></w:smartTag>"
+    ));
 }
 
 fn marker_properties(start: u32, end: u32) -> Attrs {
@@ -1885,6 +1963,7 @@ fn model_run(text: &str) -> String {
         formatting: None,
         property_changes: None,
         content,
+        direction_scopes: Vec::new(),
     };
     let mut context =
         crate::serializer::SerializerContext::new(&crate::serializer::s10::SerializerDeterminism {

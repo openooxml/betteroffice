@@ -1,5 +1,383 @@
 # @betteroffice/docx-react
 
+## 0.6.1
+
+### Patch Changes
+
+- @betteroffice/docx@0.6.1
+- @betteroffice/docx-i18n@0.6.1
+
+## 0.6.0
+
+### Minor Changes
+
+- 3773773: Attached agent proposals use the shared engine; standalone behavior is unchanged. Adds opt-in DOCX `editPeer`, `proposeAsync`, `rejectAsync`, `discardAsync`, `keepRevisions`, `replaceText.at`, typed `TrackedRevisionConflictError`, `AcceptDateUnsupportedError` and `ProposalDecidedInEditorError`, and XLSX `getProposalStatus`, `onProposalChange` and `isProposalStale`.
+- cc2dc6c: Drawing atoms and structured image/unsupported inlines expose `drawing` (`wp:docPr` properties, placement and type) by default. Plugins request drawing frame rects via the `drawing` target. Previously seeded sessions lack `drawing` until reseeded. Set new `TextAtom`, image/unsupported `InlineKind` and `DocxExportInline`, `RunContent::Drawing`, `RunContent::Shape`, `RunContent::Chart`, `RunContent::OpaqueDrawing` and `ChartA11yAttrs` fields.
+- 02bd5be: DOCX uses installed font packs by default for characters they cover. Uncovered scripts and unavailable CJK families retain browser and Google Fonts fallbacks unless disabled; configured fonts and document embeds still take precedence.
+- ba48e63: `DocxEditor` gains `shortcuts` and `onShortcutIssue`: hosts can remap or disable keyboard shortcuts in worker and non-worker modes, and menus, tooltips and the shortcuts dialog show the result.
+- e639401: `docxMiniToolbar()` from the new `@betteroffice/docx-react/mini-toolbar` subpath is an opt-in plugin: a floating toolbar above selected text with bold, italic, underline, strikethrough, clear formatting and paste as plain text, or the items a host lists.
+- 4cb2369: Text pasted from Word or a browser keeps its formatting in the worker editor: bold, italic, underline, strikethrough, font, size, colour, highlight and links. Paste Options then offer keeping that formatting, merging it with the surrounding text, or keeping text only.
+- 5edcbc3: Paste Options: after pasting formatted content copied in the editor, or a table, a small menu offers keeping the source formatting, merging it with the surrounding text, or keeping text only. Set `pasteOptions={false}` to turn it off.
+- fdb3aa8: Plugins can read `snapshot.inputFocused` and return focus to the document with `context.focusDocument()`, which keeps the selection. Both members are required, so hand-built snapshots and contexts (e.g. test doubles), including snapshots passed to the selection placement helpers, must add them.
+- 3f67d2e: Adds `placeFloating`, which places a box above or below an anchor inside the viewport, and `useDocxSelectionPlacement` / `createDocxSelectionPlacement`, which place a plugin's box by the current selection and keep it through a relayout of the same selection.
+- 87f79c9: `DocxEditor` gains `onReady(api)`: on the worker editor it is called once per document after its first page has painted, on a later turn, with the api the ref exposes, and never after the editor has unmounted or the file has changed.
+- 8b78827: The worker-only editor now gives pages it has not built yet a plain text mirror, so screen readers and find in page reach the whole document. New `unbuiltPageMirror` option: `'text'` (default) or `'off'`.
+- 269d242: Adds `snapshot.focused`, `snapshot.locale`, `focus-change`, and `locale-change` for installed plugins by default. DOCX and PPTX also expose `geometry.viewport` and `viewport-change`; the experimental event unions gain variants affecting exhaustive switches.
+- 86b9ec4: Granted mutating built-ins now run from a trusted gesture in the plugin's own UI until that event's dispatch and queued microtasks finish; other plugins and later calls refuse with `unsupported-policy`. Plugin panels, overlays and sidebar cards sit in a `display: contents` wrapper.
+- 5945e66: Plugins gain experimental `selection-settle` events, `snapshot.selectionSettled` and `{ kind: 'selection' }` anchor geometry. DOCX plugins receive header and footer caret moves. Remote edits removing the caret's story clear selection. Supply `selectionSettled` in DOCX and XLSX snapshot providers and implement XLSX's new `readAnchorGeometries` in geometry providers.
+- e4b365a: `resolveDocxShortcuts`, `resolveXlsxShortcuts` and `resolvePptxShortcuts` load from each package's `./shortcuts` subpath, keeping them out of the editor bundle. They were never released from the package root, so nothing breaks.
+
+### Patch Changes
+
+- 79b93d3: The caret takes the colour of the text under it and stays visible on dark shading or highlights. The DOCX worker caret and the XLSX cell editor no longer pick up the host page's text colour.
+- fb7f6da: Suggesting mode now tracks character formatting and hyperlink edits through optional `suggesting` authors on `toggleMark`, `formatRange`, `clearFormatting` and `setHyperlink`. Character formatting over fields or inline content controls is refused with `SuggestedFormattingOverContainerError`; commands return `unsupported-suggesting`. Rust matches must handle `OpError::SuggestedFormattingOverContainer`, and `RunFormatting` literals must set `format_change`.
+- b7fa550: Adds Clear formatting shortcuts by default: Ctrl+Space on Windows and Linux, and ⌘\ on macOS, with translated shortcut help in every locale. Shortcut bindings can now be restricted to a platform through the optional `platform` field.
+- 14495c1: Keeps comment cards visible and steady while typing as their anchor positions update.
+- 359b7f2: The text context menu closes when you click anywhere outside it, including inside the page in worker mode.
+- 7a43677: The text and image context menus and the link popup close on a click outside them even when it comes right after they open.
+- 0372f1d: Reads now include `drawings` on inline content-control atoms by default, including text boxes and revision views. Drawing geometry targets accept an optional `index` to address a drawing inside a control, including footer controls. Rust `TextAtom` literals must set `drawings`.
+- dc75d14: Copying, cutting and pasting text inside the docx editor keeps its character formatting and links, also into table cells and between documents, where formatting pastes as direct formatting. Rich text targets get the formatting too.
+- 6887ab6: A cut (Ctrl+X or Shift+Delete) whose selection holds objects the clipboard cannot carry, such as notes, shapes, charts, equations, content controls or page and column breaks, is now refused with a notice and a recoverable `onError` report instead of deleting them. `DocxClipboardSlice` gains `leftOut`.
+- 16b9fe4: Drag selection does less work per step: the worker keeps parsed pages between steps and answers a step with one message. `createDisplayListQueries` takes an optional `storePages` cap on parsed pages.
+- 19ea3e2: Under React Strict Mode, the worker editor's search, commands, layout-complete waits and change listeners stopped working after the development remount; they now keep working.
+- 8685244: The Find and Replace dialog takes the focus as it opens and selects the text it starts with, and the Replace field takes the focus as its row appears. Text typed right after opening goes into the dialog.
+- 1608bd7: The in-thread editor no longer jumps back to the top of the document when you start scrolling while it is still opening.
+- cc7f362: Opening a Word document no longer downloads the save engine up front. The editor prepares saving as soon as you edit or reach for Save, so the first save stays fast and read-only opens download less.
+- fc50a58: Unless hidden text is shown, DOCX rows marked `w:trPr/w:hidden` with entirely hidden content occupy no height and paint neither borders nor shading. Marked rows with visible content render. Fully hidden tables take no space. Cells retain document row numbers. Initialize new `TableRow` and `TableRowFormatting` fields.
+- 25ed84c: Word documents stay more responsive during typing and scrolling. Hit-test preparation waits for scrolling to pause and, while the editor is focused, for two seconds without document changes; larger pages wait for more idle time.
+- b64dd94: A scroll position the host restores while a document opens is kept: the editor's default caret at the start of the document no longer scrolls the view back to the top.
+- 0ca9421: Text being composed with an input method (Korean, Japanese, Chinese) now shows at the caret, or at the start of the selected text it replaces, in the worker editor while it is composed, instead of appearing only after the composition commits.
+- 09241d2: The Layout menu's Size list no longer repeats the inch dimensions of Japanese paper size names next to the sizes in the ruler unit.
+- afffd29: Adds a Layout menu by default with margin presets, orientation, paper sizes, and indentation controls in both DOCX editors. Preset dimensions follow `rulerUnit`, and labels are translated in every locale.
+- 743afd6: Editing a link from its popup no longer pulls the caret back to the text field a frame after the form opens, which could put a typed address into the link's text.
+- 791e12f: DOCX link popups now use the whole hyperlink text when it spans multiple painted runs, rather than just the clicked fragment.
+- 09b46fc: Bullets and Numbering create a list of their kind or join the one directly above or below, put a selection on one list, and lay it out as saved. The engine gains `ensure_list_definition_after` and `paragraph_style_numbers`; `ensure_list_definition` also returns `listLevelIndents`; an engine without `ensureListDefinition` refuses `toggleList`.
+- 57fa9d7: Screen reader page mirrors read a visible list bullet as a localised word, never its stored character. `DocAttrs` gains `listMarkerBullet` and `MirrorLabels` gains `bullet`; without either, a bullet stays hidden. Rust `DocAttrs` literals must set `list_marker_bullet`.
+- 736fcba: Screen reader page mirrors read a picture without alternative text as "Picture", and no longer expose a shape without a name as an unnamed image. A shape's text still reads.
+- 533fb57: The native DOCX engine now enforces the worker heap limit: a call past it fails with the same out-of-memory error as wasm, and its object refuses later calls. A limit turns heap counting on; without a limit or `startHeapCounting()`, counting costs nothing.
+- 590615b: The native DOCX engine can report its editing heap per thread. Counting is off by default; `startHeapCounting()` from `@betteroffice/docx/yrs` turns it on. Pressure events on native need a host memory budget.
+- 8e6d70f: Navigating to a paragraph (from a plugin or the API) after an edit now stays at the paragraph, instead of jumping back to the caret when the editor paints the next frames.
+- 6b60afa: The caret in the canvas editor takes the colour of the text under it, so it stays visible on dark cell shading, dark highlights and in dark mode.
+- 60f7a7d: The Column width, Resize image and Move image dialogs show styled, spaced Cancel and Apply buttons and bordered fields, matching the editor's other dialogs.
+- 2a2f92b: The error page for a document that cannot open now says whether the file looks damaged or uses something the editor can't read yet, when the engine's message tells them apart.
+- 9e291d0: Worker-editor pages outside the viewport now skip rendering work while scrolling, so large documents scroll with fewer dropped frames; layout, accessibility and find are unchanged.
+- 4b9ca33: Fixes the page indicator flashing when resizing the editor or rotating a phone.
+- 45954df: Worker-editor pages now sit on whole device pixels and match their canvas size exactly, so page text is shown 1:1 instead of slightly resampled at 100% zoom on every display scale.
+- 8d05835: The Page Setup dialog shows and accepts margins in centimeters when `rulerUnit` is `'cm'`, in both editors.
+- 6708632: Adds the `paragraphSpacing` command and paragraph spacing controls in the line spacing menu for both editors. The menu and spacing dialog are available by default with translated labels.
+- e5533dd: Paste and paste as plain text pressed right after typing now paste: the command waits for the typed text to land instead of refusing because the document changed under it.
+- fc2d6cf: Pasting text with more than 300 formatted runs no longer stalls the editor: such a paste inserts its text without run formatting, as earlier releases did, and offers no Paste Options.
+- 5c56e62: Preserves paste formatting choices and later edits when the DOCX editor recovers. If recovery fails, the editor explains that the file itself is undamaged.
+- 7187534: A Paste Options choice made right after a paste, or right after another choice, is now applied. Before, the editor could drop the choice and hide the control while it was still loading a font for the pasted text.
+- 847685b: Pasting preformatted text with a very large number of lines from another application stops reading lines at the paste's paragraph limit instead of splitting the whole text first.
+- 2bfee58: Escape pressed right after clicking a picture now leaves the picture, instead of being lost while the selection was still landing.
+- 9f6d4cc: In the in-thread editor, a plugin's selection display range no longer drops to null when the layout is replaced under an unchanged selection; it keeps its previous range until the new layout maps it, then one `selection-change` follows.
+- c2f553d: The caret now moves with prepainted text while you type, at its real height, and settles when layout arrives. Moving or blinking the caret no longer causes a page layout.
+- d60b8e4: The worker editor opens bundled CJK faces from their skeleton and core and fetches outline chunks for the glyphs each page draws before painting it, so a first CJK frame downloads a fraction of the face; print waits for pending outlines.
+- 48c6d3c: Opening a Word document downloads about 4 MB less by using a smaller module for caret and selection queries.
+- 9588b74: The text context menu takes keyboard focus: arrow keys, Home/End and typeahead move between items, and Escape or choosing an item returns focus to the document.
+- 85df306: The editor no longer writes a debug message to the browser console each time it scrolls the caret into view.
+- ea3a8a7: Shift+Delete pressed right after typing, before the typed text has settled, now deletes the next character when nothing is selected, as it did before, instead of doing nothing.
+- 5db0183: When the worker editor refuses a formatted paste, it now shows a notice instead of dropping the paste without a word.
+- c48265f: A plugin asking for a reservation it no longer has now gets `missing-target` right away, instead of `layout-unavailable` until the editor relays out.
+- 4182d03: Keeps a plugin's reserved boxes available while another plugin's reservations change or that plugin is removed, instead of every plugin's anchors disappearing until the editor relays out.
+- 7a9c8de: A tracked-change balloon in dots review now appears where it belongs, instead of first showing one frame offset by the previous balloon's width.
+- c8db6a8: Review cards in the sidebar no longer re-render while a document with tracked changes or comments scrolls, unless the card's own data or position changed.
+- 13c71f9: Scrolling to a comment or tracked change in worker mode no longer reports failure when a font or render update lands in the same frame and leaves the selection where navigation put it.
+- 11ce6ac: Ruler margin and indent markers show a tooltip with their name and value in `rulerUnit` while hovered, focused or dragged, and tab stop titles follow `rulerUnit`.
+- ebd5027: The `sectionProperties` read takes an optional `paragraphs` list that limits the tab stops it returns to those paragraphs. The ruler uses it, so typing in long documents no longer waits for every paragraph to be re-read after each keystroke.
+- 4bfed8a: Scrolling a document no longer repositions the hidden text input on every scroll step; the input now moves with the page content, which lowers main-thread layout work while scrolling.
+- b3aac16: Scrolling a document no longer re-renders the toolbar and editor shell for every painted frame, which lowers main-thread work while scrolling. The page indicator also stays visible while frames arrive during a scroll.
+- d0fb8c1: Table column borders and the table's right edge can be dragged to resize columns again in the default worker editor. Handles follow the borders at any zoom, and a drag is one undo step.
+- 3056f24: Table row borders can be dragged to set a row's height in both docx editors. The height saves as an at-least `w:trHeight`, and a drag is one undo step. Adds `set_row_height` to the engine.
+- 6d8fb19: A table that crossing undos left unlayoutable is now skipped instead of breaking layout; table commands and saves refuse with a coded error until redo restores it or it is deleted. Both engines add `unavailable_tables_from`. Exhaustive matches must handle `OpError::TableUnavailable`.
+- 689a679: DOCX toolbar icon buttons no longer inherit the browser's default `2px outset` border or ButtonFace fill in hosts that do not load Tailwind preflight. Explicit `border` and `bg-*` utilities still win.
+- 0f9f39e: In DOCX, the mark after a tracked inserted or deleted paragraph is drawn from the document's own default-family face when the document uses it and that face is loaded whole, and by the browser otherwise.
+- 6091ab3: The editor now loads the fallback font for Chinese, Japanese, Korean, Arabic or Hebrew text typed or pasted into a document that had none, instead of drawing empty boxes until the document is reopened.
+- c1509ed: Focus or a selection handed from a not yet built page now lands on the same paragraph in the page's full accessibility mirror once the page is built, and a page mirror rebuilt after an edit keeps focus and a selection that were inside it.
+- 904e7f0: The clipboardSlice document read gains an optional cells range; omitting it keeps the old behaviour. In the worker editor, copy now completes with the selection it was pressed on, even when the selection changes right after.
+- c993007: Dragging to select text no longer reads the document from the worker on every pointer move.
+- 1d5efb7: The editors keep a left-to-right layout on right-to-left host pages, so the spreadsheet grid paints and menus stay on screen in Arabic or Hebrew apps.
+- 21a60e5: The DOCX editor keeps one copy of each bundled font instead of several, which lowers memory while opening and editing documents, most for CJK documents.
+- 2919067: The deprecation warning for `legacySyncApi` and the `@deprecated` comments that named 0.6.0 as the release removing the synchronous editor API now name 0.7.0. 0.6.0 still ships it.
+- 23825ed: Screen-reader links in DOCX only expose safe targets, whatever their source. Following one from the keyboard or a screen reader opens it in a new tab without an opener, and an internal link moves the caret to its bookmark.
+- cc65f8e: READMEs state API compatibility as a versioning policy: releases are versioned with Changesets, the API can change between minor versions with every change in the changelog, and deprecations are announced before removal. The Python packages drop the development status classifier.
+- ce6d66a: On XLSX and PPTX, focusing an input inside a plugin overlay now reports `focused` false, as DOCX does. On every engine, replacing the editor surface while it has focus reports `focused` false, and an editor opened in an unfocused window starts unfocused.
+- c1d5485: Context menus, table tools, the shortcut dialog, rulers, error screens, presence chips and other labels that were always English now follow the editor locale, and numbers, units and times in them use its formatting.
+- ad45f86: Editors decode packed fonts with their engine by default instead of downloading a separate decoder. Standalone font providers can opt into a decoder with `runtime.decoder`.
+- 3af54c4: A menu opened while its list is still loading always appears once the list arrives, and keys pressed meanwhile no longer reach the document behind it; Escape and Tab still dismiss it.
+- 8c70d22: Toolbar overflow and context menus now load their menu list separately and preload it when the browser is idle, so the editors' initial download is smaller. A menu that cannot load stays closed and retries.
+- e6d5c52: Package exports now carry a `default` condition next to `import`, so webpack consumers (`next build --webpack`, including editors loaded with `next/dynamic`) resolve every entry instead of failing with "Package path is not exported".
+- Updated dependencies [21d4394]
+- Updated dependencies [5421e9e]
+- Updated dependencies [5ec048d]
+- Updated dependencies [1f2c008]
+- Updated dependencies [1282f77]
+- Updated dependencies [1d8ac98]
+- Updated dependencies [3773773]
+- Updated dependencies [01681e5]
+- Updated dependencies [f99e53a]
+- Updated dependencies [8875bfa]
+- Updated dependencies [9e9309a]
+- Updated dependencies [b2ccc11]
+- Updated dependencies [9590d1e]
+- Updated dependencies [232fe11]
+- Updated dependencies [27130ef]
+- Updated dependencies [c3d6f21]
+- Updated dependencies [42fd2b6]
+- Updated dependencies [c0ae1af]
+- Updated dependencies [f831537]
+- Updated dependencies [f9c8379]
+- Updated dependencies [e1a414e]
+- Updated dependencies [1a82d79]
+- Updated dependencies [32371d3]
+- Updated dependencies [a67d95a]
+- Updated dependencies [c2b9ac7]
+- Updated dependencies [675b859]
+- Updated dependencies [062502a]
+- Updated dependencies [fb7f6da]
+- Updated dependencies [455254f]
+- Updated dependencies [a13d67a]
+- Updated dependencies [b7fa550]
+- Updated dependencies [fedbb82]
+- Updated dependencies [4592a3a]
+- Updated dependencies [4a2cab2]
+- Updated dependencies [69824f2]
+- Updated dependencies [8ee77cd]
+- Updated dependencies [802a67c]
+- Updated dependencies [0372f1d]
+- Updated dependencies [dc75d14]
+- Updated dependencies [54a0219]
+- Updated dependencies [7db6627]
+- Updated dependencies [6887ab6]
+- Updated dependencies [ccb79e9]
+- Updated dependencies [16b9fe4]
+- Updated dependencies [cc2dc6c]
+- Updated dependencies [05e884f]
+- Updated dependencies [78f28c5]
+- Updated dependencies [cd6e71d]
+- Updated dependencies [db2e1a9]
+- Updated dependencies [46c17cb]
+- Updated dependencies [c13d981]
+- Updated dependencies [33fcb87]
+- Updated dependencies [f6946f9]
+- Updated dependencies [0226ab8]
+- Updated dependencies [a9b74ab]
+- Updated dependencies [363ceb2]
+- Updated dependencies [cc7f362]
+- Updated dependencies [3609ce4]
+- Updated dependencies [0a4285c]
+- Updated dependencies [02bd5be]
+- Updated dependencies [c3c5294]
+- Updated dependencies [c2281b5]
+- Updated dependencies [2a1d763]
+- Updated dependencies [fa2717d]
+- Updated dependencies [53fa897]
+- Updated dependencies [6a5dded]
+- Updated dependencies [8e4260c]
+- Updated dependencies [fc50a58]
+- Updated dependencies [ba48e63]
+- Updated dependencies [80fbccd]
+- Updated dependencies [51390c5]
+- Updated dependencies [869c704]
+- Updated dependencies [b756b5f]
+- Updated dependencies [e3b2ddb]
+- Updated dependencies [b17eab1]
+- Updated dependencies [773c633]
+- Updated dependencies [8efeef9]
+- Updated dependencies [cf6e362]
+- Updated dependencies [51a1bbf]
+- Updated dependencies [30134ef]
+- Updated dependencies [bf8880c]
+- Updated dependencies [f777004]
+- Updated dependencies [f31b62e]
+- Updated dependencies [f88d5cd]
+- Updated dependencies [ccb79e9]
+- Updated dependencies [002ac93]
+- Updated dependencies [afffd29]
+- Updated dependencies [09b46fc]
+- Updated dependencies [5ea8ee1]
+- Updated dependencies [3789492]
+- Updated dependencies [afcb67e]
+- Updated dependencies [10fbc38]
+- Updated dependencies [fa27c3c]
+- Updated dependencies [45aceb4]
+- Updated dependencies [e639401]
+- Updated dependencies [57fa9d7]
+- Updated dependencies [464d5c6]
+- Updated dependencies [2aa581d]
+- Updated dependencies [59d467a]
+- Updated dependencies [b0072d1]
+- Updated dependencies [b1a4b01]
+- Updated dependencies [140c8fa]
+- Updated dependencies [736fcba]
+- Updated dependencies [a09a352]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [5999962]
+- Updated dependencies [29dc450]
+- Updated dependencies [57f4975]
+- Updated dependencies [533fb57]
+- Updated dependencies [590615b]
+- Updated dependencies [56c2c6c]
+- Updated dependencies [f44c229]
+- Updated dependencies [ce686a8]
+- Updated dependencies [b312d8c]
+- Updated dependencies [58f213a]
+- Updated dependencies [3936cdb]
+- Updated dependencies [129e1eb]
+- Updated dependencies [2a2f92b]
+- Updated dependencies [fa08d5d]
+- Updated dependencies [3a0020d]
+- Updated dependencies [4dc30ef]
+- Updated dependencies [01ce3ff]
+- Updated dependencies [61f3ae2]
+- Updated dependencies [5a6445d]
+- Updated dependencies [45954df]
+- Updated dependencies [c0e297a]
+- Updated dependencies [ed0a3ce]
+- Updated dependencies [0cc6839]
+- Updated dependencies [6708632]
+- Updated dependencies [f0c1835]
+- Updated dependencies [a159be8]
+- Updated dependencies [f32900e]
+- Updated dependencies [4cb2369]
+- Updated dependencies [fc2d6cf]
+- Updated dependencies [5c56e62]
+- Updated dependencies [5edcbc3]
+- Updated dependencies [934104f]
+- Updated dependencies [22fc562]
+- Updated dependencies [7796969]
+- Updated dependencies [101fbe9]
+- Updated dependencies [a9897ef]
+- Updated dependencies [62605af]
+- Updated dependencies [914dabc]
+- Updated dependencies [4761a87]
+- Updated dependencies [c2f553d]
+- Updated dependencies [f78484e]
+- Updated dependencies [d60b8e4]
+- Updated dependencies [48c6d3c]
+- Updated dependencies [27cfa5d]
+- Updated dependencies [857b6ea]
+- Updated dependencies [6b80d49]
+- Updated dependencies [c98f495]
+- Updated dependencies [7ad595e]
+- Updated dependencies [e20cdb3]
+- Updated dependencies [17c7d6e]
+- Updated dependencies [4b0842b]
+- Updated dependencies [f30d46e]
+- Updated dependencies [bb1207f]
+- Updated dependencies [875e0d6]
+- Updated dependencies [11ce6ac]
+- Updated dependencies [ebd5027]
+- Updated dependencies [5e26101]
+- Updated dependencies [94093ba]
+- Updated dependencies [9ab2b61]
+- Updated dependencies [524652d]
+- Updated dependencies [5b6aed8]
+- Updated dependencies [55ef1d4]
+- Updated dependencies [1a76823]
+- Updated dependencies [cfdeb9e]
+- Updated dependencies [7599ffb]
+- Updated dependencies [365b54f]
+- Updated dependencies [60aeefa]
+- Updated dependencies [fc50302]
+- Updated dependencies [c3a8e27]
+- Updated dependencies [734d754]
+- Updated dependencies [cda31aa]
+- Updated dependencies [c8e95a2]
+- Updated dependencies [0499bb2]
+- Updated dependencies [bb08976]
+- Updated dependencies [8c6a8a7]
+- Updated dependencies [a711586]
+- Updated dependencies [84b271b]
+- Updated dependencies [8b8cee7]
+- Updated dependencies [2a45e05]
+- Updated dependencies [6f65928]
+- Updated dependencies [c08727c]
+- Updated dependencies [3789492]
+- Updated dependencies [670abd0]
+- Updated dependencies [946f6f5]
+- Updated dependencies [308f7b3]
+- Updated dependencies [3789492]
+- Updated dependencies [3789492]
+- Updated dependencies [657aaea]
+- Updated dependencies [35a4fc2]
+- Updated dependencies [ec58a7d]
+- Updated dependencies [514e876]
+- Updated dependencies [67388a5]
+- Updated dependencies [bbac3e7]
+- Updated dependencies [ceb5208]
+- Updated dependencies [ae6e7e1]
+- Updated dependencies [d0fb8c1]
+- Updated dependencies [e2acb8e]
+- Updated dependencies [3056f24]
+- Updated dependencies [298152c]
+- Updated dependencies [6d8fb19]
+- Updated dependencies [c74b2b8]
+- Updated dependencies [c2e450c]
+- Updated dependencies [c87ef90]
+- Updated dependencies [0bee43d]
+- Updated dependencies [7774f6c]
+- Updated dependencies [59914af]
+- Updated dependencies [689a679]
+- Updated dependencies [dd8824c]
+- Updated dependencies [6f381d7]
+- Updated dependencies [d55af86]
+- Updated dependencies [0f9f39e]
+- Updated dependencies [6091ab3]
+- Updated dependencies [675b859]
+- Updated dependencies [16316e4]
+- Updated dependencies [c1509ed]
+- Updated dependencies [8b78827]
+- Updated dependencies [d1fff89]
+- Updated dependencies [f8c262a]
+- Updated dependencies [dab515e]
+- Updated dependencies [f428dee]
+- Updated dependencies [c0fc51b]
+- Updated dependencies [981a867]
+- Updated dependencies [5c79fa5]
+- Updated dependencies [51969ae]
+- Updated dependencies [904e7f0]
+- Updated dependencies [0c57a22]
+- Updated dependencies [fe023f2]
+- Updated dependencies [ad45f86]
+- Updated dependencies [b8395eb]
+- Updated dependencies [f52a44a]
+- Updated dependencies [53502c6]
+- Updated dependencies [58a8ca6]
+- Updated dependencies [21a60e5]
+- Updated dependencies [4fb3025]
+- Updated dependencies [7b30d80]
+- Updated dependencies [37199d9]
+- Updated dependencies [23825ed]
+- Updated dependencies [eb5c453]
+- Updated dependencies [681b02e]
+- Updated dependencies [6378188]
+- Updated dependencies [842d624]
+- Updated dependencies [d56440d]
+- Updated dependencies [86b9ec4]
+- Updated dependencies [5945e66]
+- Updated dependencies [351f13c]
+- Updated dependencies [98beb7f]
+- Updated dependencies [f1e7906]
+- Updated dependencies [c14aa20]
+- Updated dependencies [486e205]
+- Updated dependencies [54d400a]
+- Updated dependencies [d1166bc]
+- Updated dependencies [7cf70f8]
+- Updated dependencies [55c25ba]
+- Updated dependencies [5013cfc]
+- Updated dependencies [fd25d97]
+- Updated dependencies [974d3ab]
+- Updated dependencies [1175683]
+- Updated dependencies [6478dec]
+- Updated dependencies [e6d5c52]
+- Updated dependencies [763916f]
+- Updated dependencies [f2df1e8]
+- Updated dependencies [6d79fc5]
+  - @betteroffice/docx@0.6.0
+  - @betteroffice/docx-i18n@0.6.0
+
 ## 0.5.1
 
 ### Patch Changes

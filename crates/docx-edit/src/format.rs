@@ -17,7 +17,12 @@ pub const HYPERLINK: &str = "hyperlink";
 /// Attributes protected from formatting sweeps.
 pub(crate) const RPR_CHANGE: &str = "rPrChange";
 
-pub(crate) const PROTECTED_ATTRS: [&str; 4] = [INS, DEL, HYPERLINK, RPR_CHANGE];
+/// The `w:dir` and `w:bdo` elements around a run, outermost first, as the parsed run holds them.
+pub(crate) const DIRECTION_SCOPES: &str = "directionScopes";
+
+pub(crate) const PROTECTED_ATTRS: [&str; 5] = [INS, DEL, HYPERLINK, RPR_CHANGE, DIRECTION_SCOPES];
+
+const STRUCTURAL_ATTRS: [&str; 1] = ["fieldResult"];
 
 /// Word's closed highlight palette keyed by exact uppercase hex.
 const HIGHLIGHT_HEX_TO_NAME: [(&str, &str); 16] = [
@@ -796,7 +801,7 @@ pub(crate) fn is_active(attrs: Option<&Attrs>, key: &str) -> bool {
 /// a field, which it refuses.
 fn holds_suggestion_container<T: ReadTxn>(chunks: &[crate::ops::Chunk], txn: &T) -> bool {
     chunks.iter().any(|chunk| {
-        chunk.attrs.contains_key("fieldResult")
+        chunk.attr_active("fieldResult")
             || matches!(&chunk.kind, crate::ops::ChunkKind::Embed(Some(map))
                 if crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("sdt")
                     || (crate::map_string(map, txn, crate::KIND_KEY).as_deref() == Some("field")
@@ -1554,9 +1559,13 @@ impl EditingDoc {
             crate::ops::code_point_range(&story, &txn, range.start, range.end);
         let len = range.end - range.start;
         if ctx.is_suggesting() {
+            let chunks = crate::ops::snapshot_range(&story, &txn, range.start, range.end);
+            if holds_suggestion_container(&chunks, &txn) {
+                return Err(OpError::SuggestedFormattingOverContainer);
+            }
             let mut runs = Vec::new();
             let mut changed = false;
-            for chunk in crate::ops::snapshot_range(&story, &txn, range.start, range.end) {
+            for chunk in chunks {
                 let start = chunk.start.max(range.start);
                 let end = chunk.end().min(range.end);
                 if start >= end {
@@ -1564,7 +1573,7 @@ impl EditingDoc {
                 }
                 if [INS, DEL, RPR_CHANGE]
                     .iter()
-                    .any(|key| chunk.attrs.contains_key(*key))
+                    .any(|key| chunk.attr_active(key))
                 {
                     return Err(OpError::OverlapsTrackedChange);
                 }
@@ -1982,7 +1991,9 @@ impl EditingDoc {
 pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &Any) -> Attrs {
     let mut patch: Attrs = attrs
         .keys()
-        .filter(|key| !PROTECTED_ATTRS.contains(&key.as_str()))
+        .filter(|key| {
+            !PROTECTED_ATTRS.contains(&key.as_str()) && !STRUCTURAL_ATTRS.contains(&key.as_str())
+        })
         .map(|key| (Arc::from(key.as_str()), Any::Null))
         .collect();
     if let Any::Map(change) = change {
@@ -1997,7 +2008,8 @@ pub(crate) fn previous_run_properties(attrs: &BTreeMap<String, Any>, change: &An
                 .unwrap_or_default(),
         };
         for (key, value) in previous {
-            if !PROTECTED_ATTRS.contains(&key.as_str()) {
+            if !PROTECTED_ATTRS.contains(&key.as_str()) && !STRUCTURAL_ATTRS.contains(&key.as_str())
+            {
                 patch.insert(Arc::from(key), value);
             }
         }

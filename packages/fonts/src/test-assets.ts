@@ -1,3 +1,4 @@
+import * as Bun from 'bun';
 import latinManifest from '../../fonts-latin/assets/manifest.json';
 import cjkManifest from '../../fonts-cjk/assets/manifest.json';
 import baseLatinManifest from '../assets/base-latin.json';

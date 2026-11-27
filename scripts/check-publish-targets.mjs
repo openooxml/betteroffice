@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { publishedPackageVersions, workspaceEntries } from './published-packages.mjs';
 import { NATIVE_PACKAGES, platformPackageVersions } from './native-bindings.mjs';
+import { REQUEST_TIMEOUT_MS, attemptRegistry, backoffMs, fetchRegistry, sleep } from './registry-fetch.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const require = createRequire(import.meta.url);
@@ -20,70 +21,8 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org';
 const CRATES_REGISTRY = process.env.CRATES_REGISTRY_URL ?? 'https://crates.io/api/v1/crates';
 const CDN_BASE = process.env.CDN_BASE_URL ?? 'https://cdn.jsdelivr.net/npm';
+const FONT_PACKAGES = new Set(['@betteroffice/fonts-latin', '@betteroffice/fonts-intl', '@betteroffice/fonts-cjk']);
 const VERIFY_WAIT_MS = 10 * 60_000;
-// crates.io rejects a request without one.
-const USER_AGENT = 'betteroffice-release (https://github.com/openooxml/betteroffice)';
-const ATTEMPTS = 5;
-const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_TIMEOUT_MS ?? 15_000);
-// A registry may ask for an hour; a release gate waits a minute.
-const RETRY_AFTER_CAP_MS = 60_000;
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Half the backoff plus a random half, so parallel releases don't retry in lockstep. */
-function backoffMs(attempt) {
-  const base = 2 ** attempt * 500;
-  return base / 2 + Math.random() * (base / 2);
-}
-
-/** `Retry-After` in ms — seconds or an HTTP-date — or undefined if there is none. */
-function retryAfterMs(response) {
-  const header = response.headers.get('Retry-After');
-  if (!header) return undefined;
-  const seconds = Number(header);
-  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
-  if (!Number.isFinite(ms)) return undefined;
-  return Math.min(Math.max(ms, 0), RETRY_AFTER_CAP_MS);
-}
-
-/** The parsed body, `null` when the name is unclaimed, or a failure to weigh. */
-async function attemptRegistry(url, headers, timeoutMs, method = 'GET', readBody = method !== 'HEAD') {
-  const response = await fetch(url, {
-    method,
-    headers: { 'User-Agent': USER_AGENT, ...headers },
-    cache: 'no-store',
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  if (response.status === 404) return { body: null };
-  if (response.ok && readBody) return { body: await response.json() };
-  if (response.ok) {
-    response.body?.cancel().catch(() => {});
-    return { body: true };
-  }
-  const error = new Error(`${url} returned ${response.status}`);
-  const retry = response.status === 429 || response.status >= 500;
-  return { error, retry, wait: retry ? retryAfterMs(response) : undefined };
-}
-
-async function fetchRegistry(url, headers = {}, timeoutMs = REQUEST_TIMEOUT_MS, readBody = true) {
-  let lastError;
-  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
-    let result;
-    try {
-      result = await attemptRegistry(url, headers, timeoutMs, 'GET', readBody);
-    } catch (error) {
-      // A refused connection, a request past REQUEST_TIMEOUT_MS, or a body that stops mid-JSON.
-      result = { error, retry: true };
-    }
-    if (!result.error) return result.body;
-    if (!result.retry) throw result.error;
-    lastError = result.error;
-    if (attempt < ATTEMPTS - 1) await sleep(result.wait ?? backoffMs(attempt));
-  }
-  throw lastError;
-}
 
 /** Bodies by name; with `readBody` false, `true` for a name that exists and `null` for one that does not. */
 function npmPackages(registry, timeoutMs, readBody = true) {
@@ -92,9 +31,7 @@ function npmPackages(registry, timeoutMs, readBody = true) {
     if (!cache.has(name)) {
       cache.set(name, fetchRegistry(
         `${registry.replace(/\/+$/, '')}/${encodeURIComponent(name)}`,
-        { Accept: 'application/vnd.npm.install-v1+json' },
-        timeoutMs,
-        readBody
+        { headers: { Accept: 'application/vnd.npm.install-v1+json' }, timeoutMs, readBody }
       ));
     }
     return cache.get(name);
@@ -120,7 +57,7 @@ export async function auditNpmPackages(packages, registry = NPM_REGISTRY, timeou
   return auditPackages(packages, npmPackages(registry, timeoutMs));
 }
 
-/** Whether release.yml skips its native job: Actions compares `vars.RELEASE_SKIP_NATIVE != 'true'` ignoring case. */
+/** Whether the release plan skipped native publishing. */
 function skipsNative(env = process.env) {
   return env.RELEASE_SKIP_NATIVE?.toLowerCase() === 'true';
 }
@@ -133,7 +70,7 @@ export function nativeReleaseVersions(workspaces = workspaceEntries()) {
     .map(({ manifest }) => ({ name: manifest.name, version: manifest.version }));
 }
 
-function releaseEntries(packages, workspaces) {
+export function releaseEntries(packages, workspaces) {
   const byName = new Map(workspaces.map((entry) => [entry.manifest.name, entry]));
   return packages.map(({ name, version }) => {
     const entry = byName.get(name);
@@ -161,6 +98,14 @@ function workspaceDependencies(packages, workspaces) {
       }
     }
     return dependencies;
+  });
+}
+
+function nativeDependencies(dependencies, natives) {
+  const byName = new Map(natives.map((native) => [native.name, native]));
+  return dependencies.flatMap(({ name, dependency }) => {
+    const native = byName.get(dependency);
+    return native ? [{ name, native }] : [];
   });
 }
 
@@ -213,7 +158,7 @@ export function repositoryScan(packages = publishedPackageVersions(), workspaces
 export async function auditCrates(names, registry = CRATES_REGISTRY, timeoutMs = REQUEST_TIMEOUT_MS) {
   const audit = [];
   for (const name of names) {
-    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, {}, timeoutMs);
+    const body = await fetchRegistry(`${registry}/${encodeURIComponent(name)}`, { timeoutMs });
     audit.push({ name, state: body === null ? 'missing' : 'present' });
   }
   return audit;
@@ -225,8 +170,11 @@ export async function checkNpm({
   timeoutMs = REQUEST_TIMEOUT_MS,
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
-  later = skipsNative() ? [] : nativeReleaseVersions(workspaces),
+  natives = nativeReleaseVersions(workspaces),
+  later = skipsNative() ? [] : natives,
   platforms = skipsNative() ? [] : platformPackageVersions(),
+  holdNative = true,
+  onHeld = (_held) => {},
   references
 } = {}) {
   const fetchPackage = npmPackages(registry, timeoutMs);
@@ -246,12 +194,17 @@ export async function checkNpm({
     out.error('Publish each by hand first: RELEASING.md, "Initial npm release of a new package".');
   }
 
+  const pending = audit.filter(({ state }) => state !== 'published').map(({ name, version }) => ({ name, version }));
+  const dependencies = workspaceDependencies(pending, workspaces);
+  const nativeDeps = holdNative ? nativeDependencies(dependencies, natives) : [];
+  const needsNativeVersion = new Set(nativeDeps.map(({ native }) => native.name));
   const packageExists = npmPackages(registry, timeoutMs, false);
   const nativeMissing = [];
   let lookupFailure;
   for (const { name } of [...later, ...platforms]) {
     try {
-      if ((await packageExists(name)) === null) nativeMissing.push(name);
+      const lookup = needsNativeVersion.has(name) ? fetchPackage : packageExists;
+      if ((await lookup(name)) === null) nativeMissing.push(name);
     } catch (error) {
       lookupFailure = { name, error };
       break;
@@ -269,7 +222,18 @@ export async function checkNpm({
     return 1;
   }
 
-  const releaseVersions = new Map([...later, ...packages].map(({ name, version }) => [name, version]));
+  const heldNames = new Set();
+  for (const { name, native } of nativeDeps) {
+    const body = await fetchPackage(native.name);
+    if (!(native.version in (body?.versions ?? {}))) heldNames.add(name);
+  }
+  const held = pending.filter(({ name }) => heldNames.has(name));
+  for (const { name, version } of held) out.log(`${name}@${version} is held for its native dependencies.`);
+  onHeld(held);
+
+  const immediate = packages.filter(({ name }) => !heldNames.has(name));
+  const releaseVersions = new Map(immediate.map(({ name, version }) => [name, version]));
+  const nativeVersions = new Map(natives.map(({ name, version }) => [name, version]));
   const available = async (name, range, exact = false) => {
     const matches = (version) => exact ? version === range : satisfies(version, range);
     const version = releaseVersions.get(name);
@@ -277,7 +241,22 @@ export async function checkNpm({
     const body = await fetchPackage(name);
     return Object.keys(body?.versions ?? {}).some(matches);
   };
-  for (const { name, version, dependency, range } of workspaceDependencies(packages, workspaces)) {
+  for (const { name, version, dependency, range } of dependencies) {
+    if (heldNames.has(name)) {
+      if (heldNames.has(dependency)) {
+        out.error(`${name}@${version} depends on ${dependency}@${range}, which is also held`);
+        failed = true;
+        continue;
+      }
+      const nativeVersion = nativeVersions.get(dependency);
+      if (nativeVersion !== undefined) {
+        if (!satisfies(nativeVersion, range)) {
+          out.error(`${name}@${version} depends on ${dependency}@${range}, but the native manifest version ${nativeVersion} does not satisfy that range`);
+          failed = true;
+        }
+        continue;
+      }
+    }
     if (await available(dependency, range)) continue;
     out.error(`${name}@${version} depends on ${dependency}@${range}, which is neither in this release nor on npm`);
     failed = true;
@@ -288,6 +267,10 @@ export async function checkNpm({
     failed = true;
   }
   return failed ? 1 : 0;
+}
+
+function npmVersionUrl(registry, name, version) {
+  return `${registry.replace(/\/+$/, '')}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
 }
 
 async function waitForPublished(url, method, timeoutMs, deadline) {
@@ -307,6 +290,43 @@ async function waitForPublished(url, method, timeoutMs, deadline) {
   return false;
 }
 
+function cdnPublishTargets(packages, workspaces, baseUrl) {
+  return releaseEntries(packages, workspaces).flatMap(({ name, version, directory }) => {
+    const tag = `${name}@${version}`;
+    const asset = FONT_PACKAGES.has(name)
+      ? JSON.parse(readFileSync(join(directory, 'assets', 'manifest.json'), 'utf8'))?.faces?.[0]?.file
+      : undefined;
+    if (FONT_PACKAGES.has(name) && (typeof asset !== 'string' || !asset.endsWith('.zst'))) throw new Error(`${tag} has no compressed assets in its manifest`);
+    return [
+      { label: tag, service: 'the CDN', method: 'HEAD', url: `${baseUrl}/${tag}/package.json` },
+      ...(asset ? [
+        { label: `${tag}/assets/${asset}`, service: 'the CDN', method: 'HEAD', url: `${baseUrl}/${tag}/assets/${asset}` }
+      ] : [])
+    ];
+  });
+}
+
+export async function missingHeldNatives(packages, {
+  registry = NPM_REGISTRY,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  maxWaitMs = VERIFY_WAIT_MS,
+  workspaces = workspaceEntries(),
+  natives = nativeReleaseVersions(workspaces),
+  wait = false
+} = {}) {
+  const dependencies = workspaceDependencies(packages, workspaces);
+  const required = [...new Set(nativeDependencies(dependencies, natives).map(({ native }) => native))];
+  const deadline = Date.now() + maxWaitMs;
+  const missing = await Promise.all(required.map(async ({ name, version }) => {
+    const url = npmVersionUrl(registry, name, version);
+    const found = wait
+      ? await waitForPublished(url, 'GET', timeoutMs, deadline)
+      : (await fetchRegistry(url, { timeoutMs, readBody: false })) !== null;
+    return found ? null : { name, version };
+  }));
+  return missing.filter(Boolean);
+}
+
 export async function verifyPublished({
   registry = NPM_REGISTRY,
   cdnBase = CDN_BASE,
@@ -315,38 +335,40 @@ export async function verifyPublished({
   maxWaitMs = VERIFY_WAIT_MS,
   packages = publishedPackageVersions(),
   workspaces = workspaceEntries(),
+  held = [],
   annotate = false,
   summary
 } = {}) {
+  const heldVersions = new Set(held.map(({ name, version }) => `${name}@${version}`));
+  for (const tag of heldVersions) out.log(`${tag} is held for its native dependencies.`);
+  const immediate = packages.filter(({ name, version }) => !heldVersions.has(`${name}@${version}`));
   const cdnPackages = new Map();
-  for (const { name, version } of [...packages, ...siblingReferences(packages, workspaces)]) {
-    cdnPackages.set(`${name}@${version}`, { name, version });
+  for (const { name, version } of [...immediate, ...siblingReferences(immediate, workspaces)]) {
+    const tag = `${name}@${version}`;
+    if (!heldVersions.has(tag)) cdnPackages.set(tag, { name, version });
   }
   const targets = [
-    ...packages.map(({ name, version }) => ({
-      name, version, service: 'npm', method: 'GET',
-      url: `${registry.replace(/\/+$/, '')}/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+    ...immediate.map(({ name, version }) => ({
+      label: `${name}@${version}`, service: 'npm', method: 'GET',
+      url: npmVersionUrl(registry, name, version)
     })),
-    ...[...cdnPackages.values()].map(({ name, version }) => ({
-      name, version, service: 'the CDN', method: 'HEAD',
-      url: `${cdnBase.replace(/\/+$/, '')}/${name}@${version}/package.json`
-    }))
+    ...cdnPublishTargets([...cdnPackages.values()], workspaces, cdnBase.replace(/\/+$/, ''))
   ];
   const deadline = Date.now() + Math.min(maxWaitMs, VERIFY_WAIT_MS);
   const results = await Promise.all(targets.map(async (target) => ({
     ...target,
     found: await waitForPublished(target.url, target.method, timeoutMs, deadline)
   })));
-  for (const { name, version, service, found } of results) {
-    const message = `${name}@${version} is ${found ? '' : 'not '}on ${service} after publishing.`;
+  for (const { label, service, found } of results) {
+    const message = `${label} is ${found ? '' : 'not '}on ${service} after publishing.`;
     if (found) out.log(message);
     else out.error(message);
   }
   const missing = results.filter(({ found }) => !found);
   if (missing.length === 0) return 0;
   if (annotate) {
-    for (const { name, version, service } of missing) {
-      out.error(`::error title=Release incomplete::${name}@${version} is not on ${service} after publishing`);
+    for (const { label, service } of missing) {
+      out.error(`::error title=Release incomplete::${label} is not on ${service} after publishing`);
     }
   }
   if (summary) {
@@ -355,7 +377,7 @@ export async function verifyPublished({
       '',
       'These versions were not found after publishing. If the publish step succeeded, the registry or CDN is still propagating: check them again later. If it failed, publish what is missing (RELEASING.md); native packages and the deploy are dispatched with publish-native.yml and deploy.yml.',
       '',
-      ...missing.map(({ name, version, service }) => `- \`${name}@${version}\` on ${service}`),
+      ...missing.map(({ label, service }) => `- \`${label}\` on ${service}`),
       ''
     ].join('\n'));
   }
@@ -437,8 +459,16 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error('check-publish-targets.mjs: expected exactly one of --npm, --crates, --verify-published or --plan');
     process.exit(2);
   }
-  const options = mode === '--verify-published'
-    ? { annotate: process.env.GITHUB_ACTIONS === 'true', summary: process.env.GITHUB_STEP_SUMMARY || undefined }
-    : undefined;
+  let options;
+  if (mode === '--npm' && process.env.GITHUB_OUTPUT) {
+    options = { onHeld: (held) => appendFileSync(process.env.GITHUB_OUTPUT, `held=${JSON.stringify(held)}\n`) };
+  }
+  if (mode === '--verify-published') {
+    options = {
+      annotate: process.env.GITHUB_ACTIONS === 'true',
+      summary: process.env.GITHUB_STEP_SUMMARY || undefined,
+      held: JSON.parse(process.env.HELD_NPM_PACKAGES || '[]')
+    };
+  }
   process.exit(await modes[mode](options));
 }

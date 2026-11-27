@@ -1,3 +1,4 @@
+import { bentConnectorHit, containsBentConnector } from '../../../shared/bentConnectorHit';
 import type {
   DeckSnapshot,
   ShapeRect,
@@ -7,6 +8,7 @@ import type {
   SlideSnapshot,
   TextBoxPrimitive,
 } from '@betteroffice/pptx';
+import { resizedShapeRect } from '../../../shared/office-session/shapeResize';
 
 export interface SlidePoint {
   x: number;
@@ -287,6 +289,8 @@ export function farEdge(origin: number, extent: number): number {
 /** The local point when it lands inside the primitive, else null. */
 function containedPoint(primitive: SlidePrimitive, point: SlidePoint): SlidePoint | null {
   const local = localPoint(primitive, point);
+  const connector = primitive.kind === 'shape' ? bentConnectorHit(primitive) : undefined;
+  if (connector) return containsBentConnector(connector, local) ? local : null;
   return local.x >= Math.fround(primitive.x) &&
     local.x <= farEdge(primitive.x, primitive.w) &&
     local.y >= Math.fround(primitive.y) &&
@@ -385,36 +389,7 @@ export function resizedBounds(
   minimum: number,
   aspectRatioLocked = false
 ): FrameBounds {
-  if (aspectRatioLocked && handle.length === 2 && bounds.width > 0 && bounds.height > 0) {
-    const dx = handle.includes('w') ? -delta.x : delta.x;
-    const dy = handle.startsWith('n') ? -delta.y : delta.y;
-    const scale = Math.max(1 + (dx * bounds.width + dy * bounds.height) /
-      (bounds.width ** 2 + bounds.height ** 2),
-      minimum / bounds.width, minimum / bounds.height);
-    const width = Math.round(bounds.width * scale);
-    const height = Math.round(bounds.height * scale);
-    return {
-      x: handle.includes('w') ? bounds.x + bounds.width - width : bounds.x,
-      y: handle.startsWith('n') ? bounds.y + bounds.height - height : bounds.y,
-      width, height,
-    };
-  }
-  let { x, y, width, height } = bounds;
-  if (handle.includes('w')) {
-    const dx = Math.min(delta.x, width - minimum);
-    x += dx;
-    width -= dx;
-  } else if (handle.includes('e')) {
-    width = Math.max(minimum, width + delta.x);
-  }
-  if (handle.startsWith('n')) {
-    const dy = Math.min(delta.y, height - minimum);
-    y += dy;
-    height -= dy;
-  } else if (handle.startsWith('s')) {
-    height = Math.max(minimum, height + delta.y);
-  }
-  return { x, y, width, height };
+  return resizedShapeRect(bounds, handle, delta, minimum, aspectRatioLocked);
 }
 
 /** The delta a resize commits. The release event's own position wins, so a

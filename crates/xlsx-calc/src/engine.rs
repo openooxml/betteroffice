@@ -26,7 +26,7 @@ use crate::deps::reads_other_workbook;
 use crate::eval::{
     EvalContext, EvaluationBudget, HeldCells, MAX_RECALCULATION_CELL_VISITS, evaluate,
 };
-use crate::graph::{Answer, DepGraph, ReaderIndex, UnevaluatedCell};
+use crate::graph::{Answer, DepGraph, Gap, ReaderIndex, UnevaluatedCell};
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -717,7 +717,7 @@ struct Readers<'g> {
 
 enum SheetReaders<'g> {
     Scanned(usize),
-    Indexed(ReaderIndex<'g>),
+    Indexed(Box<ReaderIndex<'g>>),
 }
 
 impl<'g> Readers<'g> {
@@ -733,7 +733,7 @@ impl<'g> Readers<'g> {
         if let SheetReaders::Scanned(lookups) = readers {
             *lookups += 1;
             if *lookups > SCANNED_LOOKUPS {
-                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
+                *readers = SheetReaders::Indexed(Box::new(self.graph.reader_index(k.0)));
             }
         }
         match readers {
@@ -1079,7 +1079,7 @@ impl<'g> Pass<'g> {
             watch.as_ref().map(|watch| watch as &dyn HeldCells),
         );
         self.note_early(watch);
-        self.write(wb, u, evaluated);
+        self.write(wb, u, evaluated, false);
     }
 
     /// the watch over what `u` reads, when it reads through computed
@@ -1251,7 +1251,8 @@ impl<'g> Pass<'g> {
     /// the first of them runs again with that value. a cycle one of whose
     /// members holds or reached an uncomputable call settles at nothing: what
     /// it would settle at hangs on values no engine computes, so every member
-    /// keeps what it holds and is listed with the calls.
+    /// keeps what it holds and is listed with the calls. iterative cycles also
+    /// keep their values and are listed as unevaluated.
     fn settle(&mut self, wb: &mut Workbook, members: &[Key]) {
         self.budget.set_settling(true);
         let ids: HashMap<Key, usize> = members.iter().enumerate().map(|(id, &u)| (u, id)).collect();
@@ -1293,7 +1294,7 @@ impl<'g> Pass<'g> {
                 self.note_early(watch);
                 reached[id].extend(evaluated.gap.iter().flatten().cloned());
                 let Some(target) = target else {
-                    self.write(wb, u, evaluated);
+                    self.write(wb, u, evaluated, false);
                     settled[id] = true;
                     on_chain[id] = None;
                     chain.pop();
@@ -1316,20 +1317,21 @@ impl<'g> Pass<'g> {
                 }
                 functions.sort_unstable();
                 functions.dedup();
+                let iterate = wb.iterate;
                 for member in circular {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
                     settled[member] = true;
                     on_chain[member] = None;
-                    if !functions.is_empty() {
+                    if iterate || !functions.is_empty() {
                         let kept = Evaluated {
                             value: None,
                             limited: false,
                             gap: Some(functions.clone()),
                             reach: None,
                         };
-                        self.write(wb, u, kept);
+                        self.write(wb, u, kept, iterate);
                         continue;
                     }
                     if write_if_changed(wb, u, circular_value(wb, u), &self.budget) {
@@ -1351,7 +1353,7 @@ impl<'g> Pass<'g> {
     /// engine's answer stands and the formula is listed all the same. once a
     /// gap keeps a formula's value, what an earlier round of this recalc wrote
     /// for it is put back as it was before the recalc.
-    fn write(&mut self, wb: &mut Workbook, u: Key, evaluated: Evaluated) {
+    fn write(&mut self, wb: &mut Workbook, u: Key, evaluated: Evaluated, iterative: bool) {
         let Evaluated {
             mut value,
             limited,
@@ -1361,9 +1363,15 @@ impl<'g> Pass<'g> {
         if let Some(inherited) = self.inherited.get(&u) {
             note_functions(gap.get_or_insert_with(Vec::new), inherited);
         }
-        let keeps = gap.as_ref().is_some_and(|functions| {
-            !functions.is_empty() && !answers(self.graph, wb, u, functions)
-        });
+        let iterative =
+            iterative || (wb.iterate && limited && self.graph.is_iterative_gap(u.0, cell_of(u)));
+        let keeps = iterative
+            || gap.as_ref().is_some_and(|functions| {
+                !functions.is_empty() && !answers(self.graph, wb, u, functions)
+            });
+        if iterative {
+            gap.get_or_insert_with(Vec::new);
+        }
         if let Some(reads) = self.answered_reads.get(&u) {
             note_functions(gap.get_or_insert_with(Vec::new), reads);
         }
@@ -1423,7 +1431,8 @@ impl<'g> Pass<'g> {
                                 gap: Some(held),
                                 reach: None,
                             };
-                            self.write(wb, u, kept);
+                            let iterative = wb.iterate && self.graph.is_iterative_gap(u.0, at.1);
+                            self.write(wb, u, kept, iterative);
                             return;
                         }
                         self.refuse(wb, u, log.as_mut());
@@ -1434,6 +1443,10 @@ impl<'g> Pass<'g> {
             None => {}
         }
         let held = gap.clone().filter(|functions| !functions.is_empty());
+        let gap = gap.map(|functions| Gap {
+            functions,
+            iterative,
+        });
         self.graph.set_unevaluated(u.0, at.1, gap);
         let wrote = answered.then(|| Answer {
             formula: wb.formula(u.0, at.1).unwrap_or_default().to_owned(),
@@ -2422,6 +2435,51 @@ mod tests {
     }
 
     #[test]
+    fn unquoted_whole_row_sheet_spans_keep_cached_values() {
+        let mut workbook = Workbook {
+            sheets: [
+                "Sheet1", "Sheet2", "Sheet3", "Q1_Sales", "Q2_Sales", "Report",
+            ]
+            .into_iter()
+            .map(Sheet::new)
+            .collect(),
+            ..Workbook::default()
+        };
+        let report = SheetId(5);
+        for (source, cache) in [
+            ("SUM(Sheet1:Sheet3!1:2)", 42.0),
+            ("SUM(Sheet1:Sheet2!$1:$5)", 43.0),
+            ("Sheet1:Sheet3!1:1", 44.0),
+            ("SUM(Q1_Sales:Q2_Sales!1:10)", 45.0),
+        ] {
+            put_cached_formula(&mut workbook, report, "A1", source, num(cache));
+            rebuild_and_recalc_all(&mut workbook, None);
+            assert_eq!(value(&workbook, report, "A1"), num(cache), "{source}");
+        }
+    }
+
+    #[test]
+    fn let_range_joins_recalculate_across_unquoted_reference_shaped_sheet_names() {
+        for sheet in ["R2C3", "A1", "TRUE"] {
+            let (mut workbook, report) = one_sheet();
+            let input = SheetId(1);
+            workbook.sheets.push(Sheet::new(sheet));
+            put_num(&mut workbook, input, "A1", 2.0);
+            put_num(&mut workbook, input, "A2", 3.0);
+            let source = format!("_xlfn.LET(_xlpm.c, {sheet}!A1, SUM(_xlpm.c:{sheet}!A2))");
+            put_formula(&mut workbook, report, "A1", &source);
+            let (mut graph, _) = rebuild_and_recalc_all(&mut workbook, None);
+            assert_eq!(value(&workbook, report, "A1"), num(5.0), "{source}");
+            put_num(&mut workbook, input, "A2", 7.0);
+            recalc_after(&mut workbook, &mut graph, &[(input, a1("A2"))], None);
+            assert_eq!(value(&workbook, report, "A1"), num(9.0), "{source}");
+            put_num(&mut workbook, input, "A1", 11.0);
+            recalc_after(&mut workbook, &mut graph, &[(input, a1("A1"))], None);
+            assert_eq!(value(&workbook, report, "A1"), num(18.0), "{source}");
+        }
+    }
+
+    #[test]
     fn an_unknown_function_without_a_cached_value_reports_name() {
         let (mut wb, s) = one_sheet();
         put_formula(&mut wb, s, "A1", "REPRO_UNKNOWN_FUNCTION(1)");
@@ -2614,6 +2672,29 @@ mod tests {
         assert_eq!(value(&wb, s, "B4"), num(5.0));
         assert_eq!(value(&wb, s, "B5"), reference);
         assert_eq!(value(&wb, s, "B6"), num(0.25));
+    }
+
+    #[test]
+    fn indirect_into_another_workbook_preserves_cached_and_blank_results() {
+        let (mut wb, s) = one_sheet();
+        for (address, source) in [
+            ("A1", r#"IFERROR(INDIRECT("'[1]Data'!A1"),0)"#),
+            ("A2", r#"INDIRECT("'[1]Data'!R1C1",FALSE)"#),
+            ("A3", r#"IFERROR(INDIRECT("'[1]Data'!Rate"),0)"#),
+            ("A4", r#"IFERROR(INDIRECT("[1]Data!A1"),0)"#),
+            ("A6", r#"IFERROR(INDIRECT("[1]Data!R1C1",FALSE),0)"#),
+        ] {
+            put_cached_formula(&mut wb, s, address, source, num(42.0));
+        }
+        put_formula(&mut wb, s, "A5", r#"INDIRECT("'[1]Data'!A1")"#);
+        rebuild_and_recalc_all(&mut wb, None);
+        for address in ["A1", "A2"] {
+            assert_eq!(value(&wb, s, address), num(42.0), "{address}");
+        }
+        for address in ["A3", "A4", "A6"] {
+            assert_eq!(value(&wb, s, address), num(0.0), "{address}");
+        }
+        assert_eq!(value(&wb, s, "A5"), CellValue::Empty);
     }
 
     #[test]
@@ -4032,6 +4113,67 @@ mod tests {
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
+    #[test]
+    fn iterative_cycles_keep_caches_and_their_readers_recalculate() {
+        let (mut wb, sheet) = one_sheet();
+        wb.iterate = true;
+        wb.sheets.push(Sheet::new("Sheet2"));
+        let other = SheetId(1);
+        put_cached_formula(&mut wb, sheet, "A1", "B1+1", num(10.0));
+        put_cached_formula(&mut wb, sheet, "B1", "A1+1", num(20.0));
+        put_cached_formula(&mut wb, sheet, "C1", "A1*3", num(70.0));
+        put_cached_formula(&mut wb, sheet, "D1", "C1+SEQUENCE(2)", num(80.0));
+        put_num(&mut wb, sheet, "D2", 81.0);
+        wb.sheet_mut(sheet)
+            .unwrap()
+            .set_array_formula(a1("D1"), CellRange::parse_a1("D1:D2").unwrap());
+        put_cached_formula(&mut wb, other, "A1", "SUM(Sheet1!D2:D3)", num(90.0));
+        put_formula(&mut wb, other, "B1", "INDIRECT(\"Sheet1!D2\")");
+        put_formula(&mut wb, other, "C1", "C1+REPRO_UNKNOWN(1)");
+
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(
+            result.cycle_cells.is_empty(),
+            "iterative cycles are unevaluated"
+        );
+        for (at, cell, expected) in [
+            (sheet, "A1", 10.0),
+            (sheet, "B1", 20.0),
+            (sheet, "C1", 30.0),
+            (sheet, "D1", 31.0),
+            (sheet, "D2", 32.0),
+            (other, "A1", 32.0),
+            (other, "B1", 32.0),
+        ] {
+            assert_eq!(value(&wb, at, cell), num(expected), "sheet {} {cell}", at.0);
+        }
+        assert_eq!(
+            result.unevaluated_cells,
+            [
+                UnevaluatedCell {
+                    sheet,
+                    cell: a1("A1"),
+                    functions: Vec::new(),
+                },
+                UnevaluatedCell {
+                    sheet,
+                    cell: a1("B1"),
+                    functions: Vec::new(),
+                },
+                UnevaluatedCell {
+                    sheet: other,
+                    cell: a1("C1"),
+                    functions: vec!["REPRO_UNKNOWN".into()],
+                },
+            ]
+        );
+        assert_eq!(
+            value(&wb, other, "C1"),
+            CellValue::Empty,
+            "an unknown-function answer cannot replace a cycle member's blank"
+        );
     }
 
     #[test]

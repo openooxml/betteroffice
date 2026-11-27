@@ -69,7 +69,7 @@ const RELEASE_CONTEXT_IF =
 const PUBLISH_IF =
   "${{ inputs.publish && inputs.sha != '' && github.repository == 'openooxml/betteroffice' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.fork == false && vars.WOPI_IMAGE_PUBLISH == 'true' }}";
 const RELEASE_WOPI_IF =
-  "needs.release.result == 'success' && needs.release.outputs.published == 'true' && " +
+  "!cancelled() && needs.release.result == 'success' && needs.release.outputs.published == 'true' && " +
   RELEASE_CONTEXT_IF + " && vars.WOPI_IMAGE_PUBLISH == 'true'";
 const VERSION_IMAGE = "ghcr.io/openooxml/betteroffice-wopi:0.1.0";
 
@@ -338,8 +338,11 @@ describe("release workflow WOPI image job", () => {
     const needs = Array.isArray(caller.needs) ? caller.needs : [caller.needs];
     expect(needs).toContain("release");
     expect(workflow.jobs.release!.outputs).toEqual({
-      publishing: "${{ steps.pending.outputs.publishing }}",
+      publishing: "${{ needs.plan.outputs.publishing }}",
+      native: "${{ needs.plan.outputs.native }}",
+      python: "${{ needs.plan.outputs.python }}",
       published: "${{ steps.changesets.outputs.published }}",
+      held: "${{ steps.npm-targets.outputs.held }}",
     });
     expect(caller.if).toBe(RELEASE_WOPI_IF);
     expect(caller.if).not.toContain("||");

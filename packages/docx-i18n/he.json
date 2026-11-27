@@ -593,6 +593,7 @@
     "noDocumentLoaded": "לא נטען מסמך",
     "failedToLoad": "טעינת המסמך נכשלה",
     "failedToLoadDescription": "ייתכן שהקובץ פגום, או שהוא משתמש במשהו שעורך זה עדיין אינו יכול לקרוא.",
+    "recoveryFailedDescription": "העורך הפסיק לפעול ולא הצליח לשחזר את השינויים האחרונים שלך. הקובץ עצמו לא נפגם.",
     "failedToLoadDamaged": "הקובץ פגום או שאינו מסמך Word שלם.",
     "failedToLoadUnsupported": "מסמך זה משתמש במשהו שהעורך הזה עדיין לא יודע לקרוא.",
     "editorUnavailable": "טעינת העורך נכשלה",

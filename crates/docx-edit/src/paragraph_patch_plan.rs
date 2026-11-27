@@ -8,9 +8,11 @@ use docx_parse::paragraph_patch::{
     LegacyParagraphV1, ParagraphPatchV1, PatchErrorCode, RunEditV1, SeedV1, SlotV1, TextEditV1,
     UnitV1, canonical_json_v1, result_sha256, unit_sha256,
 };
+use docx_parse::serializer::ParagraphPatchSource;
 use serde_json::{Value, json};
 use yrs::Any;
 
+use crate::provenance::Proof;
 use crate::{SegmentContent, StorySegment};
 
 #[derive(Clone, Copy)]
@@ -19,8 +21,9 @@ pub(crate) struct PatchContext<'a> {
     pub session_key: &'a str,
     pub story: &'a str,
     pub metadata: Option<&'a crate::seed::SourceMetadata>,
-    pub source_paragraph: Option<&'a dyn Fn() -> Option<String>>,
+    pub source_paragraph: Option<&'a dyn Fn() -> Option<&'a str>>,
     pub source: Option<&'a crate::identity::SourceIndex>,
+    pub stale_inheritance: bool,
     pub seeded_markers: &'a [(u32, String, bool)],
     pub live_markers: &'a [(u32, String, bool)],
 }
@@ -163,6 +166,7 @@ fn snapshot(segments: &[StorySegment]) -> Result<Snapshot, String> {
             }),
             SegmentContent::Pilcrow(pilcrow) => {
                 properties = attrs(&pilcrow.values)?;
+                properties.remove(crate::list_definitions::LIST_LEVEL_INDENTS);
                 if let Some(original) = properties
                     .get("_originalFormatting")
                     .and_then(Value::as_object)
@@ -625,7 +629,7 @@ fn alignment(
                 .source_paragraph
                 .and_then(|load| load())
                 .is_some_and(|source| {
-                    homogeneous_source_replacement(&source, before, shared_prefix..old_end)
+                    homogeneous_source_replacement(source, before, shared_prefix..old_end)
                 })
             {
                 return Err("ambiguous: nonunique content alignment");
@@ -746,7 +750,7 @@ fn homogeneous_source_replacement(
             return Some(());
         }
         match element.name.as_str() {
-            "w:p" | "w:hyperlink" | "w:smartTag" => {
+            "w:p" | "w:hyperlink" | "w:smartTag" | "w:dir" | "w:bdo" => {
                 for (index, child) in element.child_elements().enumerate() {
                     path.push(index as u32);
                     visit(source, child, path, before, range, cursor, properties)?;
@@ -1400,14 +1404,105 @@ pub(crate) fn diff_paragraph_v1(
     context: PatchContext<'_>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let widened = Cell::new(false);
-    plan_paragraph(seeded, live, context, RunRules::Full, &widened).map_err(|legacy| {
+    plan_paragraph(seeded, live, context, RunRules::Full, &widened, None).map_err(|legacy| {
         if !widened.get() {
             return legacy;
         }
-        plan_paragraph(seeded, live, context, RunRules::Basic, &widened)
+        plan_paragraph(seeded, live, context, RunRules::Basic, &widened, None)
             .err()
             .unwrap_or(legacy)
     })
+}
+
+pub(crate) fn unproven_paragraph(ordinal: u32) -> LegacyParagraphV1 {
+    LegacyParagraphV1 {
+        ordinal,
+        code: PatchErrorCode::AmbiguousAlignment,
+        detail: "ambiguous: unproven edit provenance".to_owned(),
+    }
+}
+
+pub(crate) fn diff_recorded_paragraph<'a>(
+    seeded: &[StorySegment],
+    live: &[StorySegment],
+    context: PatchContext<'_>,
+    proof: &Proof,
+    patch_source: impl FnOnce() -> Option<(&'a ParagraphPatchSource, usize)>,
+) -> Result<(ParagraphPatchV1, bool), LegacyParagraphV1> {
+    let recorded = plan_paragraph(
+        seeded,
+        live,
+        context,
+        RunRules::Full,
+        &Cell::new(false),
+        Some(proof),
+    )?;
+    if let Ok(base) = diff_paragraph_v1(seeded, live, context)
+        && base != recorded
+        && let Some((source, start)) = patch_source()
+        && source
+            .base_preserving_more_runs(start, &base, &recorded)
+            .is_some()
+    {
+        return Ok((base, true));
+    }
+    Ok((recorded, false))
+}
+
+struct RecordedEdit {
+    old_end: usize,
+    new_end: usize,
+    donor: DonorV1,
+}
+
+fn recorded_pairs(
+    proof: &Proof,
+    old: &[Token],
+    new: &[Token],
+    donors: &DonorIndex,
+) -> Option<(Vec<(usize, usize)>, Vec<RecordedEdit>)> {
+    let live = DonorIndex::new(new);
+    if donors.offsets.last() != Some(&proof.seed_width)
+        || live.offsets.last() != Some(&proof.live_width)
+    {
+        return None;
+    }
+    let mut retained = Vec::new();
+    let mut edits = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let mut keep = |i: usize, j: usize, old_end: usize, new_end: usize| {
+        if old_end.checked_sub(i)? != new_end.checked_sub(j)? {
+            return None;
+        }
+        for (old_at, new_at) in (i..old_end).zip(j..new_end) {
+            if old.get(old_at)?.content != new.get(new_at)?.content {
+                return None;
+            }
+            retained.push((old_at, new_at));
+        }
+        Some(())
+    };
+    for edit in &proof.edits {
+        let old_start = donors.offsets.binary_search(&edit.from).ok()?;
+        let old_end = donors.offsets.binary_search(&edit.to).ok()?;
+        let new_start = live.offsets.binary_search(&edit.live_from).ok()?;
+        let new_end = live.offsets.binary_search(&edit.live_to).ok()?;
+        if old_end < old_start
+            || new_end < new_start
+            || (old_start == old_end && new_start == new_end)
+        {
+            return None;
+        }
+        keep(i, j, old_start, new_start)?;
+        edits.push(RecordedEdit {
+            old_end,
+            new_end,
+            donor: edit.donor.clone(),
+        });
+        (i, j) = (old_end, new_end);
+    }
+    keep(i, j, old.len(), new.len())?;
+    Some((retained, edits))
 }
 
 /// Whether `changes` reach a key the full rules accept beyond the basic ones.
@@ -1426,6 +1521,7 @@ fn plan_paragraph(
     context: PatchContext<'_>,
     rules: RunRules,
     widened: &Cell<bool>,
+    proof: Option<&Proof>,
 ) -> Result<ParagraphPatchV1, LegacyParagraphV1> {
     let before = snapshot(seeded)
         .map_err(|detail| context.legacy(PatchErrorCode::UnsupportedKey, detail))?;
@@ -1586,8 +1682,8 @@ fn plan_paragraph(
     let new = tokens(&after.units);
     let old_inherit = inherited_runs(&context, &before.properties, &old);
     let new_inherit = inherited_runs(&context, &after.properties, &new);
-    let retained = match alignment(&old, &new, &context) {
-        Ok(retained) => retained,
+    let align = || match alignment(&old, &new, &context) {
+        Ok(retained) => Ok(retained),
         Err(detail @ "ambiguous: nonunique content alignment") => {
             drawing_text_alignment(&old, &new)
                 .or_else(|| {
@@ -1595,11 +1691,20 @@ fn plan_paragraph(
                         .then(|| single_run_insertion_alignment(&before, &after))
                         .flatten()
                 })
-                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))?
+                .ok_or_else(|| context.legacy(PatchErrorCode::AmbiguousAlignment, detail))
         }
-        Err(detail) => return Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
+        Err(detail) => Err(context.legacy(PatchErrorCode::AmbiguousAlignment, detail)),
     };
-    let donors = DonorIndex::new(&old);
+    let (retained, recorded, donors) = if let Some(proof) = proof {
+        let donors = DonorIndex::new(&old);
+        let (retained, edits) = recorded_pairs(proof, &old, &new, &donors)
+            .ok_or_else(|| unproven_paragraph(context.ordinal))?;
+        (retained, Some(edits), donors)
+    } else {
+        let retained = align()?;
+        (retained, None, DonorIndex::new(&old))
+    };
+    let mut recorded = recorded.map(Vec::into_iter);
     let offsets = &donors.offsets;
     let mut text_edits = Vec::new();
     let mut run_edits: Vec<RunEditV1> = Vec::new();
@@ -1609,9 +1714,27 @@ fn plan_paragraph(
     let mut previous = (0, 0);
     let end = (old.len(), new.len());
     for &(i, j) in retained.iter().chain(std::iter::once(&end)) {
-        if i != previous.0 || j != previous.1 {
-            let removed = &old[previous.0..i];
-            let inserted = &new[previous.1..j];
+        while i != previous.0 || j != previous.1 {
+            let (i, j, recorded_donor) = if let Some(edits) = &mut recorded {
+                let edit = edits
+                    .next()
+                    .ok_or_else(|| unproven_paragraph(context.ordinal))?;
+                if !(previous.0..=i).contains(&edit.old_end)
+                    || !(previous.1..=j).contains(&edit.new_end)
+                    || (edit.old_end, edit.new_end) == previous
+                {
+                    return Err(unproven_paragraph(context.ordinal));
+                }
+                (edit.old_end, edit.new_end, Some(edit.donor))
+            } else {
+                (i, j, None)
+            };
+            let removed = old
+                .get(previous.0..i)
+                .ok_or_else(|| unproven_paragraph(context.ordinal))?;
+            let inserted = new
+                .get(previous.1..j)
+                .ok_or_else(|| unproven_paragraph(context.ordinal))?;
             if removed.iter().chain(inserted).any(complex_field) {
                 return Err(context.legacy(
                     PatchErrorCode::UnsupportedStructure,
@@ -1634,6 +1757,14 @@ fn plan_paragraph(
                 ));
             }
             let donor = donors.donor(previous.0, i, &context)?;
+            let donor = if let Some(recorded) = recorded_donor {
+                if recorded != donor {
+                    return Err(unproven_paragraph(context.ordinal));
+                }
+                recorded
+            } else {
+                donor
+            };
             let mark_attrs = mark_attrs(&before);
             let donor_attrs = donors
                 .text_donor(previous.0, i)
@@ -1704,8 +1835,12 @@ fn plan_paragraph(
                 donor,
             });
             replay.extend_from_slice(inserted);
+            previous = (i, j);
         }
         if i < old.len() {
+            if j >= new.len() {
+                return Err(unproven_paragraph(context.ordinal));
+            }
             if old[i].attrs.get("runStyle") != new[j].attrs.get("runStyle")
                 || (!patchable_restyle && !same_attrs(&old_inherit[i], &new_inherit[j]))
             {
@@ -1776,6 +1911,9 @@ fn plan_paragraph(
             });
         }
         previous = (i + 1, j + 1);
+    }
+    if recorded.is_some_and(|mut edits| edits.next().is_some()) {
+        return Err(unproven_paragraph(context.ordinal));
     }
     if replay != new {
         return Err(context.legacy(
@@ -1854,7 +1992,7 @@ fn plan_paragraph(
         para_inherit,
         mark_inherit,
         result_sha256: result_sha256(&units(&replay), &result_properties),
-        inheritance: if context.metadata.is_some() {
+        inheritance: if context.metadata.is_some() && !context.stale_inheritance {
             InheritanceStateV1::Current
         } else {
             InheritanceStateV1::Unknown
@@ -1997,7 +2135,7 @@ mod tests {
         ]
     }
 
-    fn context() -> PatchContext<'static> {
+    fn context<'a>() -> PatchContext<'a> {
         PatchContext {
             ordinal: 0,
             session_key: "p1",
@@ -2005,6 +2143,7 @@ mod tests {
             metadata: None,
             source_paragraph: None,
             source: None,
+            stale_inheritance: false,
             seeded_markers: &[],
             live_markers: &[],
         }
@@ -2081,16 +2220,15 @@ mod tests {
             }
             let mut after = before.clone();
             after[0].content = SegmentContent::Text("Title ".to_owned());
-            let source = || {
-                let drawing = if drawing {
-                    "<w:r><w:drawing/></w:r>"
-                } else {
-                    ""
-                };
-                Some(format!(
-                    "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
-                ))
+            let drawing = if drawing {
+                "<w:r><w:drawing/></w:r>"
+            } else {
+                ""
             };
+            let xml = format!(
+                "<w:p><w:r><w:t xml:space=\"preserve\">Caption </w:t></w:r>{drawing}</w:p>"
+            );
+            let source = || Some(xml.as_str());
             let patch = diff_paragraph_v1(
                 &before,
                 &after,
@@ -2131,6 +2269,163 @@ mod tests {
             { "id": 1, "name": "mark", "kind": "start", "offset": start },
             { "id": 1, "kind": "end", "offset": end }
         ] })
+    }
+
+    fn whole_word_replacement() -> Proof {
+        Proof {
+            seed_width: 6,
+            live_width: 6,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 0,
+                to: 6,
+                live_from: 0,
+                live_to: 6,
+                donor: DonorV1::At { at: 0 },
+            }],
+        }
+    }
+
+    #[test]
+    fn base_replaces_a_recorded_whole_word_only_if_raw_run_properties_match() {
+        let seeded = paragraph("aKEEPz", json!({}));
+        let live = paragraph("bKEEPy", json!({}));
+        let proof = whole_word_replacement();
+        let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
+        let (recorded, _) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap();
+        assert_eq!(recorded.text_edits.len(), 1);
+        assert_eq!(base.text_edits.len(), 2);
+
+        for (kept_property, last_property, uses_base) in [
+            ("", "", true),
+            ("<w:noProof/>", "", false),
+            ("<w:rtl/>", "", false),
+            ("<w:noProof/>", "<w:rPr><w:noProof/></w:rPr>", false),
+        ] {
+            let keep = if kept_property.is_empty() {
+                "<w:r><w:t>KEEP</w:t></w:r>".to_owned()
+            } else {
+                format!("<w:r><w:rPr>{kept_property}</w:rPr><w:t>KEEP</w:t></w:r>")
+            };
+            let source = ParagraphPatchSource::new(format!(
+                "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:r><w:t>a</w:t></w:r>{keep}<w:r>{last_property}<w:t>z</w:t></w:r></w:p>"
+            ));
+            let (patch, used_base) =
+                diff_recorded_paragraph(&seeded, &live, context(), &proof, || Some((&source, 0)))
+                    .unwrap();
+            assert_eq!(used_base, uses_base, "{kept_property} {last_property}");
+            if uses_base {
+                assert_eq!(patch, base);
+                let xml = source
+                    .base_preserving_more_runs(0, &patch, &recorded)
+                    .unwrap();
+                assert!(xml.contains(&keep));
+            } else {
+                assert_eq!(patch, recorded);
+            }
+        }
+    }
+
+    #[test]
+    fn base_replaces_a_recorded_edit_that_crosses_a_permission_range() {
+        use docx_parse::serializer::{S13SaveRequest, write_docx_s13_parts_with_report};
+        use sha2::{Digest, Sha256};
+
+        let seeded = paragraph("aKEEPz", json!({}));
+        let live = paragraph("bKEEPy", json!({}));
+        let proof = whole_word_replacement();
+        let range = concat!(
+            r#"<w:permStart w:edGrp="everyone" w:id="7"/>"#,
+            "<w:r><w:rPr><w:noProof/></w:rPr><w:t>EE</w:t></w:r>",
+            r#"<w:permEnd w:id="7"/>"#,
+        );
+        let source = ParagraphPatchSource::new(format!(
+            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:t>aK</w:t></w:r>{range}<w:r><w:t>Pz</w:t></w:r></w:p>"#
+        ));
+        let (recorded, _) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap();
+        let (patch, used_base) =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || Some((&source, 0)))
+                .unwrap();
+        assert!(used_base);
+        assert_eq!(patch, diff_paragraph_v1(&seeded, &live, context()).unwrap());
+        let xml = source
+            .base_preserving_more_runs(0, &patch, &recorded)
+            .unwrap();
+        assert!(xml.contains(range));
+
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,
+            source.as_str()
+        );
+        let part = "word/document.xml";
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
+            "document": {"content": [{"type": "paragraph", "sourceOrdinal": 0, "content": [{
+                "type": "run", "content": [{"type": "text", "text": "bKEEPy"}]
+            }]}]},
+            "options": {"updateModifiedDate": false},
+            "paragraphIds": {"splicedParts": [{
+                "part": part, "sha256": format!("{:x}", Sha256::digest(xml.as_bytes())),
+                "paragraphs": [0], "changed": [0], "paragraphPatches": [recorded]
+            }]}
+        }))
+        .unwrap();
+        let (_, report) =
+            write_docx_s13_parts_with_report(request, &[(part.to_owned(), xml.into_bytes())], None)
+                .unwrap();
+        assert_eq!(
+            report.warnings,
+            ["DOCX_MINIMAL_PATCH replace counts {\"marker\":1}"]
+        );
+    }
+
+    #[test]
+    fn reversed_recorded_ranges_do_not_produce_a_patch() {
+        let seeded = paragraph("abc", json!({}));
+        let live = paragraph("aXc", json!({}));
+        let proof = Proof {
+            seed_width: 3,
+            live_width: 3,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 1,
+                to: 0,
+                live_from: 1,
+                live_to: 0,
+                donor: DonorV1::At { at: 0 },
+            }],
+        };
+        let error =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
+        assert_eq!(error, unproven_paragraph(0));
+    }
+
+    #[test]
+    fn unproven_donor_after_a_widened_run_edit_does_not_produce_a_patch() {
+        let seeded = paragraph("abc", json!({}));
+        let mut live = paragraph("a", json!({}));
+        live[0].attributes.insert(
+            "characterSpacing".to_owned(),
+            crate::seed::any_from_value(json!({ "spacing": 20 })).unwrap(),
+        );
+        live.insert(1, paragraph("Xc", json!({})).remove(0));
+        let proof = Proof {
+            seed_width: 3,
+            live_width: 3,
+            edits: vec![crate::provenance::ProvenEdit {
+                from: 1,
+                to: 2,
+                live_from: 1,
+                live_to: 2,
+                donor: DonorV1::At { at: 0 },
+            }],
+        };
+        let base = diff_paragraph_v1(&seeded, &live, context()).unwrap();
+        assert_eq!(base.run_edits.len(), 1);
+        assert_eq!(base.text_edits.len(), 1);
+        let error =
+            diff_recorded_paragraph(&seeded, &live, context(), &proof, || None).unwrap_err();
+        assert_eq!(error, unproven_paragraph(0));
     }
 
     #[test]

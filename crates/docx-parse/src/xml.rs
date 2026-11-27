@@ -1,5 +1,7 @@
 //! Bounded, resolver-free OOXML event/tree core.
 
+use std::sync::{Arc, Mutex};
+
 use indexmap::IndexMap;
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -10,6 +12,8 @@ pub const MAX_NESTING_DEPTH: usize = 64;
 
 const MAX_GROUP_TEXT_BOX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GROUP_TEXT_BOX_NESTING: usize = 4;
+/// The bytes of `w:dir`/`w:bdo` data a document may copy onto the children inside them.
+pub(crate) const MAX_DIRECTION_SCOPE_BYTES: usize = 64 * 1024 * 1024;
 
 /// OOXML namespace URIs.
 pub mod namespaces {
@@ -98,6 +102,11 @@ pub struct ParseBudget<'a> {
     group_text_box_bytes: usize,
     group_text_box_depth: usize,
     paragraph_runs: Vec<Option<usize>>,
+    direction_scopes: u32,
+    direction_scope_bytes: std::cell::Cell<usize>,
+    unmodeled_inline: Vec<(String, usize)>,
+    pub(crate) preview_connectors: Option<Arc<Mutex<crate::s9::PreviewConnectorSources>>>,
+    pub(crate) connector_story: Option<(String, Option<String>)>,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -122,6 +131,34 @@ impl<'a> ParseBudget<'a> {
             group_text_box_bytes: 0,
             group_text_box_depth: 0,
             paragraph_runs: Vec::new(),
+            direction_scopes: 0,
+            direction_scope_bytes: std::cell::Cell::new(0),
+            unmodeled_inline: Vec::new(),
+            preview_connectors: None,
+            connector_story: None,
+        }
+    }
+
+    pub(crate) fn connector_story(&mut self, part: &str, item: Option<String>) {
+        if self.preview_connectors.is_some() {
+            self.connector_story = Some((part.trim_start_matches('/').to_owned(), item));
+        }
+    }
+
+    pub(crate) fn record_connector(
+        &mut self,
+        baseline: &crate::shape::Shape,
+        guides: crate::s9::PreviewConnectorGuides,
+    ) {
+        if !guides.is_empty()
+            && let (Some(sources), Some(story)) = (&self.preview_connectors, &self.connector_story)
+        {
+            sources
+                .lock()
+                .unwrap()
+                .entry(story.clone())
+                .or_default()
+                .push((baseline.clone(), guides));
         }
     }
 
@@ -210,6 +247,59 @@ impl<'a> ParseBudget<'a> {
 
     pub(crate) fn take_paragraph_runs(&mut self) -> Vec<Option<usize>> {
         std::mem::take(&mut self.paragraph_runs)
+    }
+
+    /// Starts the `w:dir`/`w:bdo` ordinals of a paragraph, returning the enclosing one's.
+    pub(crate) fn begin_direction_scopes(&mut self) -> u32 {
+        std::mem::take(&mut self.direction_scopes)
+    }
+
+    pub(crate) fn end_direction_scopes(&mut self, enclosing: u32) {
+        self.direction_scopes = enclosing;
+    }
+
+    /// Charge a copy of direction scope data onto one child, before it is made. Every walk of
+    /// the document charges this one counter, including walks that only hold a shared borrow.
+    pub(crate) fn charge_direction_scope_bytes(
+        &self,
+        amount: usize,
+        part: &str,
+    ) -> Result<(), ParseError> {
+        let mut used = self.direction_scope_bytes.get();
+        charge(
+            &mut used,
+            amount,
+            MAX_DIRECTION_SCOPE_BYTES,
+            "directionScopeBytes",
+            part,
+        )?;
+        self.direction_scope_bytes.set(used);
+        Ok(())
+    }
+
+    pub(crate) fn next_direction_scope(&mut self) -> u32 {
+        let id = self.direction_scopes;
+        self.direction_scopes = id.saturating_add(1);
+        id
+    }
+
+    pub(crate) fn record_unmodeled_inline(&mut self, name: &str, chars: usize) {
+        match self
+            .unmodeled_inline
+            .iter_mut()
+            .find(|(known, _)| *known == name)
+        {
+            Some((_, total)) => *total = total.saturating_add(chars),
+            None => self.unmodeled_inline.push((name.to_owned(), chars)),
+        }
+    }
+
+    /// One `DOCX_UNMODELED_INLINE` warning per text-bearing element name kept as raw XML.
+    pub(crate) fn take_unmodeled_inline_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unmodeled_inline)
+            .into_iter()
+            .map(|(name, chars)| format!("DOCX_UNMODELED_INLINE {name} chars={chars}"))
+            .collect()
     }
 
     /// XML events charged so far.
@@ -1361,6 +1451,7 @@ pub(crate) fn parse_xml_strict(
     let mut roots = Vec::new();
     let mut stack: Vec<XmlElement> = Vec::new();
     let mut starts = Vec::new();
+    let mut bookmarks_below: Vec<bool> = Vec::new();
     let mut paragraphs = 0u32;
     let mut local_names = false;
     let mut number = |mut element: XmlElement, ancestors: &[XmlElement]| {
@@ -1400,6 +1491,7 @@ pub(crate) fn parse_xml_strict(
                 let element = number(element, &stack);
                 stack.push(element);
                 starts.push(offset);
+                bookmarks_below.push(false);
             }
             Event::Empty(start) => {
                 if stack.len() + 1 > budget.limits.max_xml_depth {
@@ -1412,7 +1504,11 @@ pub(crate) fn parse_xml_strict(
                 scope_name_matching(&mut element, &mut stack, &mut local_names);
                 let mut element = number(element, &stack);
                 retain_bookmark_xml(&mut element, xml, offset, reader.buffer_position() as usize);
-                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
+                let holds = is_bookmark_boundary(&element);
+                retain_replayed_namespace_aliases(&mut element, &stack, holds, part, budget)?;
+                if let Some(parent) = bookmarks_below.last_mut() {
+                    *parent |= holds;
+                }
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
@@ -1422,8 +1518,12 @@ pub(crate) fn parse_xml_strict(
                     message: "unexpected closing element".to_owned(),
                 })?;
                 let start = starts.pop().unwrap();
+                let holds = bookmarks_below.pop().unwrap() || is_bookmark_boundary(&element);
                 retain_bookmark_xml(&mut element, xml, start, reader.buffer_position() as usize);
-                retain_replayed_namespace_aliases(&mut element, &stack, part, budget)?;
+                retain_replayed_namespace_aliases(&mut element, &stack, holds, part, budget)?;
+                if let Some(parent) = bookmarks_below.last_mut() {
+                    *parent |= holds;
+                }
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -1559,9 +1659,14 @@ pub(crate) fn canonical_namespace(prefix: &str) -> Option<&'static str> {
         .map(|standard| standard.transitional)
 }
 
+fn is_bookmark_boundary(element: &XmlElement) -> bool {
+    matches!(element.local_name(), "bookmarkStart" | "bookmarkEnd")
+}
+
 fn retain_replayed_namespace_aliases(
     element: &mut XmlElement,
     ancestors: &[XmlElement],
+    holds_bookmark: bool,
     part: &str,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), ParseError> {
@@ -1587,7 +1692,8 @@ fn retain_replayed_namespace_aliases(
             child.local_name() == "drawing" && crate::smart_art::is_smart_art_drawing(child)
         });
     let drawing = matches!(element.local_name(), "drawing" | "AlternateContent");
-    let bookmarked_drawing = drawing && crate::text_box::has_bookmarked_text_box(element);
+    let bookmarked_drawing =
+        drawing && holds_bookmark && crate::text_box::has_bookmarked_text_box(element);
     let text_box_drawing =
         drawing && !bookmarked_drawing && crate::text_box::contains_text_box(element);
     if !row
@@ -2877,5 +2983,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn budget_clones_share_preview_connector_captures() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        budget.preview_connectors = Some(Default::default());
+        let shape = crate::shape::Shape::empty("bentConnector2".to_owned(), Default::default());
+        let guides = || vec![(Vec::new(), "bentConnector2".to_owned(), Default::default())];
+        budget.connector_story("word/header1.xml", None);
+        budget.record_connector(&shape, guides());
+
+        let checkpoint = budget.clone();
+        budget.connector_story("word/footer1.xml", None);
+        budget.record_connector(&shape, guides());
+        assert!(format!("{:?}", checkpoint.preview_connectors).contains("word/footer1.xml"));
     }
 }

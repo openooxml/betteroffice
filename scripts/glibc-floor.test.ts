@@ -1,0 +1,321 @@
+import { expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { GLIBC_FLOOR, compareGlibc, requiredGlibcVersions, unversionedUndefinedSymbols } from './glibc-floor.mjs';
+
+type ElfSymbol = { name: string; binding?: number; section?: number; version?: number };
+
+function elf(
+  libraries: string[][],
+  machine = 62,
+  { symbols = [], hash = 'sysv', versym = true, needed = [] }: {
+    symbols?: ElfSymbol[];
+    hash?: 'sysv' | 'gnu';
+    versym?: boolean;
+    needed?: string[];
+  } = {}
+) {
+  let names = '\0';
+  const addName = (name: string) => {
+    const offset = names.length;
+    names += `${name}\0`;
+    return offset;
+  };
+  const needs = libraries.map((versions, index) => ({
+    file: addName(index === 0 ? 'libc.so.6' : 'libm.so.6'),
+    versions: versions.map(addName)
+  }));
+  const neededOffsets = needed.map(addName);
+  const symbolRecords = symbols.map(({ name, binding = 1, section = 0, version = 1 }) => ({
+    name: addName(name), binding, section, version
+  }));
+
+  const loadAddress = 0x400000;
+  const elfHeaderSize = 64;
+  const headersOffset = elfHeaderSize;
+  const headerSize = 56;
+  const stringsOffset = headersOffset + 2 * headerSize;
+  const needsOffset = stringsOffset + Math.ceil(names.length / 8) * 8;
+  const recordStride = 24;
+  const symbolsOffset = needsOffset + needs.reduce((sum, { versions }) => sum + 1 + versions.length, 0) * recordStride;
+  const symbolSize = 24;
+  const symbolCount = symbolRecords.length + 1;
+  const firstDefined = symbolRecords.findIndex(({ section }) => section !== 0);
+  const firstHashed = firstDefined === -1 ? symbolCount : firstDefined + 1;
+  const chainCount = symbolCount - firstHashed;
+  const hashOffset = symbolsOffset + symbolCount * symbolSize;
+  const hashSize = hash === 'gnu' ? 16 + 8 + 4 + chainCount * 4 : 8 + 4 + symbolCount * 4;
+  const versymOffset = hashOffset + hashSize;
+  const dynamicOffset = symbolRecords.length
+    ? Math.ceil((versymOffset + (versym ? symbolCount * 2 : 0)) / 8) * 8
+    : symbolsOffset;
+  const dynamic: [number, number][] = [
+    [5, loadAddress + stringsOffset],
+    [10, names.length]
+  ];
+  for (const offset of neededOffsets) dynamic.push([1, offset]);
+  if (needs.length) dynamic.push([0x6ffffffe, loadAddress + needsOffset], [0x6fffffff, needs.length]);
+  if (symbolRecords.length) {
+    dynamic.push([6, loadAddress + symbolsOffset], [11, symbolSize], [hash === 'gnu' ? 0x6ffffef5 : 4, loadAddress + hashOffset]);
+    if (versym) dynamic.push([0x6ffffff0, loadAddress + versymOffset]);
+  }
+  dynamic.push([0, 0]);
+  const size = dynamicOffset + dynamic.length * 16;
+  const bytes = new Uint8Array(size + 8).subarray(8);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16 = (offset: number, value: number) => view.setUint16(offset, value, true);
+  const u32 = (offset: number, value: number) => view.setUint32(offset, value, true);
+  const u64 = (offset: number, value: number) => view.setBigUint64(offset, BigInt(value), true);
+
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  u16(16, 3);
+  u16(18, machine);
+  u32(20, 1);
+  u64(32, headersOffset);
+  u16(52, elfHeaderSize);
+  u16(54, headerSize);
+  u16(56, 2);
+
+  function programHeader(header: number, type: number, offset: number, segmentSize: number, align: number) {
+    u32(header, type);
+    u32(header + 4, 4);
+    u64(header + 8, offset);
+    u64(header + 16, loadAddress + offset);
+    u64(header + 32, segmentSize);
+    u64(header + 40, segmentSize);
+    u64(header + 48, align);
+  }
+  programHeader(headersOffset, 1, 0, bytes.length, 0x1000);
+  programHeader(headersOffset + headerSize, 2, dynamicOffset, dynamic.length * 16, 8);
+  dynamic.forEach(([tag, value], index) => {
+    const offset = dynamicOffset + index * 16;
+    u64(offset, tag);
+    u64(offset + 8, value);
+  });
+  bytes.set(new TextEncoder().encode(names), stringsOffset);
+
+  let need = needsOffset;
+  let versionIndex = 2;
+  needs.forEach(({ file, versions }, index) => {
+    const next = (1 + versions.length) * recordStride;
+    u16(need, 1);
+    u16(need + 2, versions.length);
+    u32(need + 4, file);
+    u32(need + 8, recordStride);
+    u32(need + 12, index + 1 < needs.length ? next : 0);
+    versions.forEach((name, item) => {
+      const aux = need + (item + 1) * recordStride;
+      u16(aux + 6, versionIndex++);
+      u32(aux + 8, name);
+      u32(aux + 12, item + 1 < versions.length ? recordStride : 0);
+    });
+    need += next;
+  });
+
+  if (symbolRecords.length) {
+    symbolRecords.forEach(({ name, binding, section, version }, index) => {
+      const symbol = symbolsOffset + (index + 1) * symbolSize;
+      u32(symbol, name);
+      bytes[symbol + 4] = binding << 4;
+      u16(symbol + 6, section);
+      if (versym) u16(versymOffset + (index + 1) * 2, version);
+    });
+    u32(hashOffset, 1);
+    if (hash === 'gnu') {
+      u32(hashOffset + 4, firstHashed);
+      u32(hashOffset + 8, 1);
+      if (chainCount) {
+        u32(hashOffset + 24, firstHashed);
+        u32(hashOffset + hashSize - 4, 1);
+      }
+    } else {
+      u32(hashOffset + 4, symbolCount);
+    }
+  }
+  return bytes;
+}
+
+const cli = (...files: string[]) => spawnSync('node', [
+  fileURLToPath(new URL('./glibc-floor.mjs', import.meta.url)),
+  ...files
+], { encoding: 'utf8' });
+
+test('collects sorted unique glibc versions from every needed library', () => {
+  for (const machine of [62, 183]) {
+    expect(requiredGlibcVersions(elf([
+      ['GLIBC_2.43', 'GLIBC_2.9'],
+      [`GLIBC_${GLIBC_FLOOR}`, 'GCC_3.0', 'CXXABI_1.3', 'GLIBC_2.9', 'GLIBC_2.2.5']
+    ], machine))).toEqual(['GLIBC_2.2.5', 'GLIBC_2.9', `GLIBC_${GLIBC_FLOOR}`, 'GLIBC_2.43']);
+  }
+});
+
+test('rejects glibc needs that are not a numbered version', () => {
+  for (const need of ['GLIBC_ABI_DT_RELR', 'GLIBC_PRIVATE']) {
+    expect(() => requiredGlibcVersions(elf([[`GLIBC_${GLIBC_FLOOR}`, need]]))).toThrow(`unsupported glibc version need ${need}`);
+  }
+});
+
+test('rejects a version record that lists no versions', () => {
+  expect(() => requiredGlibcVersions(elf([[], ['GLIBC_2.9']]))).toThrow('invalid ELF vn_cnt');
+});
+
+test('compares major, minor and patch versions numerically', () => {
+  expect(compareGlibc('2.9', GLIBC_FLOOR)).toBeLessThan(0);
+  expect(compareGlibc(GLIBC_FLOOR, '2.43')).toBeLessThan(0);
+  expect(compareGlibc('2.43.10', '2.43.9')).toBeGreaterThan(0);
+  expect(compareGlibc(`${GLIBC_FLOOR}.0`, GLIBC_FLOOR)).toBe(0);
+});
+
+test('rejects non-ELF, ELF32, big-endian and other ELF machines', () => {
+  expect(() => requiredGlibcVersions(new Uint8Array(64))).toThrow('expected an ELF file');
+  const elf32 = elf([]);
+  elf32[4] = 1;
+  expect(() => requiredGlibcVersions(elf32)).toThrow('expected little-endian ELF64');
+  const bigEndian = elf([]);
+  bigEndian[5] = 2;
+  expect(() => requiredGlibcVersions(bigEndian)).toThrow('expected little-endian ELF64');
+  expect(() => requiredGlibcVersions(elf([], 243))).toThrow('expected x86_64 or aarch64 ELF');
+});
+
+test('finds unversioned undefined symbols using either dynamic hash table', () => {
+  const symbols = [
+    { name: '__isoc23_strtol', version: 0x8001 },
+    { name: '__gmon_start__', binding: 2 },
+    { name: 'napi_create_object' },
+    { name: 'node_api_get_module_file_name' },
+    { name: 'uv_run' },
+    { name: 'exported_function', section: 1 },
+    { name: '__isoc23_strtoul', version: 0 }
+  ];
+  for (const hash of ['sysv', 'gnu'] as const) {
+    const bytes = elf([[`GLIBC_${GLIBC_FLOOR}`]], 62, { symbols, hash });
+    expect(unversionedUndefinedSymbols(bytes)).toEqual(['__isoc23_strtol', '__isoc23_strtoul']);
+  }
+});
+
+test('treats undefined symbols as unversioned without DT_VERSYM', () => {
+  const bytes = elf([], 183, {
+    symbols: [{ name: '__isoc23_strtol' }, { name: 'napi_register_module_v1', section: 1 }], hash: 'gnu', versym: false
+  });
+  expect(unversionedUndefinedSymbols(bytes)).toEqual(['__isoc23_strtol']);
+});
+
+test('rejects a GNU hash table without hashed symbols, whose symbol offset does not count the imports', () => {
+  const bytes = elf([], 62, { symbols: [{ name: '__isoc23_strtol' }], hash: 'gnu' });
+  expect(() => unversionedUndefinedSymbols(bytes)).toThrow('dynamic symbol count is unknown');
+});
+
+test('the CLI checks every file, rejecting newer binaries and files without version needs', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const compatible = join(directory, 'compatible.node');
+    const newer = join(directory, 'newer.node');
+    const noNeeds = join(directory, 'no-needs.node');
+    writeFileSync(compatible, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GLIBC_2.9']]));
+    writeFileSync(newer, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GLIBC_2.43']]));
+    writeFileSync(noNeeds, elf([]));
+
+    const pass = cli(compatible);
+    expect(pass.status).toBe(0);
+    const compatibleLine = `${compatible}: needs GLIBC ${GLIBC_FLOOR} (floor ${GLIBC_FLOOR})\n`;
+    expect(pass.stdout).toBe(compatibleLine);
+
+    const fail = cli(newer, compatible);
+    expect(fail.status).toBe(1);
+    expect(fail.stdout).toBe(`${newer}: needs GLIBC 2.43 (floor ${GLIBC_FLOOR})\n${compatibleLine}`);
+
+    const missing = cli(noNeeds);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain(`${noNeeds}: no GLIBC version needs found`);
+    expect(cli(join(directory, 'missing.*.node')).status).toBe(1);
+    expect(cli().status).toBe(1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the CLI checks the GCC version ceiling and rejects unparseable GCC needs', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const file = join(directory, 'gcc.node');
+    for (const version of ['GCC_4.2.0', 'GCC_4.8', 'GCC_4.8.0']) {
+      writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], [version]]));
+      const result = cli(file);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+    }
+
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GCC_7.0.0', 'GCC_4.2.0']]));
+    const aboveCeiling = cli(file);
+    expect(aboveCeiling.status).toBe(1);
+    expect(aboveCeiling.stderr).toBe(`${file}: needs GCC_7.0.0 (maximum GCC_4.8.0)\n`);
+
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`], ['GCC_PRIVATE']]));
+    const unparseable = cli(file);
+    expect(unparseable.status).toBe(1);
+    expect(unparseable.stderr).toBe(`${file}: unsupported GCC version need GCC_PRIVATE\n`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the CLI accepts the allowed shared libraries on x86_64 and aarch64', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const libraries = ['libc.so.6', 'libm.so.6', 'libdl.so.2', 'libpthread.so.0', 'librt.so.1', 'libgcc_s.so.1'];
+    for (const [machine, loader] of [[62, 'ld-linux-x86-64.so.2'], [183, 'ld-linux-aarch64.so.1']] as const) {
+      const file = join(directory, `${machine}.node`);
+      writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`]], machine, { needed: [...libraries, loader] }));
+      const result = cli(file);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test.each(['libmvec.so.1', 'libstdc++.so.6'])('the CLI rejects a dependency on %s', (library) => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const file = join(directory, 'unsupported.node');
+    const needed = ['libc.so.6', library, 'libm.so.6'];
+    writeFileSync(file, elf([[`GLIBC_${GLIBC_FLOOR}`]], 62, { needed }));
+    const result = cli(file);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toBe(`${file}: unsupported shared library "${library}"\n`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the CLI rejects unversioned undefined symbols and reports versioned ones through their glibc need', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'glibc-floor-'));
+  try {
+    const unversioned = join(directory, 'unversioned.node');
+    const versioned = join(directory, 'versioned.node');
+    const symbol = { name: '__isoc23_strtol' };
+    writeFileSync(unversioned, elf([[`GLIBC_${GLIBC_FLOOR}`]], 62, {
+      symbols: [symbol, { name: '__isoc23_strtoul' }]
+    }));
+    const versionedElf = elf([['GLIBC_2.38']], 62, { symbols: [{ ...symbol, version: 2 }] });
+    expect(unversionedUndefinedSymbols(versionedElf)).toEqual([]);
+    writeFileSync(versioned, versionedElf);
+
+    const unresolved = cli(unversioned);
+    expect(unresolved.status).toBe(1);
+    expect(unresolved.stderr).toBe(
+      `${unversioned}: unversioned undefined symbol __isoc23_strtol\n` +
+      `${unversioned}: unversioned undefined symbol __isoc23_strtoul\n`
+    );
+    const overFloor = cli(versioned);
+    expect(overFloor.status).toBe(1);
+    expect(overFloor.stdout).toBe(`${versioned}: needs GLIBC 2.38 (floor ${GLIBC_FLOOR})\n`);
+    expect(overFloor.stderr).toBe('');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -21,7 +21,7 @@ function painterModule() {
   let release!: () => void;
   const ready = new Promise<void>((resolve) => { release = resolve; });
   const painter = { adopt: mock((_list: DisplayList) => {}),
-    paint: mock((_: DisplayList, paint: () => void) => { paint(); return true; }), dispose: mock(() => {}) };
+    paint: mock((list: DisplayList, paint: (list: DisplayList) => void) => { paint(list); return true; }), dispose: mock(() => {}) };
   const create = mock(() => painter);
   const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(async () => {
     await ready;

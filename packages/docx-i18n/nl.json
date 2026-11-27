@@ -593,6 +593,7 @@
     "noDocumentLoaded": "Geen document geladen",
     "failedToLoad": "Kan dit document niet openen",
     "failedToLoadDescription": "Het bestand is mogelijk beschadigd, of gebruikt iets dat deze editor nog niet kan lezen.",
+    "recoveryFailedDescription": "De editor is gestopt en kon uw laatste wijzigingen niet herstellen. Het bestand zelf is niet beschadigd.",
     "failedToLoadDamaged": "Het bestand is beschadigd of is geen volledig Word-document.",
     "failedToLoadUnsupported": "Dit document gebruikt iets dat deze editor nog niet kan lezen.",
     "editorUnavailable": "De editor kan niet worden geladen",

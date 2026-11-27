@@ -713,13 +713,11 @@ fn indented_fallback_wraps_at_the_remaining_content_width() {
     let fallback =
         measure_paragraph(paragraph, 100.0, &fallback_config()).expect("fallback measures");
 
-    assert_eq!(fallback.lines.len(), 3);
-    for (index, line) in fallback.lines.iter().enumerate() {
-        assert_eq!(
-            (line.head_char, line.tail_char),
-            (index * 4, (index + 1) * 4)
-        );
-        assert!((line.width - FONT_SIZE_PX * 4.0).abs() < 0.01);
+    let spans = [(0, 2), (2, 6), (6, 10), (10, 12)];
+    assert_eq!(fallback.lines.len(), spans.len());
+    for (line, (start, end)) in fallback.lines.iter().zip(spans) {
+        assert_eq!((line.head_char, line.tail_char), (start, end));
+        assert!((line.width - FONT_SIZE_PX * (end - start) as f64).abs() < 0.01);
         assert!(line.width <= 60.0);
     }
 }

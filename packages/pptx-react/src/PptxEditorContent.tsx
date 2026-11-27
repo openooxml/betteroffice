@@ -3641,7 +3641,7 @@ const styles: Record<string, CSSProperties> = {
   textEditOutline: {
     position: 'absolute',
     zIndex: 3,
-    border: '2px dashed #6b7280',
+    border: '1px solid #6b7280',
     boxSizing: 'border-box',
     boxShadow: '0 0 0 1px rgba(255, 255, 255, 0.9)',
     pointerEvents: 'none',

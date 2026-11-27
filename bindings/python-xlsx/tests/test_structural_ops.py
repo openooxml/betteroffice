@@ -29,6 +29,7 @@ INTERNAL_TAGS = {
     "restoreColStyles",
     "restoreRowStyles",
     "restoreSheet",
+    "restoreTableColumn",
     "setTables",
 }
 
@@ -126,7 +127,17 @@ def test_typed_ops_cover_every_public_tag_the_engine_decodes(sample_bytes):
 def test_apply_ops_refuses_the_internal_ops_as_every_binding_does(sample_bytes):
     workbook = bo.Workbook.open(sample_bytes)
     before = workbook.save()
-    for op in ({"type": "setCharts", "sheet": 0, "charts": []}, {"type": "setTables", "tables": []}):
+    restore_column = {
+        "type": "restoreTableColumn",
+        "sheet": 0,
+        "at": {"row": 0, "col": 0},
+        "table": "Table1",
+        "caption": "Name",
+        "cell": {},
+        "formulas": [],
+        "defined_names": [],
+    }
+    for op in ({"type": "setCharts", "sheet": 0, "charts": []}, {"type": "setTables", "tables": []}, restore_column):
         with pytest.raises(bo.OperationError, match="^restore sheet operations are internal$"):
             workbook.apply_ops([op])
     assert workbook.save() == before

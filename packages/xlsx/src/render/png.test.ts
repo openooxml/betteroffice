@@ -3,7 +3,7 @@ import * as bundled from '@betteroffice/fonts';
 import { PngExportError } from '../../../../shared/office-session/pngExportError';
 import type { DisplayList } from '../display-list/types';
 import { engineKind, renderPng, type XlsxPngEngine } from '../wasm/enginePng';
-import { displayListToPng, sheetFonts } from './png';
+import { displayListToPng, sheetFontRequests, sheetFonts } from './png';
 
 const text = { op: 'text', x: 4, y: 12, text: 'Total', fontSize: 11, color: '#000000', fontFamily: 'Brand Sans' } as const;
 const list = (commands: DisplayList['commands'] = [text]): DisplayList => ({ width: 120.5, height: 40, commands });
@@ -162,6 +162,14 @@ describe('text runs', () => {
     ]);
   });
 
+  test('PNG font requests include the script of a number format fill character', () => {
+    expect(sheetFontRequests(list([{
+      ...text,
+      text: '42',
+      numberFormat: { left: 0, width: 80, parts: [{ offset: 0, kind: 'fill', character: 'ก' }] },
+    }]))).toEqual([{ font: { family: 'Brand Sans', bold: false, italic: false }, scripts: ['thai'] }]);
+  });
+
   test('the export waits for the faces of text runs before painting', async () => {
     const calls = stubBrowser();
     await displayListToPng(list([{ ...text, runs: [{ start: 0, end: 2, fontFamily: 'Cambria' }, { start: 2, end: 5, bold: true }] }]), { dpr: 1, width: 121, height: 40 });
@@ -250,13 +258,15 @@ describe.skipIf(engineKind === 'native')('the wasm PNG engine', () => {
   const nativeFace = (family: string, bold: boolean) => bundled.resolveBundledFamilyFace(family, bold, false)
     ?? bundled.resolveGlyphFallbackFace(family, bold, false, 'word') ?? bundled.resolveLastResortChoice(family, bold, false, 'word').face;
 
-  test('without fonts, a bold run on a regular face installs it regular so the bold is synthesized as natively', async () => {
-    const calls = stubBrowser();
-    await renderPng(sheetOf('Calibri Light', true), box, {});
-    expect(nativeFace('Calibri Light', true).weight).toBe(400);
-    expect(calls.faces.map((installed) => installed.weight)).toEqual(['400']);
-    expect(calls.painted.some((font) => font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
-  });
+  for (const [family, weight] of [['Calibri Light', 700], ['DM Serif Display Light', 400]] as const) {
+    test(`without fonts, a bold ${family} run installs its substitute at weight ${weight}`, async () => {
+      const calls = stubBrowser();
+      await renderPng(sheetOf(family, true), box, {});
+      expect(nativeFace(family, true).weight).toBe(weight);
+      expect(calls.faces.map((installed) => installed.weight)).toEqual([String(weight)]);
+      expect(calls.painted.some((font) => font.startsWith('bold ') && font.includes('bo-xlsx-png'))).toBe(true);
+    });
+  }
 
   test('without fonts, a regular run on a bold face paints with that face, installed bold', async () => {
     const calls = stubBrowser();

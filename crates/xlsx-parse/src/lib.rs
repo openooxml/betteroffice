@@ -61,7 +61,7 @@ pub use pictures::sheet_pictures;
 pub use read::styles_part_name;
 pub use read::{
     LegacySheetDimensions, SharedStringCells, SourceCellFacts, cf_rule_attribute, parse_workbook,
-    workbook_full_precision,
+    workbook_calculation_settings, workbook_full_precision, workbook_iterate,
 };
 pub use reference::UnpatchableReference;
 pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
@@ -116,16 +116,8 @@ pub fn parse_workbook_with_package(
 pub fn parse_workbook_with_owned_package(
     parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(&parts)?;
-    let package = PreservedPackage::capture(
-        parts,
-        &parsed.workbook,
-        parsed.active_sheet,
-        &parsed.shared_string_cells,
-        &parsed.declined_parts,
-        parsed.rich_shared_strings,
-        parsed.cell_facts,
-    )?;
+    let mut parsed = read::parse_workbook_indexed(&parts)?;
+    let package = PreservedPackage::capture(parts, &mut parsed)?;
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,

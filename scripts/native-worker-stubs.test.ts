@@ -1,24 +1,21 @@
 import { afterAll, expect, test } from 'bun:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
-import { validatePublishedWorker } from './worker-entry-check.mjs';
-import type { buildWorkerStub as BuildWorkerStub, WorkerStub } from './worker-stub';
+import { join, relative, resolve } from 'node:path';
+import { build } from 'esbuild';
+import { nativeEnginePlugin } from './native-engine';
+import { validateNativeWorker } from './worker-entry-check.mjs';
+import type { WorkerStub } from './worker-stub';
 
 type Format = 'xlsx' | 'pptx' | 'docx';
 type WorkerStubs = (format: Format, outDir: string) => WorkerStub[];
 
 const stubModule = await import('./worker-stub').catch(() => undefined);
-const buildWorkerStub: typeof BuildWorkerStub | undefined = stubModule?.buildWorkerStub;
+const buildWorkerStubs = stubModule?.buildWorkerStubs;
 const workerStubs: WorkerStubs | undefined = (stubModule as { workerStubs?: WorkerStubs } | undefined)?.workerStubs;
 
 const root = resolve(import.meta.dir, '..');
 const formats: Format[] = ['xlsx', 'pptx', 'docx'];
-const startEntries: Record<Format, string[]> = {
-  xlsx: ['xlsxWorkerStart'],
-  pptx: ['pptxWorkerStart'],
-  docx: ['yrs/residentEngineWorker', 'yrs/residentEngineWorker'],
-};
 const directory = await mkdtemp(join(tmpdir(), 'native-worker-stubs-'));
 
 afterAll(() => rm(directory, { recursive: true, force: true }));
@@ -42,23 +39,45 @@ for (const format of formats) {
     expect(native).toEqual(wasm);
   });
 
-  test(`${format}-native worker stubs import nothing statically and start an entry the binding builds`, async () => {
-    expect(buildWorkerStub).toBeFunction();
+  test(`${format}-native module workers bundle native engines without wasm assets or chunk imports`, async () => {
+    expect(buildWorkerStubs).toBeFunction();
     expect(workerStubs).toBeFunction();
     const out = join(directory, `${format}-native`);
     const stubs = workerStubs!(format, out);
-    const native = await entryKeys(`bindings/${format}-native/js/tsup.config.ts`);
-    const started: string[] = [];
+    const config = (await import(join(root, `bindings/${format}-native/js/tsup.config.ts`))).default;
+    const external: string[] = [...[config].flat()[0].external, '@betteroffice/fonts', '@betteroffice/fonts/*'];
+    await buildWorkerStubs!(format, out, { plugins: [nativeEnginePlugin(format)], external });
     const failures: string[] = [];
     for (const stub of stubs) {
-      await buildWorkerStub!(stub);
-      const { problems, target } = await validatePublishedWorker(await readFile(stub.outfile, 'utf8'));
+      const contents = await readFile(stub.outfile, 'utf8');
+      const { problems } = await validateNativeWorker(contents, stub.sibling ?? null);
       failures.push(...problems.map((problem: string) => `${relative(out, stub.outfile)} ${problem}`));
-      if (target === null) continue;
-      const entry = relative(out, resolve(dirname(stub.outfile), target)).replace(/\.m?js$/, '');
-      started.push(entry);
-      if (!native.includes(entry)) failures.push(`${relative(out, stub.outfile)} starts ${target}, which ${format}-native does not build`);
+      expect(contents).not.toMatch(/new URL\([^)]*\.wasm|WebAssembly\.instantiate|generated\//);
+      expect(contents).not.toContain('font-pack-request');
+      expect(contents).not.toContain('Bundled font asset');
+      if (stub.sibling) {
+        expect(contents).toBe('import "../docxWorker.mjs";\n');
+        continue;
+      }
+      const parsed = await build({
+        stdin: { contents },
+        bundle: true,
+        format: 'esm',
+        external: ['*'],
+        write: false,
+        metafile: true,
+      });
+      const imports = Object.values(parsed.metafile!.outputs).flatMap((output) => output.imports);
+      expect(imports.some(({ path }) => path === 'node:module')).toBe(true);
+      expect(imports.filter(({ path }) => path === '@betteroffice/fonts').map(({ kind }) => kind))
+        .toEqual(format === 'xlsx' ? [] : expect.arrayContaining(['dynamic-import']));
+      for (const { path } of imports) {
+        if (external.some((pattern) =>
+          pattern.endsWith('*') ? path.startsWith(pattern.slice(0, -1)) : path === pattern)) continue;
+        failures.push(`${relative(out, stub.outfile)} imports ${path}`);
+      }
     }
-    expect({ failures, started }).toEqual({ failures: [], started: startEntries[format] });
+    expect(failures).toEqual([]);
+    expect(await access(join(out, 'generated')).then(() => true, () => false)).toBe(false);
   });
 }

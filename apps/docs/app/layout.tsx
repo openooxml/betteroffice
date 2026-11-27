@@ -1,7 +1,8 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
 import type { Metadata } from 'next';
-import '@fontsource-variable/inter';
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
 import { appName, siteUrl } from '@/lib/shared';
 
 export const metadata: Metadata = {

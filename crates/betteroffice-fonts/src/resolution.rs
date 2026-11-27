@@ -130,31 +130,26 @@ pub fn resolve_script_fallback_face(
     italic: bool,
 ) -> Option<&'static BundledFontFace> {
     let files = catalog().script_fallback_order.get(script)?;
-    let faces: Vec<_> = files
+    let faces = files
         .iter()
-        .filter_map(|file| catalog().faces.iter().find(|face| &face.file == file))
-        .collect();
-    faces
-        .iter()
-        .copied()
-        .find(|face| matches_style(face, bold, italic))
-        .or_else(|| {
-            faces
-                .iter()
-                .copied()
-                .find(|face| matches_style(face, bold, false))
-        })
-        .or_else(|| {
-            faces
-                .iter()
-                .copied()
-                .find(|face| matches_style(face, false, false))
-        })
-        .or_else(|| faces.first().copied())
+        .filter_map(|file| catalog().faces.iter().find(|face| &face.file == file));
+    best_script_fallback(faces, bold, italic)
 }
 
-/// The script fallback for text that requests `family`: the catalog's face for
-/// that family and script whatever the style, else [`resolve_script_fallback_face`].
+fn best_script_fallback(
+    mut faces: impl Iterator<Item = &'static BundledFontFace> + Clone,
+    bold: bool,
+    italic: bool,
+) -> Option<&'static BundledFontFace> {
+    faces
+        .clone()
+        .find(|face| matches_style(face, bold, italic))
+        .or_else(|| faces.clone().find(|face| matches_style(face, bold, false)))
+        .or_else(|| faces.clone().find(|face| matches_style(face, false, false)))
+        .or_else(|| faces.next())
+}
+
+/// The best style of the requested family's script fallback.
 pub fn resolve_family_script_fallback_face(
     family: &str,
     script: &str,
@@ -166,10 +161,21 @@ pub fn resolve_family_script_fallback_face(
         .get(&key(family))
         .and_then(|scripts| scripts.get(script))
         .and_then(|file| catalog().faces.iter().find(|face| &face.file == file))
+        .and_then(|preferred| {
+            let faces = catalog().faces.iter().filter(|face| {
+                face.family == preferred.family && face.script.as_deref() == Some(script)
+            });
+            best_script_fallback(faces, bold, italic)
+        })
         .or_else(|| resolve_script_fallback_face(script, bold, italic))
 }
 
-fn variant(family: &str, italic: bool, heavy: bool) -> Option<&'static BundledFontFace> {
+fn variant(
+    family: &str,
+    bold: bool,
+    italic: bool,
+    heavy: bool,
+) -> Option<&'static BundledFontFace> {
     let family = family.trim_matches(whitespace);
     if family.ends_with('-') {
         return None;
@@ -190,15 +196,22 @@ fn variant(family: &str, italic: bool, heavy: bool) -> Option<&'static BundledFo
     if !variants.contains(&suffix) {
         return None;
     }
-    resolve_metric_compat_face(&words.join(" "), heavy, italic)
+    let base = words.join(" ");
+    if heavy {
+        return resolve_metric_compat_face(&base, true, italic);
+    }
+    let bold = bold && resolve_metric_compat_family(&base) != Some("Selawik");
+    resolve_metric_compat_face(&base, bold, italic)
+        .filter(|face| !bold || face.weight == 700)
+        .or_else(|| resolve_metric_compat_face(&base, false, italic))
 }
 
 pub fn resolve_light_variant_face(
     family: &str,
-    _bold: bool,
+    bold: bool,
     italic: bool,
 ) -> Option<&'static BundledFontFace> {
-    variant(family, italic, false)
+    variant(family, bold, italic, false)
 }
 
 fn looks_serif(family: &str) -> bool {
@@ -239,7 +252,7 @@ fn resolve_base_face(
     office: LastResortOffice,
     exclude_glyph_fallback: bool,
 ) -> &'static BundledFontFace {
-    let light = variant(family, italic, false);
+    let light = resolve_light_variant_face(family, bold, italic);
     let allowed = |face: &&BundledFontFace| {
         !exclude_glyph_fallback || !catalog().glyph_fallback_families.contains(&face.family)
     };
@@ -249,7 +262,7 @@ fn resolve_base_face(
     if light.is_some() {
         bold = false;
     }
-    if let Some(face) = variant(family, italic, true).filter(allowed) {
+    if let Some(face) = variant(family, bold, italic, true).filter(allowed) {
         return face;
     }
     if catalog().emulated_symbol_families.contains(&key(family)) {

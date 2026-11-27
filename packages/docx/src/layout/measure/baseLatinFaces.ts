@@ -1,6 +1,7 @@
 import { installBaseLatinFace } from '../../wasm/baseLatinFonts';
 import type { FontCoverage } from './fontCoverage';
 import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import { importFonts } from '../../../../../shared/office-session/fontModules';
 import type { BundledFontProvider } from './fontRegistry';
 
 type Loader = () => Promise<ArrayBuffer>;
@@ -57,7 +58,7 @@ export function resolveBaseLatinProvider(
   let pending = cache.get(key);
   if (!pending) {
     const baseUrl = state.baseUrl;
-    pending = import('@betteroffice/fonts').then(manager =>
+    pending = importFonts().then(manager =>
       manager.createFontProvider(baseUrl === undefined ? undefined : { baseUrl }, key));
     const current = pending;
     pending.catch(() => { if (cache.get(key) === current) cache.delete(key); });

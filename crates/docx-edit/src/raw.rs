@@ -18,8 +18,8 @@ use crate::op::{OpError, OpResult};
 use crate::seed::SeedAttrs;
 use crate::sticky_positions::sticky_index;
 use crate::{
-    COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, anchor_value, is_pilcrow,
-    map_string, out_len, story_ref,
+    COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, RAW_INLINES, anchor_value,
+    is_pilcrow, map_string, out_len, raw_mark_value, story_ref,
 };
 
 /// One low-level story mutation. Indices are UTF-16 story units (every embed = 1).
@@ -59,6 +59,16 @@ pub enum RawOp {
     },
     /// Remove the side-map comment keyed by `id`. Errors when it does not exist.
     RemoveComment { id: String },
+    /// Keeps an empty inline element of the source at `at` by one sticky anchor in the side map:
+    /// `Assoc::After` sticks to the unit after it, `Assoc::Before` to the unit before it.
+    /// `ordinal` is its source order among the story's kept elements.
+    SetRawMark {
+        id: String,
+        at: u32,
+        assoc: Assoc,
+        ordinal: u32,
+        xml: String,
+    },
 }
 
 pub(crate) struct SeedRange {
@@ -120,6 +130,7 @@ impl EditingDoc {
             RawOp::SetEmbedAttr { key, .. } => key == PARA_ID,
             _ => false,
         });
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let since = txn.before_state().get(&ClientID::new(self.client_id()));
         if rekeys {
@@ -165,6 +176,7 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         self.apply_raw_seed_batches(batches, ctx).map(|_| ())
     }
 
@@ -489,7 +501,10 @@ fn authors_last_paragraph(ops: &[RawOp], mut len: u32) -> bool {
                 len = len.saturating_sub(*removed);
                 continue;
             }
-            RawOp::Format { .. } | RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {
+            RawOp::Format { .. }
+            | RawOp::SetComment { .. }
+            | RawOp::RemoveComment { .. }
+            | RawOp::SetRawMark { .. } => {
                 continue;
             }
         };
@@ -555,7 +570,9 @@ fn apply_raw_ops_to_story(
             op => {
                 run.flush(&story, txn, shared)?;
                 match &op {
-                    RawOp::SetComment { .. } | RawOp::RemoveComment { .. } => {}
+                    RawOp::SetComment { .. }
+                    | RawOp::RemoveComment { .. }
+                    | RawOp::SetRawMark { .. } => {}
                     RawOp::Insert { .. } | RawOp::InsertEmbed { .. } => {
                         run.seed_candidate = false;
                         run.seed_range = None;
@@ -742,6 +759,45 @@ fn apply_raw_op_absolute(
                 return Err(OpError::UnknownComment(id));
             }
         }
+        RawOp::SetRawMark {
+            id,
+            at,
+            assoc,
+            ordinal,
+            xml,
+        } => {
+            guard_index(story, txn, at)?;
+            let seeded = seed_range.and_then(|range| {
+                let clock = match assoc {
+                    Assoc::After if at < range.len => range.clock + at,
+                    Assoc::Before if at > 0 && at <= range.len => range.clock + at - 1,
+                    _ => return None,
+                };
+                Some(StickyIndex::new(
+                    IndexScope::Relative(ID::new(range.client, clock)),
+                    assoc,
+                ))
+            });
+            debug_assert!(seeded.is_none() || seeded == sticky_index(story, txn, at, assoc));
+            let anchor = match seeded {
+                Some(anchor) => Some(anchor),
+                None => sticky_index(story, txn, at, assoc),
+            };
+            let Some(anchor) = anchor else {
+                return Err(OpError::OutOfBounds {
+                    index: at,
+                    len: story.len(txn),
+                });
+            };
+            let marks = txn
+                .get_map(RAW_INLINES)
+                .expect("raw inlines root is declared by EditingDoc::new");
+            marks.insert(
+                txn,
+                id.as_str(),
+                raw_mark_value(story_id, &anchor, ordinal, &xml),
+            );
+        }
     }
     Ok(())
 }
@@ -906,6 +962,26 @@ mod tests {
                     if comments.remove(txn, &id).is_none() {
                         return Err(OpError::UnknownComment(id));
                     }
+                }
+                RawOp::SetRawMark {
+                    id,
+                    at,
+                    assoc,
+                    ordinal,
+                    xml,
+                } => {
+                    guard_index(txn, at)?;
+                    let Some(anchor) = sticky_index(&story, txn, at, assoc) else {
+                        return Err(OpError::OutOfBounds {
+                            index: at,
+                            len: story.len(txn),
+                        });
+                    };
+                    let marks = txn
+                        .get_map(RAW_INLINES)
+                        .expect("raw inlines root is declared by EditingDoc::new");
+                    let mark = raw_mark_value(story_id, &anchor, ordinal, &xml);
+                    marks.insert(txn, id.as_str(), mark);
                 }
             }
         }

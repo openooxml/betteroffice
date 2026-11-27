@@ -1350,6 +1350,96 @@ fn body_docx(body: &str) -> Vec<u8> {
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
+#[test]
+fn editing_text_before_a_nested_field_preserves_its_cached_result_on_reopen() {
+    use betteroffice_docx::ParagraphContent::Inline;
+
+    let source = body_docx(concat!(
+        r#"<w:p w14:paraId="55555555"><w:r><w:t>abc</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> QUOTE </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> REF Bookmark </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:t xml:space="preserve">First </w:t></w:r>"#,
+        r#"<w:r><w:rPr><w:b/></w:rPr><w:t>Second</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    ));
+    let mut document = Document::open(&source).unwrap();
+    let BlockContent::Paragraph(paragraph) = &mut document.model_mut().body.content[0] else {
+        panic!("expected a paragraph");
+    };
+    let Inline(InlineNode::Run(run)) = &mut std::sync::Arc::make_mut(paragraph).content[0] else {
+        panic!("expected a run before the field");
+    };
+    let RunContent::Text { text, .. } = &mut run.content[0] else {
+        panic!("expected text before the field");
+    };
+    text.insert(1, 'X');
+
+    let saved = document.save().unwrap();
+    let reopened = Document::open(&saved).unwrap();
+    let paragraph = reopened.paragraph("55555555").unwrap();
+    let [
+        Inline(InlineNode::Run(run)),
+        Inline(InlineNode::ComplexField(owner)),
+    ] = paragraph.content.as_slice()
+    else {
+        panic!("expected a run followed by the owner field");
+    };
+    assert!(matches!(
+        run.content.as_slice(),
+        [RunContent::Text { text, .. }] if text == "aXbc"
+    ));
+    assert_eq!(owner.instruction, "QUOTE");
+    let [InlineNode::ComplexField(nested)] = owner
+        .structured_result
+        .as_ref()
+        .and_then(|result| result.inline.as_deref())
+        .unwrap()
+    else {
+        panic!("expected a nested field in the owner result");
+    };
+    assert_eq!(nested.instruction, "REF Bookmark");
+    assert_eq!(nested.field_result.len(), 2);
+    for (run, (expected, bold)) in nested
+        .field_result
+        .iter()
+        .zip([("First ", false), ("Second", true)])
+    {
+        let [RunContent::Text { text, .. }] = run.content.as_slice() else {
+            panic!("expected a cached text run");
+        };
+        assert_eq!(text, expected);
+        assert_eq!(
+            run.formatting
+                .as_ref()
+                .and_then(|formatting| formatting.bold)
+                .unwrap_or_default(),
+            bold
+        );
+    }
+
+    let seeded = betteroffice_docx::EditingDoc::new(1);
+    docx_edit::seed_from_docx(&seeded, &saved).unwrap();
+    let label =
+        seeded
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .find_map(|segment| match segment.content {
+                docx_edit::SegmentContent::OtherEmbed { kind, payload } if kind == "field" => {
+                    let instruction = serde_json::to_value(&payload["instruction"]).unwrap();
+                    (instruction == "QUOTE")
+                        .then(|| serde_json::to_value(&payload["displayText"]).unwrap())
+                }
+                _ => None,
+            });
+    assert_eq!(label, Some(serde_json::json!("First Second")));
+}
+
 /// Paragraphs without IDs: two in the body, one in a table cell, one in a
 /// content control and a closing one, in that order.
 fn unidentified_paragraphs() -> [String; 5] {
@@ -1656,4 +1746,67 @@ fn an_edit_by_index_of_a_paragraph_with_an_id_reports_that_id() {
         .unwrap();
     assert_eq!(receipt, expected);
     assert_eq!(by_index.save().unwrap(), by_id.save().unwrap());
+}
+
+#[test]
+fn replacing_the_text_of_a_paragraph_inside_a_direction_element_keeps_the_element() {
+    let document_xml = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+        r#"xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>"#,
+        r#"<w:p w14:paraId="55555555"><w:dir w:val="rtl"><w:r><w:t>abc</w:t></w:r></w:dir></w:p>"#,
+        r#"<w:sectPr/></w:body></w:document>"#
+    );
+    let parts = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml".to_owned(), document_xml.as_bytes().to_vec()),
+    ];
+    let mut document = Document::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    document.replace_paragraph_text("55555555", "xyz").unwrap();
+    let scopes = |document: &Document| -> Vec<String> {
+        let paragraph = document.paragraph("55555555").unwrap();
+        paragraph
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| &run.direction_scopes)
+            .map(|scope| {
+                format!(
+                    "{}:{}",
+                    scope.kind.element(),
+                    scope.val.as_deref().unwrap_or("")
+                )
+            })
+            .collect()
+    };
+    assert_eq!(scopes(&document), ["w:dir:rtl"]);
+    for block in &mut document.model_mut().body.content {
+        if let BlockContent::Paragraph(paragraph) = block
+            && paragraph.para_id.as_deref() == Some("55555555")
+        {
+            std::sync::Arc::make_mut(paragraph)
+                .formatting
+                .get_or_insert_with(Default::default)
+                .alignment = Some("center".to_owned());
+        }
+    }
+    let saved = document.save().unwrap();
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    let xml = saved_part(&parts, "word/document.xml");
+    assert!(
+        xml.contains(r#"<w:dir w:val="rtl"><w:r><w:t>xyz</w:t></w:r></w:dir>"#),
+        "{xml}"
+    );
+    let reopened = Document::open(&saved).unwrap();
+    assert_eq!(scopes(&reopened), ["w:dir:rtl"]);
 }

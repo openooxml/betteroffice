@@ -2,11 +2,12 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import type { DocxCommandAck, DocxCommandFrame, DocxCommandConnection } from '@betteroffice/docx/worker';
 import { SessionFailure } from '../../../../../../shared/office-session/types';
+import { ParseError } from '../../DocxEditorHelpers';
 import { usePeerlessEditSession, type UsePeerlessEditSessionOptions } from './usePeerlessEditSession';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook, waitFor } = await import('@testing-library/react');
+const { act, cleanup, render, renderHook, waitFor } = await import('@testing-library/react');
 afterEach(cleanup);
 afterAll(async () => {
   await act(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); });
@@ -126,6 +127,22 @@ test('a requested frame arriving after unmount releases its transferred bitmaps'
   expectClosed(frame);
 });
 
+for (const request of ['requestFullFrame', 'requestViewport'] as const) {
+  test(`a terminal ${request} failure after ready reports a recovery failure`, async () => {
+    const { connection, options } = resident();
+    let reject!: (error: Error) => void;
+    connection[request] = () => new Promise<never>((_, no) => { reject = no; });
+    const onError = mock((_error: Error, _recoveryFailed?: boolean) => {});
+    const view = renderHook(() => usePeerlessEditSession({ ...options, onError }));
+    await waitFor(() => expect(view.result.current.status).toBe('ready'));
+    if (request === 'requestViewport') act(() => view.result.current.binding!.setDisplayWindow!(0, 2));
+    const failure = new SessionFailure('message', 'Invalid worker response');
+    await act(async () => { reject(failure); });
+    expect(onError).toHaveBeenCalledWith(failure, true);
+    expect(view.result.current).toMatchObject({ status: 'failed', recoveryFailed: true });
+  });
+}
+
 test('a crashed worker respawns once with the viewport re-sent and a second crash fails the editor through onError', async () => {
   const first = resident();
   let rejectViewport!: (error: Error) => void;
@@ -155,31 +172,41 @@ test('a crashed worker respawns once with the viewport re-sent and a second cras
   await act(async () => { respawns[0]!.crash(second); });
   await waitFor(() => expect(view.result.current.status).toBe('failed'));
   expect(reopen).toHaveBeenCalledTimes(1);
-  expect(onError.mock.calls).toEqual([[second]]);
+  expect(onError).toHaveBeenCalledWith(second, true);
   expect(view.result.current.error).toBe(second);
   expect(phases).toEqual(['recovering', 'recovered', 'recovering', 'failed']);
 });
 
-for (const reason of ['stale-version', 'stale-anchor', 'read-only']) {
-  test(`recovery fails loudly when replay refuses acknowledged work with ${reason}`, async () => {
+for (const [kind, status, reason] of [
+  ['insertText', 'refused', 'stale-version'], ['insertText', 'refused', 'stale-anchor'], ['insertText', 'refused', 'read-only'],
+  ['insertText', 'refused', 'paste-changed'], ['replacePasteFragment', 'cancelled', 'paste-changed'],
+  ['replacePasteFragment', 'refused', 'stale-anchor'], ['replacePasteFragment', 'refused', 'paste-changed'],
+  ['replacePasteFragment', 'refused', 'nothing-to-undo'], ['replacePasteFragment', 'noop', undefined],
+] as const) {
+  test(`recovery fails when a replayed ${kind} is ${status} with ${reason}`, async () => {
     const first = resident();
     first.connection.client.call.edit = async command => ({ ...first.connection.initial, frame: undefined,
       version: 1, throughSeq: command.seq, outcomes: [{ seq: command.seq, status: 'applied' }] });
     const next = resident(2);
     next.connection.client.call.edit = async command => ({ ...next.connection.initial, frame: undefined,
-      throughSeq: command.seq, outcomes: [{ seq: command.seq, status: 'refused', reason }] });
+      throughSeq: command.seq, outcomes: [{ seq: command.seq, status, reason }] });
     const phases: string[] = [];
     const onError = mock((_error: Error) => {});
     const view = renderHook(() => usePeerlessEditSession({ ...first.options, onError,
       recovery: { reopen: async () => next.connection, onRecovery: event => { phases.push(event.phase); } } }));
     await waitFor(() => expect(view.result.current.status).toBe('ready'));
-    await act(async () => { await view.result.current.binding!.session.submit('insertText', { text: 'kept' }).ack; });
+    const payload = kind === 'insertText' ? { text: 'kept' } : { fragment: { paragraphs: [{ text: 'kept' }] } };
+    await act(async () => { await view.result.current.binding!.session.submit(kind, payload).ack; });
     act(() => first.crash(new SessionFailure('crash', 'Worker stopped')));
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
     expect(onError.mock.calls[0]![0]).toBeInstanceOf(SessionFailure);
-    expect(onError.mock.calls[0]![0].message).toContain(reason);
+    expect(onError.mock.calls[0]![0].message).toContain(reason ?? status);
     expect(phases).not.toContain('recovered');
-    expect(view.result.current.status).toBe('failed');
+    const result = view.result.current;
+    if (result.status !== 'failed') throw new Error('Expected replay to fail');
+    const page = render(<ParseError message={result.error.message} recoveryFailed={result.recoveryFailed} />);
+    expect(page.getByRole('alert').textContent).toContain('The editor stopped and could not restore your recent changes. The file itself is not damaged.');
+    expect(page.getByRole('alert').textContent).not.toContain('The file may be damaged');
   });
 }
 

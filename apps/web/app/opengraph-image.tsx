@@ -25,7 +25,7 @@ export default function OpengraphImage() {
       >
         <img
           src={logoUri}
-          width={760}
+          width={567}
           height={567}
           style={{
             position: "absolute",
@@ -36,7 +36,7 @@ export default function OpengraphImage() {
           }}
         />
 
-        <img src={logoUri} width={150} height={112} style={{ marginBottom: 44 }} />
+        <img src={logoUri} width={112} height={112} style={{ marginBottom: 44 }} />
         <div style={{ fontSize: 84, fontWeight: 700, letterSpacing: -3 }}>
           BetterOffice
         </div>

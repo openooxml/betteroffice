@@ -97,10 +97,17 @@ pub(super) fn lower_shape_json(
     lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
 }
 
+/// Whether a drawing's wrap type is `inline`, the one wrap that keeps a drawing
+/// in its paragraph's flow.
+pub(crate) fn inline_wrap(wrap_type: Option<&str>) -> bool {
+    wrap_type == Some("inline")
+}
+
 /// A `wp:anchor` shape rather than a `wp:inline` one. A malformed anchor can
 /// lose its position and keep only its wrap, so both spellings count.
 pub(super) fn anchored_shape(shape: &ShapeBlock) -> bool {
-    shape.position.is_some() || shape.wrap_type.is_some()
+    shape.position.is_some()
+        || (shape.wrap_type.is_some() && !inline_wrap(shape.wrap_type.as_deref()))
 }
 
 pub(super) fn inline_native_shape(shape: &ShapeBlock) -> bool {
@@ -653,7 +660,11 @@ fn shape_paragraph(
         ..ParagraphAttrs::default()
     };
     super::lower_paragraph_spacing(&values, &mut attrs, env, false);
-    super::lower_paragraph_indent(&values, &mut attrs);
+    super::lower_paragraph_indent(
+        &values,
+        &crate::list_marker::ListState::default(),
+        &mut attrs,
+    );
     super::lower_paragraph_tabs(&values, &mut attrs);
     if let Some(bullet) = object(paragraph, "bullet") {
         attrs.list_marker = string_in(bullet, "text");
@@ -1290,49 +1301,7 @@ fn arrow(direction: &str) -> Vec<Value> {
     right
 }
 
-fn bent_connector(segments: usize) -> Vec<Value> {
-    if segments <= 2 {
-        return vec![
-            command("move", &[("x", 0.0), ("y", 0.0)]),
-            command("line", &[("x", 0.5), ("y", 0.0)]),
-            command("line", &[("x", 0.5), ("y", 1.0)]),
-            command("line", &[("x", 1.0), ("y", 1.0)]),
-        ];
-    }
-    let mut output = vec![command("move", &[("x", 0.0), ("y", 0.0)])];
-    for index in 1..segments {
-        let fraction = index as f64 / segments as f64;
-        let point = if index % 2 == 1 {
-            (
-                if index == 1 { 0.5 } else { fraction },
-                (index - 1) as f64 / segments as f64,
-            )
-        } else {
-            ((index - 1) as f64 / segments as f64, fraction)
-        };
-        output.push(command("line", &[("x", point.0), ("y", point.1)]));
-    }
-    output.push(command("line", &[("x", 1.0), ("y", 1.0)]));
-    output
-}
-
 fn curved_connector(segments: usize) -> Vec<Value> {
-    if segments <= 2 {
-        return vec![
-            command("move", &[("x", 0.0), ("y", 0.0)]),
-            command(
-                "cubic",
-                &[
-                    ("cp1x", 0.5),
-                    ("cp1y", 0.0),
-                    ("cp2x", 0.5),
-                    ("cp2y", 1.0),
-                    ("x", 1.0),
-                    ("y", 1.0),
-                ],
-            ),
-        ];
-    }
     let mut output = vec![command("move", &[("x", 0.0), ("y", 0.0)])];
     for index in 0..segments - 1 {
         let start = index as f64 / (segments - 1) as f64;
@@ -1473,11 +1442,6 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
         "star16" => star(16),
         "star24" => star(24),
         "star32" => star(32),
-        "bentConnector2" => bent_connector(2),
-        "bentConnector3" => bent_connector(3),
-        "bentConnector4" => bent_connector(4),
-        "bentConnector5" => bent_connector(5),
-        "curvedConnector2" => curved_connector(2),
         "curvedConnector3" => curved_connector(3),
         "curvedConnector4" => curved_connector(4),
         "curvedConnector5" => curved_connector(5),

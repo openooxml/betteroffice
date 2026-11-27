@@ -207,6 +207,7 @@ impl EditingDoc {
         kind: &str,
         entries: &[(String, Any)],
     ) -> OpResult<()> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
         let story = story_ref(&txn, story_id)?;
         let map = embed_map_at(&story, &txn, raw)?;
@@ -266,6 +267,7 @@ impl EditingDoc {
                 if let Some((at, records)) = insert {
                     minted = self.insert_paragraph_records(child, *at, records)?;
                 }
+                let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
                 let mut txn = self.transact_for(&EditCtx::local(String::new(), String::new()));
                 let story = story_ref(&txn, child)?;
                 for paragraph in paragraphs.iter().rev() {

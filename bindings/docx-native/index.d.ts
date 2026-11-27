@@ -75,6 +75,8 @@ export declare class EditSession {
   apply_edits_json(request: string): string
   apply_host_update(update: Uint8Array): void
   apply_local_update(update: Uint8Array): void
+  /** @internal */
+  apply_local_update_with_provenance(update: Uint8Array, sidecar: Uint8Array): void
   apply_paragraph_style(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, styleId: string, authorName?: string | undefined | null, authorDate?: string | undefined | null): void
   apply_raw_ops(story: string, opsJson: string): void
   apply_seed_raw_ops(story: string, opsJson: string): void
@@ -84,6 +86,8 @@ export declare class EditSession {
   begin_opening(generation?: string | undefined | null): void
   begin_shared_reads(): void
   bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | undefined | null): void
+  /** @internal */
+  bootstrap_peer_with_provenance(state: Uint8Array, metadata: Uint8Array, source: Uint8Array | undefined | null, sidecar: Uint8Array): void
   can_redo(): boolean
   can_undo(): boolean
   cell_selection(): string
@@ -107,6 +111,8 @@ export declare class EditSession {
   edit_text_resident(story: string, startPara: string, startOffset: number, endPara: string, endOffset: number, text?: string | undefined | null): string
   encode_diff_chunks(remoteStateVector: Uint8Array, maxChunkBytes: number): Array<any>
   encode_diff(remoteStateVector: Uint8Array): Uint8Array
+  /** @internal */
+  encode_edit_provenance_for_transfer(bytes: Uint8Array, base?: Uint8Array | undefined | null): Uint8Array
   encode_peer_metadata(): Uint8Array
   encode_state(): Uint8Array
   encode_state_vector(): Uint8Array
@@ -170,6 +176,8 @@ export declare class EditSession {
   prime_save_seed_states_slice(paragraphs: number, inflated: number, maxBytes: number): number
   prime_last_slice_cost(): number
   paragraph_save_plan(): string
+  /** @internal */
+  paragraph_save_plan_with_local_provenance(): string
   paragraph_spans(story: string): string
   paragraph_unit(story: string, paraId: string): number
   paragraphs(story: string): string
@@ -188,6 +196,7 @@ export declare class EditSession {
   resolve_comment(commentId: string): string
   resolve_encoded_selection(story: string, anchor: Uint8Array, head: Uint8Array): string
   resolve_paragraph_anchor(anchorJson: string): string
+  resolve_raw_marks(): string
   resolve_sticky_position(story: string, position: Uint8Array): string
   revision_ids_at(story: string, paraId: string, offset: number): string
   revision_stamps_json(idsJson: string): string
@@ -215,6 +224,8 @@ export declare class EditSession {
   set_style_language(styleId: string | undefined | null, slotsJson: string): boolean
   patch_style_languages_xml(source: string): string
   ensure_list_definition(story: string, paraId: string, kind: string): string
+  ensure_list_definition_after(story: string, paraId: string, kind: string, lead?: string | undefined | null): string
+  paragraph_style_numbers(story: string, paraId: string): boolean | undefined
   created_list_definitions_json(): string
   list_definition_keys_in_use_json(): string
   set_document_property(key: string, json: string): boolean

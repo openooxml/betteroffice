@@ -55,7 +55,7 @@ use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
 use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow, story_ref};
 use crate::list_definitions::{effective_list_state, resolve_list_identity, written_numbering};
 use crate::list_marker::{ListState, compute_list_marker};
-use crate::seed::synthesized_cell_width;
+use crate::seed::{RAW_INLINE_KIND, synthesized_cell_width};
 use crate::sticky_positions::sticky_offset;
 
 pub(crate) mod group_pictures;
@@ -69,6 +69,7 @@ pub use group_pictures::GroupPictureSources;
 pub(crate) mod run_size_provenance;
 mod shapes;
 pub use shapes::ShapeStyles;
+pub(crate) use shapes::inline_wrap;
 
 pub use reservations::{Reservation, ReservationKind, ReservationSide, Reservations};
 
@@ -186,6 +187,13 @@ pub(crate) fn source_font_theme(doc: &EditingDoc) -> Option<docx_parse::Theme> {
         return Some(index.render_theme().clone());
     }
     package_font_theme(doc.media_table()?.retained_package())
+}
+
+pub(crate) fn group_picture_sources(doc: &EditingDoc, env: &RenderEnv) -> GroupPictureSources {
+    doc.source_index()
+        .map(|index| index.group_picture_sources())
+        .or_else(|| doc.source_metadata()?.preview_shape_sources.clone())
+        .unwrap_or_else(|| env.group_pictures.clone())
 }
 
 pub(crate) fn parse_font_theme(value: Value) -> Result<docx_parse::Theme, serde_json::Error> {
@@ -499,10 +507,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         } else {
             env.media.clone()
         },
-        group_pictures: doc
-            .source_index()
-            .map(|index| index.group_picture_sources())
-            .unwrap_or_else(|| env.group_pictures.clone()),
+        group_pictures: group_picture_sources(doc, env),
         shape_styles: shapes::ShapeStyles::new(doc),
         ..env.clone()
     };
@@ -1481,7 +1486,14 @@ fn walk_story_chunks<T: ReadTxn>(
                         fallback: Some(if hidden {
                             String::new()
                         } else {
-                            shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            revealed_field_text(
+                                || shared_map_string(field, txn, "fieldData"),
+                                shared_any(field, txn, "resultProjection").is_some(),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                shared_map_string(field, txn, "displayText").unwrap_or_default()
+                            })
                         }),
                         source: field_join
                             .as_ref()
@@ -1833,6 +1845,13 @@ fn walk_story_chunks<T: ReadTxn>(
                 paragraph_pm_units += 1;
                 at_block_boundary = false;
             }
+            Out::YMap(raw)
+                if shared_map_string(raw, txn, "_kind").as_deref() == Some(RAW_INLINE_KIND) =>
+            {
+                story_index += 1;
+                paragraph_pm_units += 1;
+                at_block_boundary = false;
+            }
             _ => {
                 return Err(BridgeError::UnsupportedEmbed {
                     story: story_id.to_owned(),
@@ -2004,6 +2023,18 @@ fn opaque_image_previews(values: &HashMap<String, Any>) -> Vec<&HashMap<String, 
         previews.extend(images.iter().filter_map(any_map));
     }
     previews
+}
+
+fn revealed_field_text(
+    source: impl FnOnce() -> Option<String>,
+    projected_children: bool,
+    env: &RenderEnv,
+) -> Option<String> {
+    if !env.show_hidden_text {
+        return None;
+    }
+    let value: Value = serde_json::from_str(&source()?).ok()?;
+    crate::seed::nested_field_display_text(&value, projected_children)
 }
 
 /// The paragraph a field's paragraph joins because the field's code hides its mark, and the
@@ -3305,7 +3336,7 @@ fn chart_drawing_anchored(chart: &Value) -> bool {
             .get("wrap")
             .and_then(|wrap| wrap.get("type"))
             .and_then(Value::as_str)
-            .is_some_and(|wrap_type| wrap_type != "inline")
+            .is_some_and(|wrap_type| !inline_wrap(Some(wrap_type)))
 }
 
 /// Replaces `+mj-*` and `+mn-*` typefaces in a chart's layout copy with the
@@ -3657,9 +3688,18 @@ fn lower_inline_sdt_values(
                         raw_type: (field_type != mapped_type).then_some(field_type),
                         instruction,
                         fallback: Some(
-                            payload
-                                .and_then(|payload| map_string(payload, "displayText"))
-                                .unwrap_or_default(),
+                            revealed_field_text(
+                                || payload.and_then(|payload| map_string(payload, "fieldData")),
+                                payload.is_some_and(|payload| {
+                                    payload.contains_key("resultProjection")
+                                }),
+                                env,
+                            )
+                            .unwrap_or_else(|| {
+                                payload
+                                    .and_then(|payload| map_string(payload, "displayText"))
+                                    .unwrap_or_default()
+                            }),
                         ),
                         source: payload.and_then(|payload| map_string(payload, "fieldData")),
                         locked: payload
@@ -5614,7 +5654,7 @@ fn lower_paragraph_attrs(
     result.doc_grid_pitch_px = env
         .doc_grid_pitch_px
         .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
-    lower_paragraph_indent(values, &mut result);
+    lower_paragraph_indent(values, list_state, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
     result.has_source_content = true_property(values, "hasSourceContent");
@@ -5949,7 +5989,16 @@ fn lower_paragraph_spacing(
     }
 }
 
-fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+/// The indent of the paragraph with `values`. A paragraph on a list with no left indent of its own
+/// takes the indent of Word's default lists. One put on its list in this session instead takes
+/// what it has no value of its own for from the definition of its list level, and the default
+/// where the definition gives none or the paragraph states that indent in character units, which
+/// layout does not read.
+fn lower_paragraph_indent(
+    values: &BTreeMap<String, Any>,
+    list_state: &ListState,
+    result: &mut ParagraphAttrs,
+) {
     let indent_map = values.get("indent").and_then(any_map);
     let mut left = value_number(values.get("indentLeft"))
         .or_else(|| indent_map.and_then(|map| map_number(map, "left")));
@@ -5963,11 +6012,35 @@ fn lower_paragraph_indent(values: &BTreeMap<String, Any>, result: &mut Paragraph
         .or_else(|| indent_map.and_then(|map| map_bool(map, "hanging")))
         .unwrap_or(false);
 
-    if let (Some(list), None) = (resolve_list_identity(values), left) {
+    let joined = true_property(values, crate::list_definitions::LIST_LEVEL_INDENTS).is_some();
+    if let (Some(list), None, false) = (resolve_list_identity(values), left, joined) {
         left = Some((list.level() + 1.0) * 720.0);
         if first_line.is_none() {
             first_line = Some(-360.0);
             hanging = true;
+        }
+    } else if let (Some(list), true) = (resolve_list_identity(values), joined) {
+        let original = values.get("_originalFormatting").and_then(any_map);
+        let in_characters = |key: &str| {
+            [
+                values.get(key),
+                original.and_then(|original| original.get(key)),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !matches!(value, Any::Null))
+        };
+        let (level_left, level_first) = list_state.level_indent(values);
+        let level_left = level_left.filter(|_| !in_characters("indentLeftChars"));
+        let level_first = level_first.filter(|_| !in_characters("indentFirstLineChars"));
+        let own_left = left.is_some();
+        left = left.or(level_left).or(Some((list.level() + 1.0) * 720.0));
+        if first_line.is_none() {
+            let default = (!own_left && level_left.is_none()).then_some((-360.0, true));
+            if let Some((first, hangs)) = level_first.or(default) {
+                first_line = Some(first);
+                hanging = hangs;
+            }
         }
     }
 
@@ -6639,6 +6712,51 @@ mod tests {
     fn yrs_attrs(value: Value) -> Attrs {
         let value = crate::seed::any_from_value(value).unwrap();
         attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn a_field_without_nested_results_renders_its_stored_label_in_both_modes() {
+        let result = json!([{"type": "run", "content": [{"type": "text", "text": 42}]}]);
+        let field = json!({
+            "type": "simpleField", "instruction": "QUOTE", "fieldType": "QUOTE",
+            "content": result, "structuredResult": {"inline": result}
+        });
+        let doc = EditingDoc::new(63);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "field".to_owned(),
+                payload: vec![
+                    ("instruction".to_owned(), Any::from("QUOTE")),
+                    ("fieldType".to_owned(), Any::from("QUOTE")),
+                    ("displayText".to_owned(), Any::from("42")),
+                    ("fieldData".to_owned(), Any::from(field.to_string())),
+                ],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        for show_hidden_text in [false, true] {
+            let blocks = yrs_doc_to_layout_blocks(
+                &doc,
+                "body",
+                &RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!("expected paragraph");
+            };
+            let [Run::Field(field)] = paragraph.runs.as_slice() else {
+                panic!("expected field");
+            };
+            assert_eq!(field.fallback.as_deref(), Some("42"), "{show_hidden_text}");
+        }
     }
 
     #[test]

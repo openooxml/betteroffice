@@ -141,6 +141,7 @@ impl EditingDoc {
         at: Position,
         entries: Vec<(String, Any)>,
     ) -> OpResult<Receipt> {
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         let map = embed_map_at(&story, &txn, at.index)?;
@@ -182,6 +183,7 @@ impl EditingDoc {
                 return Err(OpError::ReservedKey(key.clone()));
             }
         }
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let (_, map) = embed_by_id(&txn, embed_id)?;
         let retyped = guard_embed_write(
@@ -219,6 +221,7 @@ impl EditingDoc {
         if root(&at.story) != root(&to.story) {
             return Err(OpError::NotTopLevel);
         }
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let source = story_ref(&txn, &at.story)?;
         let destination = story_ref(&txn, &to.story)?;
@@ -325,6 +328,7 @@ impl EditingDoc {
             kind,
             payload.iter().map(|(key, value)| (key.as_str(), value)),
         )?;
+        let _watch = self.watch_provenance(crate::provenance::WatchKind::All);
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;

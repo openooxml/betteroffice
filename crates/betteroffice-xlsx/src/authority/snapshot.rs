@@ -43,7 +43,7 @@ pub(crate) trait Codec: Sized + Send + Sync + 'static {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct CalculationSettings(pub DateSystem, pub Option<bool>);
+pub(crate) struct CalculationSettings(pub DateSystem, pub Option<bool>, pub bool);
 
 impl Codec for CalculationSettings {
     fn write(&self, w: &mut Writer) {
@@ -51,22 +51,24 @@ impl Codec for CalculationSettings {
             DateSystem::V1900 => 0,
             DateSystem::V1904 => 1,
         };
-        w.u8(date | if self.1 == Some(false) { 2 } else { 0 });
+        let precision = if self.1 == Some(false) { 2 } else { 0 };
+        let iterate = if self.2 { 4 } else { 0 };
+        w.u8(date | precision | iterate);
     }
 
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         let settings = r.u8()?;
-        let precision = match settings {
-            0 | 1 => None,
-            2 | 3 => Some(false),
-            _ => return Err(SnapshotError::new("invalid snapshot calculation settings")),
-        };
+        if settings > 7 {
+            return Err(SnapshotError::new("invalid snapshot calculation settings"));
+        }
         let date = if settings & 1 == 0 {
             DateSystem::V1900
         } else {
             DateSystem::V1904
         };
-        Ok(Self(date, precision))
+        let precision = (settings & 2 != 0).then_some(false);
+        let iterate = settings & 4 != 0;
+        Ok(Self(date, precision, iterate))
     }
 }
 
@@ -1767,6 +1769,7 @@ fn base_counts(base: &WorkbookBase) -> [usize; BASE_SECTIONS] {
         bootstrap_client_id: _,
         date_system: _,
         full_precision: _,
+        iterate: _,
         defined_names,
         fingerprint: _,
         fingerprints,
@@ -1817,6 +1820,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         bootstrap_client_id,
         date_system,
         full_precision,
+        iterate,
         defined_names: _,
         fingerprint,
         fingerprints: _,
@@ -1834,7 +1838,7 @@ fn write_manifest(base: &WorkbookBase, w: &mut Writer) {
         tables: _,
     } = base;
     bootstrap_client_id.write(w);
-    CalculationSettings(*date_system, *full_precision).write(w);
+    CalculationSettings(*date_system, *full_precision, *iterate).write(w);
     fingerprint.write(w);
     styles.theme.write(w);
     for count in &base_counts(base)[..manifest_counts(usize::from(manifest_tag(base)))] {
@@ -1871,6 +1875,7 @@ impl BaseCursor {
             bootstrap_client_id: _,
             date_system: _,
             full_precision: _,
+            iterate: _,
             defined_names,
             fingerprint: _,
             fingerprints,
@@ -2467,7 +2472,7 @@ impl BaseBuilder {
             BaseRecord::Manifest(manifest) => {
                 let BaseManifest {
                     client,
-                    date,
+                    date: CalculationSettings(date_system, full_precision, iterate),
                     fingerprint,
                     theme,
                     counts,
@@ -2477,8 +2482,9 @@ impl BaseBuilder {
                 styles.theme = theme;
                 self.base = Some(WorkbookBase {
                     bootstrap_client_id: client,
-                    date_system: date.0,
-                    full_precision: date.1,
+                    date_system,
+                    full_precision,
+                    iterate,
                     defined_names: Vec::new(),
                     fingerprint,
                     fingerprints: BTreeMap::new().into(),
@@ -2558,7 +2564,7 @@ impl BaseBuilder {
         }
         if section == 0 {
             let bootstrap_client_id = Codec::read(&mut r)?;
-            let CalculationSettings(date_system, full_precision) = Codec::read(&mut r)?;
+            let CalculationSettings(date_system, full_precision, iterate) = Codec::read(&mut r)?;
             let fingerprint = Codec::read(&mut r)?;
             let theme = Codec::read(&mut r)?;
             let mut styles = Stylesheet::default();
@@ -2570,6 +2576,7 @@ impl BaseBuilder {
                 bootstrap_client_id,
                 date_system,
                 full_precision,
+                iterate,
                 defined_names: Vec::new(),
                 fingerprint,
                 fingerprints: BTreeMap::new().into(),
@@ -3064,23 +3071,31 @@ mod tests {
     }
 
     #[test]
-    fn precision_settings_are_rejected_by_the_legacy_date_reader() {
-        for date in [DateSystem::V1900, DateSystem::V1904] {
+    fn calculation_flags_are_rejected_by_the_legacy_date_reader() {
+        for (date, date_bit) in [(DateSystem::V1900, 0u8), (DateSystem::V1904, 1)] {
             for precision in [None, Some(true), Some(false)] {
-                let mut writer = Writer::new();
-                CalculationSettings(date, precision).write(&mut writer);
-                let bytes = writer.into_bytes();
-                let legacy = DateSystem::read(&mut Reader::new(&bytes));
-                if precision == Some(false) {
-                    assert!(legacy.is_err());
-                } else {
-                    assert_eq!(legacy.unwrap(), date);
+                let legacy_byte = date_bit | if precision == Some(false) { 2 } else { 0 };
+                for iterate in [false, true] {
+                    let mut writer = Writer::new();
+                    CalculationSettings(date, precision, iterate).write(&mut writer);
+                    let bytes = writer.into_bytes();
+                    assert_eq!(bytes, [legacy_byte | if iterate { 4 } else { 0 }]);
+                    let legacy = DateSystem::read(&mut Reader::new(&bytes));
+                    if precision == Some(false) || iterate {
+                        assert!(legacy.is_err());
+                    } else {
+                        assert_eq!(legacy.unwrap(), date);
+                    }
+                    let CalculationSettings(restored_date, restored_precision, restored_iterate) =
+                        CalculationSettings::read(&mut Reader::new(&bytes)).unwrap();
+                    assert_eq!(restored_date, date);
+                    assert_eq!(restored_precision, precision.filter(|full| !full));
+                    assert_eq!(restored_iterate, iterate);
                 }
-                let CalculationSettings(restored_date, restored_precision) =
-                    CalculationSettings::read(&mut Reader::new(&bytes)).unwrap();
-                assert_eq!(restored_date, date);
-                assert_eq!(restored_precision, precision.filter(|full| !full));
             }
+        }
+        for invalid in 8..=u8::MAX {
+            assert!(CalculationSettings::read(&mut Reader::new(&[invalid])).is_err());
         }
     }
 
