@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 
 import type { Document } from '../types/document';
-import { createEditSession } from '../wasm/edit';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
 import type { YrsSession } from './index';
 import { projectionAllowlist } from './projectionParity.allowlist';
@@ -12,10 +11,11 @@ import {
   checkComposition,
   checkStory,
   compareSnapshots,
+  createEditSession,
   edit,
   nativeProjection,
   nativeStoryProjection,
-  preloadSeedParityWasm,
+  preloadProjectionWasm,
   projectionExport,
   projectionRootOrder,
   random,
@@ -79,7 +79,7 @@ describe('Native DOCX projection parity', () => {
 
   beforeAll(async () => {
     checkDisagreementFixture(fixtures);
-    await preloadSeedParityWasm();
+    await preloadProjectionWasm();
     const raw = createEditSession(CLIENT);
     try {
       projectionExport(raw, 'project_document_json');

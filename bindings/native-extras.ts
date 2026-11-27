@@ -47,6 +47,11 @@ export const docxExtras = {
   },
 } satisfies ExtraReasons<DocxNativeExtras>;
 
+export const docxWasmOnly = {
+  'EditSession.prototype.project_document_json': { reason: 'exposes the WASM document projection for diagnostics', backs: 'the projection parity harness' },
+  'EditSession.prototype.project_story_json': { reason: 'exposes the WASM story projection for diagnostics', backs: 'the projection parity harness' },
+} satisfies Record<string, Extra>;
+
 const WASM_CLASSES = {
   xlsx: { wrapped: ['XlsxDocument'], all: ['XlsxDocument', 'XlsxSnapshotBuilder'] },
   pptx: { wrapped: ['PptxDocument'], all: ['PptxDocument', 'PptxRenderer', 'MetafileConverter'] },
@@ -116,6 +121,7 @@ export function arityAllowances(format: Format): Record<string, Record<string, E
 export function rawAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
   const wasmOnly: Record<string, Extra> = { ...disposeFromEngineModule(format) };
+  if (format === 'docx') Object.assign(wasmOnly, docxWasmOnly);
   if (format === 'pptx') wasmOnly.MetafileConverter = { reason: 'metafile conversion runs inside the native engine; no standalone converter', pending: 'item 11' };
   return {
     nativeOnly: flatten(extras),
@@ -132,7 +138,7 @@ export function engineAllowances(format: Format): Allowances {
   const extras = { xlsx: xlsxExtras, pptx: pptxExtras, docx: docxExtras }[format];
   return {
     nativeOnly: flatten({ functions: {}, members: extras.members }),
-    wasmOnly: {},
+    wasmOnly: format === 'docx' ? docxWasmOnly : {},
     internals: { wasm: wasmInternals(format, 'engine'), native: {} },
   };
 }

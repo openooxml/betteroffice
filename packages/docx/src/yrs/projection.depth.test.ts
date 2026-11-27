@@ -2,16 +2,16 @@ import { beforeAll, describe, expect, it } from 'bun:test';
 
 import { toBytes } from '../docx/rezip/parts';
 import type { BlockContent } from '../types/document';
-import { createEditSession } from '../wasm/edit';
 import {
   buildDocxFromParts,
   canonicalStories,
   check,
   checkComposition,
   checkStory,
+  createEditSession,
   nativeProjection,
   nativeStoryProjection,
-  preloadSeedParityWasm,
+  preloadProjectionWasm,
   type Deferral,
 } from './projectionParity.support';
 import { wrapSession } from './yrsSessionFacade';
@@ -45,7 +45,7 @@ function expectDeepMarker(blocks: readonly BlockContent[], levels: number): void
 }
 
 describe('Native DOCX projection depth', () => {
-  beforeAll(preloadSeedParityWasm, 30_000);
+  beforeAll(preloadProjectionWasm, 30_000);
 
   it('checks assembled body keys when only an auxiliary root was requested', () => {
     const raw = createEditSession(CLIENT);

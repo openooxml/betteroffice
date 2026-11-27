@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { assertSafeTree, decodeS9Blocks, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type { BlockContent, Document } from '../types/document';
-import { preloadEditWasm, type EditSession } from '../wasm/edit';
+import { preloadEditWasm } from '../wasm/edit';
+import initProjectionWasm, { EditSession } from '../wasm/generated/edit/docx_edit.js';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
 import type { YrsSession } from './index';
 import { projectionAllowlist, type ProjectionFamily } from './projectionParity.allowlist';
@@ -21,6 +22,14 @@ const AUTHOR = { name: 'Differential', date: '2026-01-01T00:00:00Z' };
 
 export function preloadSeedParityWasm(): Promise<void> {
   return preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+}
+
+export async function preloadProjectionWasm(): Promise<void> {
+  await initProjectionWasm({ module_or_path: new Uint8Array(readFileSync(WASM)) });
+}
+
+export function createEditSession(clientId: number): EditSession {
+  return new EditSession(clientId);
 }
 
 const PACKAGE_RELS = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
