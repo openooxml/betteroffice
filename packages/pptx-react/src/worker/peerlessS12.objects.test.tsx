@@ -132,6 +132,33 @@ test('the capturing stage shows the press cursor until the press ends', async ()
   expect(value.stage.style.cursor).toBe('');
 });
 
+test('moving over the stage clears the press cursor after Escape releases capture', async () => {
+  const value = await open();
+  const body = value.point();
+  act(() => { fireEvent.pointerDown(value.canvas, { ...body, buttons: 1 }); });
+  expect(value.stage.hasPointerCapture(7)).toBe(true);
+  expect(value.stage.style.cursor).toBe('move');
+  act(() => { fireEvent.pointerMove(value.stage, { ...body, buttons: 1 }); });
+  expect(value.stage.style.cursor).toBe('move');
+  act(() => { fireEvent.keyDown(value.stage, { key: 'Escape' }); });
+  expect(value.stage.hasPointerCapture(7)).toBe(false);
+  expect(value.stage.style.cursor).toBe('move');
+  act(() => { fireEvent.pointerMove(value.stage, { ...body, buttons: 0 }); });
+  expect(value.stage.style.cursor).toBe('');
+});
+
+test('leaving the stage clears the press cursor after capture is released', async () => {
+  const value = await open();
+  const body = value.point();
+  act(() => { fireEvent.pointerDown(value.canvas, { ...body, buttons: 1 }); });
+  expect(value.stage.hasPointerCapture(7)).toBe(true);
+  value.stage.releasePointerCapture(7);
+  expect(value.stage.hasPointerCapture(7)).toBe(false);
+  expect(value.stage.style.cursor).toBe('move');
+  act(() => { fireEvent.pointerLeave(value.stage, { ...body, buttons: 0 }); });
+  expect(value.stage.style.cursor).toBe('');
+});
+
 test('a press resolves its cursor at the press point', async () => {
   const value = await open();
   const line = value.box.lines[0]!;
