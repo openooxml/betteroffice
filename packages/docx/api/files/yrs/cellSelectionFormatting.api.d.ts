@@ -3,6 +3,8 @@
 import type { YrsAuthor, YrsSession, YrsStoryRange, YrsTableRange } from './index';
 /** A run mark the selection context reports as on, off or mixed. @internal */
 export type YrsToggledMark = 'bold' | 'italic' | 'underline' | 'strike' | 'superscript' | 'subscript';
+/** Whether the caret belongs to a cell covered by a multi-cell selection. @internal */
+export declare function cellSelectionContainsCaret(reader: Pick<YrsSession, 'tablePayload'>, cells: YrsTableRange, caretStory: string): boolean;
 /** The whole text of each non-empty cell that `cells` covers, in reading order. @internal */
 export declare function cellSelectionRanges(reader: Pick<YrsSession, 'tablePayload' | 'paragraphSpans'>, cells: YrsTableRange): YrsStoryRange[];
 /**
