@@ -886,12 +886,7 @@ impl FieldSpans {
                     .map(|patch| (patch.ordinal, patch))
                     .collect(),
             });
-            plan.plan_story(
-                &story_block_elements(body),
-                model,
-                &edits,
-                &selected,
-            );
+            plan.plan_story(&story_block_elements(body), model, &edits, &selected);
         }
         plan
     }

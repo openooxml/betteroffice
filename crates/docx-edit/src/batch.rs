@@ -1879,30 +1879,25 @@ fn plan_delete_paragraphs<T: ReadTxn>(
                 &requested,
             ));
         }
-        if let Some((kind, _)) = paragraph
-            .embeds
-            .iter()
-            .find(|(kind, field)| {
-                if matches!(kind.as_str(), "break" | "image") {
-                    return false;
-                }
-                let local_page_reference = kind == "field"
-                    && paragraph.embeds.len() == 1
-                    && field.as_ref().is_some_and(|field| {
-                        crate::map_string(field, views.txn(), "fieldType").as_deref()
-                            == Some("PAGEREF")
-                            && toc_entries
-                                .get_or_insert_with(|| {
-                                    unlinked_toc_entry_ids(&story.paragraphs[..first], views.txn())
-                                })
-                                .contains(&paragraph.para_id)
-                            && crate::map_string(field, views.txn(), "fieldData")
-                                .and_then(|data| serde_json::from_str::<Value>(&data).ok())
-                                .is_some_and(|data| is_closed_pageref(&data))
-                    });
-                !local_page_reference
-            })
-        {
+        if let Some((kind, _)) = paragraph.embeds.iter().find(|(kind, field)| {
+            if matches!(kind.as_str(), "break" | "image") {
+                return false;
+            }
+            let local_page_reference = kind == "field"
+                && paragraph.embeds.len() == 1
+                && field.as_ref().is_some_and(|field| {
+                    crate::map_string(field, views.txn(), "fieldType").as_deref() == Some("PAGEREF")
+                        && toc_entries
+                            .get_or_insert_with(|| {
+                                unlinked_toc_entry_ids(&story.paragraphs[..first], views.txn())
+                            })
+                            .contains(&paragraph.para_id)
+                        && crate::map_string(field, views.txn(), "fieldData")
+                            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+                            .is_some_and(|data| is_closed_pageref(&data))
+                });
+            !local_page_reference
+        }) {
             return Err(unsupported(
                 format!("deleting the span would destroy a {kind:?} embed"),
                 &requested,
