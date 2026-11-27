@@ -151,6 +151,18 @@ test('pptx worker caret is black over the light half of a picture', async ({ pag
   await expectCaret(page, BLACK);
 });
 
+test.describe('at a device pixel ratio of 2', () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  test('pptx worker caret reads the picture half under it', async ({ page }) => {
+    await edit(page, null, photo + shape('FFFFFF'), { image: halves });
+    await expectCaret(page, WHITE);
+    const box = { x: 576, y: 96, w: 336, h: 96 };
+    await edit(page, null, photo + shape('FFFFFF', { box }), { image: halves, box });
+    await expectCaret(page, BLACK);
+  });
+});
+
 const gradient = `<a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="0B1F4B"/></a:gs><a:gs pos="100000"><a:srgbClr val="F2F2F2"/></a:gs></a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>`;
 
 test('pptx worker caret is white on the navy end of a navy to near-white gradient', async ({ page }) => {
@@ -165,8 +177,12 @@ test('pptx worker caret is black on the near-white end of a navy to near-white g
 
 test('pptx worker caret is black or white against each table cell fill', async ({ page }) => {
   await open(page, await deck(null, table([['0B1F4B', 'C8F56A'], ['FFF0EA', 'E0603A'], ['808080', 'FFFFFF'], ['FFFFFF', '315EFB']])));
+  const place = () => page.getByTestId('pptx-caret').evaluate((element) => `${element.style.left} ${element.style.top}`);
+  let previous = '';
   for (const [x, y, expected] of [[246, 141, WHITE], [546, 141, BLACK], [246, 231, BLACK], [546, 231, BLACK]] as const) {
     await caretAt(page, x, y);
+    await expect.poll(place).not.toBe(previous);
+    previous = await place();
     await expectCaret(page, expected);
   }
 });

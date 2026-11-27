@@ -36,14 +36,17 @@ function presentation(caret: CommandRect) {
 function slideCanvas(shade: number, fail = false) {
   const reads: number[][] = [];
   const contexts: unknown[][] = [];
-  const canvas = { width: 960 * 2 * 1.25, height: 540 * 2 * 1.25, getContext: (...args: unknown[]) => {
-    contexts.push(args);
-    return { getImageData: (x: number, y: number, width: number, height: number) => {
-      reads.push([x, y, width, height]);
+  const context = {
+    clearRect: () => {},
+    drawImage: (_source: unknown, x: number, y: number, width: number, height: number) => { reads.push([x, y, width, height]); },
+    getImageData: (_x: number, _y: number, width: number, height: number) => {
       if (fail) throw new DOMException('tainted', 'SecurityError');
-      return { data: new Uint8ClampedArray(width * height * 4).map((_, index) => index % 4 === 3 ? 255 : shade), width, height };
-    } };
-  } } as unknown as HTMLCanvasElement;
+      return { data: new Uint8ClampedArray(width * height * 4).map((_, index) => index % 4 === 3 ? 255 : shade) };
+    },
+  };
+  const scratch = { width: 0, height: 0, getContext: (...args: unknown[]) => { contexts.push(['scratch', ...args]); return context; } };
+  const canvas = { width: 960 * 2 * 1.25, height: 540 * 2 * 1.25, ownerDocument: { createElement: () => scratch },
+    getContext: (...args: unknown[]) => { contexts.push(['slide', ...args]); return null; } } as unknown as HTMLCanvasElement;
   return { canvas, reads, contexts };
 }
 
@@ -59,21 +62,23 @@ function blinking() {
   return { ticks, restore: () => { window.setInterval = original; } };
 }
 
-test('the worker caret is black or white by the painted pixels, one small read per caret move or frame, none per blink', () => {
+test('the worker caret is black or white by the painted pixels, one small read per caret move, frame or zoom, none per blink', () => {
   const timers = blinking();
   try {
     const run = presentation({ x: 120, y: 100, width: 1, height: 20 });
     const painted = slideCanvas(245);
-    const view = render(<PeerlessCaret store={run.store} canvas={{ current: painted.canvas }} />);
+    const ref = { current: painted.canvas };
+    const view = render(<PeerlessCaret store={run.store} canvas={ref} scale={1.25} />);
     const caret = view.getByTestId('pptx-caret');
     expect(ink(caret)).toBe('#000000');
-    expect(painted.reads).toEqual([[300, 250, 3, 50]]);
+    expect(painted.reads).toEqual([[300, 248, 3, 54]]);
     for (let blink = 0; blink < 6; blink += 1) act(() => timers.ticks.at(-1)!());
     expect(painted.reads).toHaveLength(1);
     act(() => run.move({ x: 140, y: 100, width: 1, height: 20 }));
     act(() => run.commit());
-    expect(painted.reads).toEqual([[300, 250, 3, 50], [350, 250, 3, 50], [350, 250, 3, 50]]);
-    expect(painted.contexts.every((args) => args.length === 1 && args[0] === '2d')).toBe(true);
+    view.rerender(<PeerlessCaret store={run.store} canvas={ref} scale={1.5} />);
+    expect(painted.reads).toEqual([[300, 248, 3, 54], [350, 248, 3, 54], [350, 248, 3, 54], [350, 248, 3, 54]]);
+    expect(painted.contexts).toEqual([['scratch', '2d', { willReadFrequently: true }]]);
   } finally { timers.restore(); }
 });
 

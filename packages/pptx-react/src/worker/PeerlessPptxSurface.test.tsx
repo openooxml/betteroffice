@@ -136,7 +136,7 @@ function expectRestored(canvas: HTMLCanvasElement, authoritative: HTMLCanvasElem
 function expectIntact(canvas: HTMLCanvasElement, authoritative: HTMLCanvasElement, since: number): void {
   expectRestored(canvas, authoritative);
   const entries = calls(canvas);
-  expect(kinds(entries.slice(since).filter((entry) => !['save', 'restore', 'setTransform', 'getImageData'].includes(entry.kind)))).toEqual([]);
+  expect(kinds(entries.slice(since).filter((entry) => !['save', 'restore', 'setTransform'].includes(entry.kind)))).toEqual([]);
   const draws = entries.filter((entry) => entry.kind === 'drawImage');
   expect(draws[draws.length - 1].args[0] === authoritative).toBe(true);
 }

@@ -147,7 +147,7 @@ function Overlays({ run, commands, inputRef, canvas, preview, insertion, editor,
     <div style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none',
       width: confirmed.displayList.width, height: confirmed.displayList.height,
       transform: `scale(${fit.scale})`, transformOrigin: '0 0' }}>
-      <PeerlessCaret store={run.visual} canvas={canvas} />
+      <PeerlessCaret store={run.visual} canvas={canvas} scale={fit.scale} />
     </div>
     <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
