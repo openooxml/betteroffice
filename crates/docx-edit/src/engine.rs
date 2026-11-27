@@ -136,8 +136,6 @@ struct RenderState {
     cache_misses: u64,
     preview_patches: u64,
     preview_fallbacks: u64,
-    /// Body lowerings a cell edit re-lowered only one table of.
-    table_patches: u64,
 }
 
 struct LoweredNoteSeparators {
@@ -6452,7 +6450,6 @@ impl EngineSession {
         lowered.serialized_blocks = None;
         lowered.preview_edit = None;
         render.generation = generation;
-        render.table_patches = render.table_patches.wrapping_add(1);
         drop(render);
         if measurement_patch.is_some() {
             *self.measurement_patch() = measurement_patch;
@@ -11820,10 +11817,7 @@ impl EngineSession {
         {
             return Ok(false);
         }
-        let relowerings = || {
-            let render = self.render.borrow();
-            (render.cache_misses, render.table_patches)
-        };
+        let relowerings = || self.render.borrow().cache_misses;
         let misses = relowerings();
         let outcome = self
             .with_shared_lowered_story_mapped(
@@ -11833,23 +11827,19 @@ impl EngineSession {
                 |blocks,
                  lowering|
                  -> Result<Option<(ResidentLayoutInput, usize, Vec<f64>)>, String> {
-                    let one_section = self.lays_out_as_one_section(
+                    // A repeated final section takes this path only for an edit the local
+                    // patch absorbed, for a cell edit's table patch, which re-lowers only
+                    // that table, or for a plain split of a top-level body paragraph,
+                    // which re-lowers the body.
+                    if !self.lays_out_as_one_section(
                         &regions,
                         blocks
                             .iter()
                             .filter(|block| matches!(block, LayoutBlock::SectionBreak(_)))
                             .count(),
-                    );
-                    // A repeated final section takes this path only for an edit the local
-                    // patch absorbed, for a plain split of a top-level body paragraph,
-                    // which re-lowers the body, or for a cell edit's table patch when the
-                    // body lays out as one section: the patch re-lowers only that table,
-                    // which holds no section break.
-                    let (body_lowerings, table_patches) = relowerings();
-                    if regions.sections.len() > 1
-                        && (body_lowerings != misses.0
-                            || (table_patches != misses.1 && !one_section))
-                        && self.split_epoch.get() != Some(self.doc_epoch())
+                    ) || (regions.sections.len() > 1
+                        && relowerings() != misses
+                        && self.split_epoch.get() != Some(self.doc_epoch()))
                     {
                         return Ok(None);
                     }
@@ -11875,8 +11865,7 @@ impl EngineSession {
                     };
                     let default_width = widths.first().copied().unwrap_or(0.0);
                     let float_width_policy = FloatWidthPolicy::for_document(blocks.iter());
-                    if !one_section
-                        || blocks
+                    if blocks
                         .iter()
                         .any(|block| !collect_note_refs(std::slice::from_ref(block)).is_empty())
                         // the page side can bring a shape with no initial zone into the body
