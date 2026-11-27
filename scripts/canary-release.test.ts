@@ -9,6 +9,7 @@ const release = Bun.YAML.parse(
   readFileSync(fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url)), 'utf8')
 ) as any;
 const canary = release.jobs.canary;
+const publisher = release.jobs['canary-publish'];
 const step = (name: string) => canary.steps.find((candidate: any) => candidate.name === name);
 const runs = () => canary.steps.map((candidate: any) => candidate.run ?? '').join('\n');
 
@@ -20,7 +21,7 @@ describe('canary workflow', () => {
   test('runs daily only when CANARY_RELEASE opts in, or on a dispatch that asks for it, from main', () => {
     expect(release.on.schedule).toEqual([{ cron: '17 3 * * *' }]);
     expect(release.on.workflow_dispatch.inputs.canary).toEqual({
-      description: 'Build an npm canary from the newest main commit with green CI instead of releasing.',
+      description: 'Build an npm canary from this main commit once its CI passed, instead of releasing.',
       type: 'boolean',
       default: false
     });
@@ -42,41 +43,56 @@ describe('canary workflow', () => {
     }
     expect(canary.needs).toBeUndefined();
     for (const [id, job] of Object.entries<any>(release.jobs)) {
-      if (id !== 'canary') expect([job.needs ?? []].flat(), id).not.toContain('canary');
+      if (id !== 'canary-publish') expect([job.needs ?? []].flat(), id).not.toContain('canary');
+      if (!id.startsWith('canary')) expect([job.needs ?? []].flat(), id).not.toContain('canary-publish');
     }
     const checks = canary.steps.filter((candidate: any) => candidate.run?.includes('actions/workflows/release.yml/runs?status=in_progress'));
     expect(checks.map((candidate: any) => candidate.id)).toEqual(['idle', 'still-idle']);
   });
 
-  test('has only read access, an OIDC token, and no secret at all', () => {
-    expect(canary.permissions).toEqual({ contents: 'read', actions: 'read', 'id-token': 'write' });
-    const source = JSON.stringify(canary);
-    expect(source).not.toContain('secrets.');
-    expect(source).not.toContain('NODE_AUTH_TOKEN');
-    expect(source).not.toContain('registry-url');
-    const checkout = canary.steps.find((candidate: any) => candidate.uses?.startsWith('actions/checkout@'));
-    expect(checkout.with).toEqual({ ref: '${{ steps.commit.outputs.sha }}', 'persist-credentials': false });
+  test('builds with read access only and publishes from a job that holds the OIDC token and no secret', () => {
+    expect(canary.permissions).toEqual({ contents: 'read', actions: 'read' });
+    expect(publisher.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(publisher.needs).toBe('canary');
+    expect(publisher.if).toBe("needs.canary.outputs.publish == 'true'");
+    for (const job of [canary, publisher]) {
+      const source = JSON.stringify(job);
+      expect(source).not.toContain('secrets.');
+      expect(source).not.toContain('NODE_AUTH_TOKEN');
+      expect(source).not.toContain('registry-url');
+      const checkout = job.steps.find((candidate: any) => candidate.uses?.startsWith('actions/checkout@'));
+      expect(checkout.with).toEqual({ 'persist-credentials': false });
+    }
+  });
+
+  test('the OIDC job installs and builds nothing: it uploads the verified tarballs', () => {
+    expect(publisher.steps.map((candidate: any) => candidate.name ?? candidate.uses.split('@')[0])).toEqual([
+      'actions/checkout', 'actions/setup-node', 'actions/download-artifact', 'Publish the canary'
+    ]);
+    expect(publisher.steps[2].with.name).toBe('npm-canary');
+    expect(publisher.steps[3].run).toBe('node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"');
+    expect(canary.outputs.publish).toBe('${{ steps.still-idle.outputs.idle }}');
   });
 
   test('writes nothing to the repository and never runs Changesets publishing', () => {
-    for (const candidate of canary.steps) {
-      expect(candidate.uses ?? '').not.toMatch(/^changesets\/action@/);
+    for (const job of [canary, publisher]) {
+      for (const candidate of job.steps) {
+        expect(candidate.uses ?? '').not.toMatch(/^changesets\/action@/);
+      }
     }
-    expect(runs()).not.toMatch(/\bgit\s+(?:push|commit|tag)\b|\bgh\s+(?:pr|release|workflow)\b|\bchangeset\s+publish\b|\bnpm\s+dist-tag\b/);
+    expect(runs()).not.toMatch(/\bgit\s+(?:push|commit|tag)\b|\bgh\s+(?:pr|release|workflow)\b|\bchangeset\s+publish\b|\bnpm\s+(?:publish|dist-tag)\b|canary-release\.mjs publish/);
   });
 
-  test('builds from the newest main commit with green CI and publishes only outside a dry run', () => {
-    expect(step('Pick the newest main commit with green CI').run).toContain(
-      'actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1'
-    );
-    const publishers = canary.steps.filter((candidate: any) => / publish "/.test(candidate.run ?? ''));
-    expect(publishers.map((candidate: any) => candidate.name)).toEqual(['Publish the canary']);
-    expect(step('Publish the canary').if).toBe("steps.still-idle.outputs.idle == 'true' && env.DRY_RUN != 'true'");
+  test('builds this run\'s commit only once its CI passed, and publishes only outside a dry run', () => {
+    const check = step('Check that CI passed on this commit');
+    expect(check.env.SHA).toBe('${{ github.sha }}');
+    expect(check.run).toContain('actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=1');
+    expect(step('Check that no release is running').if).toBe("steps.commit.outputs.green == 'true'");
     expect(step('Check again that no release is running').if).toBe(
       "steps.published.outputs.fresh == 'true' && env.DRY_RUN != 'true'"
     );
-    expect(step('Install the canary tarballs in an empty project').if).toBe("steps.published.outputs.fresh == 'true'");
-    expect(step('Upload the canary tarballs').if).toBe("steps.published.outputs.fresh == 'true'");
+    expect(step('Install the canary tarballs in an empty project').if).toBe("steps.published.outputs.build == 'true'");
+    expect(step('Upload the canary tarballs').if).toBe("steps.published.outputs.build == 'true'");
   });
 });
 

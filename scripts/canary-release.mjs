@@ -97,10 +97,11 @@ function npm(args, options = {}) {
 
 function npmView(spec, field) {
   try {
-    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     return out ? JSON.parse(out) : undefined;
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (/\bE404\b/.test(`${error.stdout ?? ''}${error.stderr ?? ''}`)) return undefined;
+    throw error;
   }
 }
 
@@ -140,19 +141,22 @@ function published(destination, sha) {
   for (const [name, head] of heads) console.log(`${name}@${CANARY_TAG} was built from ${head ?? 'nothing yet'}`);
   const current = set.length > 0 && heads.every(([, head]) => head === sha);
   if (current) console.log(`Every canary was already built from ${sha}.`);
-  writeOutput({ fresh: !current });
+  writeOutput({ fresh: !current, build: !current || process.env.DRY_RUN === 'true' });
 }
 
 function tarball(destination, { name, version }) {
   return join(destination, 'tarballs', `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`);
 }
 
-function pack(destination) {
+function pack(destination, sha) {
   const set = plan(destination);
+  const members = new Set(set.map(({ name }) => name));
   execFileSync('bun', ['scripts/rewrite-workspace-deps.ts'], { cwd: ROOT, stdio: 'inherit' });
   for (const { directory } of workspaceEntries()) {
     const path = join(directory, 'package.json');
-    writeJson(path, pinToCanaries(readJson(path), set));
+    const pinned = pinToCanaries(readJson(path), set);
+    if (sha && members.has(pinned.name)) pinned.gitHead = sha;
+    writeJson(path, pinned);
   }
   mkdirSync(join(destination, 'tarballs'), { recursive: true });
   for (const entry of set) {
@@ -223,11 +227,16 @@ function publish(destination) {
   const problems = [];
   for (const { name, version } of set) {
     const tags = distTags(name);
-    if (tags.latest !== latest.get(name)) problems.push(`${name} latest moved from ${latest.get(name)} to ${tags.latest}`);
+    const before = latest.get(name);
+    if (tags.latest !== before && (tags.latest === version || String(tags.latest).includes('-'))) {
+      problems.push(`${name} latest moved from ${before} to ${tags.latest}`);
+    } else if (tags.latest !== before) {
+      console.log(`${name} latest moved from ${before} to ${tags.latest}, a stable release published meanwhile.`);
+    }
     if (tags[CANARY_TAG] !== version) problems.push(`${name}@${CANARY_TAG} is ${tags[CANARY_TAG]}, not ${version}`);
   }
   if (problems.length) throw new Error(problems.join('\n'));
-  console.log(`Published ${set.length} canaries; latest is unchanged on every package.`);
+  console.log(`Published ${set.length} canaries; latest points at no canary.`);
 }
 
 const COMMANDS = { prepare, published, pack, verify, publish };

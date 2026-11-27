@@ -114,12 +114,12 @@ Once a day `release.yml` publishes the pending npm changes as a canary: the
 document, React and i18n packages of each format and the font packages, versioned
 below the coming release (for example `0.7.0-canary.20261127031700`) under the
 `canary` dist-tag. Native packages, the packages that need them, crates and
-Python bindings have no canary. A run builds the newest main commit whose CI
-passed, publishes nothing when that commit already has a canary or no changeset
-is pending, and never moves `latest`.
+Python bindings have no canary. A run builds the current main commit only once
+its CI has passed, publishes nothing when that commit already has a canary or no
+changeset is pending, and never moves `latest`.
 
 - Install: `npm install @betteroffice/docx@canary`.
-- Trigger: run **Release** with `canary` checked; `dry_run` (on by default) packs
+- Trigger: run **Release** on main with `canary` checked; `dry_run` (on by default) packs
   and install-checks the tarballs and uploads them as the `npm-canary` artifact.
 - Turn on or off: the schedule runs only while the repository variable
   `CANARY_RELEASE` is `true`.

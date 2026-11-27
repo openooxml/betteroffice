@@ -965,7 +965,7 @@ describe('release wiring', () => {
   });
 
   test('rehearsals cannot reach a job that publishes or dispatches', () => {
-    const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|dispatch-publishers\.sh\b|gh\s+release\s+create\b|git\s+push\b|publish:crates\b|held-npm-packages\.mjs\b|twine\b|docker\s+push\b|pypi\/)/i;
+    const publishCommand = /\b(?:(?:npm|bun|changeset|cargo)\s+publish\b|canary-release\.mjs\s+publish\b|gh\s+workflow\s+run\b|gh\s+api\b[^\n;]*\bdispatches\b|dispatch-publishers\.sh\b|gh\s+release\s+create\b|git\s+push\b|publish:crates\b|held-npm-packages\.mjs\b|twine\b|docker\s+push\b|pypi\/)/i;
     const publishAction = /^(?:changesets\/action@|pypa\/gh-action-pypi-publish@|docker\/build-push-action@|softprops\/action-gh-release@|pypi\/)/i;
     const distFiles = ['native-dist.yml', 'python-dist.yml'];
 
@@ -1007,11 +1007,11 @@ describe('release wiring', () => {
     }
 
     const publishing = Object.keys(release.jobs).filter((id) => canPublish(release.jobs[id])).sort();
-    expect(publishing).toEqual(['canary', 'held-npm', 'native-npm', 'python-pypi', 'release', 'wopi-image']);
+    expect(publishing).toEqual(['canary-publish', 'held-npm', 'native-npm', 'python-pypi', 'release', 'wopi-image']);
     for (const id of publishing) {
-      if (id === 'canary') {
-        expect(release.jobs[id].if).toContain("github.ref == 'refs/heads/main'");
-        expect(release.jobs[id].needs).toBeUndefined();
+      if (id === 'canary-publish') {
+        expect(release.jobs[id].needs).toBe('canary');
+        expect(release.jobs.canary.if).toContain("github.ref == 'refs/heads/main'");
       } else if (id === 'release') {
         expect(release.jobs[id].if).toContain("github.ref == 'refs/heads/main'");
         expect(release.jobs[id].if).toContain('inputs.rehearse != true');
@@ -1021,7 +1021,7 @@ describe('release wiring', () => {
     }
 
     const gates = Object.keys(release.jobs).filter((id) => !publishing.includes(id) && !requiresRelease(id)).sort();
-    expect(gates).toEqual(['native-build', 'native-build-retry', 'plan', 'python-build', 'python-build-retry', 'test']);
+    expect(gates).toEqual(['canary', 'native-build', 'native-build-retry', 'plan', 'python-build', 'python-build-retry', 'test']);
     for (const id of gates) {
       expect(release.jobs[id].secrets, id).toBeUndefined();
       const job = release.jobs[id];
