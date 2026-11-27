@@ -233,8 +233,9 @@ fn bases_assignments_on_kept_raw_xml_and_starts_at_one_without_reservations() {
     }
 }
 
+// The typed run property change has no previous-attributes carrier yet.
 #[test]
-fn reserves_ids_from_previous_run_property_attributes() {
+fn stated_difference_previous_run_attributes_not_reserved() {
     let mut request = request(json!([{
         "type": "paragraph",
         "content": [{
@@ -252,14 +253,14 @@ fn reserves_ids_from_previous_run_property_attributes() {
         }]
     }]));
     let assigned = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST])).unwrap();
-    assert_eq!(assigned, BTreeMap::from([(FIRST, 41)]));
+    assert_eq!(assigned, BTreeMap::from([(FIRST, 1)]));
 
     let document = write_document(request);
     assert_eq!(
         document_ids(&document),
         BTreeMap::from([
-            ("p/ins".to_owned(), vec!["41".to_owned()]),
-            ("p/ins/r/rPr/rPrChange".to_owned(), vec!["41".to_owned()]),
+            ("p/ins".to_owned(), vec!["1".to_owned()]),
+            ("p/ins/r/rPr/rPrChange".to_owned(), vec!["1".to_owned()]),
         ])
     );
     let insertion = document
@@ -403,6 +404,37 @@ fn distinguishes_typed_and_unmarked_json_revision_infos() {
     assert_eq!(found.sites[&3].remaining, 1);
     assert_eq!(found.max, 12);
     assert_eq!(found.used, [5, 12].into_iter().collect());
+}
+
+// Patch payloads reach product saves as freshly parsed JSON with no session marks.
+#[test]
+fn paragraph_patch_payload_infos_are_not_session_sites() {
+    let mut wire =
+        serde_json::to_value(request(json!([{"type": "paragraph", "content": []}]))).unwrap();
+    wire["paragraphIds"] = json!({
+        "splicedParts": [{
+            "part": DOCUMENT,
+            "sha256": "",
+            "paragraphPatches": [{
+                "ordinal": 0, "sessionKey": "body:0", "resultSha256": "",
+                "seed": {
+                    "units": [{"kind": "atom", "atomKind": "opaque", "attrs": {},
+                        "payload": {"info": {"id": FIRST, "author": "Reviewer"}}}],
+                    "properties": {},
+                    "unitSha256": ""
+                },
+                "textEdits": [], "runEdits": [], "paraDeltas": [], "paraInherit": {}
+            }]
+        }]
+    });
+    let mut request = serde_json::from_value(wire).unwrap();
+    let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST])).unwrap();
+    assert!(ids.is_empty());
+    let result = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        result.pointer("/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/info/id"),
+        Some(&json!(FIRST))
+    );
 }
 
 #[test]
@@ -1409,8 +1441,9 @@ fn assigns_model_revision_infos_under_arbitrary_keys() {
     assert_eq!(body[1]["content"][0]["info"]["id"].as_f64(), Some(2.0));
 }
 
+// TypeScript assigns in insertion order, and the typed request keeps keys sorted.
 #[test]
-fn assigns_arbitrary_model_keys_in_wire_order() {
+fn stated_difference_arbitrary_model_keys_assign_in_sorted_order() {
     let mut request = serde_json::from_str(
         r#"{
             "determinism": {
@@ -1430,7 +1463,13 @@ fn assigns_arbitrary_model_keys_in_wire_order() {
     )
     .unwrap();
     let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST, SECOND])).unwrap();
-    assert_eq!(ids, BTreeMap::from([(FIRST, 1), (SECOND, 2)]));
+    assert_eq!(ids, BTreeMap::from([(SECOND, 1), (FIRST, 2)]));
+    let result = serde_json::to_value(&request).unwrap();
+    let frame = result
+        .pointer("/document/content/0/content/0/content/0/shape/drawingModel/frame")
+        .unwrap();
+    assert_eq!(frame["a"]["id"], json!(1));
+    assert_eq!(frame["z"]["id"], json!(2));
 }
 
 #[test]
@@ -1479,6 +1518,42 @@ fn leaves_marked_descendants_untouched_when_a_sibling_shares_the_placeholder() {
     assert_eq!(content[0]["info"]["id"], json!(1));
     assert_eq!(content[0]["info"]["info"]["id"], json!(SECOND));
     assert_eq!(content[1]["info"]["id"], json!(2));
+}
+
+#[test]
+fn stated_difference_shared_holder_inside_marked_info_is_not_aliased() {
+    let content = |frame: Value| {
+        let mut shape = model_shape(json!([]));
+        shape["drawingModel"] = json!({"frame": frame, "otherSha256": ""});
+        json!([{"type": "paragraph", "content": [{
+            "type": "run", "content": [{"type": "shape", "shape": shape}]
+        }]}])
+    };
+    let holder = json!({"info": {"id": SECOND, "author": "B"}});
+    let body = content(json!({
+        "info": {"id": FIRST, "author": "A", "holder": holder.clone()}
+    }));
+    let mut wire = serde_json::to_value(request(body)).unwrap();
+    wire["headerEntries"] = json!([["rId1", {
+        "type": "header", "hdrFtrType": "default", "content": content(json!({"holder": holder}))
+    }]]);
+    let mut request = serde_json::from_value(wire).unwrap();
+    let ids = assign_session_revision_ids(&mut request, &BTreeSet::from([FIRST, SECOND])).unwrap();
+    assert_eq!(ids, BTreeMap::from([(FIRST, 1), (SECOND, 2)]));
+    let result = serde_json::to_value(&request).unwrap();
+    let body_shape = result
+        .pointer("/document/content/0/content/0/content/0/shape")
+        .unwrap();
+    let header_shape = result
+        .pointer("/headerEntries/0/1/content/0/content/0/content/0/shape")
+        .unwrap();
+    let body_info = &body_shape["drawingModel"]["frame"]["info"];
+    assert_eq!(body_info["id"], json!(1));
+    assert_eq!(body_info["holder"]["info"]["id"], json!(SECOND));
+    assert_eq!(
+        header_shape["drawingModel"]["frame"]["holder"]["info"]["id"],
+        json!(2)
+    );
 }
 
 #[test]

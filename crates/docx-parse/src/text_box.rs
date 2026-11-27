@@ -322,7 +322,7 @@ pub(crate) fn content_sha256(content: &[serde_json::Value]) -> String {
     let model = crate::smart_art::wire_model(serde_json::Value::Array(content.to_vec()));
     format!(
         "{:x}",
-        Sha256::digest(crate::paragraph_patch::canonical_json_v1(&model).as_bytes())
+        Sha256::digest(serde_json::to_vec(&model).expect("text box content"))
     )
 }
 

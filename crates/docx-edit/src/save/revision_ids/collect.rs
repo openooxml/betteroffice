@@ -1201,7 +1201,6 @@ record!(docx_parse::inline::RunPropertyChange {
     info,
     previous_formatting => "previousFormatting",
     current_formatting => "currentFormatting",
-    previous_attributes => "previousAttributes",
 } tags { node_type => "type" });
 
 record!(docx_parse::inline::RawInlineXml {
