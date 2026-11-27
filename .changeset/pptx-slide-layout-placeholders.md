@@ -6,4 +6,4 @@
 "@betteroffice/rust-crates": minor
 ---
 
-Adds opt-in `instantiatePlaceholders` to `insertSlide`, exposes `layouts` and `PresentationSlideLayoutSummary` in worker sessions, and adds `placeholderType` to `TextBoxPrimitive`. In `PptxEditor`, inserting a slide now instantiates layout placeholders with localized empty guides by default.
+Adds opt-in `instantiatePlaceholders` to `insertSlide`, exposes `layouts` and `PresentationSlideLayoutSummary` in worker sessions, and adds `placeholderType` to `TextBoxPrimitive`. In `PptxEditor`, inserting a slide now instantiates layout placeholders by default; untouched placeholders follow their layout, and empty ones show the layout prompt or a localized guide.
