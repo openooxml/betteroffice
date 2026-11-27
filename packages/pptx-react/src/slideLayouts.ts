@@ -7,33 +7,33 @@ import type { PresentationSlideLayoutSummary } from '@betteroffice/pptx/worker';
 import type { TFunction, TranslationKey } from '@betteroffice/pptx-i18n';
 import { isTextPlaceholderType } from '../../../shared/pptxPlaceholders';
 
-const LAYOUT_TYPE_KEYS: Record<string, TranslationKey> = {
-  title: 'toolbar.layouts.title',
-  obj: 'toolbar.layouts.obj',
-  secHead: 'toolbar.layouts.secHead',
-  twoObj: 'toolbar.layouts.twoObj',
-  twoTxTwoObj: 'toolbar.layouts.twoTxTwoObj',
-  titleOnly: 'toolbar.layouts.titleOnly',
-  blank: 'toolbar.layouts.blank',
-  objTx: 'toolbar.layouts.objTx',
-  picTx: 'toolbar.layouts.picTx',
-  vertTx: 'toolbar.layouts.vertTx',
-  vertTitleAndTx: 'toolbar.layouts.vertTitleAndTx',
-};
+const LAYOUT_TYPE_KEYS = new Map<string, TranslationKey>([
+  ['title', 'toolbar.layouts.title'],
+  ['obj', 'toolbar.layouts.obj'],
+  ['secHead', 'toolbar.layouts.secHead'],
+  ['twoObj', 'toolbar.layouts.twoObj'],
+  ['twoTxTwoObj', 'toolbar.layouts.twoTxTwoObj'],
+  ['titleOnly', 'toolbar.layouts.titleOnly'],
+  ['blank', 'toolbar.layouts.blank'],
+  ['objTx', 'toolbar.layouts.objTx'],
+  ['picTx', 'toolbar.layouts.picTx'],
+  ['vertTx', 'toolbar.layouts.vertTx'],
+  ['vertTitleAndTx', 'toolbar.layouts.vertTitleAndTx'],
+]);
 
-const STANDARD_LAYOUT_NAME_KEYS: Record<string, TranslationKey> = {
-  'title slide': 'toolbar.layouts.title',
-  'title and content': 'toolbar.layouts.obj',
-  'section header': 'toolbar.layouts.secHead',
-  'two content': 'toolbar.layouts.twoObj',
-  comparison: 'toolbar.layouts.twoTxTwoObj',
-  'title only': 'toolbar.layouts.titleOnly',
-  blank: 'toolbar.layouts.blank',
-  'content with caption': 'toolbar.layouts.objTx',
-  'picture with caption': 'toolbar.layouts.picTx',
-  'title and vertical text': 'toolbar.layouts.vertTx',
-  'vertical title and text': 'toolbar.layouts.vertTitleAndTx',
-};
+const STANDARD_LAYOUT_NAME_KEYS = new Map<string, TranslationKey>([
+  ['title slide', 'toolbar.layouts.title'],
+  ['title and content', 'toolbar.layouts.obj'],
+  ['section header', 'toolbar.layouts.secHead'],
+  ['two content', 'toolbar.layouts.twoObj'],
+  ['comparison', 'toolbar.layouts.twoTxTwoObj'],
+  ['title only', 'toolbar.layouts.titleOnly'],
+  ['blank', 'toolbar.layouts.blank'],
+  ['content with caption', 'toolbar.layouts.objTx'],
+  ['picture with caption', 'toolbar.layouts.picTx'],
+  ['title and vertical text', 'toolbar.layouts.vertTx'],
+  ['vertical title and text', 'toolbar.layouts.vertTitleAndTx'],
+]);
 
 /** Resolve which layout part path clicking the main "New Slide" action uses. */
 export function defaultInsertLayoutPath(
@@ -70,8 +70,8 @@ export function slideLayoutChoices(
   if (layouts?.length) {
     return layouts.map((layout, index) => {
       const rawName = layout.name?.trim();
-      const standardKey = rawName ? STANDARD_LAYOUT_NAME_KEYS[rawName.toLowerCase()] : undefined;
-      const typeKey = layout.layoutType ? LAYOUT_TYPE_KEYS[layout.layoutType] : undefined;
+      const standardKey = rawName ? STANDARD_LAYOUT_NAME_KEYS.get(rawName.toLowerCase()) : undefined;
+      const typeKey = layout.layoutType ? LAYOUT_TYPE_KEYS.get(layout.layoutType) : undefined;
       const label = standardKey
         ? t(standardKey)
         : rawName

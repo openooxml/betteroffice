@@ -62,6 +62,18 @@ test('slideLayoutChoices localizes standard layout names while preserving custom
   ]);
 });
 
+test('slideLayoutChoices treats Object prototype keys as custom layout names and types', () => {
+  const layouts = [
+    { partPath: 'l1', name: 'Constructor', layoutType: 'obj' },
+    { partPath: 'l2', name: '__proto__', layoutType: 'obj' },
+    { partPath: 'l3', name: 'toString', layoutType: 'obj' },
+    { partPath: 'l4', name: null, layoutType: 'toString' },
+  ];
+  expect(slideLayoutChoices(layouts, undefined, (key, params) =>
+    typeof key === 'string' ? tEn(key, params) : 'Unexpected translation key',
+  ).map((choice) => choice.label)).toEqual(['Constructor', '__proto__', 'toString', 'Layout 4']);
+});
+
 test('emptyPlaceholderGuides filters out non-text placeholders and preserves anchor, alignment, and transform', () => {
   const list: SlideDisplayList = {
     contractVersion: 1,
