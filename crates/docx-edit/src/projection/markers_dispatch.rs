@@ -67,16 +67,39 @@ impl ProjectionHooks for Hooks {
         story: &mut StoryPosition<'_>,
         props: Option<&ParagraphProperties>,
         source: Option<&Paragraph>,
-        _paragraph: &mut Paragraph,
+        paragraph: &mut Paragraph,
     ) -> Result<(), ProjectionError> {
         let index = Some(story.state.paragraph_index);
-        for kind in ["pPrIns", "pPrDel", "pPrChange", "bookmarks"] {
-            if props
+        let live = |kind| {
+            props
                 .and_then(|props| props.values.get(kind))
-                .is_some_and(|value| !matches!(value, Any::Null | Any::Undefined))
-            {
+                .is_some_and(|value| match value {
+                    Any::Null | Any::Undefined => false,
+                    Any::Array(entries) => !entries.is_empty(),
+                    _ => true,
+                })
+        };
+        for (kind, marker) in [
+            ("pPrIns", &mut paragraph.p_pr_ins),
+            ("pPrDel", &mut paragraph.p_pr_del),
+        ] {
+            if live(kind) {
                 story.result.defer(self.family(), kind, story.id, index);
+            } else {
+                *marker = None;
             }
+        }
+        if live("pPrChange") {
+            story.result.defer(self.family(), "pPrChange", story.id, index);
+        } else {
+            paragraph.property_changes = None;
+        }
+        if live("bookmarks") {
+            story.result.defer(self.family(), "bookmarks", story.id, index);
+        } else {
+            paragraph.content.retain(|entry| {
+                !matches!(entry.node_type(), "bookmarkStart" | "bookmarkEnd")
+            });
         }
         if story.state.markers.raw_mark_offsets[story
             .state

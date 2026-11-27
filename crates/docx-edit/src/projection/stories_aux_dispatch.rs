@@ -42,6 +42,17 @@ impl ProjectionHooks for Hooks {
         _source: Option<&Paragraph>,
         paragraph: &mut Paragraph,
     ) -> Result<(), ProjectionError> {
+        if matches!(
+            properties.and_then(|properties| crate::resolve_list_identity(&properties.values)),
+            Some(crate::ListIdentity::Created { .. })
+        ) {
+            story.result.defer(
+                self.family(),
+                crate::LIST_DEF,
+                story.id,
+                Some(story.state.paragraph_index),
+            );
+        }
         if paragraph.section_properties.is_some()
             || properties.is_some_and(|properties| {
                 properties.values.contains_key("sectPr")

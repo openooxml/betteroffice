@@ -396,6 +396,7 @@ fn lower_items(
     source: Option<&Paragraph>,
 ) -> Result<Vec<ParagraphContent>, ProjectionError> {
     let authored = runs::AuthoredRuns::new(source, attrs)?;
+    fields_dispatch::defer_boundary_content(story, attrs, &authored);
     let plain = |item: &PlacedSegment| {
         item.projected.is_none()
             && matches!(item.segment.content, SegmentContent::Text(_))

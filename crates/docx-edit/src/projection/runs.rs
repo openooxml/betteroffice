@@ -90,11 +90,20 @@ impl<'a> AuthoredRuns<'a> {
                 .get("_originalFormatting")
                 .map(json_value)
                 .transpose()?;
-            let mark = original
+            let original = original
                 .as_ref()
                 .and_then(|value| value.get("runProperties"))
                 .filter(|value| !value.is_null());
-            decode::<TextFormatting>(mark)?.map(|mark| TextFormatting {
+            let mut mark = decode::<TextFormatting>(original)?;
+            if let Some(language) = attrs.get("language") {
+                let language = live_language(
+                    original.and_then(|mark| mark.get("language")),
+                    &json_value(language)?,
+                );
+                mark.get_or_insert_with(TextFormatting::default).language =
+                    decode(language.as_ref())?;
+            }
+            mark.map(|mark| TextFormatting {
                 font_family: mark.font_family,
                 language: mark.language,
                 ..TextFormatting::default()
@@ -106,6 +115,15 @@ impl<'a> AuthoredRuns<'a> {
             source,
             boundaries: boundaries.unwrap_or_default(),
             mark,
+        })
+    }
+
+    pub(super) fn has_note_marks(&self) -> bool {
+        self.boundaries.iter().any(|boundary| {
+            boundary
+                .note_marks
+                .as_ref()
+                .is_some_and(|marks| !marks.is_empty())
         })
     }
 

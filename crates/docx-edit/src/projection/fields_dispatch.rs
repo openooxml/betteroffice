@@ -1,5 +1,8 @@
+use yrs::Any;
+
 use super::{
-    Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks, StoryPosition,
+    Attrs, Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks,
+    StoryPosition, runs::AuthoredRuns,
 };
 use crate::StorySegment;
 
@@ -7,6 +10,24 @@ pub(super) struct Hooks;
 pub(super) type StoryData = ();
 
 pub(super) const MARKS: &[&str] = &["fieldResult", "hyperlink"];
+
+pub(super) fn defer_boundary_content(
+    story: &mut StoryPosition<'_>,
+    attrs: &Attrs,
+    authored: &AuthoredRuns<'_>,
+) {
+    let paragraph = Some(story.state.paragraph_index);
+    if matches!(attrs.get("pageBreakBeforeRun"), Some(Any::Bool(true))) {
+        story
+            .result
+            .defer(ProjectionFamily::Fields, "pageBreak", story.id, paragraph);
+    }
+    if authored.has_note_marks() {
+        story
+            .result
+            .defer(ProjectionFamily::Fields, "noteMarks", story.id, paragraph);
+    }
+}
 
 impl ProjectionHooks for Hooks {
     fn family(&self) -> ProjectionFamily {

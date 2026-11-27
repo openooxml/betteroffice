@@ -865,13 +865,17 @@ function nestedParagraphs(
     }
   };
   let paragraph = 0;
+  let table = 0;
+  let sdt = 0;
   blocks.forEach((block, index) => {
     const path = `blocks[${index}]`;
     if (block.type === 'paragraph') {
       const key = paragraphKeys[paragraph++];
       walk(block.content, `${path}.content`, `${key === undefined ? path : JSON.stringify(key)}.content`);
     } else {
-      walk(block, path, path);
+      const position = block.type === 'table' ? `table[${table++}]`
+        : block.type === 'blockSdt' ? `blockSdt[${sdt++}]` : path;
+      walk(block, path, position);
     }
   });
   return paragraphs;
@@ -898,31 +902,44 @@ export function checkSourceOrdinals(
     );
   });
 
-  const nestedSources = new Map<string, NestedParagraph[]>();
+  const nestedSources = nestedParagraphs(source, sourceKeys);
   const byPosition = new Map<string, NestedParagraph>();
   const byId = new Map<unknown, NestedParagraph | undefined>();
-  for (const entry of nestedParagraphs(source, sourceKeys)) {
+  for (const entry of nestedSources) {
     const { paragraph, position } = entry;
     byPosition.set(position, entry);
     if (paragraph.paraId && !paragraph.repeatedParaId) {
       byId.set(paragraph.paraId, byId.has(paragraph.paraId) ? undefined : entry);
     }
-    const key = stableStringify(canonicalProjection(paragraph));
-    const entries = nestedSources.get(key) ?? [];
-    entries.push(entry);
-    nestedSources.set(key, entries);
   }
   const positions = paragraphs(blocks).map((_, index) => keys[index] ?? sourceKeys[index]);
-  for (const { paragraph, path, position } of nestedParagraphs(blocks, positions)) {
-    const key = stableStringify(canonicalProjection(paragraph));
-    const candidates = nestedSources.get(key);
-    const match = candidates?.findIndex((entry) => entry.paragraph.sourceOrdinal === paragraph.sourceOrdinal) ?? -1;
-    const identified = paragraph.repeatedParaId ? undefined : byId.get(paragraph.paraId);
-    const positioned = byPosition.get(position);
-    const aligned = positioned && (!candidates?.length || candidates.includes(positioned))
-      ? positioned : undefined;
-    const original = identified ?? aligned ?? (match >= 0 ? candidates![match] : candidates?.[0]);
-    if (match >= 0) candidates!.splice(0, match + 1);
+  const nested = nestedParagraphs(blocks, positions);
+  const matched = new Map<NestedParagraph, NestedParagraph>();
+  const claimed = new Set<NestedParagraph>();
+  const match = (entry: NestedParagraph, original: NestedParagraph | undefined): void => {
+    if (!original || claimed.has(original)) return;
+    matched.set(entry, original);
+    claimed.add(original);
+  };
+  for (const entry of nested) {
+    if (!entry.paragraph.repeatedParaId) match(entry, byId.get(entry.paragraph.paraId));
+  }
+  for (const entry of nested) {
+    if (!matched.has(entry)) match(entry, byPosition.get(entry.position));
+  }
+
+  const byContent = new Map<string, NestedParagraph[]>();
+  const contentKey = (entry: NestedParagraph) => stableStringify(canonicalProjection(entry.paragraph));
+  for (const entry of nestedSources.reverse()) {
+    if (claimed.has(entry)) continue;
+    const key = contentKey(entry);
+    const candidates = byContent.get(key) ?? [];
+    candidates.push(entry);
+    byContent.set(key, candidates);
+  }
+  for (const entry of nested) {
+    const { paragraph, path } = entry;
+    const original = matched.get(entry) ?? byContent.get(contentKey(entry))?.pop();
     comparison.compare(original?.paragraph.sourceOrdinal, paragraph.sourceOrdinal, { storyId, paragraph: null }, `${path}.sourceOrdinal`);
   }
   return comparison.differences;
@@ -983,8 +1000,11 @@ export function checkStory(
   const actual = new Map<string, Story>();
   collectStory(actual, storyId, blocks);
   compareStories(comparison, expected, actual, source, new Set([storyId]));
-  if (!rootDefersKeys(storyId, deferred)) compareStoryKeys(comparison, storyId, expected.get(storyId), paragraphSessionKeys);
-  comparison.differences.push(...checkSourceOrdinals(storyId, blocks, source.get(storyId)?.content ?? [], paragraphSessionKeys));
+  const defersKeys = rootDefersKeys(storyId, deferred);
+  compareStoryKeys(comparison, storyId, defersKeys ? undefined : expected.get(storyId), paragraphSessionKeys);
+  comparison.differences.push(...checkSourceOrdinals(
+    storyId, blocks, source.get(storyId)?.content ?? [], defersKeys ? [] : paragraphSessionKeys
+  ));
   return comparison.differences;
 }
 
