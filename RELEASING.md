@@ -111,7 +111,7 @@ secret after the release and add the missing Trusted Publishers.
 ## Canary releases
 
 Once a day `release.yml` publishes the pending npm changes as a canary: the
-document, React and i18n packages of each format and the font packages, versioned
+document, React and i18n packages of docx, xlsx and pptx and the font packages, versioned
 below the coming release (for example `0.7.0-canary.20261127031700`) under the
 `canary` dist-tag. Native packages, the packages that need them, crates and
 Python bindings have no canary. A run builds the current main commit only once

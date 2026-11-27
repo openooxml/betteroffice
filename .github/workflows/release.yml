@@ -24,7 +24,7 @@ on:
         default: true
 
 concurrency:
-  group: ${{ (github.event_name == 'schedule' || inputs.canary == true) && 'release-canary' || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}
+  group: ${{ (github.event_name == 'schedule' || inputs.canary == true) && (github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true') && 'release-canary' || format('release-canary-skip-{0}', github.run_id)) || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}
   cancel-in-progress: false
 
 defaults:
@@ -747,6 +747,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      actions: read # check again that no release is running
       id-token: write # OIDC Trusted Publishing and provenance
     steps:
       - uses: actions/checkout@v7.0.1
@@ -764,7 +765,29 @@ jobs:
           name: npm-canary
           path: ${{ runner.temp }}/canary
 
+      # A retry of this job alone runs these checks again.
+      - name: Check that this commit is still main's head and no release is running
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          running=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=in_progress&per_page=100" --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice::main has moved on from $SHA to $head, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif [ "$running" != 0 ]; then
+            echo "::notice::A release run is in progress, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish the canary
+        if: steps.gate.outputs.go == 'true'
         env:
           NPM_CONFIG_PROVENANCE: "true"
         run: node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"

@@ -38,7 +38,7 @@ describe('canary workflow', () => {
 
   test('never shares a concurrency slot with, or starts, the stable release', () => {
     expect(release.concurrency.group).toStartWith(
-      "${{ (github.event_name == 'schedule' || inputs.canary == true) && 'release-canary' || "
+      "${{ (github.event_name == 'schedule' || inputs.canary == true) && (github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true') && 'release-canary' || format('release-canary-skip-{0}', github.run_id)) || "
     );
     for (const id of ['plan', 'release']) {
       expect(release.jobs[id].if, id).toContain("github.event_name != 'schedule' && inputs.canary != true");
@@ -54,7 +54,7 @@ describe('canary workflow', () => {
 
   test('builds with read access only and publishes from a job that holds the OIDC token and no secret', () => {
     expect(canary.permissions).toEqual({ contents: 'read', actions: 'read' });
-    expect(publisher.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(publisher.permissions).toEqual({ contents: 'read', actions: 'read', 'id-token': 'write' });
     expect(publisher.needs).toBe('canary');
     expect(publisher.if).toBe("needs.canary.outputs.publish == 'true'");
     for (const job of [canary, publisher]) {
@@ -69,10 +69,15 @@ describe('canary workflow', () => {
 
   test('the OIDC job installs and builds nothing: it uploads the verified tarballs', () => {
     expect(publisher.steps.map((candidate: any) => candidate.name ?? candidate.uses.split('@')[0])).toEqual([
-      'actions/checkout', 'actions/setup-node', 'actions/download-artifact', 'Publish the canary'
+      'actions/checkout', 'actions/setup-node', 'actions/download-artifact',
+      "Check that this commit is still main's head and no release is running", 'Publish the canary'
     ]);
     expect(publisher.steps[2].with.name).toBe('npm-canary');
-    expect(publisher.steps[3].run).toBe('node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"');
+    expect(publisher.steps[3].env.SHA).toBe('${{ github.sha }}');
+    expect(publisher.steps[3].run).toContain('repos/$REPO/commits/main');
+    expect(publisher.steps[3].run).toContain('runs?status=in_progress');
+    expect(publisher.steps[4].if).toBe("steps.gate.outputs.go == 'true'");
+    expect(publisher.steps[4].run).toBe('node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"');
     expect(canary.outputs.publish).toBe('${{ steps.still-idle.outputs.idle }}');
   });
 
@@ -144,6 +149,8 @@ describe('canary set', () => {
     expect(() => checkPublishable(set, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('holds @x/a@1.1.0');
     const stable = [{ name: '@x/a', version: '1.1.0', directory: '' }];
     expect(() => checkPublishable(stable, () => ({ name: '@x/a', version: '1.1.0' }))).toThrow('not a canary version');
+    const other = [{ name: '@x/a', version: '1.1.0-alpha-canary.1', directory: '' }];
+    expect(() => checkPublishable(other, () => ({ name: '@x/a', version: '1.1.0-alpha-canary.1' }))).toThrow('not a canary version');
   });
 
   test('keeps the dependency ranges Changesets rewrote, so only versions change', () => {

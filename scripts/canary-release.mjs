@@ -13,7 +13,7 @@ const RUNTIME_FIELDS = ['dependencies', 'peerDependencies', 'optionalDependencie
 const PLAN = 'plan.json';
 
 export function isCanaryVersion(version) {
-  return typeof version === 'string' && version.includes(`-${CANARY_TAG}.`);
+  return typeof version === 'string' && new RegExp(`^\\d+\\.\\d+\\.\\d+-${CANARY_TAG}\\.\\d+$`).test(version);
 }
 
 function internalDependencies(manifest, names) {
