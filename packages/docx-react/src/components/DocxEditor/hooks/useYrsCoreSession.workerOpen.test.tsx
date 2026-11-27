@@ -1603,13 +1603,7 @@ async function openingPluginMetadataFallback() {
       onWorkerOpen: (worker) => { if (worker) opened = worker; },
     },
   });
-  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
-    await act(async () => {
-      clock.advance(0);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    });
-  }
-  await flushPluginFallback(clock);
+  await openedPluginFallback(result, clock, () => opened);
   expect(result.current.host).not.toBeNull();
   expect(opened).toBeDefined();
   const session = result.current.core.session!;
@@ -9403,6 +9397,20 @@ async function flushPluginFallback(clock: ReturnType<typeof holdPeerFallback>) {
   }
 }
 
+async function openedPluginFallback(
+  result: { readonly current: { readonly host: unknown } },
+  clock: ReturnType<typeof holdPeerFallback>,
+  opened: () => unknown
+) {
+  while (!opened() || result.current.host === null) {
+    await act(async () => {
+      clock.advance(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
+  await flushPluginFallback(clock);
+}
+
 async function openingPluginFallback() {
   const source = await longFixture(2);
   const worker = installWorker({ holdState: true, holdCompletion: true });
@@ -9418,13 +9426,7 @@ async function openingPluginFallback() {
       onWorkerOpen: (worker) => { if (worker) opened = worker; },
     },
   });
-  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
-    await act(async () => {
-      clock.advance(0);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    });
-  }
-  await flushPluginFallback(clock);
+  await openedPluginFallback(result, clock, () => opened);
   expect(result.current.host).not.toBeNull();
   expect(opened).toBeDefined();
   const session = result.current.core.session!;
