@@ -404,6 +404,7 @@ fn a_cycling_page_side_shape_beside_an_inline_picture_keeps_the_convergence_erro
         &mut prepared.input,
         &prepared.regions,
         &prepared.measurement,
+        &mut Default::default(),
         |input, phase| {
             let mut layout = docx_layout::place::layout_document(input)?;
             for fragment in layout
@@ -462,6 +463,7 @@ fn a_picture_pinned_on_the_last_wrap_phase_still_lays_out() {
         &mut prepared.input,
         &prepared.regions,
         &prepared.measurement,
+        &mut Default::default(),
         |input, phase| {
             let mut layout = docx_layout::place::layout_document(input)?;
             let column_x = if phase % 2 == 0 { 144.0 } else { 264.0 };
@@ -487,6 +489,7 @@ fn wrapping_that_keeps_moving_after_a_pin_ends_in_the_convergence_error() {
         &mut prepared.input,
         &prepared.regions,
         &prepared.measurement,
+        &mut Default::default(),
         |input, phase| {
             let mut layout = docx_layout::place::layout_document(input)?;
             let column_x = if phase % 2 == 0 { 144.0 } else { 264.0 };
@@ -530,6 +533,7 @@ fn flow_after_a_settled_picture_measures_as_a_fresh_layout_does() {
         &mut prepared.input,
         &prepared.regions,
         &prepared.measurement,
+        &mut Default::default(),
         |input, _| docx_layout::place::layout_document(input),
     );
     assert!(settled.unwrap());
