@@ -925,6 +925,92 @@ test('a tracked insertion in the opening unlinked title is dropped and its page 
   expect(summary).toBe('begins=4 ends=4 instr=same pageref=3/3 endpara=3 after=outside markers=-');
 }, 30_000);
 
+const R5_DELETE_ROUTES = [
+  ['full_write', 'on a full save'],
+  ['xml_comment', 'on a session save with an XML comment'],
+  ['insert_table', 'on a session save that also inserts a table'],
+] as const;
+
+const R5_DELETE_CASES = [WORD_TOC_SHAPES[0], WORD_TOC_SHAPES[1], WORD_TOC_SHAPES[3]]
+  .flatMap(([shape, build]) => R5_DELETE_ROUTES.map(([route, save]) => [
+    `deleting the TOC closing paragraph and the next paragraph closes the TOC in the last surviving entry ${save} (${shape})`,
+    `r5_delete_closer_and_next_${shape.slice(0, 2).toLowerCase()}_${route}`,
+    build,
+    route,
+  ] as const));
+
+test.each(R5_DELETE_CASES)('%s', async (_title, caseName, build, route) => {
+  const toc = build();
+  const closer = toc.paragraphs.length - 1;
+  const before = route === 'insert_table' ? paragraph(textRun('BEFORE')) : '';
+  const tocXml = wordTocXml(toc);
+  const source = before + (route === 'xml_comment'
+    ? tocXml.replace('</w:p><w:p>', '</w:p><!-- x --><w:p>') : tocXml);
+  const remaining = toc.paragraphs.slice(0, closer);
+  remaining[closer - 1] += fieldChar('end');
+  const table = route === 'insert_table' ? `<w:tbl><w:tr><w:tc>${paragraph('')}</w:tc></w:tr></w:tbl>` : '';
+  const expected = table + before + remaining.map(paragraph).join('');
+  let deleted = false;
+  const xml = await editAndSave(source, session => {
+    const { story } = toc;
+    const paragraphs = session.paragraphs(story);
+    const closingIndex = closer + (before ? 1 : 0);
+    const first = paragraphs[closingIndex]!;
+    const last = paragraphs[closingIndex + 1]!;
+    deleted = session.applyEdits({
+      expectVersion: session.version(),
+      steps: [{ op: 'deleteParagraphs', story, firstParaId: first.paraId, lastParaId: last.paraId }],
+    }).ok;
+    if (route === 'insert_table') {
+      session.insertTable({ story, paraId: paragraphs[0]!.paraId, offset: 0 }, 1, 1);
+    }
+  }, route === 'full_write');
+  assertSpanningSave(xml, expected, caseName);
+  expect(deleted).toBe(true);
+  if (route === 'insert_table') expect(xml).toMatch(/<w:tbl[\s>]/);
+}, 30_000);
+
+const R5_MOVE_EDITS = [
+  ['split_start', 'splitting at the start of the opening TOC paragraph'],
+  ['merge_blank', 'merging a blank paragraph with the opening TOC paragraph'],
+] as const;
+const R5_MOVE_SAVES = [
+  ['session_save', 'on a session save'],
+  ['full_write', 'on a full save'],
+] as const;
+
+const R5_MOVE_CASES = [WORD_TOC_SHAPES[0], WORD_TOC_SHAPES[1], WORD_TOC_SHAPES[2]]
+  .flatMap(([shape, build]) => R5_MOVE_EDITS.flatMap(([edit, action]) =>
+    R5_MOVE_SAVES.map(([route, save]) => [
+      `editing the second TOC title after ${action} keeps the page references ${save} (${shape})`,
+      `r5_${edit}_edit_second_${shape.slice(0, 2).toLowerCase()}_${route}`,
+      build,
+      edit,
+      route,
+    ] as const)));
+
+test.each(R5_MOVE_CASES)('%s', async (_title, caseName, build, edit, route) => {
+  const toc = build();
+  const { story } = toc;
+  const before = paragraph(edit === 'split_start' ? textRun('BEFORE') : '');
+  const tocXml = wordTocXml(toc);
+  const titleEdit = { kind: 'text', story, marker: toc.titles[1]! } as const;
+  const expectedBefore = edit === 'split_start' ? before + paragraph('') : '';
+  const expected = expectedBefore + editedWordTocXml(toc, titleEdit, tocXml);
+  let edited = false;
+  const xml = await editAndSave(before + tocXml, session => {
+    const [previous, opening] = session.paragraphs(story);
+    if (edit === 'split_start') {
+      session.splitParagraph({ story, paraId: opening!.paraId, offset: 0 });
+    } else {
+      session.mergeParagraphs(story, previous!.paraId);
+    }
+    edited = applyWordTocEdit(session, titleEdit);
+  }, route === 'full_write');
+  assertSpanningSave(xml, expected, caseName);
+  expect(edited).toBe(true);
+}, 30_000);
+
 const LINKED_TITLE_CASES = ['text separator', 'added tab'] as const;
 
 test.each(LINKED_TITLE_CASES.map(kind => [kind] as const))(

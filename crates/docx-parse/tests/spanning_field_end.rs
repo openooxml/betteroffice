@@ -2024,3 +2024,112 @@ fn selective_save_assigns_a_different_shape_id() -> Result<(), Box<dyn Error>> {
     assert_ne!(selective_id, whole_id);
     Ok(())
 }
+
+fn assert_r5_deleted_toc_closer(toc: WordToc, case: &str) -> Result<(), Box<dyn Error>> {
+    let start = r#"<w:bookmarkStart w:id="41" w:name="TocRange"/>"#;
+    let end = r#"<w:bookmarkEnd w:id="41"/>"#;
+    let source = package(&format!("{start}{}{end}", toc.xml(&toc.paragraphs)))?;
+    let mut request = save_request(&source, false)?;
+    let blocks = request["document"]["content"]
+        .as_array_mut()
+        .ok_or("missing body blocks")?;
+    let body = blocks
+        .iter()
+        .rposition(|block| block["type"] == "paragraph")
+        .filter(|&index| index > 0)
+        .ok_or("missing closing and following paragraphs")?;
+    blocks.drain(body - 1..=body);
+
+    let closer = toc.paragraphs.len() - 1;
+    let mut remaining = toc.paragraphs[..closer].to_vec();
+    remaining[closer - 1].push_str(&field_char("end"));
+    let entries: String = remaining
+        .iter()
+        .enumerate()
+        .map(|(index, content)| paragraph(index, content))
+        .collect();
+    let expected = format!("{start}{entries}{end}");
+    let saved = write_docx_s13(serde_json::from_value(request)?, &source)?;
+    assert_spanning_save(&document_xml(&saved)?, &expected, case);
+    Ok(())
+}
+
+enum R5OpeningEdit {
+    SplitStart,
+    MergeBlank,
+}
+
+fn assert_r5_moved_toc_opening(
+    toc: WordToc,
+    case: &str,
+    edit: R5OpeningEdit,
+) -> Result<(), Box<dyn Error>> {
+    let before = match edit {
+        R5OpeningEdit::SplitStart => paragraph(toc.paragraphs.len() + 1, &text_run("BEFORE")),
+        R5OpeningEdit::MergeBlank => paragraph(toc.paragraphs.len() + 1, ""),
+    };
+    let toc_xml = toc.xml(&toc.paragraphs);
+    let source = package(&format!("{before}{toc_xml}"))?;
+    let mut request = save_request(&source, false)?;
+    let blocks = request["document"]["content"]
+        .as_array_mut()
+        .ok_or("missing body blocks")?;
+    let (second_entry, expected_before) = match edit {
+        R5OpeningEdit::SplitStart => {
+            let mut opening = blocks[1].clone();
+            opening
+                .as_object_mut()
+                .ok_or("missing TOC opening paragraph")?
+                .remove("paraId");
+            blocks[1]["content"] = json!([]);
+            blocks.insert(2, opening);
+            (3, before + &paragraph(toc.paragraphs.len() + 2, ""))
+        }
+        R5OpeningEdit::MergeBlank => {
+            let mut opening = blocks.remove(1);
+            blocks[0]["content"] = opening["content"].take();
+            (1, String::new())
+        }
+    };
+    let title = toc.titles[1];
+    let edited_title = format!("{} EDIT {}", &title[..1], &title[1..]);
+    let edited = edit_runs(&mut blocks[second_entry], title, &edited_title);
+    let expected =
+        expected_before + &toc_xml.replace(&format!(">{title}<"), &format!(">{edited_title}<"));
+    let saved = write_docx_s13(serde_json::from_value(request)?, &source)?;
+    assert_spanning_save(&document_xml(&saved)?, &expected, case);
+    assert!(edited > 0, "{case}: missing second entry title");
+    Ok(())
+}
+
+macro_rules! r5_word_toc_tests {
+    ($($test:ident: $case:literal => $check:ident($build:ident $(, $edit:expr)?)),+ $(,)?) => {
+        $(
+            #[test]
+            fn $test() -> Result<(), Box<dyn Error>> {
+                $check($build(), $case $(, $edit)?)
+            }
+        )+
+    };
+}
+
+r5_word_toc_tests! {
+    deleting_the_plain_toc_closer_and_next_paragraph_closes_before_the_bookmark:
+        "r5_delete_closer_and_next_w1_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w1),
+    deleting_the_inline_toc_closer_and_next_paragraph_closes_before_the_bookmark:
+        "r5_delete_closer_and_next_w2_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w2),
+    deleting_the_unlinked_toc_closer_and_next_paragraph_closes_before_the_bookmark:
+        "r5_delete_closer_and_next_w4_trailing_bookmark" => assert_r5_deleted_toc_closer(word_toc_w4),
+    editing_the_second_plain_toc_title_after_splitting_the_opening_keeps_page_references:
+        "r5_split_start_edit_second_w1_full_write" => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::SplitStart),
+    editing_the_second_inline_toc_title_after_splitting_the_opening_keeps_page_references:
+        "r5_split_start_edit_second_w2_full_write" => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::SplitStart),
+    editing_the_second_numbered_toc_title_after_splitting_the_opening_keeps_page_references:
+        "r5_split_start_edit_second_w3_full_write" => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::SplitStart),
+    editing_the_second_plain_toc_title_after_merging_with_a_blank_keeps_page_references:
+        "r5_merge_blank_edit_second_w1_full_write" => assert_r5_moved_toc_opening(word_toc_w1, R5OpeningEdit::MergeBlank),
+    editing_the_second_inline_toc_title_after_merging_with_a_blank_keeps_page_references:
+        "r5_merge_blank_edit_second_w2_full_write" => assert_r5_moved_toc_opening(word_toc_w2, R5OpeningEdit::MergeBlank),
+    editing_the_second_numbered_toc_title_after_merging_with_a_blank_keeps_page_references:
+        "r5_merge_blank_edit_second_w3_full_write" => assert_r5_moved_toc_opening(word_toc_w3, R5OpeningEdit::MergeBlank),
+}
