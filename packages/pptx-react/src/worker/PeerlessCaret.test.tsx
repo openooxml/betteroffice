@@ -72,7 +72,7 @@ test('the worker caret is black or white by the painted pixels, one small read p
     const caret = view.getByTestId('pptx-caret');
     expect(ink(caret)).toBe('#000000');
     expect(painted.reads).toEqual([[300, 248, 3, 54]]);
-    for (let blink = 0; blink < 6; blink += 1) act(() => timers.ticks.at(-1)!());
+    for (let blink = 0; blink < 6; blink += 1) act(() => timers.ticks[timers.ticks.length - 1]!());
     expect(painted.reads).toHaveLength(1);
     act(() => run.move({ x: 140, y: 100, width: 1, height: 20 }));
     act(() => run.commit());
