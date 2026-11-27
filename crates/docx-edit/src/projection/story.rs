@@ -510,9 +510,7 @@ fn lower_items(
                         .split_first()
                         .expect("deferred text has at least one mark");
                     let deferred = DeferredMarks { first, rest };
-                    lowered = if let Some(source) =
-                        fallback.marked(story, &deferred, kind, text)
-                    {
+                    lowered = if let Some(source) = fallback.marked(story, &deferred, kind, text) {
                         Lowered::Inline(vec![source])
                     } else {
                         let mut slices = deferred_text_slice(
@@ -751,12 +749,12 @@ impl SourceInlines {
         payload: &Attrs,
     ) -> Option<ParagraphContent> {
         story.defer_here(family, kind);
-        let kind = if kind == "field" && attr_string(payload, "modelKind") == Some("commentReference")
-        {
-            "commentReference"
-        } else {
-            kind
-        };
+        let kind =
+            if kind == "field" && attr_string(payload, "modelKind") == Some("commentReference") {
+                "commentReference"
+            } else {
+                kind
+            };
         let candidates = self.items.get_mut(kind)?;
         let raw_xml = attr_string(payload, "xml");
         let comment_id = match payload.get("commentId") {

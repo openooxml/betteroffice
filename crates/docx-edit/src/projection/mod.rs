@@ -1420,11 +1420,26 @@ mod tests {
 
     fn seeded_header() -> EditingDoc {
         let parts = [
-            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#),
-            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
-            ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#),
-            ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#),
-            ("word/header.xml", r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#),
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr></w:body></w:document>"#,
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="header" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/></Relationships>"#,
+            ),
+            (
+                "word/header.xml",
+                r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"#,
+            ),
         ];
         seeded_parts(parts)
     }
@@ -1441,8 +1456,14 @@ mod tests {
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:test"><w:body>{body}</w:body></w:document>"#
         );
         seeded_parts([
-            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#),
-            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
             ("word/document.xml", &document),
         ])
     }
@@ -1450,7 +1471,9 @@ mod tests {
     #[test]
     fn reports_deferrals_for_retained_tab_and_raw_block() {
         let doc = seeded_body(r#"<x:extra/><w:p><w:r><w:tab/></w:r></w:p>"#);
-        let output = doc.project_story("body", &ProjectionInput::default()).unwrap();
+        let output = doc
+            .project_story("body", &ProjectionInput::default())
+            .unwrap();
         assert!(matches!(output.blocks[0], BlockContent::RawXml(_)));
         let BlockContent::Paragraph(paragraph) = &output.blocks[1] else {
             panic!("expected the paragraph after the raw block");
@@ -1489,12 +1512,21 @@ mod tests {
             )]);
             body.format(&mut txn, 0, 6, attrs);
         }
-        let output = doc.project_story("body", &ProjectionInput::default()).unwrap();
+        let output = doc
+            .project_story("body", &ProjectionInput::default())
+            .unwrap();
         let BlockContent::Paragraph(paragraph) = &output.blocks[0] else {
             panic!("expected the paragraph with marked text");
         };
-        let kinds: Vec<_> = paragraph.content.iter().map(ParagraphContent::node_type).collect();
-        assert_eq!(kinds, ["moveFromRangeStart", "hyperlink", "moveFromRangeEnd"]);
+        let kinds: Vec<_> = paragraph
+            .content
+            .iter()
+            .map(ParagraphContent::node_type)
+            .collect();
+        assert_eq!(
+            kinds,
+            ["moveFromRangeStart", "hyperlink", "moveFromRangeEnd"]
+        );
         for (family, kind) in [
             (ProjectionFamily::Fields, "fieldResult"),
             (ProjectionFamily::Fields, "hyperlink"),
