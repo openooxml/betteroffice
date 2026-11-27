@@ -207,8 +207,12 @@ export async function open(options: Partial<PptxAsyncEditorProps> = {}, budget: 
     right: list.width, bottom: list.height, width: list.width, height: list.height, toJSON: () => ({}) });
   restorers.push(() => bounds.mockRestore());
   const stage = view.getByRole('application');
-  Object.defineProperties(stage, { setPointerCapture: { configurable: true, value: mock(() => {}) },
-    releasePointerCapture: { configurable: true, value: mock(() => {}) } });
+  const capturedPointers = new Set<number>();
+  Object.defineProperties(stage, {
+    setPointerCapture: { configurable: true, value: mock((pointerId: number) => { capturedPointers.add(pointerId); }) },
+    releasePointerCapture: { configurable: true, value: mock((pointerId: number) => { capturedPointers.delete(pointerId); }) },
+    hasPointerCapture: { configurable: true, value: (pointerId: number) => capturedPointers.has(pointerId) },
+  });
   const point = (x = box.x + 1, y = box.y + box.h / 2) =>
     ({ clientX: x, clientY: y, pointerId: 7, isPrimary: true, button: 0, detail: 1 });
   const select = async () => {

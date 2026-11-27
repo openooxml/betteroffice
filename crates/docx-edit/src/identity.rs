@@ -463,6 +463,10 @@ pub(crate) struct SourceIndex {
     package_sha256: String,
     #[serde(skip, default = "empty_package_bytes")]
     bytes: PackageBytes,
+    #[serde(skip)]
+    pub(crate) projection_envelope: Option<Arc<docx_parse::S9WireEnvelope>>,
+    #[serde(skip)]
+    pub(crate) projection_media: Option<docx_parse::media::MediaTable>,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
@@ -771,6 +775,8 @@ impl SourceIndex {
         Self {
             package_sha256,
             bytes,
+            projection_envelope: None,
+            projection_media: None,
             occupied,
             parts,
             roots,
@@ -3162,6 +3168,7 @@ impl EditingDoc {
     pub fn begin_opening(&self, generation: Option<&str>) {
         self.clear_edit_provenance();
         self.save_story_states.lock().unwrap().clear();
+        self.projection.lock().unwrap().reset_opening();
         let generation = generation.map_or_else(fresh_generation, str::to_owned);
         let mut txn = self.transact_for(&EditCtx::system(""));
         txn.get_map(SESSION)
@@ -3791,16 +3798,25 @@ impl EditingDoc {
     pub fn story_paragraph_ids(&self, story_id: &str) -> EditResult<Vec<Option<String>>> {
         let source = self.source_index();
         let txn = self.yrs_doc().transact();
-        let story = match story_ref(&txn, story_id) {
+        self.story_paragraph_ids_in(&txn, story_id, source.as_deref())
+    }
+
+    pub(crate) fn story_paragraph_ids_in<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+        source: Option<&SourceIndex>,
+    ) -> EditResult<Vec<Option<String>>> {
+        let story = match story_ref(txn, story_id) {
             Ok(story) => story,
             Err(crate::EditError::CellHasNoStory(_)) => return Ok(vec![None]),
             Err(error) => return Err(error),
         };
-        Ok(pilcrows(&story, &txn)
+        Ok(pilcrows(&story, txn)
             .into_iter()
             .map(|(_, map)| {
-                Pilcrow::read(story_id, map, &txn)
-                    .saved_id(source.as_deref())
+                Pilcrow::read(story_id, map, txn)
+                    .saved_id(source)
                     .map(|(id, _)| id)
             })
             .collect())

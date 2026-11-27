@@ -3,7 +3,7 @@ import type { ShapeRect } from '@betteroffice/pptx';
 import type {
   PresentationCommandFrameTag, PresentationCommandObjectSelection, PresentationCommandObjectTarget,
 } from '@betteroffice/pptx/worker';
-import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizedBounds,
+import { MIN_SHAPE_SIZE_EMU, passedDragThreshold, RESIZE_HANDLES, resizeCommitDelta, resizeCursor, resizedBounds,
   slidePoint, type ResizeHandle, type SlidePoint } from '../interactions';
 import { hitConfirmedGeometry, peerlessGestureActive, peerlessInputReference, setPeerlessGestureActive, type PeerlessViewStore } from './peerlessViewStore';
 import type { PeerlessPresentation } from './usePeerlessPresentation';
@@ -209,14 +209,23 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     return true;
   }, [store, presentation, canvas, cancelActive, position, paint]);
 
-  const hoverCursor = useCallback((event: PointerEvent<HTMLElement>): string | null => {
-    if (event.buttons !== 0 || (store && peerlessGestureActive(store))) return null;
+  const geometryCursor = useCallback((event: PointerEvent<HTMLElement>): 'text' | 'move' | 'default' => {
     const confirmed = presentation?.getVisualSnapshot()?.view.confirmed;
     const point = position(event);
     if (!store || !presentation?.selectionEnabled || !canvas.current || !confirmed || !point) return 'default';
     const hit = hitConfirmedGeometry(store, point, canvas.current.getBoundingClientRect().width / confirmed.displayList.width);
     return hit?.kind === 'text' ? 'text' : hit?.kind === 'shape' ? 'move' : 'default';
   }, [store, presentation, canvas, position]);
+
+  const cursorAt = (event: PointerEvent<HTMLElement>, geometry: ReturnType<typeof geometryCursor>): string => {
+    const handle = (event.target as HTMLElement).dataset?.pptxResize as ResizeHandle | undefined;
+    return handle && RESIZE_HANDLES.includes(handle) ? resizeCursor(handle) : geometry;
+  };
+
+  const hoverCursor = useCallback((event: PointerEvent<HTMLElement>): string | null => {
+    if (event.buttons !== 0 || (store && peerlessGestureActive(store))) return null;
+    return geometryCursor(event);
+  }, [store, geometryCursor]);
 
   const onPointerMove = useCallback((event: PointerEvent<HTMLElement>): boolean => {
     const current = gesture.current;
@@ -336,6 +345,6 @@ export function usePeerlessShapeGestures(store: PeerlessViewStore | null, {
     cancel();
   }, [cancel]);
 
-  return { preview: preview.current, hoverCursor, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
+  return { preview: preview.current, cursorAt, geometryCursor, hoverCursor, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onKeyDown,
     onLostPointerCapture: onPointerCancel };
 }
