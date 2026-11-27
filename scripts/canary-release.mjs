@@ -97,7 +97,7 @@ function npm(args, options = {}) {
 
 function npmView(spec, field) {
   try {
-    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
     return out ? JSON.parse(out) : undefined;
   } catch (error) {
     if (/\bE404\b/.test(`${error.stdout ?? ''}${error.stderr ?? ''}`)) return undefined;
@@ -251,7 +251,8 @@ function publish(destination) {
     });
   }
   let problems = [];
-  for (let attempt = 0; attempt < 6; attempt += 1) {
+  const deadline = Date.now() + 5 * 60_000;
+  for (let attempt = 0; attempt < 6 && (attempt === 0 || Date.now() < deadline); attempt += 1) {
     if (attempt) pause(10_000);
     problems = [];
     for (const { name, version } of set) {
