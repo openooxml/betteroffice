@@ -1474,7 +1474,8 @@ fn stated_difference_arbitrary_model_keys_assign_in_sorted_order() {
     assert_eq!(frame["z"]["id"], json!(2));
 }
 
-const MODEL_ENTRIES: &str = "/document/content/0/content/0/content/0/shape/drawingModel/frame/entries";
+const MODEL_ENTRIES: &str =
+    "/document/content/0/content/0/content/0/shape/drawingModel/frame/entries";
 
 fn assign_with_skipped_model_field(
     entry: Value,

@@ -853,7 +853,12 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
                 let fields = &*record;
                 let placeholder = if !self.skipped_views.is_empty() {
                     self.session.model_placeholder(|key| {
-                        field_if_not_skipped(&mut self.path, self.skipped_views, key, fields.get(key))
+                        field_if_not_skipped(
+                            &mut self.path,
+                            self.skipped_views,
+                            key,
+                            fields.get(key),
+                        )
                     })
                 } else {
                     self.session.model_placeholder(|key| fields.get(key))
