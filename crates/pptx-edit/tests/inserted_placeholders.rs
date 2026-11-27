@@ -8,8 +8,7 @@ const MASTER: &str = "ppt/slideMasters/slideMaster1.xml";
 const SOURCE_SLIDE: &str = "ppt/slides/slide1.xml";
 const CONTENT_LAYOUT: usize = 2;
 const TITLE_PROPERTIES: &str = r#"<a:xfrm flipH="1" rot="600000"><a:off x="800000" y="450000"/><a:ext cx="10000000" cy="1100000"/></a:xfrm>"#;
-const TITLE_GEOMETRY: &str =
-    r#"<a:prstGeom prst="roundRect"><a:avLst><a:gd fmla="val 25000" name="adj"/></a:avLst></a:prstGeom>"#;
+const TITLE_GEOMETRY: &str = r#"<a:prstGeom prst="roundRect"><a:avLst><a:gd fmla="val 25000" name="adj"/></a:avLst></a:prstGeom>"#;
 const FOOTERS: &[&str] = &[
     r#"type="dt" idx="10""#,
     r#"type="ftr" idx="11""#,
@@ -49,11 +48,15 @@ fn relationship(id: usize, kind: &str, target: &str) -> String {
 }
 
 fn relationships(entries: &str) -> String {
-    format!(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{entries}</Relationships>"#)
+    format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{entries}</Relationships>"#
+    )
 }
 
 fn common_slide(name: &str, shapes: &str) -> String {
-    format!(r#"<p:cSld name="{name}"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld>"#)
+    format!(
+        r#"<p:cSld name="{name}"><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shapes}</p:spTree></p:cSld>"#
+    )
 }
 
 fn placeholder(id: usize, attributes: &str, properties: &str) -> String {
@@ -62,7 +65,9 @@ fn placeholder(id: usize, attributes: &str, properties: &str) -> String {
     } else {
         format!("<p:spPr>{properties}</p:spPr>")
     };
-    format!(r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Placeholder {id}"/><p:cNvSpPr/><p:nvPr><p:ph {attributes}/></p:nvPr></p:nvSpPr>{properties}<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#)
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="Placeholder {id}"/><p:cNvSpPr/><p:nvPr><p:ph {attributes}/></p:nvPr></p:nvSpPr>{properties}<p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody></p:sp>"#
+    )
 }
 
 fn deck() -> Vec<u8> {
@@ -73,14 +78,18 @@ fn deck() -> Vec<u8> {
         (MASTER, "slideMaster"),
         (SOURCE_SLIDE, "slide"),
     ] {
-        overrides += &format!(r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.{kind}+xml"/>"#);
+        overrides += &format!(
+            r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.{kind}+xml"/>"#
+        );
     }
     let mut layout_ids = String::new();
     let mut master_rels = String::new();
     for (index, &(name, kind, placeholders)) in LAYOUTS.iter().enumerate() {
         let number = index + 1;
         let path = layout_path(number);
-        overrides += &format!(r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#);
+        overrides += &format!(
+            r#"<Override PartName="/{path}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>"#
+        );
         let id = 2_147_483_648 + number;
         layout_ids += &format!(r#"<p:sldLayoutId id="{id}" r:id="rId{number}"/>"#);
         master_rels += &relationship(
@@ -109,7 +118,11 @@ fn deck() -> Vec<u8> {
         );
         parts.insert(
             format!("ppt/slideLayouts/_rels/slideLayout{number}.xml.rels"),
-            relationships(&relationship(1, "slideMaster", "../slideMasters/slideMaster1.xml")),
+            relationships(&relationship(
+                1,
+                "slideMaster",
+                "../slideMasters/slideMaster1.xml",
+            )),
         );
     }
     parts.insert("[Content_Types].xml".to_owned(), format!(r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>{overrides}</Types>"#));
@@ -143,7 +156,11 @@ fn deck() -> Vec<u8> {
     );
     parts.insert(
         "ppt/slides/_rels/slide1.xml.rels".to_owned(),
-        relationships(&relationship(1, "slideLayout", "../slideLayouts/slideLayout2.xml")),
+        relationships(&relationship(
+            1,
+            "slideLayout",
+            "../slideLayouts/slideLayout2.xml",
+        )),
     );
     let parts: Vec<_> = parts.into_iter().collect();
     let bytes = ooxml_opc::rezip_parts_borrowed(&parts).unwrap();
@@ -181,7 +198,10 @@ fn insertion_copies_only_text_placeholders_across_standard_layouts() {
     let default_content = (None, Some(1), None);
     let body = (Some("body"), Some(1), None);
     let expected: &[&[_]] = &[
-        &[(Some("ctrTitle"), None, None), (Some("subTitle"), Some(1), None)],
+        &[
+            (Some("ctrTitle"), None, None),
+            (Some("subTitle"), Some(1), None),
+        ],
         &[title, default_content],
         &[title, default_content, (Some("obj"), Some(2), None)],
         &[title, body],
@@ -223,7 +243,11 @@ fn untouched_inserted_placeholders_save_empty_properties_and_reopen_inherited() 
     let (slide, xml) = reopened_content(&session.save().unwrap());
     assert_eq!(xml.matches("<p:spPr/>").count(), 2, "{xml}");
     assert_eq!(xml.matches("<a:xfrm").count(), 1, "{xml}");
-    assert_eq!(xml.matches("<a:bodyPr/><a:lstStyle/><a:p/>").count(), 2, "{xml}");
+    assert_eq!(
+        xml.matches("<a:bodyPr/><a:lstStyle/><a:p/>").count(),
+        2,
+        "{xml}"
+    );
     assert!(!xml.contains("<a:prstGeom"), "{xml}");
     assert_eq!(
         slide.shapes[0].inherited,
@@ -268,7 +292,10 @@ fn a_moved_inserted_placeholder_saves_an_explicit_transform() {
         )
         .unwrap();
     let (slide, xml) = reopened_content(&session.save().unwrap());
-    assert!(xml.contains(&TITLE_PROPERTIES.replace("800000", "2100000")), "{xml}");
+    assert!(
+        xml.contains(&TITLE_PROPERTIES.replace("800000", "2100000")),
+        "{xml}"
+    );
     assert_eq!(slide.shapes[0].x, 2_100_000);
     assert!(slide.shapes[0].inherited.is_none());
 }
@@ -286,7 +313,10 @@ fn adjusting_an_inserted_placeholder_saves_explicit_geometry() {
         .unwrap();
     let (_, xml) = reopened_content(&session.save().unwrap());
     assert!(xml.contains(TITLE_PROPERTIES), "{xml}");
-    assert!(xml.contains(&TITLE_GEOMETRY.replace("25000", "40000")), "{xml}");
+    assert!(
+        xml.contains(&TITLE_GEOMETRY.replace("25000", "40000")),
+        "{xml}"
+    );
 }
 
 #[test]

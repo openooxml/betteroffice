@@ -9,8 +9,9 @@ use crate::comments::{
 };
 use crate::drawing::{
     BasicLayout, DIAGRAM_EXTENT_EMU, classify_layout, common_slide_data,
-    common_slide_data_with_vml, custom_prompt_shape_ids, layout_basic_diagram, normalize_text_columns,
-    parse_diagram_drawing, parse_paragraph_properties, parse_style_levels, parse_text_styles,
+    common_slide_data_with_vml, custom_prompt_shape_ids, layout_basic_diagram,
+    normalize_text_columns, parse_diagram_drawing, parse_paragraph_properties, parse_style_levels,
+    parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};

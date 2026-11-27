@@ -1018,7 +1018,11 @@ fn instantiated_rotated_flipped_placeholder_round_trips_on_save() {
     let reopened = reopen(&session);
     let saved_shape = &reopened.snapshot().unwrap().slides[1].shapes[0];
     let (rotation, flip_h, flip_v) = saved_shape.inherited.map_or(
-        (saved_shape.rotation_deg, saved_shape.flip_h, saved_shape.flip_v),
+        (
+            saved_shape.rotation_deg,
+            saved_shape.flip_h,
+            saved_shape.flip_v,
+        ),
         |transform| (transform.rotation_deg, transform.flip_h, transform.flip_v),
     );
     assert!(

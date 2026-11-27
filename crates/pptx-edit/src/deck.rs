@@ -1406,16 +1406,15 @@ fn layout_placeholder_specs(
         } else {
             geometry_source.geometry.clone()
         };
-        let adjust_values_json = if geometry == geometry_source.geometry
-            && !geometry_source.adjust_values.is_empty()
-        {
-            Some(
-                serde_json::to_string(&geometry_source.adjust_values)
-                    .map_err(|error| EditError::Json(error.to_string()))?,
-            )
-        } else {
-            None
-        };
+        let adjust_values_json =
+            if geometry == geometry_source.geometry && !geometry_source.adjust_values.is_empty() {
+                Some(
+                    serde_json::to_string(&geometry_source.adjust_values)
+                        .map_err(|error| EditError::Json(error.to_string()))?,
+                )
+            } else {
+                None
+            };
         let placeholder_json = serde_json::to_string(placeholder)
             .map_err(|error| EditError::Json(error.to_string()))?;
         specs.push(PlaceholderSpec {

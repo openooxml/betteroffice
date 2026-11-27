@@ -3930,9 +3930,9 @@ impl<'a> BodyCascade<'a> {
     fn custom_prompt(&self, paragraphs: &[TextParagraph]) -> Option<String> {
         if !self.has_custom_prompt
             || paragraphs.len() > 1
-            || paragraphs.iter().any(|paragraph| {
-                paragraph.runs.iter().any(|run| !run.text.is_empty())
-            })
+            || paragraphs
+                .iter()
+                .any(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
         {
             return None;
         }

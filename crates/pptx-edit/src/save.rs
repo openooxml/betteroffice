@@ -854,7 +854,8 @@ fn inherits_shape_properties(shape: &ShapeSnapshot, context: &SlideContext<'_>) 
     same_transform
         && match layout_geometry(context, placeholder) {
             Some(inherited) => {
-                shape.geometry == inherited.geometry && shape.adjust_values == inherited.adjust_values
+                shape.geometry == inherited.geometry
+                    && shape.adjust_values == inherited.adjust_values
             }
             None => shape.geometry == "rect" && shape.adjust_values.is_empty(),
         }
