@@ -7959,7 +7959,6 @@ pub(crate) fn replica_source(
 ) -> Result<(SourceMetadata, SourceIndex, Vec<String>), String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
-    let projection_envelope = Arc::new(envelope.clone());
     let LoweredDocx {
         mut context,
         referenced_fonts,
@@ -7968,7 +7967,7 @@ pub(crate) fn replica_source(
         read,
         ..
     } = lower_docx_with(envelope, Some(&parts), false)?;
-    let mut index = build_source_index(
+    let index = build_source_index(
         bytes,
         digest,
         &parts,
@@ -7977,7 +7976,6 @@ pub(crate) fn replica_source(
         &relationships,
         std::mem::take(&mut context.paragraphs),
     );
-    index.projection_envelope = Some(projection_envelope);
     Ok((
         SourceMetadata {
             styles: context.styles,
@@ -8204,12 +8202,11 @@ pub(crate) fn source_index(
     digest: Option<String>,
 ) -> Result<SourceIndex, String> {
     let digest = digest.unwrap_or_else(|| package_digest(&bytes));
-    let (envelope, parts, media) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
+    let (envelope, parts, _) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
-    let projection_envelope = Arc::new(envelope.clone());
     let lowered = lower_docx(envelope, None)?;
-    let mut index = build_source_index(
+    Ok(build_source_index(
         bytes,
         digest,
         &parts,
@@ -8217,10 +8214,7 @@ pub(crate) fn source_index(
         lowered.roots,
         &lowered.relationships,
         lowered.context.paragraphs,
-    );
-    index.projection_envelope = Some(projection_envelope);
-    index.projection_media = Some(media);
-    Ok(index)
+    ))
 }
 
 /// Seeds every story of the parsed package, resolving source provenance against `parts`, and
@@ -8236,9 +8230,8 @@ pub(crate) fn seed_parsed_docx(
 ) -> Result<SeededFonts, String> {
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
-    let projection_envelope = Arc::new(envelope.clone());
     let mut lowered = lower_docx(envelope, Some(&parts))?;
-    let mut index = build_source_index(
+    let index = build_source_index(
         bytes,
         digest,
         &parts,
@@ -8247,7 +8240,6 @@ pub(crate) fn seed_parsed_docx(
         &lowered.relationships,
         std::mem::take(&mut lowered.context.paragraphs),
     );
-    index.projection_envelope = Some(projection_envelope);
     seed_lowered(document, lowered, Some(index), media, true)
 }
 

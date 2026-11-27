@@ -417,6 +417,7 @@ impl SourceStory {
 #[derive(Default)]
 pub(crate) struct ProjectionCache {
     source: Option<Result<SourceCache, String>>,
+    source_is_ready: bool,
     generation: Option<String>,
     aliases: crate::header_footer::ProjectionAliases,
     styles: Option<(
@@ -437,30 +438,40 @@ struct CachedStory {
 
 impl ProjectionCache {
     fn resolve_source(source: &SourcePackage) -> Result<SourceCache, String> {
-        let (bytes, digest) = match source {
+        match source {
             SourcePackage::Ready(index) => {
-                if let Some(envelope) = &index.projection_envelope {
-                    return Ok(SourceCache::new(
-                        Arc::clone(envelope),
-                        true,
-                        index.projection_media.clone(),
-                    ));
-                }
-                (index.bytes(), Some(index.package_digest().to_owned()))
+                let (envelope, _, media) = crate::seed::parse_docx_package_with_media(
+                    index.bytes(),
+                    index.package_digest().to_owned(),
+                )?;
+                Ok(SourceCache::new(Arc::new(envelope), true, Some(media)))
             }
-            SourcePackage::Pending(bytes, digest) => (bytes.clone(), digest.clone()),
-        };
-        let digest = digest.unwrap_or_else(|| crate::seed::package_digest(&bytes));
-        crate::seed::parse_docx_package_with_digest(&bytes, digest)
-            .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false, None))
+            SourcePackage::Pending(bytes, digest) => {
+                let digest = digest
+                    .clone()
+                    .unwrap_or_else(|| crate::seed::package_digest(bytes));
+                crate::seed::parse_docx_package_with_digest(bytes, digest)
+                    .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false, None))
+            }
+        }
     }
 
-    fn source(&mut self, doc: &EditingDoc) -> Result<&mut SourceCache, ProjectionError> {
-        if self.source.is_none() {
-            let retained = doc.source.lock().unwrap();
-            let source = retained.as_ref().ok_or(ProjectionError::MissingSource)?;
+    fn prepare_source(&mut self, doc: &EditingDoc) -> Result<(), ProjectionError> {
+        let retained = doc.source.lock().unwrap();
+        let Some(source) = retained.as_ref() else {
+            self.reset_opening();
+            return Err(ProjectionError::MissingSource);
+        };
+        let is_ready = matches!(source, SourcePackage::Ready(_));
+        if self.source.is_none() || self.source_is_ready != is_ready {
+            self.reset_opening();
             self.source = Some(Self::resolve_source(source));
+            self.source_is_ready = is_ready;
         }
+        Ok(())
+    }
+
+    fn source(&mut self) -> Result<&mut SourceCache, ProjectionError> {
         self.source
             .as_mut()
             .ok_or(ProjectionError::MissingSource)?
@@ -469,15 +480,7 @@ impl ProjectionCache {
     }
 
     pub(crate) fn reset_opening(&mut self) {
-        let source = self.source.take();
-        *self = Self {
-            source,
-            ..Self::default()
-        };
-        if let Some(Ok(source)) = &mut self.source {
-            source.stories.clear();
-            source.materialized_document = None;
-        }
+        *self = Self::default();
     }
 
     pub(crate) fn invalidate_stories(&mut self) {
@@ -863,10 +866,11 @@ impl EditingDoc {
         }
         let mut cache = self.projection.lock().unwrap();
         let txn = self.doc.transact();
+        cache.prepare_source(self)?;
         cache.begin_generation(projection_generation(&txn));
         let aliases = cache.aliases.active_aliases(self, &txn);
         let (mut document, envelope) = {
-            let source = cache.source(self)?;
+            let source = cache.source()?;
             (source.document(self)?, Arc::clone(&source.envelope))
         };
         apply_host_metadata(&mut document, &input.host);
@@ -884,7 +888,7 @@ impl EditingDoc {
                     *entry = (id, source);
                 }
             }
-            let source = cache.source(self)?;
+            let source = cache.source()?;
             for (id, members) in &self.story_revisions.lock().unwrap().live_projection_roots {
                 if members.contains(id.as_str())
                     && !input
@@ -937,10 +941,11 @@ impl EditingDoc {
         validate_root(story_id)?;
         let mut cache = self.projection.lock().unwrap();
         let txn = self.doc.transact();
+        cache.prepare_source(self)?;
         cache.begin_generation(projection_generation(&txn));
         let group = cache.aliases.group(self, &txn, story_id);
         let id = group.as_ref().map_or(story_id, |group| group[0].as_str());
-        let source = cache.source(self)?;
+        let source = cache.source()?;
         let mut alternate = None;
         let mut override_blocks = None;
         let mut retained = false;
@@ -993,7 +998,7 @@ impl EditingDoc {
         if let Some(blocks) = override_blocks {
             return Ok(stories_aux_dispatch::project_root(id, blocks));
         }
-        let envelope = Arc::clone(&cache.source(self)?.envelope);
+        let envelope = Arc::clone(&cache.source()?.envelope);
         let package = &envelope.document.package;
         let has_sections = input
             .host
@@ -1044,7 +1049,7 @@ impl EditingDoc {
             return Ok(cached.projection.clone());
         }
 
-        let source = cache.source(self)?.story(self, id)?;
+        let source = cache.source()?.story(self, id)?;
         let projection = if id == "body" {
             cache.stories.remove(id);
             let source_metadata = self.source_metadata();
