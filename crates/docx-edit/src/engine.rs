@@ -3765,9 +3765,6 @@ fn resident_walk_plain(
         let region_retained_block = region.and_then(|(regions, widths, previous_widths)| {
             if !spacing_clean
                 || widths.get(block_index) != previous_widths.get(index)
-                || !previous_dependencies
-                    .get(index)
-                    .is_some_and(FontChainDependencies::matches_unchanged)
                 || matches!(previous[index].measure, BlockExtent::Unsupported)
                     != matches!(next_block, LayoutBlock::Unsupported)
             {
