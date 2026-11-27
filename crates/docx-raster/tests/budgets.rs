@@ -371,28 +371,43 @@ fn a_dashed_line_past_the_work_budget_is_refused_before_it_expands() {
     );
 }
 
-/// A shape stroke dashes an arbitrary geometry path, so its length has to be
-/// charged the same way a line's is.
+/// Clipping a shape stroke still leaves its visible dash expansion to charge.
 #[test]
 fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
     let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
     let resources = RenderResources::new(&fonts, &chains, &images);
-    let scene = list(
-        64.0,
-        64.0,
-        vec![json!({
-            "kind": "shape",
-            "x": 0,
-            "y": 0,
-            "w": 64,
-            "h": 64,
-            "geometryPath": [
-                {"type": "move", "x": 0, "y": 32},
-                {"type": "line", "x": 4_000_000, "y": 32}
-            ],
-            "strokePaint": {"color": "#000000", "width": 0.5, "dash": "dash"}
-        })],
+    let scene = |geometry_path: Vec<Value>| {
+        list(
+            8_192.0,
+            8.0,
+            vec![json!({
+                "kind": "shape",
+                "x": 0,
+                "y": 0,
+                "w": 8_192,
+                "h": 8,
+                "geometryPath": geometry_path,
+                "strokePaint": {"color": "#000000", "width": 0.5, "dash": "dash"}
+            })],
+        )
+    };
+    let mut geometry_path = vec![
+        json!({"type": "move", "x": -4_000_000, "y": 2}),
+        json!({"type": "line", "x": 8, "y": 2}),
+    ];
+    let accepted = render_png(&scene(geometry_path.clone()), 0, &resources);
+    assert_eq!(
+        accepted.err().as_deref(),
+        None,
+        "the mostly off-page dash fits after clipping"
     );
+
+    geometry_path.extend((1..=512).map(|step| {
+        let x = if step % 2 == 0 { 8 } else { 8_184 };
+        let y = 2.0 + f64::from(step) / 128.0;
+        json!({"type": "line", "x": x, "y": y})
+    }));
+    let scene = scene(geometry_path);
     let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
     assert_eq!(
         result.unwrap_err(),
@@ -402,6 +417,77 @@ fn a_dashed_shape_path_past_the_work_budget_is_refused_before_it_expands() {
         allocated < MIB,
         "a refused shape dash allocated {allocated} bytes expanding its path"
     );
+}
+
+#[test]
+fn a_long_custom_dash_is_charged_for_each_clipped_fragment() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let mut path = vec![json!({"type": "move", "x": 8, "y": 8})];
+    path.extend((1..=260).map(|step| {
+        let x = if step % 2 == 0 { 8 } else { 104 };
+        json!({"type": "line", "x": x, "y": 8})
+    }));
+    let scene = |geometry_path: &[Value]| {
+        list(
+            32.0,
+            16.0,
+            vec![json!({
+                "kind": "shape", "x": 0, "y": 0, "w": 32, "h": 16,
+                "geometryPath": geometry_path,
+                "strokePaint": {"color": "#000000", "width": 4, "customDash": vec![128; 65_536]}
+            })],
+        )
+    };
+    render_png(&scene(&path[..3]), 0, &resources).unwrap();
+
+    let scene = scene(&path);
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(allocated < 4 * MIB, "refusal allocated {allocated} bytes");
+}
+
+#[test]
+fn dense_spans_in_an_uneven_custom_dash_are_charged_from_each_clipped_phase() {
+    let (fonts, chains, images) = (FontStore::new(), FontChains::new(), ImageMap::new());
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let width = 1_024;
+    let period = 1_048_576;
+    let margin = (period - width) / 2;
+    let dense_dash_start = margin - 8;
+    let mut custom_dash = vec![1; 65_536];
+    custom_dash[1] = 2 * dense_dash_start - 1;
+    let trailing_gap = 2 * period - custom_dash.iter().sum::<i32>();
+    *custom_dash.last_mut().unwrap() += trailing_gap;
+
+    let mut path = vec![json!({"type": "move", "x": -margin, "y": 4})];
+    path.extend((1..=120).map(|step| {
+        let x = if step % 2 == 0 {
+            -margin
+        } else {
+            width + margin
+        };
+        json!({"type": "line", "x": x, "y": 4})
+    }));
+    let scene = list(
+        f64::from(width),
+        8.0,
+        vec![json!({
+            "kind": "shape", "x": 0, "y": 0, "w": width, "h": 8,
+            "geometryPath": path,
+            "strokePaint": {"color": "#000000", "width": 0.5, "customDash": custom_dash}
+        })],
+    );
+
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    assert_eq!(
+        result.unwrap_err(),
+        "page exceeds its 33554432 byte render work budget"
+    );
+    assert!(allocated < 4 * MIB, "refusal allocated {allocated} bytes");
 }
 
 /// An image border dashes the frame's rectangle, whose perimeter is four more

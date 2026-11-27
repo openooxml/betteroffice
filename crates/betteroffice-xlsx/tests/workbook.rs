@@ -8909,12 +8909,43 @@ fn refuses_structural_ops_that_would_strand_pivot_references() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
         .unwrap();
     Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
+#[test]
+fn header_edit_on_a_table_with_a_mismatched_header_is_refused_unchanged() {
+    let mut workbook = Workbook::open(&preservation_fixture()).unwrap();
+    let before = package_map(&workbook.save().unwrap());
+    let model_before = workbook.model().clone();
+    let version = workbook.version();
+
+    let error = workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "edited",
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    let Error::Operation(xlsx_ops::OpError::TableHeaderUnsupported(reason)) = error else {
+        panic!("expected a table header refusal, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "unsupported edit: table Table1 column 2 (B1) needs non-empty, unique text matching its caption"
+    );
+    assert_eq!(workbook.model(), &model_before);
+    assert_eq!(workbook.version(), version);
+
+    let after = package_map(&workbook.save().unwrap());
+    for path in ["xl/worksheets/sheet1.xml", "xl/tables/table1.xml"] {
+        assert_eq!(after[path], before[path], "{path}");
+    }
 }
 
 /// `Data` feeds a pivot cache over `A1:B4`, `Report` hosts the pivot table at
@@ -9187,7 +9218,7 @@ fn refuses_structural_ops_that_would_strand_unclaimed_chart_parts() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
@@ -9945,7 +9976,7 @@ fn refuses_chart_state_with_no_source_package_to_preserve_it() {
     workbook
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "edited",
             CalculationOptions::default(),
         )
@@ -10740,6 +10771,161 @@ fn moving_refuses_an_absolute_anchor_and_an_unknown_frame() {
     );
 }
 
+fn first_row_chart_anchor() -> ChartAnchor {
+    ChartAnchor::TwoCell {
+        from: AnchorCell {
+            row_off: 95_250,
+            ..Default::default()
+        },
+        to: AnchorCell {
+            col: 4,
+            row: 1,
+            ..Default::default()
+        },
+        edit_as: AnchorEditAs::OneCell,
+    }
+}
+
+fn chart_repin_op(workbook: &Workbook, to: ChartAnchor) -> Op {
+    let sheet = SheetId(0);
+    let chart = &workbook.sheet(sheet).unwrap().charts[0];
+    Op::SetChartAnchor {
+        sheet,
+        frame: chart.frame_id(),
+        part: chart.part.clone(),
+        from: chart.anchor,
+        to,
+    }
+}
+
+fn assert_inverted_chart_repin_refused(
+    workbook: &mut Workbook,
+    ops: Vec<Op>,
+    committed_anchor: ChartAnchor,
+) {
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+    assert!(!sheet.row_hidden(0));
+    assert_eq!(sheet.charts[0].anchor, committed_anchor);
+    let version = workbook.version();
+    let error = workbook
+        .apply_ops(ops, CalculationOptions::default())
+        .unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidOperation(message) if message == "anchor corners are inverted or coincident"),
+        "{error:?}"
+    );
+    let sheet = workbook.sheet(SheetId(0)).unwrap();
+    assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+    assert_eq!(sheet.charts[0].anchor, committed_anchor);
+    assert_eq!(workbook.version(), version);
+}
+
+#[test]
+fn chart_repin_before_row_shrink_applies_in_both_modes() {
+    let bytes = charted_fixture();
+    let anchor = first_row_chart_anchor();
+    for mut workbook in [
+        Workbook::open(&bytes).unwrap(),
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let sheet_id = SheetId(0);
+        let sheet = workbook.sheet(sheet_id).unwrap();
+        assert_eq!(sheet.format.default_row_height_pt, Some(15.0));
+        assert_eq!(sheet.row_heights.get(&0), None);
+        assert_ne!(sheet.charts[0].anchor, anchor);
+        let version = workbook.version();
+        let (nonce, counter) = version.as_str().rsplit_once('-').unwrap();
+        let next_counter = counter.parse::<u64>().unwrap() + 1;
+        let repin = chart_repin_op(&workbook, anchor);
+        let result = workbook
+            .apply_ops(
+                vec![
+                    repin,
+                    Op::SetRowHeight {
+                        sheet: sheet_id,
+                        row: 0,
+                        height: Some(5.0),
+                    },
+                ],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert!(result.applied);
+        assert_eq!(
+            workbook.version().as_str(),
+            format!("{nonce}-{next_counter}")
+        );
+        let sheet = workbook.sheet(sheet_id).unwrap();
+        assert_eq!(sheet.row_heights.get(&0), Some(&5.0));
+        assert_eq!(sheet.charts[0].anchor, anchor);
+        let geometry = GridGeometry::new(sheet, &workbook.model().styles);
+        assert_eq!(
+            resolve_chart_anchor(anchor, &geometry, 0, 0).unwrap_err(),
+            xlsx_render::AnchorError::InvertedCorners
+        );
+    }
+}
+
+#[test]
+fn inverted_chart_repin_before_row_growth_is_refused_in_both_modes() {
+    let mut parts = ooxml_opc::unzip_parts(&charted_fixture()).unwrap();
+    let worksheet = "xl/worksheets/sheet1.xml";
+    let xml = test_part_text(&parts, worksheet)
+        .replace(r#"<row r="1">"#, r#"<row r="1" ht="5" customHeight="1">"#);
+    set_test_part(&mut parts, worksheet, xml.into_bytes());
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let standalone = Workbook::open(&bytes).unwrap();
+    let committed_anchor = standalone.sheet(SheetId(0)).unwrap().charts[0].anchor;
+    for mut workbook in [
+        standalone,
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let repin = chart_repin_op(&workbook, first_row_chart_anchor());
+        assert_inverted_chart_repin_refused(
+            &mut workbook,
+            vec![
+                repin,
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(15.0),
+                },
+            ],
+            committed_anchor,
+        );
+    }
+}
+
+#[test]
+fn redundant_inverted_chart_repin_is_refused_in_both_modes() {
+    let bytes = charted_fixture();
+    let anchor = first_row_chart_anchor();
+    let options = CalculationOptions::default();
+    for mut workbook in [
+        Workbook::open(&bytes).unwrap(),
+        Workbook::open_collaborative(&bytes, 830).unwrap(),
+    ] {
+        let repin = chart_repin_op(&workbook, anchor);
+        assert!(workbook.apply_ops(vec![repin], options).unwrap().applied);
+        assert!(
+            workbook
+                .apply_ops(
+                    vec![Op::SetRowHeight {
+                        sheet: SheetId(0),
+                        row: 0,
+                        height: Some(5.0),
+                    }],
+                    options,
+                )
+                .unwrap()
+                .applied
+        );
+        let redundant = chart_repin_op(&workbook, anchor);
+        assert_inverted_chart_repin_refused(&mut workbook, vec![redundant], anchor);
+    }
+}
+
 /// `SetChartAnchor` accepts exactly what a save can write back, and each
 /// refusal says which part of the anchor the writer could not carry.
 #[test]
@@ -10909,7 +11095,7 @@ fn collaborative_sessions_move_a_chart_and_converge() {
     right
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "after",
             CalculationOptions::default(),
         )
@@ -10920,7 +11106,7 @@ fn collaborative_sessions_move_a_chart_and_converge() {
     left.apply_update_v1(&update, CalculationOptions::default())
         .unwrap();
     assert_eq!(left.model().sheets[0].charts[0].anchor, moved);
-    assert_eq!(left.cell(SheetId(0), cell("A1")).unwrap().input, "after");
+    assert_eq!(left.cell(SheetId(0), cell("D1")).unwrap().input, "after");
 
     // the mover can take the drag back, and the peer follows it home.
     assert!(left.can_undo());
@@ -12204,7 +12390,7 @@ fn a_locally_accepted_repin_is_one_a_peer_can_take() {
     let batch = vec![
         Op::SetCell {
             sheet: SheetId(0),
-            at: cell("A1"),
+            at: cell("D1"),
             cell: CellState {
                 value: CellValue::Text {
                     value: "important".to_owned(),
@@ -12274,7 +12460,7 @@ fn an_adopted_snapshot_answers_to_the_same_anchor_check_as_an_update() {
     touched
         .edit_cell(
             SheetId(0),
-            cell("A1"),
+            cell("D1"),
             "typed",
             CalculationOptions::default(),
         )
@@ -13382,8 +13568,6 @@ fn assert_no_shared_hidden_sizes(workbook: &Workbook) {
     let json = shared_json(workbook).to_string();
     assert!(!json.contains("hiddenColWidths"), "{json}");
     assert!(!json.contains("hiddenRowHeights"), "{json}");
-    assert!(workbook.model().sheets[0].hidden_col_widths.is_empty());
-    assert!(workbook.model().sheets[0].hidden_row_heights.is_empty());
 }
 
 #[test]
@@ -13416,7 +13600,7 @@ fn collaborative_hidden_sizes_never_write_shared_keys() {
     let mut expected = Workbook::from_model_collaborative(stripped, 887).unwrap();
     let mut workbook = Workbook::open_collaborative(&source, 887).unwrap();
     assert_no_shared_hidden_sizes(&workbook);
-    for ops in [
+    for (index, ops) in [
         vec![
             Op::SetColWidth {
                 sheet: SheetId(0),
@@ -13453,9 +13637,28 @@ fn collaborative_hidden_sizes_never_write_shared_keys() {
                 hidden: false,
             },
         ],
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected_ops = if index == 2 {
+            vec![
+                Op::SetColWidth {
+                    sheet: SheetId(0),
+                    col: 0,
+                    width: Some(25.0),
+                },
+                Op::SetRowHeight {
+                    sheet: SheetId(0),
+                    row: 0,
+                    height: Some(35.0),
+                },
+            ]
+        } else {
+            ops.clone()
+        };
         expected
-            .apply_ops(ops.clone(), CalculationOptions::default())
+            .apply_ops(expected_ops, CalculationOptions::default())
             .unwrap();
         workbook
             .apply_ops(ops, CalculationOptions::default())

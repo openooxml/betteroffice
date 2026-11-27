@@ -57,6 +57,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[path = "hit_connector.rs"]
+mod connector;
+
 #[cfg(test)]
 thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -946,40 +949,92 @@ fn in_note_area(area: &NoteRegion, x: f64, y: f64) -> bool {
 /// Mirrors `displayListImages.ts`: reverse paint order, and no document
 /// position means nothing selects it (a picture watermark), so text painted
 /// over such an image stays readable through it.
-fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
-    prims
-        .iter()
+fn over_selectable_image<'a>(
+    prims: &[Primitive],
+    candidates: impl DoubleEndedIterator<Item = (usize, &'a Primitive)>,
+    x: f64,
+    y: f64,
+) -> bool {
+    candidates
         .rev()
-        .find(|primitive| match primitive {
+        .find_map(|(index, primitive)| match primitive {
             Primitive::Image(img) => {
                 let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
                 let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-                x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+                (x >= ix && x <= ix + iw && y >= iy && y <= iy + ih)
+                    .then_some(img.attrs.doc_start.is_some())
             }
-            Primitive::Shape(shape) => {
-                if shape.attrs.inline_shape_atom != Some(true) {
-                    return false;
-                }
-                if shape.attrs.doc_start.is_none() {
-                    return false;
-                }
-                let (sx, sy) = (
-                    shape.x.as_f64().unwrap_or(0.0),
-                    shape.y.as_f64().unwrap_or(0.0),
-                );
-                let (sw, sh) = (
-                    shape.w.as_f64().unwrap_or(0.0),
-                    shape.h.as_f64().unwrap_or(0.0),
-                );
-                x >= sx && x <= sx + sw && y >= sy && y <= sy + sh
+            Primitive::Shape(shape)
+                if shape_can_hit(shape) && shape_contains_point(shape, x, y) =>
+            {
+                shape_doc_start(&prims[..index], shape).map(|_| true)
             }
-            _ => false,
+            _ => None,
         })
-        .is_some_and(|primitive| match primitive {
-            Primitive::Image(img) => img.attrs.doc_start.is_some(),
-            Primitive::Shape(shape) => shape.attrs.doc_start.is_some(),
-            _ => false,
+        .unwrap_or(false)
+}
+
+fn is_connector(shape: &ShapePrimitive) -> bool {
+    shape
+        .attrs
+        .image_shape_type
+        .as_deref()
+        .is_some_and(ooxml_drawingml::is_corrected_connector_preset)
+}
+
+fn shape_doc_start(preceding: &[Primitive], shape: &ShapePrimitive) -> Option<i64> {
+    shape.attrs.doc_start.or_else(|| {
+        let mut child = shape.attrs.block_key.as_deref()?;
+        if !is_connector(shape) || !child.contains(":child:") {
+            return None;
+        }
+        preceding.iter().rev().find_map(|primitive| {
+            let Primitive::Shape(owner) = primitive else {
+                return None;
+            };
+            let key = owner.attrs.block_key.as_deref()?;
+            if !child.strip_prefix(key)?.starts_with(":child:") {
+                return None;
+            }
+            child = key;
+            owner.attrs.doc_start
         })
+    })
+}
+
+fn shape_can_hit(shape: &ShapePrimitive) -> bool {
+    is_connector(shape)
+        || (shape.attrs.inline_shape_atom == Some(true)
+            && (!shape
+                .attrs
+                .drawing_scene
+                .as_ref()
+                .is_some_and(|scene| scene.get("root").is_some_and(connector_group))
+                || shape_fill_paints(shape)))
+}
+
+fn connector_group(node: &Value) -> bool {
+    node.get("children")
+        .and_then(Value::as_array)
+        .is_some_and(|children| {
+            !children.is_empty()
+                && children.iter().all(|child| {
+                    child
+                        .pointer("/shape/shapeType")
+                        .and_then(Value::as_str)
+                        .is_some_and(ooxml_drawingml::is_corrected_connector_preset)
+                        || connector_group(child)
+                })
+        })
+}
+
+fn shape_contains_point(shape: &ShapePrimitive, x: f64, y: f64) -> bool {
+    if is_connector(shape) {
+        return connector::contains(shape, x, y, 3.0);
+    }
+    let px = |number: &Number| number.as_f64().unwrap_or(0.0);
+    let (sx, sy, w, h) = (px(&shape.x), px(&shape.y), px(&shape.w), px(&shape.h));
+    x >= sx && x <= sx + w && y >= sy && y <= sy + h
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
@@ -987,10 +1042,23 @@ fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
 /// point is in the region's typeable area (false for a band, which has no
 /// content box); it widens the target only, never the position.
 fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointResolution {
+    resolve_point_in(prims, prims.iter().enumerate(), typeable, x, y)
+}
+
+fn resolve_point_in<'a>(
+    prims: &[Primitive],
+    candidates: impl DoubleEndedIterator<Item = (usize, &'a Primitive)> + Clone,
+    typeable: bool,
+    x: f64,
+    y: f64,
+) -> PointResolution {
     // outranks text for the CURSOR only: the pointer path selects an image
     // before it asks for a position, so position resolution keeps its own order
-    let image_target = over_selectable_image(prims, x, y);
-    let hits = text_hits(prims);
+    let image_target = over_selectable_image(prims, candidates.clone(), x, y);
+    let hits: Vec<_> = candidates
+        .clone()
+        .filter_map(|(_, p)| text_hit(p))
+        .collect();
     // What the point earns once no run claims it. An area with no positionable
     // text is not typeable whatever it encloses: such a click is answered with
     // the document's end.
@@ -1023,7 +1091,7 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     // 2. direct hit on an image with a doc position (caret parks before it).
     // Only the topmost image decides the target, so an unselectable one over
     // this leaves the area's answer standing.
-    for p in prims {
+    for (index, p) in candidates {
         match p {
             Primitive::Image(img) => {
                 let Some(ds) = img.attrs.doc_start else {
@@ -1040,21 +1108,10 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
                 }
             }
             Primitive::Shape(shape) => {
-                if shape.attrs.inline_shape_atom != Some(true) {
-                    continue;
-                }
-                let Some(ds) = shape.attrs.doc_start else {
-                    continue;
-                };
-                let (sx, sy) = (
-                    shape.x.as_f64().unwrap_or(0.0),
-                    shape.y.as_f64().unwrap_or(0.0),
-                );
-                let (sw, sh) = (
-                    shape.w.as_f64().unwrap_or(0.0),
-                    shape.h.as_f64().unwrap_or(0.0),
-                );
-                if x >= sx && x <= sx + sw && y >= sy && y <= sy + sh {
+                if shape_can_hit(shape)
+                    && shape_contains_point(shape, x, y)
+                    && let Some(ds) = shape_doc_start(&prims[..index], shape)
+                {
                     return PointResolution {
                         pos: Some(ds),
                         target,
@@ -1265,7 +1322,13 @@ fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
 
 /// Whether `primitive` carries a document position and paints its hit box at
 /// the point, inside its clip as the canvas and raster painters draw it.
-fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
+fn painted_body_hit_at(primitive: &Primitive, preceding: &[Primitive], x: f64, y: f64) -> bool {
+    if let Primitive::Shape(shape) = primitive
+        && is_connector(shape)
+    {
+        return connector::contains(shape, x, y, 0.0)
+            && shape_doc_start(preceding, shape).is_some();
+    }
     let Some(attrs) = doc_attrs(primitive) else {
         return false;
     };
@@ -1557,13 +1620,15 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
             && in_band(band)
         {
             // Only body content painted at the point takes it, and its own position answers.
-            let painted: Vec<Primitive> = page
+            let painted: Vec<_> = page
                 .primitives
                 .iter()
-                .filter(|primitive| painted_body_hit_at(primitive, x, y))
-                .cloned()
+                .enumerate()
+                .filter(|(index, primitive)| {
+                    painted_body_hit_at(primitive, &page.primitives[..*index], x, y)
+                })
                 .collect();
-            let body = resolve_point(&painted, false, x, y);
+            let body = resolve_point_in(&page.primitives, painted.into_iter(), false, x, y);
             if body.direct {
                 return Some(RegionHit {
                     region: HitRegion::Body,
@@ -4049,6 +4114,100 @@ mod tests {
             }
             assert_eq!(hit_test(&dl, 0, 109.0, 195.0), Some(10), "{text:?}");
             assert_eq!(hit_test(&dl, 0, 111.0, 195.0), Some(end), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn connector_band_ownership_follows_dashes_and_arrowhead_wings() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let y = top + 35.0;
+            let connector = serde_json::json!({
+                "kind": "shape", "shapeType": "bentConnector2",
+                "x": 100, "y": y, "w": 80, "h": 30, "docStart": 10, "docEnd": 11,
+                "geometryPath": [
+                    {"type": "move", "x": 100, "y": y},
+                    {"type": "line", "x": 180, "y": y}
+                ],
+                "stroke": {"color": "#000000", "width": 8, "dash": "dash"},
+                "strokePaint": {"tailEnd": {"type": "triangle"}}
+            });
+            let dl = band_page(kind, top, vec![connector]);
+            let hit = |x, y| hit_test_regions(&dl, 0, x, y).unwrap();
+            assert_eq!(hit(132.0, y).region, region);
+            assert_eq!(hit_test(&dl, 0, 132.0, y), None);
+            for (x, y) in [(110.0, y), (151.0, y + 13.0)] {
+                let painted = hit(x, y);
+                assert_eq!(
+                    (painted.region, painted.pos, painted.target),
+                    (HitRegion::Body, Some(10), HoverTarget::Image)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_tolerance_does_not_claim_a_band_click_for_the_body() {
+        let connector = serde_json::json!({
+            "kind": "shape", "shapeType": "bentConnector2",
+            "x": 180, "y": 35, "w": 80, "h": 30, "docStart": 10,
+            "geometryPath": [
+                {"type": "move", "x": 180, "y": 35}, {"type": "line", "x": 260, "y": 35}
+            ],
+            "stroke": {"color": "#000000", "width": 1}
+        });
+        let dl = band_page("header", 0.0, vec![connector]);
+        assert_eq!(
+            hit_test_regions(&dl, 0, 200.0, 37.0).unwrap().region,
+            HitRegion::Header
+        );
+        assert_eq!(hit_test(&dl, 0, 200.0, 37.0), Some(10));
+    }
+
+    #[test]
+    fn zero_alpha_connector_arrowhead_leaves_band_clicks_to_the_band() {
+        for (kind, top, region) in [
+            ("header", 0.0, HitRegion::Header),
+            ("footer", 420.0, HitRegion::Footer),
+        ] {
+            let y = top + 35.0;
+            let connector = serde_json::json!({
+                "kind": "shape", "shapeType": "bentConnector2",
+                "x": 100, "y": y, "w": 80, "h": 30, "docStart": 10,
+                "geometryPath": [
+                    {"type": "move", "x": 100, "y": y}, {"type": "line", "x": 180, "y": y}
+                ],
+                "stroke": {"color": "#000000", "width": 8},
+                "strokePaint": {"color": "#00000000", "tailEnd": {"type": "triangle"}}
+            });
+            let dl = band_page(kind, top, vec![connector]);
+            assert_eq!(
+                hit_test_regions(&dl, 0, 151.0, y + 13.0).unwrap().region,
+                region
+            );
+        }
+    }
+
+    #[test]
+    fn flat_cap_connectors_keep_pointer_tolerance_beyond_both_endpoints() {
+        let connector = serde_json::json!({
+            "kind": "shape", "shapeType": "bentConnector2",
+            "x": 100, "y": 35, "w": 80, "h": 30, "docStart": 10,
+            "geometryPath": [
+                {"type": "move", "x": 100, "y": 35}, {"type": "line", "x": 180, "y": 35}
+            ],
+            "stroke": {"color": "#000000", "width": 1},
+            "strokePaint": {"cap": "flat"}
+        });
+        let dl = band_page("header", 0.0, vec![connector]);
+        for x in [98.0, 182.0] {
+            assert_eq!(hit_test(&dl, 0, x, 35.0), Some(10));
+            assert_eq!(
+                hit_test_regions(&dl, 0, x, 35.0).unwrap().region,
+                HitRegion::Header
+            );
         }
     }
 }

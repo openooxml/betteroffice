@@ -1,6 +1,6 @@
 //! S9 full package orchestration and the versioned read-facade wire model.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -24,10 +24,21 @@ use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{Relationship, RelationshipMap, parse_relationships};
 use crate::s8::{find_part, parse_comment_part, parse_note_part, partition_notes};
 use crate::settings::{DocumentSettings, is_valid_utf8_xml_text, parse_settings};
+use crate::shape::Shape;
 use crate::smart_art::create_smart_art_context;
 use crate::styles::{StyleDefinitions, StyleMap, parse_style_definitions};
 use crate::theme::{Theme, apply_theme_font_lang, parse_theme};
 use crate::xml::{ParseBudget, ParseError, ParseLimits, parse_xml};
+
+#[doc(hidden)]
+pub type PreviewConnectorGuides = Vec<(Vec<usize>, String, HashMap<String, f64>)>;
+
+#[doc(hidden)]
+pub type PreviewConnectorSources =
+    BTreeMap<(String, Option<String>), Vec<(Shape, PreviewConnectorGuides)>>;
+
+#[doc(hidden)]
+pub type PreviewWithConnectors = (S9WireEnvelope, bool, PreviewConnectorSources);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -311,7 +322,9 @@ pub fn parse_docx_s9_preview_from_parts_with_budget(
         None,
         true,
         paragraph_budget,
+        false,
     )
+    .map(|preview| preview.map(|(envelope, stopped, _)| (envelope, stopped)))
 }
 
 #[doc(hidden)]
@@ -347,7 +360,9 @@ pub fn parse_docx_s9_preview_from_parts_full_dom_with_budget(
         None,
         false,
         paragraph_budget,
+        false,
     )
+    .map(|preview| preview.map(|(envelope, stopped, _)| (envelope, stopped)))
 }
 
 /// [`parse_docx_s9_preview_from_parts`] with images naming their parts by
@@ -373,6 +388,47 @@ pub fn parse_docx_s9_preview_with_media_table_with_budget(
     limits: &ParseLimits,
     paragraph_budget: Option<usize>,
 ) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    parse_media_preview(
+        parts,
+        table,
+        blocks,
+        options,
+        limits,
+        paragraph_budget,
+        false,
+    )
+    .map(|preview| preview.map(|(envelope, stopped, _)| (envelope, stopped)))
+}
+
+#[doc(hidden)]
+pub fn parse_docx_preview_with_connectors(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+) -> Result<Option<PreviewWithConnectors>, ParseError> {
+    parse_media_preview(
+        parts,
+        table,
+        blocks,
+        options,
+        limits,
+        paragraph_budget,
+        true,
+    )
+}
+
+fn parse_media_preview(
+    parts: &[(String, Vec<u8>)],
+    table: &MediaTable,
+    blocks: usize,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+    paragraph_budget: Option<usize>,
+    capture_connectors: bool,
+) -> Result<Option<PreviewWithConnectors>, ParseError> {
     if options.determinism_seed.is_none() || options.include_canonical {
         return Err(ParseError::Canonical(
             "parsing parts needs a determinism seed and no canonical envelope".to_owned(),
@@ -387,6 +443,7 @@ pub fn parse_docx_s9_preview_with_media_table_with_budget(
         Some(table),
         true,
         paragraph_budget,
+        capture_connectors,
     )
 }
 
@@ -409,8 +466,9 @@ fn parse_s9_package(
         media_table,
         true,
         None,
+        false,
     )
-    .map(|preview| preview.map(|(envelope, _)| envelope))
+    .map(|preview| preview.map(|(envelope, _, _)| envelope))
 }
 
 fn validate_main_root(name: &str, namespace: Option<&str>, path: &str) -> Result<(), ParseError> {
@@ -431,6 +489,7 @@ fn validate_main_root(name: &str, namespace: Option<&str>, path: &str) -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_s9_package_impl(
     parts: &[(String, Vec<u8>)],
     data: &[u8],
@@ -440,13 +499,15 @@ fn parse_s9_package_impl(
     media_table: Option<&MediaTable>,
     prefix_preview: bool,
     paragraph_budget: Option<usize>,
-) -> Result<Option<(S9WireEnvelope, bool)>, ParseError> {
+    capture_connectors: bool,
+) -> Result<Option<PreviewWithConnectors>, ParseError> {
     if media_table.is_some() && options.include_canonical {
         return Err(ParseError::Canonical(
             "a canonical envelope needs the media inflated".to_owned(),
         ));
     }
     let mut budget = ParseBudget::new(limits);
+    budget.preview_connectors = capture_connectors.then(Default::default);
     if let Some(table) = media_table {
         budget.read_media_from(table);
     }
@@ -570,6 +631,7 @@ fn parse_s9_package_impl(
                     if body_blocks.is_some() && crate::document::refuses_a_body_cut(root) {
                         return Ok(None);
                     }
+                    budget.connector_story(path, None);
                     let mut parser = StoryParser {
                         relationships: Some(&relationships),
                         theme: Some(&theme),
@@ -615,6 +677,7 @@ fn parse_s9_package_impl(
                                 media_table,
                                 false,
                                 paragraph_budget,
+                                capture_connectors,
                             );
                         }
                         (body, budget_stopped)
@@ -641,6 +704,7 @@ fn parse_s9_package_impl(
             )));
         }
     };
+    budget.connector_story = None;
 
     let (mut headers, mut footers) = if options.parse_headers_footers {
         let (headers, footers) = parse_related_header_footers(
@@ -842,6 +906,11 @@ fn parse_s9_package_impl(
             canonical_sha256,
         },
         budget_stopped,
+        budget
+            .preview_connectors
+            .map_or_else(BTreeMap::new, |sources| {
+                std::mem::take(&mut *sources.lock().unwrap())
+            }),
     )))
 }
 
@@ -1096,6 +1165,71 @@ fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connector_canonical_output_keeps_the_released_path() {
+        use crate::drawingml::GeometryPathCommand::{Line, Move};
+        use crate::inline::{InlineNode, RunContent};
+        use crate::paragraph::ParagraphContent;
+
+        let bytes = ooxml_opc::rezip_parts(&[(
+            "word/document.xml".to_owned(),
+            br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+              <w:body><w:p><w:r><w:drawing><wp:inline>
+                <wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Connector"/>
+                <a:graphic><a:graphicData><wps:wsp><wps:spPr>
+                  <a:xfrm><a:ext cx="914400" cy="457200"/></a:xfrm>
+                  <a:prstGeom prst="bentConnector4"><a:avLst>
+                    <a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/>
+                  </a:avLst></a:prstGeom>
+                </wps:spPr></wps:wsp></a:graphicData></a:graphic>
+              </wp:inline></w:drawing></w:r></w:p></w:body>
+            </w:document>"#
+                .to_vec(),
+        )])
+        .unwrap();
+        let parsed = parse_docx_s9_wire(
+            &bytes,
+            S9ParseOptions {
+                include_canonical: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut released = parsed.document;
+        let BlockContent::Paragraph(paragraph) = &mut released.package.document.content[0] else {
+            panic!("paragraph");
+        };
+        let paragraph = Arc::make_mut(paragraph);
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] else {
+            panic!("run");
+        };
+        let RunContent::Shape { shape, .. } = &mut run.content[0] else {
+            panic!("shape");
+        };
+        let previous_path = shape.geometry_path.replace(vec![
+            Move { x: 0.0, y: 0.0 },
+            Line { x: 1.0, y: 0.0 },
+            Line { x: 0.25, y: 0.5 },
+            Line { x: 0.75, y: 0.5 },
+            Line { x: 1.0, y: 1.0 },
+        ]);
+        let released_path = shape.geometry_path.clone();
+        let canonical = canonical_document(&released, &bytes).unwrap();
+        let expected_bytes = to_canonical_bytes(&canonical).unwrap();
+        let actual_bytes = base64::engine::general_purpose::STANDARD
+            .decode(parsed.canonical_base64.unwrap())
+            .unwrap();
+        assert!(actual_bytes == expected_bytes, "released canonical bytes");
+        assert_eq!(
+            parsed.canonical_sha256.unwrap(),
+            canonical_sha256(&canonical).unwrap()
+        );
+        assert_eq!(previous_path, released_path);
+    }
 
     #[test]
     fn full_wire_applies_options_and_package_wide_paragraph_ids() {

@@ -8,6 +8,9 @@ use crate::sheet_json::{
     check_chart_state_size, check_hyperlink_state_size, decode_charts, decode_hyperlinks,
     encode_charts, encode_hyperlinks,
 };
+use crate::workbook::hidden_sizes::{
+    AuthoredDimensions, HiddenSizes, LocalDimensions, dimension_changes,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use xlsx_model::{
@@ -886,6 +889,7 @@ pub(crate) struct StagedUpdate {
 
 pub(crate) struct StagedLocalUpdate {
     pub(crate) model: WorkbookModel,
+    pub(crate) hidden_sizes: LocalDimensions,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -898,6 +902,12 @@ struct CarriedState {
     base: Arc<WorkbookBase>,
     next_sheet_id: u64,
     sheet_order: Option<SheetOrderEntry>,
+}
+
+struct ReplicaOverlay<'a> {
+    model: &'a WorkbookModel,
+    keys: &'a [String],
+    hidden_sizes: &'a mut LocalDimensions,
 }
 
 /// Which history an adopted local update enters.
@@ -1448,6 +1458,45 @@ impl WorkbookAuthority {
         self.base.auto_filters.get(index)?.as_ref()
     }
 
+    pub(crate) fn keeps_table_headers(&self, model: &WorkbookModel) -> Result<bool, String> {
+        if self.base.tables.iter().all(|table| table.header_rows == 0) {
+            return Ok(true);
+        }
+        let txn = self.doc.transact();
+        let order = txn.get_array(SHEET_ORDER).ok_or("missing sheet order")?;
+        let keys = sheet_keys(&order, &txn)?;
+        let sheets = txn.get_map(SHEETS).ok_or("missing sheet map")?;
+        for table in self
+            .base
+            .tables
+            .iter()
+            .filter(|table| table.header_rows != 0)
+        {
+            let sheet = keys
+                .get(table.sheet.0 as usize)
+                .and_then(|key| sheets.get(&txn, key))
+                .and_then(|sheet| sheet.cast::<MapRef>().ok())
+                .ok_or("missing table worksheet")?;
+            let contents = nested_map(&sheet, &txn, CONTENTS)?;
+            let projected = model.sheet(table.sheet).ok_or("missing table worksheet")?;
+            for col in table.range.start.col..=table.range.end.col {
+                let at = CellRef::new(table.range.start.row, col);
+                let before = match contents.get(&txn, &cell_key(at)) {
+                    Some(Out::Any(value)) => Some(content_from_any(&value)?),
+                    Some(_) => return Err("table header content is not an atomic value".into()),
+                    None => None,
+                };
+                let after = projected
+                    .cell(at)
+                    .filter(|cell| cell.formula.is_some() || cell.value != CellValue::Empty);
+                if !authored_content_equal(before.as_ref(), after) {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// What a sheet's rules read as with no overlay.
     fn baseline_rules<T: ReadTxn>(
         &self,
@@ -1635,7 +1684,7 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         encode_update: bool,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
-        self.apply_ops_with_merge_edits(ops, origin, styles, encode_update, false)
+        self.apply_ops_with_merge_edits(ops, origin, styles, encode_update, false, None)
     }
 
     fn apply_ops_with_merge_edits(
@@ -1645,6 +1694,7 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         encode_update: bool,
         collaborative: bool,
+        replica: Option<ReplicaOverlay<'_>>,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector =
             encode_update.then(|| (self.doc.transact().state_vector(), self.snapshot_revision()));
@@ -1679,7 +1729,26 @@ impl WorkbookAuthority {
             FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
             return Ok(self.encode_ops_update(state_vector));
         }
-        let mut model = self.materialize()?;
+        let (mut model, structure) = self
+            .materialize_internal(false)
+            .map_err(AuthorityError::InvalidState)?;
+        let dimensions = replica.as_ref().map(|_| dimension_changes(ops));
+        if let (Some(replica), Some(dimensions)) = (&replica, &dimensions) {
+            for &index in dimensions.keys() {
+                let Some(key) = structure.sheet_keys.get(index) else {
+                    continue;
+                };
+                let prior = if replica.keys.get(index) == Some(key) {
+                    Some(index)
+                } else {
+                    replica.keys.iter().position(|prior| prior == key)
+                };
+                if let Some(prior) = prior.and_then(|index| replica.model.sheets.get(index)) {
+                    model.sheets[index].hidden_row_heights = prior.hidden_row_heights.clone();
+                    model.sheets[index].hidden_col_widths = prior.hidden_col_widths.clone();
+                }
+            }
+        }
         let plain_cell_baseline = if let [Op::SetCell { sheet, at, .. }] = ops {
             let was_plain = model
                 .sheet(*sheet)
@@ -1712,19 +1781,26 @@ impl WorkbookAuthority {
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
-        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model);
+        let mut rewritten = HashSet::new();
+        let mut batch = xlsx_ops::InPlaceBatch::without_inverse(&mut model)
+            .with_cell_restoration(matches!(origin, SyncOrigin::Undo | SyncOrigin::Redo));
         for op in ops {
-            batch.apply(op).map_err(|error| {
-                AuthorityError::InvalidState(format!(
-                    "cannot apply local operation to authored state: {error}"
-                ))
-            })?;
+            batch
+                .apply_with_inverse(op, |inverse| {
+                    for restored in inverse {
+                        if let Op::RestoreTableColumn { formulas, .. } = restored {
+                            rewritten.extend(formulas.iter().map(|(sheet, at, _)| (*sheet, *at)));
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    AuthorityError::InvalidState(format!(
+                        "cannot apply local operation to authored state: {error}"
+                    ))
+                })?;
         }
         if !collaborative && self.base.defined_names != model.defined_names {
             Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
-        }
-        if self.base.tables != model.tables {
-            Arc::make_mut(&mut self.base).tables = model.tables.clone();
         }
         let plain_style_cells =
             if let (Some(count), [Op::SetCell { cell, .. }]) = (plain_cell_baseline, ops) {
@@ -1738,8 +1814,26 @@ impl WorkbookAuthority {
             } else {
                 None
             };
-        self.sync_model(&model, ops, origin, &authored_styles, collaborative)
-            .map_err(AuthorityError::InvalidState)?;
+        self.sync_model(
+            &model,
+            ops,
+            origin,
+            &authored_styles,
+            &rewritten,
+            collaborative,
+        )
+        .map_err(AuthorityError::InvalidState)?;
+        if let (Some(replica), Some(dimensions)) = (replica, dimensions) {
+            for (index, changes) in dimensions {
+                let sizes = HiddenSizes::take(&mut model.sheets[index]);
+                replica
+                    .hidden_sizes
+                    .insert(index, AuthoredDimensions { sizes, changes });
+            }
+        }
+        if !collaborative && self.base.tables != model.tables {
+            Arc::make_mut(&mut self.base).tables = model.tables.clone();
+        }
         if let [Op::SetCell { at, cell, .. }] = ops
             && at.row < MAX_ROWS
             && at.col < MAX_COLS
@@ -1770,6 +1864,9 @@ impl WorkbookAuthority {
         let [Op::SetCell { sheet, at, cell }] = ops else {
             return None;
         };
+        if xlsx_ops::table_header_at(&self.base.tables, *sheet, *at).is_some() {
+            return None;
+        }
         let count = self.plain_style_cells.load(Ordering::Relaxed);
         let version = self.schema_version().ok()?;
         if !self.projection_valid.load(Ordering::Relaxed)
@@ -2476,31 +2573,25 @@ impl WorkbookAuthority {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_local_ops_v1(
         &self,
         ops: &[Op],
         origin: SyncOrigin,
         styles: &Stylesheet,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        self.stage_local_ops_from_validated_v1(
-            ops,
-            origin,
-            styles,
-            &self.encode_state_as_update_v1(),
-            self.projection_valid.load(Ordering::Relaxed),
-            true,
-        )
+        self.stage_ops_v1(ops, origin, styles, None, true, None)
     }
 
-    /// [`Self::stage_local_ops_v1`] from this replica's already-encoded state.
-    pub(crate) fn stage_local_ops_from_v1(
+    pub(crate) fn stage_replica_ops_v1(
         &self,
         ops: &[Op],
         origin: SyncOrigin,
         styles: &Stylesheet,
-        baseline: &[u8],
+        baseline: Option<&[u8]>,
+        replica: (&WorkbookModel, &[String]),
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        self.stage_local_ops_from_validated_v1(ops, origin, styles, baseline, false, true)
+        self.stage_ops_v1(ops, origin, styles, baseline, true, Some(replica))
     }
 
     pub(crate) fn stage_standalone_ops_v1(
@@ -2509,6 +2600,18 @@ impl WorkbookAuthority {
         origin: SyncOrigin,
         styles: &Stylesheet,
         baseline: Option<&[u8]>,
+    ) -> Result<StagedLocalUpdate, AuthorityError> {
+        self.stage_ops_v1(ops, origin, styles, baseline, false, None)
+    }
+
+    fn stage_ops_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+        baseline: Option<&[u8]>,
+        collaborative: bool,
+        replica: Option<(&WorkbookModel, &[String])>,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
         let projection_valid = baseline.is_none() && self.projection_valid.load(Ordering::Relaxed);
         let encoded;
@@ -2519,25 +2622,6 @@ impl WorkbookAuthority {
                 &encoded
             }
         };
-        self.stage_local_ops_from_validated_v1(
-            ops,
-            origin,
-            styles,
-            baseline,
-            projection_valid,
-            false,
-        )
-    }
-
-    fn stage_local_ops_from_validated_v1(
-        &self,
-        ops: &[Op],
-        origin: SyncOrigin,
-        styles: &Stylesheet,
-        baseline: &[u8],
-        projection_valid: bool,
-        collaborative: bool,
-    ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
         let mut staged = self.hydrated_alike(staged_doc);
@@ -2552,8 +2636,14 @@ impl WorkbookAuthority {
             .store(projection_valid, Ordering::Relaxed);
         // `apply_ops` already encoded the same diff: the staged doc is the
         // hydrated baseline, so its pre-op state vector is this replica's own.
+        let mut hidden_sizes = BTreeMap::new();
+        let replica = replica.map(|(model, keys)| ReplicaOverlay {
+            model,
+            keys,
+            hidden_sizes: &mut hidden_sizes,
+        });
         let update = staged
-            .apply_ops_with_merge_edits(ops, origin, styles, true, collaborative)?
+            .apply_ops_with_merge_edits(ops, origin, styles, true, collaborative, replica)?
             .unwrap_or_else(|| Update::EMPTY_V1.to_vec());
         let state = staged.encode_state_as_update_v1();
         let state_vector_entries = staged.doc.transact().state_vector().len();
@@ -2562,6 +2652,7 @@ impl WorkbookAuthority {
             .map_err(AuthorityError::InvalidState)?;
         Ok(StagedLocalUpdate {
             model,
+            hidden_sizes,
             state_bytes: state.len(),
             state_vector_entries,
             structure,
@@ -3347,6 +3438,7 @@ impl WorkbookAuthority {
         ops: &[Op],
         origin: SyncOrigin,
         authored_styles: &HashMap<(u32, CellRef), Option<u32>>,
+        rewritten: &HashSet<(SheetId, CellRef)>,
         collaborative: bool,
     ) -> Result<(), String> {
         let current_keys = self.current_sheet_keys()?;
@@ -3414,6 +3506,11 @@ impl WorkbookAuthority {
         let mut auto_filters = BTreeSet::new();
         let mut chart_anchors = BTreeSet::new();
         if !full_sync {
+            authored_cells.extend(
+                rewritten
+                    .iter()
+                    .filter_map(|(sheet, at)| Some((keys.get(sheet.0 as usize)?.clone(), *at))),
+            );
             let targets = targeted_sheet_keys(&current_keys, &keys, ops)?;
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
@@ -3957,7 +4054,7 @@ fn observe_projection(doc: &Doc, revision: Arc<AtomicU64>) -> Arc<AtomicBool> {
 /// base order and a replica mints `replica:...`, so a legacy state whose sheets
 /// were reordered still reads its own fallback features rather than whichever
 /// sheet now sits at that position.
-fn base_sheet_index(key: &str) -> Option<usize> {
+pub(crate) fn base_sheet_index(key: &str) -> Option<usize> {
     key.strip_prefix("sheet:")?.parse().ok()
 }
 
@@ -3997,6 +4094,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteDefinedName { .. }
             | Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5061,6 +5159,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
     )
 }
 
@@ -5106,6 +5205,7 @@ fn targeted_sheet_keys(
             }
             Op::SetDefinedNames { .. }
             | Op::SetTables { .. }
+            | Op::RestoreTableColumn { .. }
             | Op::SetDefinedName { .. }
             | Op::DeleteDefinedName { .. } => targets.push(None),
             op => {
@@ -5193,7 +5293,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetDefinedName { .. }
         | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. }
-        | Op::SetTables { .. } => None,
+        | Op::SetTables { .. }
+        | Op::RestoreTableColumn { .. } => None,
     }
 }
 
@@ -5651,6 +5752,16 @@ fn remap_styles<'a>(
                     sheet: *sheet,
                     name: name.clone(),
                     formulas: restored,
+                })
+            }
+            Op::RestoreTableColumn { cell, .. } => {
+                let style = resolve(cell.style)?;
+                (style != cell.style).then(|| {
+                    let mut rewritten = op.clone();
+                    if let Op::RestoreTableColumn { cell, .. } = &mut rewritten {
+                        cell.style = style;
+                    }
+                    rewritten
                 })
             }
             _ => None,

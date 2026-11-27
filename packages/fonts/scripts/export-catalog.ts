@@ -13,7 +13,7 @@ const source = readFileSync(new URL('../src/manifest.ts', import.meta.url), 'utf
 const privateNames = [
   'UNVENDORED_NOTO_SERIF', 'WIDTH_MATCHED_SUBSTITUTES',
   'LIGHTER_THAN_REGULAR', 'HEAVIER_THAN_REGULAR', 'EMULATED_SYMBOL_FAMILIES', 'REQUESTED_FAMILY_SCRIPT_FALLBACK',
-  'looksSerif', 'looksMono',
+  'looksSerif', 'looksMono', 'scriptFallbackFaces',
 ];
 const compiled = ts.transpileModule(`${source}\nexport { ${privateNames.join(', ')} };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
@@ -27,6 +27,7 @@ const tables = {} as {
   REQUESTED_FAMILY_SCRIPT_FALLBACK: Record<string, Partial<Record<manifest.BundledFontScript, string>>>;
   looksSerif: (family: string) => boolean;
   looksMono: (family: string) => boolean;
+  scriptFallbackFaces: (script: manifest.BundledFontScript) => manifest.BundledFontFace[];
 };
 new Function('exports', 'require', compiled)(tables, (path: string) =>
   JSON.parse(readFileSync(new URL(path, new URL('../src/', import.meta.url)), 'utf8')));
@@ -68,7 +69,7 @@ export function exportCatalog(): Record<string, string> {
     widthMatchedSubstitutes: Object.fromEntries(tables.WIDTH_MATCHED_SUBSTITUTES),
     emulatedSymbolFamilies: [...tables.EMULATED_SYMBOL_FAMILIES],
     scriptFallbackOrder: Object.fromEntries(scripts.map((script) => [
-      script, faces.filter((face) => face.script === script).map((face) => face.file),
+      script, tables.scriptFallbackFaces(script).map((face) => face.file),
     ])),
     requestedFamilyScriptFallback: Object.fromEntries(
       Object.entries(tables.REQUESTED_FAMILY_SCRIPT_FALLBACK).map(([family, preferred]) => [
@@ -132,7 +133,7 @@ export function exportCatalog(): Record<string, string> {
       glyphFallbackFace: faceFile(manifest.resolveGlyphFallbackFace('Segoe UI', bold, italic)),
     } });
   }
-  for (const family of ['Simplified Arabic', 'Traditional Arabic', '  SIMPLIFIED ARABIC  ', 'Arial', 'Times New Roman']) {
+  for (const family of ['Simplified Arabic', 'Traditional Arabic', '  SIMPLIFIED ARABIC  ', 'Noto Sans Arabic', 'Arial', 'Times New Roman']) {
     for (const script of ['arabic', 'hebrew'] as const) for (const bold of [false, true]) for (const italic of [false, true]) {
       cases.push({ query: { family, script, codePoint: samples[script], bold, italic }, answer: {
         scriptFallbackFace: faceFile(manifest.resolveScriptFallbackFace(script, bold, italic, family)),

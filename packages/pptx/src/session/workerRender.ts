@@ -1,5 +1,5 @@
 import type { SessionTransport } from '../../../../shared/office-session/transport';
-import { PPTX_RENDER_PORT, type PptxPaintFont, type PptxRenderReply, type PptxRenderRequest } from '../../../../shared/office-session/render/pptxWorkerRender';
+import { PPTX_RENDER_PORT, type DefaultFontPaintFace, type PptxPaintFont, type PptxRenderReply, type PptxRenderRequest } from '../../../../shared/office-session/render/pptxWorkerRender';
 import { clampToSurface } from '../../../../shared/office-session/render/rects';
 import { readFontTraits } from '../../../../shared/fontTraits';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
@@ -339,10 +339,10 @@ export function createPptxWorkerRenderer(
     fonts,
     invalidateFonts: () => refreshFonts([]),
     resetMedia,
-    defaultFonts(faces: readonly DefaultFontFace[]) {
+    defaultFonts(faces: readonly DefaultFontPaintFace[]) {
       fonts(faces.map((face) => {
         const traits = face.ownWeight ? undefined : readFontTraits(new Uint8Array(face.bytes));
-        return { family: face.family, source: face.bytes.slice(0), descriptors: {
+        return { family: face.paintFamily ?? face.family, source: face.bytes.slice(0), descriptors: {
           weight: traits ? String(traits.weight) : face.bold ? '700' : '400',
           style: traits ? traits.italic ? 'italic' : traits.oblique ? 'oblique' : 'normal' : face.italic ? 'italic' : 'normal',
         } };

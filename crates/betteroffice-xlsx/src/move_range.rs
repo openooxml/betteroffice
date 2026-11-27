@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use xlsx_calc::parse_formula;
-use xlsx_calc::parser::Expr;
+use xlsx_calc::parser::{Expr, parse_formula_for_rewrite};
+use xlsx_model::sheet_qualifier::is_path_qualifier;
 use xlsx_model::{CellRange, CellRef, SheetId, Workbook as WorkbookModel};
 use xlsx_ops::{CellState, Op};
 
@@ -193,7 +193,8 @@ fn rewrite_formula(
     source: CellRange,
     target: CellRange,
 ) -> Result<Option<String>> {
-    let expression = parse_formula(formula).map_err(|_| unsupported("unparsed formulas"))?;
+    let expression =
+        parse_formula_for_rewrite(formula).map_err(|_| unsupported("unparsed formulas"))?;
     let mut changed = false;
     let rewritten = rewrite_expr(
         &expression,
@@ -208,7 +209,7 @@ fn rewrite_formula(
         return Ok(None);
     }
     let text = rewritten.to_formula();
-    parse_formula(&text).map_err(|_| unsupported("formula references"))?;
+    parse_formula_for_rewrite(&text).map_err(|_| unsupported("formula references"))?;
     Ok(Some(text))
 }
 
@@ -222,7 +223,7 @@ fn rewrite_expr(
     changed: &mut bool,
 ) -> Result<Expr> {
     let matches = |qualified: &Option<String>| match qualified {
-        Some(name) => name.eq_ignore_ascii_case(target_name),
+        Some(name) => !is_path_qualifier(name) && name.eq_ignore_ascii_case(target_name),
         None => owner == moved_sheet,
     };
     Ok(match expression {
