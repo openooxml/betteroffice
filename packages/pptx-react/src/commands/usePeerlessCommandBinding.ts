@@ -14,6 +14,7 @@ import { peerlessHistory } from '../worker/peerlessHistory';
 import { peerlessClipboard, peerlessPaste } from '../worker/peerlessClipboard';
 import { peerlessObjectCommand } from '../worker/peerlessObjectCommands';
 import { peerlessDeleteSlide, peerlessInsertSlide } from '../worker/peerlessSlideCommands';
+import { slideLayoutChoices } from '../slideLayouts';
 import { createPptxCommandController, PptxCommandAdmissionError, type PptxCommandBinding, type PptxCommandOrigin } from './createPptxCommandStore';
 import { commandReason, DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES, type PptxCommandEnvironment } from './evaluate';
 import { clipboardRefusal, pptxMenuGates } from './menuGates';
@@ -67,7 +68,12 @@ export function usePeerlessCommandBinding(run: PeerlessPresentation | null, {
         pendingInput: Boolean((view?.pending.length || view?.waitingInputCount) && (!view?.editState.canUndo ||
           view?.pending.some((record) => record.intent.kind === 'undo' || record.intent.kind === 'redo'))),
         canUndo: view?.editState.canUndo ?? false, canRedo: view?.editState.canRedo ?? false,
-        slide: slide ? { id: slide.id, layoutPartPath: slide.layoutPartPath } : null, layouts: [...new Set(run?.client.state.slides.flatMap((slide) => slide.layoutPartPath ? [slide.layoutPartPath] : []))].map((layoutPartPath, index) => ({ value: layoutPartPath, label: t('toolbar.layoutOption', { number: index + 1 }), args: { layoutPartPath } })),
+        slide: slide ? { id: slide.id, layoutPartPath: slide.layoutPartPath } : null,
+        layouts: slideLayoutChoices(
+          run?.client.state.layouts,
+          run?.client.state.slides.map((entry) => entry.layoutPartPath),
+          t
+        ),
         text, shape: view?.editState.object ?? null, tool, zoom,
         slideCount: run?.client.state.slides.length ?? 0, table: view?.editState.toolbar.table ?? null,
         clipboardRead: typeof navigator !== 'undefined' && typeof navigator.clipboard?.readText === 'function',

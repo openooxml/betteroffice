@@ -58,6 +58,7 @@ pub(crate) struct SlideMetadata {
 
 #[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DeckSize {
     width: i64,
     height: i64,
@@ -65,8 +66,19 @@ pub(crate) struct DeckSize {
 
 #[cfg(any(feature = "engine", test))]
 #[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LayoutMetadata {
+    part_path: String,
+    name: Option<String>,
+    layout_type: Option<String>,
+    master_part_path: Option<String>,
+}
+
+#[cfg(any(feature = "engine", test))]
+#[derive(Debug, PartialEq, Serialize)]
 pub(crate) struct DeckMetadata {
     slides: Vec<SlideMetadata>,
+    layouts: Vec<LayoutMetadata>,
     size: DeckSize,
 }
 
@@ -311,8 +323,20 @@ impl DeckSession {
                 layout_part_path: map_string(&slide, &txn, "layoutPartPath"),
             });
         }
+        let layouts = self
+            .package
+            .layouts
+            .iter()
+            .map(|layout| LayoutMetadata {
+                part_path: layout.part_path.clone(),
+                name: layout.name.clone(),
+                layout_type: layout.layout_type.clone(),
+                master_part_path: layout_master_path(&self.package, layout).map(str::to_owned),
+            })
+            .collect();
         Ok(DeckMetadata {
             slides: summaries,
+            layouts,
             size: DeckSize {
                 width: required_i64(&meta, &txn, "widthEmu")?,
                 height: required_i64(&meta, &txn, "heightEmu")?,
@@ -345,23 +369,65 @@ impl DeckSession {
         index: u32,
         layout_part_path: Option<&str>,
     ) -> EditResult<SlideReceipt> {
-        if let Some(path) = layout_part_path
-            && !self
-                .package
-                .layouts
-                .iter()
-                .any(|layout| layout.part_path == path)
-        {
-            return Err(EditError::InvalidState(format!(
-                "unknown slide layout {path:?}"
-            )));
-        }
-        let (order, slides, position, length) = {
+        self.insert_slide_impl(context, index, layout_part_path, false)
+    }
+
+    /// Inserts a slide and instantiates its layout's editable text placeholders.
+    pub fn insert_slide_with_placeholders(
+        &self,
+        context: &EditCtx,
+        index: u32,
+        layout_part_path: Option<&str>,
+    ) -> EditResult<SlideReceipt> {
+        self.insert_slide_impl(context, index, layout_part_path, true)
+    }
+
+    fn insert_slide_impl(
+        &self,
+        context: &EditCtx,
+        index: u32,
+        layout_part_path: Option<&str>,
+        instantiate_placeholders: bool,
+    ) -> EditResult<SlideReceipt> {
+        let layout = match layout_part_path {
+            Some(path) => Some(
+                self.package
+                    .layouts
+                    .iter()
+                    .find(|layout| layout.part_path == path)
+                    .ok_or_else(|| {
+                        EditError::InvalidState(format!("unknown slide layout {path:?}"))
+                    })?,
+            ),
+            None => None,
+        };
+        let placeholders = if instantiate_placeholders {
+            layout_placeholder_specs(&self.package, layout)?
+        } else {
+            Vec::new()
+        };
+        let (order, slides, shapes, stories, position, length) = {
             let txn = self.doc.transact();
             let order = required_order(&txn)?;
             let (position, length) = slide_insert_position(&order, &txn, index)?;
-            (order, required_map(&txn, SLIDES)?, position, length)
+            (
+                order,
+                required_map(&txn, SLIDES)?,
+                required_map(&txn, SHAPES)?,
+                required_map(&txn, STORIES)?,
+                position,
+                length,
+            )
         };
+        let placeholder_ids: Vec<_> = placeholders
+            .iter()
+            .map(|_| {
+                let shape_id = self.next_id("shape");
+                let story_id = format!("story:{shape_id}:0");
+                let paragraph_id = self.next_id("para");
+                (shape_id, story_id, paragraph_id)
+            })
+            .collect();
         let mut txn = self.transact_for(context);
         let slide_id = self.next_slide_id(&slides, &txn);
         let slide = slides.insert(&mut txn, slide_id.as_str(), MapPrelim::default());
@@ -370,7 +436,42 @@ impl DeckSession {
         if let Some(layout_part_path) = layout_part_path {
             slide.insert(&mut txn, "layoutPartPath", layout_part_path);
         }
-        slide.insert(&mut txn, "shapes", ArrayPrelim::default());
+        let shape_order = slide.insert(&mut txn, "shapes", ArrayPrelim::default());
+        for (spec, (shape_id, story_id, paragraph_id)) in placeholders.iter().zip(placeholder_ids) {
+            seed_plain_story(
+                &stories,
+                &mut txn,
+                &story_id,
+                &paragraph_id,
+                "",
+                &crate::TextStyle::default(),
+            );
+            let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
+            shape.insert(&mut txn, "id", shape_id.as_str());
+            shape.insert(&mut txn, "sourceId", 0_f64);
+            shape.insert(&mut txn, "kind", "shape");
+            shape.insert(&mut txn, "textBox", false);
+            shape.insert(&mut txn, "name", spec.name.as_str());
+            shape.insert(&mut txn, "x", spec.transform.x as f64);
+            shape.insert(&mut txn, "y", spec.transform.y as f64);
+            shape.insert(&mut txn, "width", spec.transform.width as f64);
+            shape.insert(&mut txn, "height", spec.transform.height as f64);
+            shape.insert(&mut txn, "rotationDeg", spec.transform.rotation_deg);
+            shape.insert(&mut txn, "flipH", spec.transform.flip_h);
+            shape.insert(&mut txn, "flipV", spec.transform.flip_v);
+            shape.insert(&mut txn, "geometry", spec.geometry.as_str());
+            if let Some(adjust_values_json) = &spec.adjust_values_json {
+                shape.insert(&mut txn, "adjustValuesJson", adjust_values_json.as_str());
+            }
+            shape.insert(&mut txn, "placeholderJson", spec.placeholder_json.as_str());
+            shape.insert(
+                &mut txn,
+                "textStories",
+                string_array(std::slice::from_ref(&story_id)),
+            );
+            shape.insert(&mut txn, "children", string_array(&[]));
+            shape_order.push_back(&mut txn, shape_id.as_str());
+        }
         order.insert(&mut txn, position, slide_id.as_str());
         Ok(SlideReceipt {
             slide_id,
@@ -1249,6 +1350,107 @@ fn layout_master_path<'a>(package: &'a PptxPackage, layout: &'a SlideLayout) -> 
             .find(|master| master.layout_part_paths.contains(&layout.part_path))
             .map(|master| master.part_path.as_str())
     })
+}
+
+struct PlaceholderSpec {
+    name: String,
+    geometry: String,
+    adjust_values_json: Option<String>,
+    placeholder_json: String,
+    transform: pptx_parse::ShapeTransform,
+}
+
+fn layout_placeholder_specs(
+    package: &PptxPackage,
+    layout: Option<&SlideLayout>,
+) -> EditResult<Vec<PlaceholderSpec>> {
+    let Some(layout) = layout else {
+        return Ok(Vec::new());
+    };
+    let context = SlideContext::new(package, None, Some(layout.part_path.as_str()));
+    let mut specs = Vec::new();
+    for node in &layout.shapes {
+        let ShapeNode::Shape(shape) = node else {
+            continue;
+        };
+        let Some(placeholder) = &shape.base.placeholder else {
+            continue;
+        };
+        let raw_type = placeholder.placeholder_type.as_deref();
+        let normalized = crate::paragraph::normalize_placeholder_type(raw_type);
+        if !matches!(normalized, "title" | "subTitle" | "body") {
+            continue;
+        }
+        let transform = if shape.base.transform.width > 0 && shape.base.transform.height > 0 {
+            shape.base.transform.clone()
+        } else if let Some(inherited) = layout_transform(&context, placeholder)
+            .filter(|value| value.width > 0 && value.height > 0)
+        {
+            inherited.clone()
+        } else {
+            default_placeholder_transform(
+                raw_type.unwrap_or(normalized),
+                package.presentation.width_emu,
+                package.presentation.height_emu,
+            )
+        };
+        let geometry = if matches!(shape.geometry.as_str(), "" | "custom" | "group") {
+            "rect".to_owned()
+        } else {
+            shape.geometry.clone()
+        };
+        let adjust_values_json = if geometry == shape.geometry && !shape.adjust_values.is_empty() {
+            Some(
+                serde_json::to_string(&shape.adjust_values)
+                    .map_err(|error| EditError::Json(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let placeholder_json = serde_json::to_string(placeholder)
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        specs.push(PlaceholderSpec {
+            name: shape.base.name.clone(),
+            geometry,
+            adjust_values_json,
+            placeholder_json,
+            transform,
+        });
+    }
+    Ok(specs)
+}
+
+fn default_placeholder_transform(
+    placeholder_type: &str,
+    slide_width: i64,
+    slide_height: i64,
+) -> pptx_parse::ShapeTransform {
+    let w = slide_width.max(1);
+    let h = slide_height.max(1);
+    let pct = |base: i64, ratio: f64| ((base as f64) * ratio).round().max(1.0) as i64;
+    let (x, y, width, height) = match placeholder_type {
+        "ctrTitle" => (pct(w, 0.10), pct(h, 0.24), pct(w, 0.80), pct(h, 0.26)),
+        "title" => (
+            pct(w, 0.067),
+            pct(h, 0.067),
+            (w - pct(w, 0.134)).max(1),
+            pct(h, 0.16),
+        ),
+        "subTitle" => (pct(w, 0.15), pct(h, 0.56), pct(w, 0.70), pct(h, 0.24)),
+        _ => (
+            pct(w, 0.067),
+            pct(h, 0.255),
+            (w - pct(w, 0.134)).max(1),
+            pct(h, 0.65),
+        ),
+    };
+    pptx_parse::ShapeTransform {
+        x,
+        y,
+        width,
+        height,
+        ..pptx_parse::ShapeTransform::default()
+    }
 }
 
 fn layout_placeholder(shapes: &[ShapeNode], id: u32) -> Option<&Placeholder> {
@@ -4208,10 +4410,24 @@ mod tests {
                 })
             })
             .collect();
+        let layouts: Vec<_> = session
+            .package()
+            .layouts
+            .iter()
+            .map(|layout| {
+                serde_json::json!({
+                    "partPath": layout.part_path,
+                    "name": layout.name,
+                    "layoutType": layout.layout_type,
+                    "masterPartPath": layout_master_path(session.package(), layout),
+                })
+            })
+            .collect();
         assert_eq!(
             serde_json::to_value(session.session_metadata().unwrap()).unwrap(),
             serde_json::json!({
                 "slides": slides,
+                "layouts": layouts,
                 "size": { "width": snapshot.width_emu, "height": snapshot.height_emu },
             })
         );
@@ -4799,5 +5015,177 @@ mod tests {
                 Some(true)
             )]
         );
+    }
+
+    #[test]
+    fn insert_slide_with_placeholders_instantiates_and_saves_layout_shapes() {
+        let fixture_bytes = include_bytes!("../tests/fixtures/proposal-slide-props.pptx");
+        let session = DeckSession::open(fixture_bytes, 205).unwrap();
+        let metadata = session.session_metadata().unwrap();
+        assert_eq!(metadata.layouts.len(), 3);
+        let title_layout = &metadata.layouts[0];
+        let context = EditCtx::local("test");
+        let receipt = session
+            .insert_slide_with_placeholders(&context, 1, Some(&title_layout.part_path))
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let inserted = snapshot
+            .slides
+            .iter()
+            .find(|slide| slide.id == receipt.slide_id)
+            .unwrap();
+        assert_eq!(
+            inserted.layout_part_path.as_deref(),
+            Some(title_layout.part_path.as_str())
+        );
+        assert_eq!(inserted.shapes.len(), 1);
+        assert_eq!(
+            inserted.shapes[0]
+                .placeholder
+                .as_ref()
+                .and_then(|p| p.placeholder_type.as_deref()),
+            Some("title")
+        );
+        assert!(inserted.shapes[0].width > 0 && inserted.shapes[0].height > 0);
+
+        let saved = session.save().unwrap();
+        let reopened = DeckSession::open(&saved, 206).unwrap();
+        let reopened_slide = &reopened.snapshot().unwrap().slides[1];
+        assert_eq!(reopened_slide.shapes.len(), 1);
+        assert_eq!(
+            reopened_slide.shapes[0]
+                .placeholder
+                .as_ref()
+                .and_then(|p| p.placeholder_type.as_deref()),
+            Some("title")
+        );
+    }
+
+    #[test]
+    fn insert_slide_with_placeholders_skips_master_footer_and_preserves_geometry() {
+        let mut package = pptx_parse::parse_pptx(include_bytes!(
+            "../tests/fixtures/proposal-slide-props.pptx"
+        ))
+        .unwrap();
+        let master = &mut package.masters[0];
+        master.shapes.push(ShapeNode::Shape(pptx_parse::Shape {
+            base: pptx_parse::ShapeBase {
+                id: 90,
+                name: "Footer Placeholder".to_owned(),
+                title: None,
+                description: None,
+                decorative: false,
+                hidden: false,
+                placeholder: Some(Placeholder {
+                    placeholder_type: Some("ftr".to_owned()),
+                    index: Some(1),
+                    orientation: None,
+                    size: None,
+                }),
+                transform: pptx_parse::ShapeTransform {
+                    x: 100_000,
+                    y: 6_000_000,
+                    width: 2_000_000,
+                    height: 300_000,
+                    ..pptx_parse::ShapeTransform::default()
+                },
+            },
+            geometry: "rect".to_owned(),
+            has_preset_geometry: true,
+            adjust_values: BTreeMap::new(),
+            paths: Vec::new(),
+            fill: None,
+            picture_fill: None,
+            use_bg_fill: false,
+            outline: None,
+            effects: None,
+            style: None,
+            text: None,
+        }));
+        let layout = &mut package.layouts[0];
+        if let Some(ShapeNode::Shape(title)) = layout.shapes.first_mut() {
+            title.geometry = "roundRect".to_owned();
+            title.adjust_values.insert("adj".to_owned(), 0.25);
+        }
+        // OOXML omits `type` on default `obj` content placeholders; a colliding master footer
+        // `idx` must not suppress it, whereas an explicit layout `ftr` placeholder is skipped.
+        layout.shapes.push(ShapeNode::Shape(pptx_parse::Shape {
+            base: pptx_parse::ShapeBase {
+                id: 91,
+                name: "Content Placeholder 2".to_owned(),
+                title: None,
+                description: None,
+                decorative: false,
+                hidden: false,
+                placeholder: Some(Placeholder {
+                    placeholder_type: None,
+                    index: Some(1),
+                    orientation: None,
+                    size: None,
+                }),
+                transform: pptx_parse::ShapeTransform {
+                    x: 100_000,
+                    y: 1_500_000,
+                    width: 4_000_000,
+                    height: 2_000_000,
+                    ..pptx_parse::ShapeTransform::default()
+                },
+            },
+            geometry: "rect".to_owned(),
+            has_preset_geometry: true,
+            adjust_values: BTreeMap::new(),
+            paths: Vec::new(),
+            fill: None,
+            picture_fill: None,
+            use_bg_fill: false,
+            outline: None,
+            effects: None,
+            style: None,
+            text: None,
+        }));
+        layout.shapes.push(ShapeNode::Shape(pptx_parse::Shape {
+            base: pptx_parse::ShapeBase {
+                id: 92,
+                name: "Footer Placeholder".to_owned(),
+                title: None,
+                description: None,
+                decorative: false,
+                hidden: false,
+                placeholder: Some(Placeholder {
+                    placeholder_type: Some("ftr".to_owned()),
+                    index: Some(11),
+                    orientation: None,
+                    size: None,
+                }),
+                transform: pptx_parse::ShapeTransform {
+                    x: 100_000,
+                    y: 6_000_000,
+                    width: 2_000_000,
+                    height: 300_000,
+                    ..pptx_parse::ShapeTransform::default()
+                },
+            },
+            geometry: "rect".to_owned(),
+            has_preset_geometry: true,
+            adjust_values: BTreeMap::new(),
+            paths: Vec::new(),
+            fill: None,
+            picture_fill: None,
+            use_bg_fill: false,
+            outline: None,
+            effects: None,
+            style: None,
+            text: None,
+        }));
+
+        let specs = layout_placeholder_specs(&package, Some(&package.layouts[0])).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].geometry, "roundRect");
+        assert!(specs[0].adjust_values_json.is_some());
+        assert_eq!(specs[1].name, "Content Placeholder 2");
+
+        let ctr = default_placeholder_transform("ctrTitle", 12_192_000, 6_858_000);
+        let sub = default_placeholder_transform("subTitle", 12_192_000, 6_858_000);
+        assert!(ctr.y + ctr.height < sub.y);
     }
 }

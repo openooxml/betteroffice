@@ -242,8 +242,16 @@ export interface PresentationHandle extends CollaborationReplica {
   deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
   /** Throws the refusal the matching table edit would throw, without changing the deck. */
   checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): void;
-  insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
-  insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
+  insertSlide(
+    index: number,
+    layoutPartPath?: string,
+    options?: { instantiatePlaceholders?: boolean }
+  ): SlideReceipt;
+  insertSlideProfiled(
+    index: number,
+    layoutPartPath?: string,
+    options?: { instantiatePlaceholders?: boolean }
+  ): Profiled<SlideReceipt>;
   duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -464,6 +472,12 @@ export function replayPresentation(
 type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
 type PresentationMetadata = {
   slides: { id: string; index: number; name: string | null; layoutPartPath: string | null }[];
+  layouts?: {
+    partPath: string;
+    name: string | null;
+    layoutType: string | null;
+    masterPartPath?: string | null;
+  }[];
   size: { width: number; height: number };
 };
 type PptxStoryFormattingTarget = { slideId: string; shapeId: string; storyId: string };
@@ -487,10 +501,16 @@ export function presentationDeleteTextJoiningParagraphs(
   })), true);
 }
 
+const metadataSymbol = Symbol.for('@betteroffice/pptx/presentation-metadata');
+
 export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
   const context = presentationContexts.get(handle);
-  if (!context) throw new Error('Presentation metadata is unavailable');
-  return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
+  if (context) {
+    return context.jsonWasmCall(() => (context.doc as SessionMetadataDocument).sessionMetadataJson());
+  }
+  const read = (handle as unknown as Record<symbol, (() => PresentationMetadata) | undefined>)[metadataSymbol];
+  if (read) return read();
+  throw new Error('Presentation metadata is unavailable');
 }
 
 /** @experimental */
@@ -1041,10 +1061,16 @@ function openPresentationInternal(
     deleteTableColumn(slideId, shapeId, index): TableReceipt {
       return jsonWasmCall(() => doc.deleteTableColumnJson(JSON.stringify({ slideId, shapeId, index })), true);
     },
-    insertSlide(index, layoutPartPath): SlideReceipt {
+    insertSlide(index, layoutPartPath, options): SlideReceipt {
       return jsonWasmCall(
         () =>
-          doc.insertSlideJson(JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })),
+          doc.insertSlideJson(
+            JSON.stringify({
+              index,
+              layoutPartPath: layoutPartPath ?? null,
+              ...(options?.instantiatePlaceholders ? { instantiatePlaceholders: true } : {}),
+            })
+          ),
         true
       );
     },
@@ -1054,11 +1080,15 @@ function openPresentationInternal(
     duplicateSlide(slideId, toIndex): SlideReceipt {
       return jsonWasmCall(() => doc.duplicateSlideJson(JSON.stringify({ slideId, toIndex })), true);
     },
-    insertSlideProfiled(index, layoutPartPath): Profiled<SlideReceipt> {
+    insertSlideProfiled(index, layoutPartPath, options): Profiled<SlideReceipt> {
       return jsonWasmCall(
         () =>
           doc.insertSlideProfiledJson(
-            JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })
+            JSON.stringify({
+              index,
+              layoutPartPath: layoutPartPath ?? null,
+              ...(options?.instantiatePlaceholders ? { instantiatePlaceholders: true } : {}),
+            })
           ),
         true
       );

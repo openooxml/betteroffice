@@ -9,9 +9,10 @@ import type {
   TextBoxPrimitive,
   TextStylePatch,
 } from '@betteroffice/pptx';
-import { presentationStoryFormatting } from '@betteroffice/pptx/worker';
+import { presentationMetadata, presentationStoryFormatting } from '@betteroffice/pptx/worker';
 import type { TFunction, Translations } from '@betteroffice/pptx-i18n';
 import type { PptxEditorTool, PptxZoom, ShapeFormattingAction } from '../components/toolbarTypes';
+import { slideLayoutChoices } from '../slideLayouts';
 import { findShape } from '../interactions';
 import { shapeFormattingFromShape } from '../shapeFormatting';
 import {
@@ -312,9 +313,11 @@ export function usePptxCommandBinding(
       const model = current.modelRef.current;
       let text: PptxCommandEnvironment['text'] | undefined;
       let shape: PptxCommandEnvironment['shape'] | undefined;
-      const layouts = [
-        ...new Set(model?.snapshot.slides.map((candidate) => candidate.layoutPartPath) ?? []),
-      ];
+      let packageLayouts;
+      if (ready) {
+        try { packageLayouts = presentationMetadata(handle).layouts; } catch {}
+      }
+      const fallbackLayouts = model?.snapshot.slides.map((candidate) => candidate.layoutPartPath) ?? [];
       const readOnly = current.readOnlyRef.current;
       const proposals = current.proposalsRef.current;
       const available = readOnly
@@ -335,10 +338,11 @@ export function usePptxCommandBinding(
         canUndo: ready && handle.canUndo(),
         canRedo: ready && handle.canRedo(),
         slide: slide ? { id: slide.id, layoutPartPath: slide.layoutPartPath } : null,
-        layouts: layouts.map((layoutPartPath, index) => ({
-          args: { layoutPartPath },
-          label: current.t('toolbar.layoutOption', { number: index + 1 }),
-        })),
+        layouts: slideLayoutChoices(
+          packageLayouts,
+          fallbackLayouts,
+          current.t
+        ),
         get text() {
           if (text === undefined) text = ready ? textEnvironment(current) : null;
           return text;

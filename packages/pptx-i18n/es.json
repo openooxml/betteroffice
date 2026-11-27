@@ -43,6 +43,19 @@
     "newSlide": "Nueva diapositiva",
     "newSlideWithLayout": "Nueva diapositiva con diseño",
     "layoutOption": "Diseño {number}",
+    "layouts": {
+      "title": "Diapositiva de título",
+      "obj": "Título y objetos",
+      "secHead": "Encabezado de sección",
+      "twoObj": "Dos objetos",
+      "twoTxTwoObj": "Comparación",
+      "titleOnly": "Solo el título",
+      "blank": "En blanco",
+      "objTx": "Contenido con título",
+      "picTx": "Imagen con título",
+      "vertTx": "Título y texto vertical",
+      "vertTitleAndTx": "Título y texto verticales"
+    },
     "fit": "Ajustar",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Cuadro de texto",
@@ -113,7 +126,12 @@
     "loadError": "No se pudo cargar el editor",
     "loadErrorDescription": "Compruebe la conexión y vuelva a cargar la página.",
     "reloadPage": "Volver a cargar la página",
-    "showDetails": "Mostrar detalles"
+    "showDetails": "Mostrar detalles",
+    "placeholders": {
+      "title": "Haga clic para agregar título",
+      "subtitle": "Haga clic para agregar subtítulo",
+      "body": "Haga clic para agregar texto"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Cuadro de texto",

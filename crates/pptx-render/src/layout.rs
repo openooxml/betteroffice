@@ -23,8 +23,9 @@ use ooxml_text::{
     shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::paragraph::{
-    ListCounters, ParagraphCascade, SlideParents, find_placeholder, slide_number_insertions,
-    slide_number_run_texts, source_paragraph, table_style_text_body, table_text_levels,
+    ListCounters, ParagraphCascade, SlideParents, find_placeholder, normalize_placeholder_type,
+    slide_number_insertions, slide_number_run_texts, source_paragraph, table_style_text_body,
+    table_text_levels,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -3546,11 +3547,15 @@ impl<'a> LayoutBuilder<'a> {
         });
         let story_id = content.story_id;
         let lines = laid_out.lines;
+        let placeholder_type = cascade.placeholder.map(|placeholder| {
+            normalize_placeholder_type(placeholder.placeholder_type.as_deref()).to_owned()
+        });
         self.primitives.push(Primitive::TextBox {
             text_shadow,
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
+            placeholder_type,
             x: text_rect.x,
             y: text_rect.y,
             w: text_rect.w,
@@ -5424,6 +5429,7 @@ fn chart_text_primitive(
         object_id: text.object_id,
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
+        placeholder_type: None,
         x: box_x,
         y: baseline - line_box.ascent,
         w: box_w.max(x - box_x + width),

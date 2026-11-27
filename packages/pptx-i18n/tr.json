@@ -43,6 +43,19 @@
     "newSlide": "Yeni Slayt",
     "newSlideWithLayout": "Düzene göre yeni slayt",
     "layoutOption": "Düzen {number}",
+    "layouts": {
+      "title": "Başlık Slaytı",
+      "obj": "Başlık ve İçerik",
+      "secHead": "Bölüm Üst Bilgisi",
+      "twoObj": "İki İçerik",
+      "twoTxTwoObj": "Karşılaştırma",
+      "titleOnly": "Yalnızca Başlık",
+      "blank": "Boş",
+      "objTx": "Açıklamalı İçerik",
+      "picTx": "Açıklamalı Resim",
+      "vertTx": "Başlık ve Dikey Metin",
+      "vertTitleAndTx": "Dikey Başlık ve Metin"
+    },
     "fit": "Sığdır",
     "zoomValue": "Yakınlaştırma: {value}",
     "textBoxTool": "Metin Kutusu",
@@ -113,7 +126,12 @@
     "loadError": "Düzenleyici yüklenemedi",
     "loadErrorDescription": "Bağlantınızı denetleyip sayfayı yeniden yükleyin.",
     "reloadPage": "Sayfayı yeniden yükle",
-    "showDetails": "Ayrıntıları göster"
+    "showDetails": "Ayrıntıları göster",
+    "placeholders": {
+      "title": "Başlık eklemek için tıklayın",
+      "subtitle": "Alt başlık eklemek için tıklayın",
+      "body": "Metin eklemek için tıklayın"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Metin Kutusu",

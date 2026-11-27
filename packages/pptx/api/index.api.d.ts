@@ -979,6 +979,12 @@ export interface PresentationSlideSummary {
     name: string | null;
     layoutPartPath: string | null;
 }
+export interface PresentationSlideLayoutSummary {
+    partPath: string;
+    name: string | null;
+    layoutType: string | null;
+    masterPartPath?: string | null;
+}
 /**
  * Presentation projection; version counts applied batches and size is in EMU.
  * @experimental
@@ -2889,6 +2895,7 @@ export interface PositionedTextLine {
 export interface TextBoxPrimitive extends PrimitiveBase {
     kind: 'textBox';
     storyId?: string;
+    placeholderType?: string;
     anchor: 'top' | 'center' | 'bottom';
     paragraphs: Array<{
         align?: 'left' | 'center' | 'right' | 'justify';
@@ -3611,8 +3618,12 @@ export interface PresentationHandle extends CollaborationReplica {
     deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
     /** Throws the refusal the matching table edit would throw, without changing the deck. */
     checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): void;
-    insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
-    insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
+    insertSlide(index: number, layoutPartPath?: string, options?: {
+        instantiatePlaceholders?: boolean;
+    }): SlideReceipt;
+    insertSlideProfiled(index: number, layoutPartPath?: string, options?: {
+        instantiatePlaceholders?: boolean;
+    }): Profiled<SlideReceipt>;
     duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
     deleteSlide(slideId: string): SlideReceipt;
     moveSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -3743,6 +3754,12 @@ type PresentationMetadata = {
         index: number;
         name: string | null;
         layoutPartPath: string | null;
+    }[];
+    layouts?: {
+        partPath: string;
+        name: string | null;
+        layoutType: string | null;
+        masterPartPath?: string | null;
     }[];
     size: {
         width: number;

@@ -749,6 +749,7 @@ mod tests {
                 object_id: text.object_id,
                 shape_id: None,
                 story_id: None,
+                placeholder_type: None,
                 x: text.x as f32,
                 y: text.baseline_y as f32,
                 w: text.width as f32,

@@ -43,6 +43,19 @@
     "newSlide": "شريحة جديدة",
     "newSlideWithLayout": "شريحة جديدة بتخطيط",
     "layoutOption": "التخطيط {number}",
+    "layouts": {
+      "title": "شريحة عنوان",
+      "obj": "عنوان ومحتوى",
+      "secHead": "عنوان المقطع",
+      "twoObj": "محتويان",
+      "twoTxTwoObj": "مقارنة",
+      "titleOnly": "عنوان فقط",
+      "blank": "فارغ",
+      "objTx": "محتوى ذو تسمية توضيحية",
+      "picTx": "صورة ذات تسمية توضيحية",
+      "vertTx": "عنوان ونص عمودي",
+      "vertTitleAndTx": "عنوان ونص عموديان"
+    },
     "fit": "احتواء",
     "zoomValue": "تكبير/تصغير: {value}",
     "textBoxTool": "مربع نص",
@@ -113,7 +126,12 @@
     "loadError": "تعذر تحميل المحرر",
     "loadErrorDescription": "تحقق من اتصالك، ثم أعد تحميل الصفحة.",
     "reloadPage": "إعادة تحميل الصفحة",
-    "showDetails": "إظهار التفاصيل"
+    "showDetails": "إظهار التفاصيل",
+    "placeholders": {
+      "title": "انقر لإضافة عنوان",
+      "subtitle": "انقر لإضافة عنوان فرعي",
+      "body": "انقر لإضافة نص"
+    }
   },
   "objects": {
     "defaultTextBoxName": "مربع نص",

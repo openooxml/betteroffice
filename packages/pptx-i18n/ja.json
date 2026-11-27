@@ -43,6 +43,19 @@
     "newSlide": "新しいスライド",
     "newSlideWithLayout": "レイアウト付きの新しいスライド",
     "layoutOption": "レイアウト {number}",
+    "layouts": {
+      "title": "タイトル スライド",
+      "obj": "タイトルとコンテンツ",
+      "secHead": "セクション見出し",
+      "twoObj": "2 つのコンテンツ",
+      "twoTxTwoObj": "比較",
+      "titleOnly": "タイトルのみ",
+      "blank": "白紙",
+      "objTx": "タイトル付きのコンテンツ",
+      "picTx": "タイトル付きの図",
+      "vertTx": "タイトルと縦書きテキスト",
+      "vertTitleAndTx": "縦書きタイトルとテキスト"
+    },
     "fit": "ウィンドウに合わせる",
     "zoomValue": "ズーム：{value}",
     "textBoxTool": "テキスト ボックス",
@@ -113,7 +126,12 @@
     "loadError": "エディターを読み込めませんでした",
     "loadErrorDescription": "接続を確認してから、ページを再読み込みしてください。",
     "reloadPage": "ページの再読み込み",
-    "showDetails": "詳細を表示"
+    "showDetails": "詳細を表示",
+    "placeholders": {
+      "title": "クリックしてタイトルを入力",
+      "subtitle": "クリックしてサブタイトルを入力",
+      "body": "クリックしてテキストを入力"
+    }
   },
   "objects": {
     "defaultTextBoxName": "テキスト ボックス",

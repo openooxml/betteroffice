@@ -43,6 +43,19 @@
     "newSlide": "שקופית חדשה",
     "newSlideWithLayout": "שקופית חדשה עם פריסה",
     "layoutOption": "פריסה {number}",
+    "layouts": {
+      "title": "שקופית כותרת",
+      "obj": "כותרת ותוכן",
+      "secHead": "כותרת מקטע",
+      "twoObj": "שני פריטי תוכן",
+      "twoTxTwoObj": "השוואה",
+      "titleOnly": "כותרת בלבד",
+      "blank": "ריק",
+      "objTx": "תוכן עם כיתוב",
+      "picTx": "תמונה עם כיתוב",
+      "vertTx": "כותרת וטקסט אנכי",
+      "vertTitleAndTx": "כותרת וטקסט אנכיים"
+    },
     "fit": "התאם",
     "zoomValue": "גודל תצוגה: {value}",
     "textBoxTool": "תיבת טקסט",
@@ -113,7 +126,12 @@
     "loadError": "טעינת העורך נכשלה",
     "loadErrorDescription": "בדוק את החיבור, ולאחר מכן טען מחדש את העמוד.",
     "reloadPage": "טען מחדש את העמוד",
-    "showDetails": "הצג פרטים"
+    "showDetails": "הצג פרטים",
+    "placeholders": {
+      "title": "לחץ כדי להוסיף כותרת",
+      "subtitle": "לחץ כדי להוסיף כותרת משנה",
+      "body": "לחץ כדי להוסיף טקסט"
+    }
   },
   "objects": {
     "defaultTextBoxName": "תיבת טקסט",

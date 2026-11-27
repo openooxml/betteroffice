@@ -43,6 +43,19 @@
     "newSlide": "새 슬라이드",
     "newSlideWithLayout": "레이아웃이 있는 새 슬라이드",
     "layoutOption": "레이아웃 {number}",
+    "layouts": {
+      "title": "제목 슬라이드",
+      "obj": "제목 및 내용",
+      "secHead": "구역 머리글",
+      "twoObj": "콘텐츠 2개",
+      "twoTxTwoObj": "비교",
+      "titleOnly": "제목만",
+      "blank": "빈 화면",
+      "objTx": "캡션 있는 콘텐츠",
+      "picTx": "캡션 있는 그림",
+      "vertTx": "제목 및 세로 텍스트",
+      "vertTitleAndTx": "세로 제목 및 텍스트"
+    },
     "fit": "화면에 맞춤",
     "zoomValue": "확대/축소: {value}",
     "textBoxTool": "텍스트 상자",
@@ -113,7 +126,12 @@
     "loadError": "편집기를 불러올 수 없습니다",
     "loadErrorDescription": "연결을 확인한 후 페이지를 새로 고치세요.",
     "reloadPage": "페이지 새로 고침",
-    "showDetails": "자세히 보기"
+    "showDetails": "자세히 보기",
+    "placeholders": {
+      "title": "제목을 입력하려면 클릭하세요",
+      "subtitle": "부제목을 입력하려면 클릭하세요",
+      "body": "텍스트를 입력하려면 클릭하세요"
+    }
   },
   "objects": {
     "defaultTextBoxName": "텍스트 상자",
