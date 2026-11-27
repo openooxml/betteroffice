@@ -2056,3 +2056,85 @@ mod equal_column_pictures;
 mod equal_columns_as_released;
 mod equal_side_margin_shift;
 mod resident_matches_fresh;
+
+#[test]
+fn edits_after_a_partial_document_completes_lay_out_as_a_full_recompute_does() {
+    use super::lowering_fixture::{NS, Package, para, run};
+
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let body = format!(
+        concat!(
+        "{}",
+        r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>"#,
+        r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+        r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
+        "{}",
+        r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#,
+        ),
+        para("00001901", &run("Body text")),
+        para("00001902", &run("Plain cell")),
+        para("00001903", &run("Other cell")),
+        para("00001904", &run("After the table")),
+    );
+    let header = format!(
+        "<w:hdr {NS}>{}</w:hdr>",
+        para(
+        "00001905",
+        r#"<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> pages</w:t></w:r>"#,
+        )
+    );
+    let bytes = Package::new(&body)
+        .part("header1.xml", "rIdHeader", "header", "header", &header)
+        .bytes();
+
+    for (variant, repeated, cell) in [
+        ("repeated-cell", true, true),
+        ("single-cell", false, true),
+        ("repeated-body", true, false),
+        ("single-body", false, false),
+    ] {
+        let client_id = 9860;
+        let engine = seeded_engine(client_id, &bytes);
+        let mut request = lowering_pages::region_request(&engine, &bytes, font);
+        request["regions"]["sections"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        if repeated {
+            repeat_final_section(&mut request);
+        }
+        request["cachedPageTotals"] = json!(false);
+        engine.set_partial_document(true);
+        let mut host =
+            CommandHost::open_with(&engine, request.to_string()).seeded(client_id, bytes.clone());
+        let pages = page_count(&engine);
+        assert!(pages > 0);
+        let headers = engine.retained_headers_footers_json().unwrap().unwrap();
+        let headers: serde_json::Value = serde_json::from_str(&headers).unwrap();
+        assert_eq!(
+            headers["variants"][0]["fieldWidths"][0]["perPage"],
+            json!(vec![0.0; pages]),
+            "{variant}: partial NUMPAGES widths"
+        );
+
+        let (story, paragraph) = if cell {
+            (cell_holding(&engine, "00001902"), "00001902")
+        } else {
+            ("body".to_owned(), "00001901")
+        };
+        let at = engine
+            .doc()
+            .paragraph_index(&story)
+            .unwrap()
+            .para_span(paragraph)
+            .unwrap()
+            .0
+            + 2;
+        engine.set_partial_document(false);
+        assert!(host.command(&story, at, at, Some("x")), "{variant}: the command applied");
+        assert_eq!(page_count(&engine), pages, "{variant}: page count");
+        host.assert_matches_cold(variant);
+    }
+}
