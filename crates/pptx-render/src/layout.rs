@@ -1189,13 +1189,13 @@ impl RenderedSlide {
         }
         for region in self.hit_regions.iter().rev() {
             let (shape_x, shape_y) = region.local_point(x, y);
-            let inside_shape = region.rect.contains(shape_x, shape_y);
-            if let Some(text) = &region.text {
+            let inside_frame = region.rect.contains(shape_x, shape_y);
+            let inside_text = if let Some(text) = &region.text {
                 let (text_x, text_y) = text.local_point(x, y);
-                if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
-                    continue;
-                }
-                if let Some(line) = nearest_line(&text.lines, text_x, text_y)
+                let inside_text =
+                    inside_frame || (text.overflow && region.hit_rect.contains(text_x, text_y));
+                if inside_text
+                    && let Some(line) = nearest_line(&text.lines, text_x, text_y)
                     && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
                         (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
                     })
@@ -1206,7 +1206,17 @@ impl RenderedSlide {
                         position: caret.position,
                     });
                 }
-            } else if !inside_shape {
+                inside_text
+            } else {
+                false
+            };
+            let inside_shape = region
+                .bent_connector
+                .as_ref()
+                .map_or(inside_frame, |connector| {
+                    connector.contains(shape_x, shape_y)
+                });
+            if !inside_text && !inside_shape {
                 continue;
             }
             return Some(HitTestResult::Shape {
@@ -2119,6 +2129,7 @@ impl<'a> LayoutBuilder<'a> {
             flip_h: resolved.flip_h,
             flip_v: resolved.flip_v,
         };
+        let mut bent_connector = None;
         if self.shape_filter.is_none() {
             let inherited = [original, layout_node, master_node];
             let inherited_fill = self.resolved_fill(&inherited);
@@ -2210,11 +2221,16 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     };
+                    let start = self.primitives.len();
                     if use_bg_fill {
                         self.push_background_shape(primitive, paths, picture)?;
                     } else {
                         self.push_shape(primitive, paths, picture)?;
                     }
+                    bent_connector = self.primitives[start..]
+                        .iter()
+                        .rev()
+                        .find_map(BentConnectorHit::from_primitive);
                 }
                 ShapeKind::Picture => {
                     let source = picture_source(original);
@@ -2297,6 +2313,7 @@ impl<'a> LayoutBuilder<'a> {
                 rect,
                 hit_rect: rect_covering_text(rect, text_hit.as_ref()),
                 transform,
+                bent_connector,
                 text: text_hit,
             });
         }
@@ -2360,6 +2377,7 @@ impl<'a> LayoutBuilder<'a> {
             flip_h: base.transform.flip_h,
             flip_v: base.transform.flip_v,
         };
+        let mut bent_connector = None;
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
@@ -2431,11 +2449,16 @@ impl<'a> LayoutBuilder<'a> {
                     shadow,
                     transform,
                 };
+                let start = self.primitives.len();
                 if use_bg_fill {
                     self.push_background_shape(primitive, &value.paths, picture)?;
                 } else {
                     self.push_shape(primitive, &value.paths, picture)?;
                 }
+                bent_connector = self.primitives[start..]
+                    .iter()
+                    .rev()
+                    .find_map(BentConnectorHit::from_primitive);
             }
             ShapeNode::Picture(value) => {
                 let outline = self
@@ -2518,6 +2541,7 @@ impl<'a> LayoutBuilder<'a> {
             rect,
             hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
+            bent_connector,
             text: text_hit,
         });
         Ok(())
@@ -7021,6 +7045,7 @@ struct HitRegion {
     rect: PxRect,
     hit_rect: PxRect,
     transform: Transform,
+    bent_connector: Option<BentConnectorHit>,
     text: Option<TextHit>,
 }
 
@@ -7028,6 +7053,92 @@ impl HitRegion {
     /// Maps slide coordinates into the shape frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
         local_point(self.rect, self.transform, x, y)
+    }
+}
+
+#[derive(Default)]
+struct BentConnectorHit {
+    points: Vec<(f64, f64)>,
+    tolerance: f64,
+    miter_radius: f64,
+}
+
+impl BentConnectorHit {
+    fn from_primitive(primitive: &Primitive) -> Option<Self> {
+        let Primitive::Shape {
+            geometry,
+            path,
+            x,
+            y,
+            w,
+            h,
+            stroke,
+            ..
+        } = primitive
+        else {
+            return None;
+        };
+        if !matches!(
+            geometry.as_str(),
+            "bentConnector2" | "bentConnector3" | "bentConnector4" | "bentConnector5"
+        ) {
+            return None;
+        }
+        let Some(stroke) = stroke
+            .as_ref()
+            .filter(|stroke| stroke.width.is_finite() && stroke.width > 0.0)
+        else {
+            return Some(Self::default());
+        };
+        let points = path
+            .iter()
+            .map(|command| match *command {
+                GeometryPathCommand::Move { x: px, y: py }
+                | GeometryPathCommand::Line { x: px, y: py } => (
+                    f64::from(*x) + px * f64::from(*w),
+                    f64::from(*y) + py * f64::from(*h),
+                ),
+                _ => unreachable!("bent connector paths contain only straight segments"),
+            })
+            .collect();
+        let radius = f64::from(stroke.width) / 2.0;
+        Some(Self {
+            points,
+            tolerance: radius.max(3.0),
+            miter_radius: if matches!(stroke.join.as_deref(), Some("round" | "bevel")) {
+                0.0
+            } else {
+                radius
+            },
+        })
+    }
+
+    fn contains(&self, x: f32, y: f32) -> bool {
+        let (x, y) = (f64::from(x), f64::from(y));
+        if self.points.windows(2).any(|pair| {
+            let (ax, ay) = pair[0];
+            let (bx, by) = pair[1];
+            let dx = (ax.min(bx) - x).max(x - ax.max(bx)).max(0.0);
+            let dy = (ay.min(by) - y).max(y - ay.max(by)).max(0.0);
+            dx * dx + dy * dy <= self.tolerance * self.tolerance
+        }) {
+            return true;
+        }
+        if self.miter_radius == 0.0 {
+            return false;
+        }
+        let legs = self.points.windows(2).filter(|pair| pair[0] != pair[1]);
+        legs.clone().zip(legs.skip(1)).any(|(incoming, outgoing)| {
+            let (ax, ay) = incoming[0];
+            let (bx, by) = incoming[1];
+            let (cx, cy) = outgoing[1];
+            let (dx, dy) = (x - bx, y - by);
+            if dx.abs() > self.miter_radius || dy.abs() > self.miter_radius {
+                return false;
+            }
+            (ay == by && cx == bx && (ax - bx) * dx < 0.0 && (cy - by) * dy < 0.0)
+                || (ax == bx && cy == by && (cx - bx) * dx < 0.0 && (ay - by) * dy < 0.0)
+        })
     }
 }
 
@@ -7899,7 +8010,9 @@ fn geometry_path_with_fallback(
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect();
-    match preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+    match ooxml_drawingml::connector_geometry_for_rendering(geometry, &adjustments)
+        .or_else(|| preset_geometry_to_path(geometry, &adjustments, aspect_ratio))
+    {
         Some(path) => (path, false),
         None => (
             preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio).unwrap_or_default(),
@@ -11482,6 +11595,16 @@ mod tests {
                 outline: None,
                 text: None,
             }));
+        let Some(ShapeNode::Shape(mut connector)) = package.masters[0].shapes.last().cloned()
+        else {
+            unreachable!()
+        };
+        connector.base.id = 9_003;
+        connector.geometry = "bentConnector3".to_owned();
+        connector.adjust_values.insert("adj1".to_owned(), 1e40);
+        connector.outline = Some(red_outline(76_200.0));
+        package.masters[0].shapes.push(ShapeNode::Shape(connector));
+
         let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
         let image = rendered
             .display_list
@@ -11502,6 +11625,22 @@ mod tests {
         };
         assert_eq!(*effects, vec![ImageEffect::Alpha { amount: 0.2 }]);
         assert!(tile.is_some());
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape {
+                        object_id: 9_003,
+                        fill: None,
+                        stroke: Some(_),
+                        path,
+                        ..
+                    } if path.get(1) == Some(&GeometryPathCommand::Line { x: 1e6, y: 0.0 })
+                ))
+        );
     }
 
     #[test]
@@ -11846,6 +11985,7 @@ mod tests {
                     h: 100.0,
                 },
                 transform,
+                bent_connector: None,
                 text: None,
             }],
         };
@@ -11869,6 +12009,121 @@ mod tests {
         };
         assert!(slide(flipped).hit_test(150.0, 90.0).is_some());
         assert!(slide(flipped).hit_test(105.0, 105.0).is_none());
+    }
+
+    #[test]
+    fn hit_testing_a_rotated_bent_connector_follows_its_painted_detour() {
+        let session = DeckSession::open(FIXTURE, 8_015).unwrap();
+        let slide_id = session.slide_ids().unwrap().remove(0);
+        let added = session
+            .add_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &pptx_edit::PresetShapeDraft {
+                    name: "Connector".to_owned(),
+                    geometry: "bentConnector3".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 952_500,
+                        y: 952_500,
+                        width: 952_500,
+                        height: 952_500,
+                    },
+                    fill: None,
+                },
+            )
+            .unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        let shapes = &mut snapshot.slides[0].shapes;
+        shapes.retain(|shape| shape.id == added.shape_id);
+        let shape = &mut shapes[0];
+        shape.rotation_deg = 90.0;
+        shape.flip_h = true;
+        shape.fill = Some(ShapeFill {
+            color: Some(ColorValue {
+                rgb: Some("00FF00".to_owned()),
+                ..Default::default()
+            }),
+            ..ShapeFill::named("solid")
+        });
+        shape.outline = Some(red_outline(76_200.0));
+        shape.adjust_values.insert("adj1".to_owned(), 1.5);
+
+        let rendered = SlideRenderer::new()
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert!(
+            rendered
+                .display_list
+                .primitives
+                .iter()
+                .any(|primitive| matches!(
+                    primitive,
+                    Primitive::Shape { shape_id: Some(id), fill: None, stroke: Some(_), .. }
+                        if id == &added.shape_id
+                ))
+        );
+        assert_eq!(
+            rendered.hit_test(150.0, 53.5),
+            Some(HitTestResult::Shape {
+                shape_id: added.shape_id,
+            })
+        );
+        assert_eq!(rendered.hit_test(150.0, 55.0), None);
+        assert_eq!(rendered.hit_test(150.0, 150.0), None);
+
+        snapshot.slides[0].shapes[0].outline = None;
+        let rendered = SlideRenderer::new()
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(rendered.hit_test(150.0, 53.5), None);
+        assert_eq!(rendered.hit_test(150.0, 150.0), None);
+    }
+
+    #[test]
+    fn hit_testing_includes_the_miter_of_a_wide_bent_connector() {
+        let session = DeckSession::open(FIXTURE, 8_015).unwrap();
+        let slide_id = session.slide_ids().unwrap().remove(0);
+        let added = session
+            .add_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &pptx_edit::PresetShapeDraft {
+                    name: "Connector".to_owned(),
+                    geometry: "bentConnector4".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 952_500,
+                        y: 952_500,
+                        width: 952_500,
+                        height: 952_500,
+                    },
+                    fill: None,
+                },
+            )
+            .unwrap();
+        let mut snapshot = session.snapshot().unwrap();
+        let shapes = &mut snapshot.slides[0].shapes;
+        shapes.retain(|shape| shape.id == added.shape_id);
+        let shape = &mut shapes[0];
+        shape.adjust_values.insert("adj1".to_owned(), 0.25);
+        shape.outline = Some(red_outline(190_500.0));
+
+        let renderer = SlideRenderer::new();
+        let rendered = renderer
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(
+            rendered.hit_test(117.0, 158.0),
+            Some(HitTestResult::Shape {
+                shape_id: added.shape_id,
+            })
+        );
+        assert_eq!(rendered.hit_test(114.0, 158.0), None);
+
+        snapshot.slides[0].shapes[0].outline.as_mut().unwrap().join = Some("bevel".to_owned());
+        let beveled = renderer
+            .layout_slide(&PptxPackage::default(), &snapshot, 0)
+            .unwrap();
+        assert_eq!(beveled.hit_test(117.0, 158.0), None);
     }
 
     #[test]
@@ -11904,6 +12159,7 @@ mod tests {
                     flip_h,
                     flip_v: false,
                 },
+                bent_connector: None,
                 text: Some(TextHit {
                     overflow: false,
                     story_id: "story".to_owned(),
@@ -11984,6 +12240,7 @@ mod tests {
                 hit_rect: rect,
                 rect,
                 transform: shape,
+                bent_connector: None,
                 text: Some(TextHit {
                     overflow: false,
                     story_id: "story".to_owned(),

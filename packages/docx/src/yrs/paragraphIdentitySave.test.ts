@@ -1213,3 +1213,47 @@ describe('structured export anchors and paragraph identities', () => {
     editThroughExportAnchors(reopened);
   });
 });
+
+it('saves the authored connector part from seeded and replicated sessions', async () => {
+  const relation = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const geometry = '<a:prstGeom prst="bentConnector4"><a:avLst><a:gd name="adj1" fmla="val 150000"/><a:gd name="adj2" fmla="val -25000"/></a:avLst></a:prstGeom>';
+  const drawing = '<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Connector"/>' +
+    '<a:graphic><a:graphicData><wps:wsp><wps:spPr><a:xfrm><a:ext cx="914400" cy="457200"/></a:xfrm>' +
+    `${geometry}<a:noFill/></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+  const body = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+    `<w:body><w:p><w:r>${drawing}</w:r></w:p><w:p><w:r><w:t>Tail</w:t></w:r></w:p></w:body></w:document>`;
+  const encoder = new TextEncoder();
+  const input = new Map([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
+    ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${relation}/officeDocument" Target="word/document.xml"/></Relationships>`],
+    [DOCUMENT, body],
+  ].map(([name, xml]) => [name!, encoder.encode(xml!)] as const));
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(input));
+  const source = await open(bytes, 7);
+  const replica = await session(8);
+  replica.bootstrapPeer(source.encodeState(), source.encodePeerMetadata(), bytes, replica.openDocx(bytes, false));
+  const paragraph = yrsToDocument(replica, replica.materializeDocx()!).package.document.content[0];
+  const connector = paragraph?.type === 'paragraph'
+    ? paragraph.content.flatMap((node) => node.type === 'run' ? node.content : []).find((node) => node.type === 'shape')
+    : undefined;
+  expect(connector?.shape.geometryPath).toEqual([
+    { type: 'move', x: 0, y: 0 },
+    { type: 'line', x: 1, y: 0 },
+    { type: 'line', x: 0.25, y: 0.5 },
+    { type: 'line', x: 0.75, y: 0.5 },
+    { type: 'line', x: 1, y: 1 },
+  ]);
+  const options = { updateModifiedDate: false };
+  for (const live of [source, replica]) {
+    const unchanged = await saveYrsDocx(live, options);
+    expect(parts(unchanged.bytes)).toEqual(parts(bytes));
+  }
+
+  replica.insertText({ story: 'body', paraId: key(replica, 'body', 'Tail'), offset: 0 }, 'Edited ');
+  const edited = await saveYrsDocx(replica, options);
+  expect(text(edited.bytes, DOCUMENT)).toContain(drawing);
+  expect(savedParagraphs(edited.bytes, DOCUMENT)[DOCUMENT]!.map(([, content]) => content)).toEqual(['', 'Edited Tail']);
+});

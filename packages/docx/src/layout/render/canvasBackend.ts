@@ -1149,13 +1149,19 @@ function drawShapeLineEnds(
   color: string,
   width: number
 ): void {
-  const endpoints = shapePathEndpoints(shape.geometryPath);
+  const shapeType = shape.shapeType;
+  const hasShapeType = typeof shapeType === 'string';
+  if (hasShapeType && (!head?.type || head.type === 'none') && (!tail?.type || tail.type === 'none')) {
+    return;
+  }
+  const endpoints = shapePathEndpoints(shape.geometryPath, hasShapeType);
   if (!endpoints) return;
+  const solidArrow = hasShapeType && /^(?:bentConnector[2-5]|curvedConnector2)$/.test(shapeType);
   if (head?.type && head.type !== 'none') {
-    drawLineEnd(ctx, endpoints.start, endpoints.next, head, color, width);
+    drawLineEnd(ctx, endpoints.start, endpoints.next, head, color, width, solidArrow);
   }
   if (tail?.type && tail.type !== 'none') {
-    drawLineEnd(ctx, endpoints.end, endpoints.prev, tail, color, width);
+    drawLineEnd(ctx, endpoints.end, endpoints.prev, tail, color, width, solidArrow);
   }
 }
 
@@ -1165,14 +1171,32 @@ interface Point {
 }
 
 function shapePathEndpoints(
-  commands: ShapePrimitive['geometryPath']
+  commands: ShapePrimitive['geometryPath'],
+  useTangents: boolean
 ): { start: Point; next: Point; prev: Point; end: Point } | null {
   const points: Point[] = [];
-  for (const command of commands) {
-    if (command.type === 'move' || command.type === 'line')
-      points.push({ x: command.x, y: command.y });
-    else if (command.type === 'quad') points.push({ x: command.x, y: command.y });
-    else if (command.type === 'cubic') points.push({ x: command.x, y: command.y });
+  if (useTangents) {
+    const push = (x: number, y: number): void => {
+      const previous = points[points.length - 1];
+      if (!previous || previous.x !== x || previous.y !== y) points.push({ x, y });
+    };
+    for (const command of commands) {
+      if (command.type === 'close') continue;
+      if (command.type === 'quad') {
+        push(command.cpx, command.cpy);
+      } else if (command.type === 'cubic') {
+        push(command.cp1x, command.cp1y);
+        push(command.cp2x, command.cp2y);
+      }
+      push(command.x, command.y);
+    }
+  } else {
+    for (const command of commands) {
+      if (command.type === 'move' || command.type === 'line')
+        points.push({ x: command.x, y: command.y });
+      else if (command.type === 'quad') points.push({ x: command.x, y: command.y });
+      else if (command.type === 'cubic') points.push({ x: command.x, y: command.y });
+    }
   }
   if (points.length < 2) return null;
   return {
@@ -1189,7 +1213,8 @@ function drawLineEnd(
   toward: Point,
   end: { type?: string; width?: string; length?: string },
   color: string,
-  strokeWidth: number
+  strokeWidth: number,
+  solidArrow: boolean
 ): void {
   const angle = Math.atan2(toward.y - tip.y, toward.x - tip.x);
   const length = strokeWidth * lineEndScale(end.length, 4);
@@ -1219,8 +1244,10 @@ function drawLineEnd(
     ctx.lineTo(baseX + normalX, baseY + normalY);
     ctx.lineTo(baseX - normalX, baseY - normalY);
     ctx.closePath();
-    if (end.type === 'arrow') ctx.stroke();
-    else ctx.fill();
+    if (end.type === 'arrow') {
+      if (solidArrow) ctx.setLineDash([]);
+      ctx.stroke();
+    } else ctx.fill();
   }
   ctx.restore();
 }
