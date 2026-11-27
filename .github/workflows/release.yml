@@ -2,18 +2,29 @@ name: Release
 
 # Pending changesets → open/update a "chore: release" PR (version bumps +
 # CHANGELOGs). No pending changesets → run the gate and publish packages.
+# The schedule and a canary dispatch run only the canary job.
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       rehearse:
         description: Build and load-check every native package and Python binding without publishing.
         type: boolean
         default: false
+      canary:
+        description: Build an npm canary from this main commit once its CI passed, instead of releasing.
+        type: boolean
+        default: false
+      dry_run:
+        description: With canary, pack and install-check the canary without publishing it.
+        type: boolean
+        default: true
 
 concurrency:
-  group: ${{ github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref) }}
+  group: ${{ (github.event_name == 'schedule' || inputs.canary == true) && format('release-canary-{0}', github.run_id) || (github.ref == 'refs/heads/main' && inputs.rehearse != true && 'release' || format('release-rehearsal-{0}', github.ref)) }}
   cancel-in-progress: false
 
 defaults:
@@ -23,7 +34,7 @@ defaults:
 jobs:
   plan:
     name: Plan release
-    if: github.ref == 'refs/heads/main' || inputs.rehearse == true
+    if: github.event_name != 'schedule' && inputs.canary != true && (github.ref == 'refs/heads/main' || inputs.rehearse == true)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -205,6 +216,7 @@ jobs:
     needs: [plan, test, native-build, native-build-retry, python-build, python-build-retry]
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.rehearse != true &&
+      github.event_name != 'schedule' && inputs.canary != true &&
       needs.plan.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.native-build.result == 'success' ||
@@ -579,3 +591,208 @@ jobs:
           gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
             "repos/$GH_REPO/actions/workflows/wopi-image.yml/dispatches" \
             -f ref=main -F "inputs[publish]=true" -f "inputs[sha]=$SHA"
+
+  # A daily npm canary of the packages that install without a native package,
+  # built in this job's own checkout of this run's main commit once its CI passed.
+  # Nothing is committed, pushed or tagged, and this job has no OIDC token: only
+  # canary-publish can publish, and it runs nothing but the upload of the tarballs
+  # this job verified. The schedule runs only with CANARY_RELEASE=true.
+  canary:
+    name: Canary
+    if: >-
+      github.repository == 'openooxml/betteroffice' && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && vars.CANARY_RELEASE == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.canary == true))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      publish: ${{ steps.still-idle.outputs.idle }}
+    permissions:
+      contents: read
+      actions: read # read this commit's CI result and any running release
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run != false || inputs.rehearse == true) }}
+    steps:
+      # Provenance names this run's commit, so the canary is built from no other,
+      # and only while it is main's head: a rerun of an older run builds nothing.
+      - name: Check that this commit is main's head and its CI passed
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          conclusion=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&branch=main&event=push&per_page=1" --jq '.workflow_runs[0].conclusion // empty')
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice::main has moved on from $SHA to $head, so no canary is built from it."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+          elif [ "$conclusion" = success ]; then
+            echo "green=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CI on $SHA is ${conclusion:-not finished}, so no canary is built from it."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check that no release is running
+        id: idle
+        if: steps.commit.outputs.green == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          running=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=in_progress&per_page=100" --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          if [ "$running" != 0 ]; then
+            echo "::notice::A release run is in progress, so no canary is built now."
+            echo "idle=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "idle=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7.0.1
+        if: steps.idle.outputs.idle == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.idle.outputs.idle == 'true'
+        with:
+          bun-version: "1.4.3"
+
+      - uses: actions/setup-node@v7.1.0
+        if: steps.idle.outputs.idle == 'true'
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        if: steps.idle.outputs.idle == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Version the canary
+        id: prepare
+        if: steps.idle.outputs.idle == 'true'
+        run: node scripts/canary-release.mjs prepare "$RUNNER_TEMP/canary"
+
+      # A dry run still builds a commit that already has a canary.
+      - name: Compare with the published canary
+        id: published
+        if: steps.prepare.outputs.count != '' && steps.prepare.outputs.count != '0'
+        env:
+          SHA: ${{ github.sha }}
+        run: node scripts/canary-release.mjs published "$RUNNER_TEMP/canary" "$SHA"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.published.outputs.build == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.published.outputs.build == 'true'
+
+      - uses: ./.github/actions/wasm-toolchain
+        if: steps.published.outputs.build == 'true'
+
+      - uses: taiki-e/install-action@v2
+        if: steps.published.outputs.build == 'true'
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Build packages
+        if: steps.published.outputs.build == 'true'
+        run: bun run build:packages
+
+      - name: Pin and pack the canary
+        if: steps.published.outputs.build == 'true'
+        env:
+          SHA: ${{ github.sha }}
+        run: node scripts/canary-release.mjs pack "$RUNNER_TEMP/canary" "$SHA"
+
+      - name: Install the canary tarballs in an empty project
+        if: steps.published.outputs.build == 'true'
+        env:
+          SHA: ${{ github.sha }}
+        run: node scripts/canary-release.mjs verify "$RUNNER_TEMP/canary" "$SHA"
+
+      - name: Upload the canary tarballs
+        if: steps.published.outputs.build == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-canary
+          path: ${{ runner.temp }}/canary
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Check again that no release is running
+        id: still-idle
+        if: steps.published.outputs.fresh == 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          running=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=in_progress&per_page=100" --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          if [ "$running" != 0 ]; then
+            echo "::notice::A release run started meanwhile, so this canary is not published."
+            echo "idle=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "idle=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  canary-publish:
+    name: Publish the canary
+    needs: canary
+    if: needs.canary.outputs.publish == 'true' && (github.event_name != 'schedule' || vars.CANARY_RELEASE == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read # check again that no release is running
+      id-token: write # OIDC Trusted Publishing and provenance
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # Node 24 ships npm >= 11.5.1, required for OIDC publishing. No registry-url:
+      # npm reaches the public registry by default and the job writes no .npmrc.
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: "24"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-canary
+          path: ${{ runner.temp }}/canary
+
+      # A retry of this job alone runs these checks again, and a run older than the
+      # newest release run publishes nothing, so a retry never moves the tag back.
+      - name: Check that this commit is still main's head and no release is running
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          running=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?status=in_progress&per_page=100" --jq "[.workflow_runs[] | select(.id != $RUN_ID)] | length")
+          later=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?per_page=100" --jq "[.workflow_runs[] | select(.id > $RUN_ID)] | length")
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice::main has moved on from $SHA to $head, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif [ "$later" != 0 ]; then
+            echo "::notice::A later release run exists, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif [ "$running" != 0 ]; then
+            echo "::notice::A release run is in progress, so this canary is not published."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish the canary
+        if: steps.gate.outputs.go == 'true'
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+        run: node scripts/canary-release.mjs publish "$RUNNER_TEMP/canary"
