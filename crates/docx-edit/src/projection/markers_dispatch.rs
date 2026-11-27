@@ -90,16 +90,20 @@ impl ProjectionHooks for Hooks {
             }
         }
         if live("pPrChange") {
-            story.result.defer(self.family(), "pPrChange", story.id, index);
+            story
+                .result
+                .defer(self.family(), "pPrChange", story.id, index);
         } else {
             paragraph.property_changes = None;
         }
         if live("bookmarks") {
-            story.result.defer(self.family(), "bookmarks", story.id, index);
+            story
+                .result
+                .defer(self.family(), "bookmarks", story.id, index);
         } else {
-            paragraph.content.retain(|entry| {
-                !matches!(entry.node_type(), "bookmarkStart" | "bookmarkEnd")
-            });
+            paragraph
+                .content
+                .retain(|entry| !matches!(entry.node_type(), "bookmarkStart" | "bookmarkEnd"));
         }
         if story.state.markers.raw_mark_offsets[story
             .state

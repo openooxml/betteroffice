@@ -138,13 +138,8 @@ fn projects_live_language_on_runs_of_new_paragraphs() {
     let split = doc
         .split_paragraph(&ctx, Position::new("body", 2), None)
         .unwrap();
-    doc.insert_text(
-        &ctx,
-        Position::new("body", 3),
-        "New",
-        FormatPolicy::Inherit,
-    )
-    .unwrap();
+    doc.insert_text(&ctx, Position::new("body", 3), "New", FormatPolicy::Inherit)
+        .unwrap();
     let id = &split.second_para_id;
     assert!(
         !doc.paragraphs("body").unwrap()[1]
