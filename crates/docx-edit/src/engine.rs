@@ -3670,7 +3670,11 @@ fn resident_walk_plain(
     blocks: &(impl BlockSource + ?Sized),
     any_block: bool,
     (paragraph_merge, paragraph_split): (bool, bool),
-    (previous_spacing, line_px): (&[BlockSpacing], Option<f64>),
+    (previous_spacing, line_px, region): (
+        &[BlockSpacing],
+        Option<f64>,
+        Option<(&DocumentRegions, &[f64], &[f64])>,
+    ),
     (previous, previous_fingerprints, previous_dependencies, take): (
         &mut [MeasuredBlock],
         &[Fingerprint],
@@ -3758,11 +3762,33 @@ fn resident_walk_plain(
         let previous_fingerprint = previous_fingerprints[index];
         let previous_block = &previous[index].block;
         let spacing_clean = previous_spacing[index].matches(next_block, line_px);
+        let region_retained_block = region.and_then(|(regions, widths, previous_widths)| {
+            if !spacing_clean
+                || widths.get(block_index) != previous_widths.get(index)
+                || !previous_dependencies
+                    .get(index)
+                    .is_some_and(FontChainDependencies::matches_unchanged)
+                || matches!(previous[index].measure, BlockExtent::Unsupported)
+                    != matches!(next_block, LayoutBlock::Unsupported)
+            {
+                return None;
+            }
+            if next_block == previous_block {
+                return Some(next_block.clone());
+            }
+            let owned = normalize_retained_block(blocks, block_index, regions, 0);
+            (owned == *previous_block).then_some(owned)
+        });
         let (Some((next_id, _)), Some((previous_id, _))) = (
             paragraph_identity(next_block),
             paragraph_identity(previous_block),
         ) else {
-            if next_block != previous_block || !spacing_clean {
+            let retained_block = if region.is_some() {
+                region_retained_block
+            } else {
+                (spacing_clean && next_block == previous_block).then(|| next_block.clone())
+            };
+            let Some(retained_block) = retained_block else {
                 let (true, Some(next_id), Some(previous_id)) = (
                     any_block,
                     fragment_identity(next_block),
@@ -3792,7 +3818,7 @@ fn resident_walk_plain(
                 #[cfg(test)]
                 BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(block_index));
                 continue;
-            }
+            };
             dependencies.push(
                 previous_dependencies
                     .get(index)
@@ -3801,7 +3827,7 @@ fn resident_walk_plain(
             );
             let measure = reuse(previous, index, measured.len());
             measured.push(MeasuredBlock {
-                block: next_block.clone(),
+                block: retained_block,
                 measure,
             });
             block_fingerprints.push(previous_fingerprint);
@@ -3812,9 +3838,14 @@ fn resident_walk_plain(
         if key != block_key(previous_id) {
             return Err(identity());
         }
-        let mut next_retained_block = next_block.clone();
-        suppress_contextual_spacing(blocks, block_index, &mut next_retained_block);
-        if spacing_clean && next_retained_block == *previous_block {
+        let next_retained_block = if region.is_some() {
+            region_retained_block
+        } else {
+            let mut owned = next_block.clone();
+            suppress_contextual_spacing(blocks, block_index, &mut owned);
+            (spacing_clean && owned == *previous_block).then_some(owned)
+        };
+        if let Some(block) = next_retained_block {
             dependencies.push(
                 previous_dependencies
                     .get(index)
@@ -3822,10 +3853,7 @@ fn resident_walk_plain(
                     .unwrap_or_else(FontChainDependencies::unknown),
             );
             let measure = reuse(previous, index, measured.len());
-            measured.push(MeasuredBlock {
-                block: next_retained_block,
-                measure,
-            });
+            measured.push(MeasuredBlock { block, measure });
             block_fingerprints.push(previous_fingerprint);
             resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
             continue;
@@ -4185,11 +4213,17 @@ fn normalize_retained_block(
         regions,
         section_index,
     );
-    suppress_contextual_spacing(blocks, index, &mut owned);
-    docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(std::slice::from_mut(
-        &mut owned,
-    ));
+    suppress_retained_spacing(blocks, index, &mut owned);
     owned
+}
+
+fn suppress_retained_spacing(
+    blocks: &(impl BlockSource + ?Sized),
+    index: usize,
+    block: &mut LayoutBlock,
+) {
+    suppress_contextual_spacing(blocks, index, block);
+    docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(std::slice::from_mut(block));
 }
 
 fn retain_shape_measurements(next: &mut LayoutBlock, previous: &LayoutBlock) {
@@ -10567,6 +10601,7 @@ impl EngineSession {
                 false,
                 false,
                 RelayoutTrigger::Interactive,
+                None,
                 &mut |_, key, previous_block, next_block| {
                     let mut envelope = self
                         .measurement_envelope_for_block(key, previous_block)
@@ -10609,6 +10644,7 @@ impl EngineSession {
         any_block: bool,
         take: bool,
         trigger: RelayoutTrigger,
+        region: Option<(&DocumentRegions, &[f64])>,
         measure_dirty: &mut dyn FnMut(
             usize,
             &str,
@@ -10616,12 +10652,7 @@ impl EngineSession {
             &mut LayoutBlock,
         ) -> Result<BlockExtent, String>,
     ) -> Result<ResidentLayoutInput, String> {
-        let line_px = self
-            .regions
-            .borrow()
-            .as_ref()
-            .and_then(|state| state.fast_path.as_ref())
-            .map(|fast| fast.regions.paragraph_spacing_line_px(0));
+        let line_px = region.map(|(regions, _)| regions.paragraph_spacing_line_px(0));
         let mut pagination = self.pagination.borrow_mut();
         let pagination = &mut *pagination;
         let previous = pagination
@@ -10677,7 +10708,13 @@ impl EngineSession {
                 blocks,
                 any_block,
                 (paragraph_merge, paragraph_split),
-                (&pagination.measured_spacing, line_px),
+                (
+                    &pagination.measured_spacing,
+                    line_px,
+                    region.map(|(regions, widths)| {
+                        (regions, widths, pagination.measured_widths.as_slice())
+                    }),
+                ),
                 (
                     &mut previous.measured,
                     previous_fingerprints,
@@ -11003,10 +11040,7 @@ impl EngineSession {
                 }
                 let mut owned = normalize_measurement_block(next_block, regions, section_index);
                 fingerprint_blocks[index] = Some(owned.clone());
-                suppress_contextual_spacing(blocks, index, &mut owned);
-                docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
-                    std::slice::from_mut(&mut owned),
-                );
+                suppress_retained_spacing(blocks, index, &mut owned);
                 let ordinary_equal = width_clean
                     && (owned == *previous_block
                         || section_breaks_match_but_margins(&owned, previous_block));
@@ -11415,31 +11449,9 @@ impl EngineSession {
                 if let Some(safe) = pagination.measured_shift_safe.get_mut(index) {
                     *safe = None;
                 }
-                let mut owned = next_block.clone();
-                resolve_line_unit_spacing(
-                    &mut owned,
-                    regions.paragraph_spacing_line_px(section_index),
-                );
-                resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
-                if let LayoutBlock::SectionBreak(section_break) = &mut owned
-                    && !section_break.is_self_describing()
-                    && let Some(section) = regions.sections.get(section_index)
-                {
-                    if section.page_size.is_some() {
-                        section_break.page_size.clone_from(&section.page_size);
-                    }
-                    if section.margins.is_some() {
-                        section_break.margins.clone_from(&section.margins);
-                    }
-                    if section.columns.is_some() {
-                        section_break.columns.clone_from(&section.columns);
-                    }
-                }
+                let mut owned = normalize_measurement_block(next_block, regions, section_index);
                 let mut fingerprint_block = owned.clone();
-                suppress_contextual_spacing(blocks, index, &mut owned);
-                docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
-                    std::slice::from_mut(&mut owned),
-                );
+                suppress_retained_spacing(blocks, index, &mut owned);
                 if width_clean
                     && (owned == *previous_block
                         || section_breaks_match_but_margins(&owned, previous_block))
@@ -11852,6 +11864,11 @@ impl EngineSession {
                         let pagination = self.pagination.borrow();
                         if pagination.measured_font_chains.as_ref()
                             != Some(&measurement.font_chains)
+                            || pagination.measured_with != Some(measurement_fingerprint)
+                            || pagination.measured_float_width_policy
+                                != Some(FloatWidthPolicy::FirstBlock)
+                            || retained_grid_pitch(&pagination.measured_grid_pitches, 0)
+                                != regions.doc_grid_snap_pitch_px(0)
                         {
                             return Ok(None);
                         }
@@ -11893,6 +11910,7 @@ impl EngineSession {
                         true,
                         self.local_lowering.get(),
                         trigger,
+                        Some((&regions, &widths)),
                         &mut |index, _key, _previous_block, next_block| {
                             let width = widths.get(index).copied().unwrap_or(default_width);
                             resolve_line_unit_spacing(
@@ -18181,6 +18199,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     true,
                     true,
                     RelayoutTrigger::Preview,
+                    None,
                     &mut |_, _, _, _| { Err("measurement failed".to_owned()) }
                 )
                 .is_err()
@@ -29212,6 +29231,7 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                     false,
                     false,
                     RelayoutTrigger::Interactive,
+                    None,
                     &mut |index, key, _, _| {
                         dirty.push((index, key.to_owned()));
                         Ok(BlockExtent::Paragraph(ParagraphExtent {
