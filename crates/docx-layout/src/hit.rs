@@ -65,6 +65,7 @@ thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CARET_STOPS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static KEPT_RANGE_PAGE_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RANGE_RECT_PAGE_VISITS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -112,7 +113,14 @@ struct TextHit<'a> {
     doc_start: i64,
     doc_end: i64,
     stops_source: StopsSource<'a>,
-    caret_stops: std::cell::OnceCell<Vec<CaretStop>>,
+    caret_stops: StopsCell<'a>,
+}
+
+/// Where a text hit keeps its lazily built caret stops: in the hit, or in a
+/// [`RangeRectPages`] page that outlives the query.
+enum StopsCell<'a> {
+    Own(std::cell::OnceCell<Vec<CaretStop>>),
+    Kept(&'a std::cell::OnceCell<Vec<CaretStop>>),
 }
 
 enum StopsSource<'a> {
@@ -126,7 +134,11 @@ enum StopsSource<'a> {
 
 impl TextHit<'_> {
     fn stops(&self) -> &[CaretStop] {
-        self.caret_stops.get_or_init(|| {
+        let cell = match &self.caret_stops {
+            StopsCell::Own(cell) => cell,
+            StopsCell::Kept(cell) => *cell,
+        };
+        cell.get_or_init(|| {
             #[cfg(test)]
             CARET_STOPS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
             match self.stops_source {
@@ -161,7 +173,7 @@ impl TextHit<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct CaretStop {
     x: f64,
     position: i64,
@@ -428,7 +440,7 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 doc_start: ds,
                 doc_end: de,
                 stops_source: StopsSource::Text(t),
-                caret_stops: std::cell::OnceCell::new(),
+                caret_stops: StopsCell::Own(std::cell::OnceCell::new()),
             })
         }
         Primitive::GlyphRun(g) => {
@@ -469,7 +481,7 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                     glyphs: &g.glyphs,
                     rtl,
                 },
-                caret_stops: std::cell::OnceCell::new(),
+                caret_stops: StopsCell::Own(std::cell::OnceCell::new()),
             })
         }
         _ => None,
@@ -1856,6 +1868,339 @@ impl<'a> RangeRectIndex<'a> {
                 }),
         );
         out
+    }
+}
+
+/// Body range rects for many ranges across a display list's pages, with each page's
+/// [`RangeRectIndex`] — its text hits in document order with their caret stops, and its
+/// atoms — kept from one query to the next.
+///
+/// A page reuses what it kept while every input of the index is unchanged: each text hit's
+/// box, span and glyph run caret-stop inputs (text, glyph x, advance and cluster,
+/// direction), each atom's box and span, and which primitives they come from. Positions
+/// may all move by one delta, as they do on the pages after an edit; a query is then
+/// answered at the kept positions, which gives the same rects because neither the index
+/// nor a rect depends on where positions start. Any other difference builds the page's
+/// index again. Line identity and the text of a primitive's stops are read from the
+/// queried primitives, never from what was kept.
+#[derive(Debug, Default)]
+pub struct RangeRectPages {
+    pages: Vec<Option<KeptRangePage>>,
+}
+
+#[derive(Debug)]
+struct KeptRangePage {
+    /// The queried page's positions minus the kept ones.
+    shift: i64,
+    /// Text hits in primitive order.
+    hits: Vec<KeptHit>,
+    /// `hits` by start position, ties in primitive order.
+    hits_by_start: Vec<u32>,
+    widest: i64,
+    /// Atoms in primitive order.
+    atoms: Vec<KeptAtom>,
+    /// `atoms` by start position, ties in primitive order.
+    atoms_by_start: Vec<u32>,
+    widest_atom: i64,
+    /// No range outside `[low, high)` meets a hit or an atom.
+    reach: (i64, i64),
+    /// The glyph run texts and glyphs the kept caret stops were built from.
+    texts: String,
+    glyphs: Vec<(u64, u64, u32)>,
+}
+
+#[derive(Debug)]
+struct KeptHit {
+    primitive: usize,
+    x: f64,
+    width: f64,
+    baseline: f64,
+    top: f64,
+    bottom: f64,
+    doc_start: i64,
+    doc_end: i64,
+    /// A glyph run's stop inputs, as ranges of the page's `texts` and `glyphs`; a text
+    /// primitive's stops are built per query.
+    glyph_input: Option<(Range<usize>, Range<usize>, bool)>,
+    stops: std::cell::OnceCell<Vec<CaretStop>>,
+}
+
+#[derive(Debug)]
+struct KeptAtom {
+    primitive: usize,
+    start: i64,
+    end: i64,
+    rect: RangeRect,
+}
+
+fn glyph_key(glyph: &crate::display_list::PlacedGlyph) -> (u64, u64, u32) {
+    (glyph.x.to_bits(), glyph.advance.to_bits(), glyph.cluster)
+}
+
+impl KeptHit {
+    /// The hit as a query reads it: geometry and positions kept, line identity and stop
+    /// sources from `primitive`.
+    fn view<'a>(&'a self, primitive: &'a Primitive) -> Option<TextHit<'a>> {
+        let (attrs, stops_source) = match primitive {
+            Primitive::Text(run) => (&run.attrs, StopsSource::Text(run)),
+            Primitive::GlyphRun(run) => (
+                &run.attrs,
+                StopsSource::Glyphs {
+                    text: &run.text,
+                    glyphs: &run.glyphs,
+                    rtl: is_rtl(&run.attrs, run.rtl),
+                },
+            ),
+            _ => return None,
+        };
+        Some(TextHit {
+            attrs,
+            x: self.x,
+            width: self.width,
+            baseline: self.baseline,
+            top: self.top,
+            bottom: self.bottom,
+            doc_start: self.doc_start,
+            doc_end: self.doc_end,
+            stops_source,
+            caret_stops: if self.glyph_input.is_some() {
+                StopsCell::Kept(&self.stops)
+            } else {
+                StopsCell::Own(std::cell::OnceCell::new())
+            },
+        })
+    }
+}
+
+impl KeptRangePage {
+    fn new(prims: &[Primitive]) -> Self {
+        #[cfg(test)]
+        KEPT_RANGE_PAGE_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+        let mut texts = String::new();
+        let mut glyphs = Vec::new();
+        let mut hits = Vec::new();
+        let mut atoms = Vec::new();
+        for (primitive, prim) in prims.iter().enumerate() {
+            if let Some(hit) = text_hit(prim) {
+                let glyph_input = match hit.stops_source {
+                    StopsSource::Glyphs {
+                        text,
+                        glyphs: run,
+                        rtl,
+                    } => {
+                        let text_range = texts.len()..texts.len() + text.len();
+                        texts.push_str(text);
+                        let glyph_range = glyphs.len()..glyphs.len() + run.len();
+                        glyphs.extend(run.iter().map(glyph_key));
+                        Some((text_range, glyph_range, rtl))
+                    }
+                    StopsSource::Text(_) => None,
+                };
+                hits.push(KeptHit {
+                    primitive,
+                    x: hit.x,
+                    width: hit.width,
+                    baseline: hit.baseline,
+                    top: hit.top,
+                    bottom: hit.bottom,
+                    doc_start: hit.doc_start,
+                    doc_end: hit.doc_end,
+                    glyph_input,
+                    stops: std::cell::OnceCell::new(),
+                });
+            } else if let Some((start, end, rect)) = atom_rect(prim) {
+                atoms.push(KeptAtom {
+                    primitive,
+                    start,
+                    end,
+                    rect,
+                });
+            }
+        }
+        let mut hits_by_start: Vec<u32> = (0..hits.len() as u32).collect();
+        hits_by_start.sort_by_key(|&hit| hits[hit as usize].doc_start);
+        let widest = hits
+            .iter()
+            .map(|hit| hit.doc_end - hit.doc_start)
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        let mut atoms_by_start: Vec<u32> = (0..atoms.len() as u32).collect();
+        atoms_by_start.sort_by_key(|&atom| atoms[atom as usize].start);
+        let widest_atom = atoms
+            .iter()
+            .map(|atom| atom.end - atom.start)
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        let low = hits
+            .iter()
+            .map(|hit| hit.doc_start)
+            .chain(atoms.iter().map(|atom| atom.start))
+            .min()
+            .unwrap_or(0);
+        // a blank-line marker meets ranges that hold its start; anything else needs a
+        // range that starts before its end
+        let high = hits
+            .iter()
+            .map(|hit| {
+                if hit.doc_start == hit.doc_end {
+                    hit.doc_start.saturating_add(1)
+                } else {
+                    hit.doc_end
+                }
+            })
+            .chain(atoms.iter().map(|atom| atom.end))
+            .max()
+            .unwrap_or(0);
+        Self {
+            shift: 0,
+            hits,
+            hits_by_start,
+            widest,
+            atoms,
+            atoms_by_start,
+            widest_atom,
+            reach: (low, high),
+            texts,
+            glyphs,
+        }
+    }
+
+    /// How far `prims` moved every position from the kept ones, or `None` when any input
+    /// of the index differs.
+    fn shift_to(&self, prims: &[Primitive]) -> Option<i64> {
+        let mut delta = None;
+        let mut moved = |kept: i64, now: i64| {
+            let shift = now.checked_sub(kept)?;
+            (*delta.get_or_insert(shift) == shift).then_some(())
+        };
+        let mut hits = self.hits.iter();
+        let mut atoms = self.atoms.iter();
+        for (primitive, prim) in prims.iter().enumerate() {
+            if let Some(hit) = text_hit(prim) {
+                let kept = hits.next()?;
+                let same_box = [hit.x, hit.width, hit.baseline, hit.top, hit.bottom]
+                    .iter()
+                    .zip([kept.x, kept.width, kept.baseline, kept.top, kept.bottom])
+                    .all(|(now, kept)| now.to_bits() == kept.to_bits());
+                if kept.primitive != primitive
+                    || !same_box
+                    || hit.doc_end.checked_sub(hit.doc_start)
+                        != kept.doc_end.checked_sub(kept.doc_start)
+                {
+                    return None;
+                }
+                moved(kept.doc_start, hit.doc_start)?;
+                match (&kept.glyph_input, hit.stops_source) {
+                    (None, StopsSource::Text(_)) => {}
+                    (
+                        Some((text_range, glyph_range, kept_rtl)),
+                        StopsSource::Glyphs { text, glyphs, rtl },
+                    ) => {
+                        if *kept_rtl != rtl
+                            || self.texts[text_range.clone()] != *text
+                            || glyph_range.len() != glyphs.len()
+                            || !self.glyphs[glyph_range.clone()]
+                                .iter()
+                                .zip(glyphs)
+                                .all(|(kept, glyph)| *kept == glyph_key(glyph))
+                        {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            } else if let Some((start, end, rect)) = atom_rect(prim) {
+                let kept = atoms.next()?;
+                if kept.primitive != primitive
+                    || kept.rect != rect
+                    || end.checked_sub(start) != kept.end.checked_sub(kept.start)
+                {
+                    return None;
+                }
+                moved(kept.start, start)?;
+            }
+        }
+        (hits.next().is_none() && atoms.next().is_none()).then_some(delta.unwrap_or(0))
+    }
+
+    /// The merged per-line rects covering `[from, to)` of the queried positions, `prims`
+    /// being the page's primitives the index was checked against.
+    fn rects(&self, prims: &[Primitive], page_index: usize, from: i64, to: i64) -> Vec<RangeRect> {
+        let mut out = Vec::new();
+        // saturating only past every position, where it compares the same
+        let (from, to) = (
+            from.saturating_sub(self.shift),
+            to.saturating_sub(self.shift),
+        );
+        if from >= to || to <= self.reach.0 || from >= self.reach.1 {
+            return out;
+        }
+        let first = self.hits_by_start.partition_point(|&hit| {
+            self.hits[hit as usize].doc_start < from.saturating_sub(self.widest)
+        });
+        let pending: Vec<_> = self.hits_by_start[first..]
+            .iter()
+            .map(|&hit| &self.hits[hit as usize])
+            .take_while(|hit| hit.doc_start < to)
+            .filter_map(|hit| hit_rect(&hit.view(prims.get(hit.primitive)?)?, page_index, from, to))
+            .collect();
+        merge_line_rects(pending, &mut out);
+        let first = self.atoms_by_start.partition_point(|&atom| {
+            self.atoms[atom as usize].start < from.saturating_sub(self.widest_atom)
+        });
+        out.extend(
+            self.atoms_by_start[first..]
+                .iter()
+                .map(|&atom| &self.atoms[atom as usize])
+                .take_while(|atom| atom.start < to)
+                .filter(|atom| atom.end > from)
+                .map(|atom| RangeRect {
+                    page_index,
+                    ..atom.rect.clone()
+                }),
+        );
+        out
+    }
+}
+
+impl RangeRectPages {
+    /// Each `[from, to)` range's body rects across the pages of `pages` that paint
+    /// primitives, as [`RangeRectIndex`] answers them page by page in page order.
+    pub fn rects(&mut self, pages: &[DisplayPage], ranges: &[(i64, i64)]) -> Vec<Vec<RangeRect>> {
+        self.pages.truncate(pages.len());
+        self.pages.resize_with(pages.len(), || None);
+        for (kept, page) in self.pages.iter_mut().zip(pages) {
+            if page.primitives.is_empty() {
+                *kept = None;
+                continue;
+            }
+            match kept
+                .as_ref()
+                .and_then(|kept| kept.shift_to(&page.primitives))
+            {
+                Some(shift) => {
+                    if let Some(kept) = kept {
+                        kept.shift = shift;
+                    }
+                }
+                None => *kept = Some(KeptRangePage::new(&page.primitives)),
+            }
+        }
+        ranges
+            .iter()
+            .map(|&(from, to)| {
+                let (low, high) = (from.min(to), from.max(to));
+                self.pages
+                    .iter()
+                    .zip(pages)
+                    .enumerate()
+                    .filter_map(|(index, (kept, page))| Some((index, kept.as_ref()?, page)))
+                    .flat_map(|(index, kept, page)| kept.rects(&page.primitives, index, low, high))
+                    .collect()
+            })
+            .collect()
     }
 }
 
@@ -3437,6 +3782,177 @@ mod tests {
         assert_eq!(rects.len(), 2, "one band per cell: {rects:?}");
         assert!((rects[0].width - 40.0).abs() < 0.01);
         assert!((rects[1].width - 40.0).abs() < 0.01);
+    }
+
+    /// A five-glyph run of "hello" at `x` whose lines are told apart by `line`.
+    fn glyph_word(x: f64, baseline: f64, doc_start: i64, line: u64) -> serde_json::Value {
+        let glyphs: Vec<_> = (0..5)
+            .map(|index| {
+                serde_json::json!({
+                    "id": 1, "x": x + 8.0 * index as f64, "y": baseline,
+                    "cluster": index, "advance": 8
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "kind": "glyphRun", "fontId": 1, "size": 16, "color": "#000000",
+            "text": "hello", "docStart": doc_start, "docEnd": doc_start + 5,
+            "blockId": 1, "lineIndex": line, "glyphs": glyphs
+        })
+    }
+
+    /// Pages of glyph words, two per line, one paragraph each, with a text run, an image and
+    /// a blank line on the second page.
+    fn kept_rect_pages(count: usize) -> DisplayList {
+        let pages: Vec<_> = (0..count)
+            .map(|page| {
+                let start = 1 + page as i64 * 100;
+                let mut primitives: Vec<_> = (0..8)
+                    .map(|word| {
+                        let line = word as u64 / 2;
+                        let mut prim = glyph_word(
+                            100.0 + 60.0 * (word % 2) as f64,
+                            100.0 + 30.0 * line as f64,
+                            start + 6 * word as i64,
+                            line,
+                        );
+                        prim["paraId"] = format!("p{page}").into();
+                        prim
+                    })
+                    .collect();
+                if page == 1 {
+                    primitives.push(run(100.0, 260.0, 40.0, start + 60));
+                    primitives.push(image(100.0, 280.0, Some(start + 70)));
+                    let mut blank = run(100.0, 340.0, 0.0, start + 80);
+                    blank["text"] = "".into();
+                    blank["docEnd"] = (start + 80).into();
+                    primitives.push(blank);
+                }
+                serde_json::json!({
+                    "pageIndex": page, "width": 500, "height": 500, "primitives": primitives
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({ "pages": pages })).unwrap()
+    }
+
+    fn fresh_page_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
+        let (low, high) = (from.min(to), from.max(to));
+        dl.pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| !page.primitives.is_empty())
+            .flat_map(|(index, page)| RangeRectIndex::new(&page.primitives, index).rects(low, high))
+            .collect()
+    }
+
+    fn page_positions(page: &mut DisplayPage, delta: i64) {
+        for prim in &mut page.primitives {
+            let attrs = match prim {
+                Primitive::Text(value) => &mut value.attrs,
+                Primitive::GlyphRun(value) => &mut value.attrs,
+                Primitive::Image(value) => &mut value.attrs,
+                _ => continue,
+            };
+            attrs.doc_start = attrs.doc_start.map(|value| value + delta);
+            attrs.doc_end = attrs.doc_end.map(|value| value + delta);
+        }
+    }
+
+    /// Kept page indexes answer every range as indexes built afresh, while pages are edited,
+    /// moved, renumbered, added and dropped.
+    #[test]
+    fn kept_range_rect_pages_answer_like_fresh_indexes_after_page_changes() {
+        let mut kept = RangeRectPages::default();
+        let mut dl = kept_rect_pages(3);
+        let mut check = |dl: &DisplayList, label: &str| {
+            let ranges: Vec<(i64, i64)> = (-2..330)
+                .step_by(3)
+                .flat_map(|from| [(from, from + 1), (from + 9, from), (from, from + 40)])
+                .chain([(i64::MIN, i64::MAX), (5, 5)])
+                .collect();
+            let answered = kept.rects(&dl.pages, &ranges);
+            assert!(answered.iter().any(|rects| !rects.is_empty()), "{label}");
+            for (&(from, to), rects) in ranges.iter().zip(answered) {
+                assert_eq!(
+                    rects,
+                    fresh_page_rects(dl, from, to),
+                    "{label}: [{from}, {to})"
+                );
+            }
+        };
+        check(&dl, "initial");
+        check(&dl, "again");
+        for page in &mut dl.pages[1..] {
+            page_positions(page, -3);
+        }
+        check(&dl, "shifted");
+        let Primitive::GlyphRun(word) = &mut dl.pages[0].primitives[2] else {
+            unreachable!()
+        };
+        word.glyphs[1].cluster = 0;
+        word.glyphs[3].advance = 20.0;
+        check(&dl, "regrouped glyphs");
+        let Primitive::GlyphRun(word) = &mut dl.pages[2].primitives[5] else {
+            unreachable!()
+        };
+        word.attrs.line_index = Some(9);
+        word.attrs.doc_end = word.attrs.doc_end.map(|end| end + 1);
+        check(&dl, "uneven move");
+        let Primitive::Image(picture) = &mut dl.pages[1].primitives[9] else {
+            unreachable!()
+        };
+        picture.w = serde_json::Number::from(90);
+        check(&dl, "resized image");
+        dl.pages.swap(0, 2);
+        check(&dl, "moved pages");
+        dl.pages[1].primitives.clear();
+        check(&dl, "emptied page");
+        dl.pages.extend(kept_rect_pages(5).pages.split_off(3));
+        check(&dl, "added pages");
+        dl.pages.truncate(2);
+        check(&dl, "dropped pages");
+    }
+
+    /// A page whose primitives only moved keeps its index and its glyph runs' caret stops;
+    /// the edited page is the one indexed and segmented again.
+    #[test]
+    fn kept_range_rect_pages_rebuild_only_the_changed_page() {
+        let mut kept = RangeRectPages::default();
+        let mut dl = kept_rect_pages(4);
+        for page in &mut dl.pages {
+            page.primitives
+                .retain(|prim| matches!(prim, Primitive::GlyphRun(_)));
+        }
+        let ranges: Vec<(i64, i64)> = (0..4).map(|page| (page * 100, page * 100 + 100)).collect();
+        let count = |kept: &mut RangeRectPages, dl: &DisplayList| {
+            KEPT_RANGE_PAGE_BUILD_COUNT.with(|count| count.set(0));
+            CARET_STOPS_BUILD_COUNT.with(|count| count.set(0));
+            let answered = kept.rects(&dl.pages, &ranges);
+            let work = (
+                KEPT_RANGE_PAGE_BUILD_COUNT.with(std::cell::Cell::get),
+                CARET_STOPS_BUILD_COUNT.with(std::cell::Cell::get),
+            );
+            for (&(from, to), rects) in ranges.iter().zip(&answered) {
+                assert_eq!(*rects, fresh_page_rects(dl, from, to), "[{from}, {to})");
+            }
+            work
+        };
+        let (pages, _) = count(&mut kept, &dl);
+        assert_eq!(pages, 4);
+        assert_eq!(count(&mut kept, &dl), (0, 0), "nothing changed");
+        let Primitive::GlyphRun(word) = &mut dl.pages[1].primitives[3] else {
+            unreachable!()
+        };
+        word.text = "jello".into();
+        for page in &mut dl.pages[2..] {
+            page_positions(page, 4);
+        }
+        assert_eq!(
+            count(&mut kept, &dl),
+            (1, 8),
+            "the edited page is indexed again, the moved pages are not"
+        );
     }
 
     #[test]
