@@ -301,3 +301,58 @@ test('merged_cell_range_reports_one_rect_per_distinct_cell_without_overlap', asy
     }
   }
 }, TIMEOUT);
+
+const sized = (text: string, size: number) => `<w:tc><w:tcPr/><w:p><w:r><w:rPr><w:sz w:val="${size}"/></w:rPr><w:t>${text}</w:t></w:r></w:p></w:tc>`;
+
+function cellText(arm: CommandArm, texts: string[]) {
+  const stories = texts.map((text) => arm.engine.geometryReader.storyIds()
+    .find((story) => story.includes(':t') && arm.engine.paragraphs(story)[0]?.text === text)!);
+  return () => stories.map((story) => {
+    const paragraph = arm.engine.paragraphs(story)[0]!;
+    return arm.engine.selectionContext({ story, start: { paraId: paragraph.paraId, offset: 0 }, end: { paraId: paragraph.paraId, offset: paragraph.text.length } });
+  });
+}
+
+test('formatting_commands_cover_every_cell_of_a_multi_cell_range_and_undo_once_per_command', async () => {
+  const arm = await inCell(paragraph('Before') + table([sized('A', 20) + sized('B', 28), cell('C') + cell('D')]) + paragraph('After'));
+  const read = cellText(arm, ['A', 'B', 'C', 'D']);
+  const before = arm.engine.paragraphs('body').map((entry) => entry.paraId);
+  const body = () => before.map((paraId) => arm.engine.selectionContext({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 1 } }));
+  const outside = body();
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  const at = () => arm.state.selection!;
+
+  arm.engine.addUndoBoundary();
+  expect(execute(arm, command(arm, 'formatRange', { selection: at(), delta: { fontSize: 12 } })).status).toBe('applied');
+  expect(read().map((context) => context.fontSize)).toEqual([24, 24, 24, 24]);
+  expect(execute(arm, command(arm, 'undo', {})).status).toBe('applied');
+  expect(read().map((context) => context.fontSize)).toEqual([20, 28, null, null]);
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+
+  for (const [kind, payload, key] of [
+    ['toggleMark', { mark: { type: 'bold' } }, 'bold'],
+    ['toggleMark', { mark: { type: 'subscript' } }, 'subscript'],
+    ['toggleStrike', {}, 'strike'],
+  ] as const) {
+    arm.engine.addUndoBoundary();
+    expect(execute(arm, command(arm, kind, payload as never)).status).toBe('applied');
+    expect(read().map((context) => context[key])).toEqual([true, true, true, true]);
+    expect(arm.state.storedMarks).toBeNull();
+  }
+  arm.engine.addUndoBoundary();
+  expect(execute(arm, command(arm, 'toggleMark', { mark: { type: 'bold' } })).status).toBe('applied');
+  expect(read().map((context) => context.bold)).toEqual([false, false, false, false]);
+  arm.engine.addUndoBoundary();
+  expect(execute(arm, command(arm, 'clearFormatting', {})).status).toBe('applied');
+  expect(read().map((context) => [context.strike, context.subscript, context.fontSize])).toEqual(
+    [0, 1, 2, 3].map(() => [false, false, null]));
+  expect(body()).toEqual(outside);
+}, TIMEOUT);
+
+test('formatting_a_caret_in_one_cell_stores_marks_without_touching_the_cell', async () => {
+  const arm = await inCell();
+  const read = cellText(arm, ['A', 'B']);
+  expect(execute(arm, command(arm, 'toggleStrike', {}))).toMatchObject({ status: 'noop', editState: { toolbar: { strike: true } } });
+  expect(arm.state.storedMarks?.delta).toEqual({ strike: true });
+  expect(read().map((context) => context.strike)).toEqual([false, false]);
+}, TIMEOUT);
