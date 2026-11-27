@@ -100,6 +100,15 @@ describe('toolbar formatting adapter', () => {
     expect(selection().context.highlight).toBeNull();
   });
 
+  test('choosing the paragraph default font size leaves the selected runs unsized', async () => {
+    const { session, map, selection } = await selected('hello', 0, 5);
+    session.setParagraphAttrs(selection().range, { defaultTextFormatting: { fontSize: 24 } });
+
+    expect(applyYrsToolbarFormatting(session, map(), { type: 'fontSize', value: 12 })).toBe(false);
+    expect(session.storySegments('body').filter((segment) => segment.kind === 'text')
+      .map((segment) => segment.attributes.fontSize)).toEqual([undefined]);
+  });
+
   test('a collapsed caret leaves formatting to the stored caret marks', async () => {
     const { session, map } = await selected('hello', 2, 2);
     expect(applyYrsToolbarFormatting(session, map(), 'bold')).toBe(false);

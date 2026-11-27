@@ -53,6 +53,7 @@ function fixture(): Uint8Array {
     '<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>' +
     `<w:tr>${cell(run('Alpha', 20))}${cell(run('Beta', 28))}</w:tr>` +
     `<w:tr>${cell(run('Gamma'))}${cell(run('Del', 28) + run('ta'))}</w:tr></w:tbl>`;
+  const secondTable = `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cell(run('Other table'))}</w:tr></w:tbl>`;
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -68,7 +69,7 @@ function fixture(): Uint8Array {
   );
   parts.set(
     'word/document.xml',
-    toBytes(`<w:document xmlns:w="${W}"><w:body><w:p>${run('Body text')}</w:p>${table}<w:p>${run('After')}</w:p><w:sectPr/></w:body></w:document>`)
+    toBytes(`<w:document xmlns:w="${W}"><w:body><w:p>${run('Body text')}</w:p>${table}<w:p>${run('After')}</w:p>${secondTable}<w:sectPr/></w:body></w:document>`)
   );
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
@@ -250,4 +251,22 @@ test('a caret without a cell range still stores the formatting for the next type
   });
   expect(marks('italic')).toEqual([false, false, false, false]);
   expect(bridge.toolbarSelection(false)?.context.italic).toBe(true);
+});
+
+test('a caret in another table stores bold without changing the selected cells', async () => {
+  const { session, bridge, table, cells, caretIn, marks } = await opened();
+  caretIn(cells[0]!);
+  act(() => {
+    expect(bridge.command({ type: 'tableSelect', target: 'row' })).toBe(true);
+  });
+  const other = yrsCellStory(session, { ...table, tableIndex: 1, row: 0, column: 0 })!;
+  caretIn(other, 1);
+  expect(session.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 1 } });
+
+  act(() => {
+    expect(bridge.format('bold')).toBe(true);
+  });
+  expect(marks('bold')).toEqual([false, false, false, false]);
+  expect(session.selectionContext(whole(session, other)).bold).toBe(false);
+  expect(bridge.toolbarSelection(false)?.context.bold).toBe(true);
 });

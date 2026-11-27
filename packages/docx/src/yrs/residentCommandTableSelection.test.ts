@@ -419,6 +419,33 @@ test('formatting_an_empty_multi_cell_selection_keeps_stored_caret_marks', async 
   expect(arm.state.storedMarks).toEqual(stored);
 }, TIMEOUT);
 
+test('worker_formatting_stores_marks_outside_the_rectangle_and_keeps_them_in_empty_cells', async () => {
+  const arm = await inCell();
+  const selectedRow = cellText(arm, ['A', 'B']);
+  const story = tableAnchors(payload(arm)!).anchors[2]!.story!;
+  const paraId = arm.engine.paragraphs(story)[0]!.paraId;
+  expect(execute(arm, command(arm, 'selectTableCells', { target: 'row' })).status).toBe('noop');
+  expect(arm.engine.cellSelection()).toMatchObject({ anchor: { row: 0, column: 0 }, head: { row: 0, column: 1 } });
+
+  expect(execute(arm, command(arm, 'formatRange', {
+    selection: selection(paraId, 0, 0, story), delta: { bold: true },
+  }))).toMatchObject({ status: 'noop', editState: { toolbar: { bold: true } } });
+  expect(selectedRow().map((context) => context.bold)).toEqual([false, false]);
+  expect(arm.state.storedMarks).toMatchObject({ story, paraId, delta: { bold: true } });
+
+  const empty = '<w:tc><w:tcPr/><w:p/><w:p/></w:tc>';
+  const emptyArm = await inCell(paragraph('Before') + table([empty + empty]), '');
+  expect(execute(emptyArm, command(emptyArm, 'toggleMark', { mark: { type: 'italic' } })).status).toBe('noop');
+  expect(execute(emptyArm, command(emptyArm, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  const stored = emptyArm.state.storedMarks;
+  expect(stored?.delta).toEqual({ italic: true });
+
+  expect(execute(emptyArm, command(emptyArm, 'toggleMark', { mark: { type: 'bold' } }))).toMatchObject({
+    status: 'noop', editState: { toolbar: { bold: false, italic: true } },
+  });
+  expect(emptyArm.state.storedMarks).toEqual(stored);
+}, TIMEOUT);
+
 test('multi_cell_formatting_converges_with_concurrent_typing_and_undo_preserves_the_insertion', async () => {
   const bodyXml = paragraph('Before') + table([
     sized('Alpha', 20) + sized('Beta', 28), cell('Gamma') + cell('Delta'),
