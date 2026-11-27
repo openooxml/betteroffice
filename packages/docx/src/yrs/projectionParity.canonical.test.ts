@@ -34,6 +34,14 @@ function fieldWithParagraph(paragraph: Paragraph, ...rest: Paragraph[]): Paragra
   };
 }
 
+function textParagraph(text: string, sourceOrdinal: number): Paragraph {
+  return { type: 'paragraph', sourceOrdinal, content: [{ type: 'run', content: [{ type: 'text', text }] }] };
+}
+
+function tableWithParagraph(paragraph: Paragraph): BlockContent {
+  return { type: 'table', rows: [{ type: 'tableRow', cells: [{ type: 'tableCell', content: [paragraph] }] }] };
+}
+
 describe('DOCX projection canonical form', () => {
   it('validates the native document projection envelope version', () => {
     const raw = { project_document_json: () => JSON.stringify({
@@ -100,6 +108,41 @@ describe('DOCX projection canonical form', () => {
     expect(checkSourceOrdinals('body', [moved(first, second)], [source])).toEqual([]);
     expect(checkSourceOrdinals('body', [moved(second)], [source]).join('\n'))
       .toContain('content[1].structuredResult.blocks[0].sourceOrdinal: TS 3; native 4');
+  });
+
+  it('checks the surviving field paragraph ordinal after a nested deletion', () => {
+    const first = textParagraph('A', 3);
+    const second = textParagraph('B', 4);
+    const source = [fieldWithParagraph(first, second)];
+    const native = [fieldWithParagraph({ ...second, sourceOrdinal: 3 })];
+    expect(checkSourceOrdinals('body', native, source).join('\n'))
+      .toContain('structuredResult.blocks[0].sourceOrdinal: TS 4; native 3');
+  });
+
+  it('checks the source ordinals of swapped nested field paragraphs', () => {
+    const first = textParagraph('A', 3);
+    const second = textParagraph('B', 4);
+    const source = [fieldWithParagraph(first, second)];
+    const native = [fieldWithParagraph({ ...second, sourceOrdinal: 3 }, { ...first, sourceOrdinal: 4 })];
+    const differences = checkSourceOrdinals('body', native, source).join('\n');
+    expect(differences).toContain('structuredResult.blocks[0].sourceOrdinal: TS 4; native 3');
+    expect(differences).toContain('structuredResult.blocks[1].sourceOrdinal: TS 3; native 4');
+  });
+
+  it('checks nested ordinals when a new table shifts an existing table', () => {
+    const old = textParagraph('Old', 3);
+    const source = [tableWithParagraph(old)];
+    const native = [tableWithParagraph(textParagraph('New', 3)), tableWithParagraph({ ...old, sourceOrdinal: undefined })];
+    const differences = checkSourceOrdinals('body', native, source).join('\n');
+    expect(differences).toContain('blocks[0].rows[0].cells[0].content[0].sourceOrdinal: TS <missing>; native 3');
+    expect(differences).toContain('blocks[1].rows[0].cells[0].content[0].sourceOrdinal: TS 3; native <missing>');
+  });
+
+  it('rejects a reused source ordinal on a replacement table paragraph with a new ID', () => {
+    const source = [tableWithParagraph({ ...textParagraph('Old', 3), paraId: '11111111' })];
+    const native = [tableWithParagraph({ ...textParagraph('New', 3), paraId: '22222222' })];
+    expect(checkSourceOrdinals('body', native, source).join('\n'))
+      .toContain('blocks[0].rows[0].cells[0].content[0].sourceOrdinal: TS <missing>; native 3');
   });
 
   it('rejects paragraph keys on a deferred auxiliary story', () => {
