@@ -4197,8 +4197,10 @@ test('published part geometry reads header and footer aliases once per call', as
     })));
     expect(aliases).toHaveBeenCalledTimes(1);
 
-    aliases.mockReturnValueOnce('{"rIdHeader":false}');
-    expect(() => engine.partGeometry(frame)).toThrow('Invalid header/footer alias map');
+    aliases.mockReturnValueOnce('{"rIdHeader":false,"rIdFooter":"rIdCanonicalFooter"}');
+    expect(engine.partGeometry(frame)).toEqual(cold.map(part => ({
+      ...part, story: part.kind === 'header' ? 'hf:rIdHeader' : 'hf:rIdCanonicalFooter',
+    })));
   } finally {
     aliases.mockRestore();
     client.destroy();

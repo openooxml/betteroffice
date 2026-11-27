@@ -144,14 +144,18 @@ export function removePartDocument(engine: ResidentEngineSession, target: DocxPa
   return { ...document, package: { ...document.package, [name]: parts, relationships, document: body } };
 }
 
-export function readPartGeometry(readHeaderFooterAliases: () => ReadonlyMap<string, string>, frame: RetainedFrame): ResidentPartGeometry[] {
+export function readPartGeometry(engine: ResidentEngineSession, frame: RetainedFrame): ResidentPartGeometry[] {
   const result: ResidentPartGeometry[] = [];
   let aliases: ReadonlyMap<string, string> | undefined;
+  const partStory = (id: string) => {
+    if (!engine.geometryReader.headerFooterAliases) return engine.partStory(id);
+    aliases ??= engine.geometryReader.headerFooterAliases();
+    return `hf:${aliases.get(id) ?? id}`;
+  };
   for (const page of frame.pages) {
     if (page.page.unbuilt) continue;
     for (const part of [page.page.header, page.page.footer]) if (part) {
-      aliases ??= readHeaderFooterAliases();
-      result.push({ kind: part.kind, story: `hf:${aliases.get(part.rId) ?? part.rId}`,
+      result.push({ kind: part.kind, story: partStory(part.rId),
         pageIndex: page.pageIndex, pageId: page.pageId.toString(), x: 0, y: part.y, width: page.page.width, height: part.height });
     }
     for (const area of page.page.noteAreas ?? []) for (const id of area.noteIds ?? area.notes?.flatMap(note => note.id === undefined ? [] : [note.id]) ?? []) result.push({ kind: area.kind ?? 'footnote',

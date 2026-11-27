@@ -624,16 +624,13 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
       : {}),
   };
 
-  const readHeaderFooterAliases = (): ReadonlyMap<string, string> => {
-    const value: unknown = JSON.parse(session.header_footer_aliases_json());
-    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-      const entries = Object.entries(value);
-      if (entries.every((entry): entry is [string, string] => typeof entry[1] === 'string')) return new Map(entries);
-    }
-    throw new Error('Invalid header/footer alias map');
-  };
   const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
-    headerFooterAliases: readHeaderFooterAliases,
+    headerFooterAliases: () => {
+      const value: unknown = JSON.parse(session.header_footer_aliases_json());
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? new Map(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+        : new Map();
+    },
     resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
     headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
@@ -752,7 +749,7 @@ function residentEngineSession(clientId: number): ResidentEngineSession {
     setControlValue: (at, value) => applyCommandMutation(at.story, () =>
       session.set_content_control_value_index(at.story, at.index, JSON.stringify(value))),
     partDocument: hostDocument,
-    partGeometry: frame => readPartGeometry(readHeaderFooterAliases, frame),
+    partGeometry: frame => readPartGeometry(resident, frame),
     partStory: (id) => `hf:${(JSON.parse(session.header_footer_aliases_json()) as Record<string, string>)[id] ?? id}`,
     setPartDocument: (input, removeStories = []) => {
       sectionLayout = sectionSnapshot = null;
