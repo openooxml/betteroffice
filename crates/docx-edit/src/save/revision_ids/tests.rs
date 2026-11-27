@@ -432,7 +432,9 @@ fn paragraph_patch_payload_infos_are_not_session_sites() {
     assert!(ids.is_empty());
     let result = serde_json::to_value(&request).unwrap();
     assert_eq!(
-        result.pointer("/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/info/id"),
+        result.pointer(
+            "/paragraphIds/splicedParts/0/paragraphPatches/0/seed/units/0/payload/info/id"
+        ),
         Some(&json!(FIRST))
     );
 }
