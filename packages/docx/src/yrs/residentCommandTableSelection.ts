@@ -1,6 +1,6 @@
 import { isEngineTrap } from '../../../../shared/office-session/trap';
 import type { YrsCellLoc, YrsLoc, YrsStoryRange, YrsTableRange } from './index';
-import { cellSelectionRanges } from './cellSelectionFormatting';
+import { cellSelectionContainsCaret, cellSelectionRanges } from './cellSelectionFormatting';
 import type { DocxCommandSelection, DocxWorkerCommandEngine } from './residentCommandProtocol';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 import { createYrsPositionProjection, isUnavailableTablePayload } from './yrsPositionProjection';
@@ -176,8 +176,9 @@ function multiCellRange(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsTabl
 
 /** The whole text of each cell the multi-cell range at `focus` covers, or null without one. */
 export function selectedCellRanges(engine: DocxWorkerCommandEngine, focus: YrsLoc): YrsStoryRange[] | null {
-  const active = multiCellRange(engine, focus);
-  return active && cellSelectionRanges({
+  const active = readCellSelection(engine);
+  if (!active || !cellSelectionContainsCaret(engine, active, focus.story) || !resolveLiveCell(engine, focus.story)) return null;
+  return cellSelectionRanges({
     tablePayload: (story, index) => engine.tablePayload(story, index),
     paragraphSpans: (story) => engine.geometryReader.paragraphSpans(story),
   }, active);

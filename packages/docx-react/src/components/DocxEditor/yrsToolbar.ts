@@ -6,9 +6,11 @@ import type {
   YrsSelectionContext,
   YrsSession,
   YrsStoryRange,
+  YrsTableRange,
 } from '@betteroffice/docx/yrs';
 import {
   applyListToggle,
+  cellSelectionContainsCaret,
   cellSelectionRanges,
   compareYrsLocs,
   listOffAttrs,
@@ -87,6 +89,12 @@ function isCollapsed(range: YrsStoryRange): boolean {
   return range.start.paraId === range.end.paraId && range.start.offset === range.end.offset;
 }
 
+export function selectedYrsToolbarCells(session: YrsSession, range: YrsStoryRange): YrsTableRange | null {
+  if (!isCollapsed(range)) return null;
+  const cells = currentYrsTableTarget(session)?.range;
+  return cells && cellSelectionContainsCaret(session, cells, range.story) ? cells : null;
+}
+
 function paragraphRange(story: string, paraId: string): YrsStoryRange {
   return {
     story,
@@ -97,6 +105,38 @@ function paragraphRange(story: string, paraId: string): YrsStoryRange {
 
 function paragraphNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function effectiveFontSize(context: YrsSelectionContext): number | null {
+  if (context.fontSize != null) return context.fontSize;
+  const defaults = context.paragraphProperties.defaultTextFormatting;
+  if (!defaults || typeof defaults !== 'object') return null;
+  const value = (defaults as { fontSize?: unknown }).fontSize;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value && typeof value === 'object') {
+    const size = (value as { size?: unknown }).size;
+    if (typeof size === 'number' && Number.isFinite(size)) return size;
+  }
+  return null;
+}
+
+function hasExplicitFontSize(session: YrsSession, selection: YrsToolbarSelection): boolean {
+  const { range, startParagraphIndex, endParagraphIndex } = selection;
+  const indices = Array.from(
+    { length: endParagraphIndex - startParagraphIndex + 1 },
+    (_, index) => startParagraphIndex + index
+  );
+  return session.storySegmentUnits(range.story, indices).some((segments, index) => {
+    const start = index === 0 ? range.start.offset : 0;
+    const end = index === indices.length - 1 ? range.end.offset : Infinity;
+    let offset = 0;
+    return segments.some((segment) => {
+      const at = offset;
+      offset += segment.kind === 'text' ? segment.text.length : 1;
+      return segment.kind === 'text' && segment.attributes.fontSize != null &&
+        Math.min(offset, end) > Math.max(at, start);
+    });
+  });
 }
 
 /** Runs `edit` as one undo step although it writes several stories. */
@@ -299,11 +339,8 @@ export function applyYrsToolbarFormatting(
   const selection = currentYrsToolbarSelection(session, map);
   if (!selection) return false;
   const { context, range } = selection;
-  const collapsed = isCollapsed(range);
-  const cells = collapsed && selection.tableContext?.hasMultiCellSelection
-    ? currentYrsTableTarget(session)?.range
-    : undefined;
-  const ranges = cells ? cellSelectionRanges(session, cells) : collapsed ? [] : [range];
+  const cells = selectedYrsToolbarCells(session, range);
+  const ranges = cells ? cellSelectionRanges(session, cells) : isCollapsed(range) ? [] : [range];
   const format = (edit: () => void): boolean => {
     if (ranges.length === 0) return false;
     if (cells) inOneUndoStep(session, edit);
@@ -363,7 +400,12 @@ export function applyYrsToolbarFormatting(
         session.formatRange(target, { fontFamily: { ascii: action.value, hAnsi: action.value } })
       );
     case 'fontSize':
-      if (!cells && ranges.every((target) => session.selectionContext(target).fontSize === action.value * 2)) {
+      if (
+        !cells &&
+        ranges.length > 0 &&
+        effectiveFontSize(context) === action.value * 2 &&
+        (context.fontSize != null || !hasExplicitFontSize(session, selection))
+      ) {
         return false;
       }
       return each((target) => session.formatRange(target, { fontSize: action.value }));
