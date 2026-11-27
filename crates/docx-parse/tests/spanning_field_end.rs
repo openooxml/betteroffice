@@ -456,8 +456,10 @@ fn scan_story(xml: &str) -> SavedStory {
             "w:commentRangeStart" => Some(("cs", id)),
             "w:commentRangeEnd" => Some(("ce", id)),
             "w:commentReference" => Some(("cr", id)),
-            "w:moveFromRangeStart" | "w:moveFromRangeEnd"
-            | "w:moveToRangeStart" | "w:moveToRangeEnd" => Some((&name[2..], id)),
+            "w:moveFromRangeStart"
+            | "w:moveFromRangeEnd"
+            | "w:moveToRangeStart"
+            | "w:moveToRangeEnd" => Some((&name[2..], id)),
             "w:ins" | "w:del" | "w:moveFrom" | "w:moveTo" => {
                 if !opening.ends_with('/') {
                     revisions.push(id);
@@ -477,7 +479,9 @@ fn scan_story(xml: &str) -> SavedStory {
         let Some(&index) = paragraphs.last() else {
             continue;
         };
-        let visible = open.iter().all(|&field| !saved.story.fields[field].separates.is_empty());
+        let visible = open
+            .iter()
+            .all(|&field| !saved.story.fields[field].separates.is_empty());
         match name {
             "w:fldChar" if opening.contains(BEGIN) => {
                 saved.story.fields.push(FieldSpan {
@@ -626,9 +630,15 @@ fn assert_spanning_save(xml: &str, expected_xml: &str, case: &str) {
         actual.unpaired, expected.unpaired,
         "{case}: unpaired field characters"
     );
-    assert_eq!(actual.story, expected.story, "{case}: field boundaries and text");
+    assert_eq!(
+        actual.story, expected.story,
+        "{case}: field boundaries and text"
+    );
     assert_eq!(actual.tabs, expected.tabs, "{case}: tabs per paragraph");
-    assert_eq!(actual.ends_at, expected.ends_at, "{case}: field end offsets");
+    assert_eq!(
+        actual.ends_at, expected.ends_at,
+        "{case}: field end offsets"
+    );
     assert_eq!(actual.markers, expected.markers, "{case}: markers");
     assert_eq!(
         actual.marker_fields, expected.marker_fields,
@@ -1702,9 +1712,8 @@ fn mixed_bookmark_endpoints_leave_one_unpaired_field_character() -> Result<(), B
 fn bookmarked_opening_title_saves_without_its_page_number() -> Result<(), Box<dyn Error>> {
     let mut toc = word_toc_w4();
     let title = text_run("ENTRYONE");
-    let bookmarked = format!(
-        r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>{title}<w:bookmarkEnd w:id="41"/>"#
-    );
+    let bookmarked =
+        format!(r#"<w:bookmarkStart w:id="41" w:name="Toc1"/>{title}<w:bookmarkEnd w:id="41"/>"#);
     toc.paragraphs[0] = toc.paragraphs[0].replace(&title, &bookmarked);
     let source = toc.xml(&toc.paragraphs);
     let saved = save(
@@ -1720,7 +1729,13 @@ fn bookmarked_opening_title_saves_without_its_page_number() -> Result<(), Box<dy
     assert_eq!(actual.unpaired, 0);
     assert_eq!(
         actual.story.paragraphs,
-        ["ENTRYONE edited", "ENTRYTWO3", "ENTRYTHREE3", "", "BODYNEXT"]
+        [
+            "ENTRYONE edited",
+            "ENTRYTWO3",
+            "ENTRYTHREE3",
+            "",
+            "BODYNEXT"
+        ]
     );
     let toc = &actual.story.fields[0];
     assert_eq!((toc.begin, toc.end), (0, Some(3)));
@@ -1758,7 +1773,13 @@ fn whole_save_closes_repeated_unlinked_entries_at_the_opening() -> Result<(), Bo
     assert_eq!(actual.unpaired, 0);
     assert_eq!(
         actual.story.paragraphs,
-        ["Same title", "Same title3", "INSERTED", "Same title3", "BODYNEXT"]
+        [
+            "Same title",
+            "Same title3",
+            "INSERTED",
+            "Same title3",
+            "BODYNEXT"
+        ]
     );
     assert!(actual.story.fields.len() >= 2);
     assert_eq!(
@@ -1875,12 +1896,18 @@ fn closing_span_omits_simple_field_or_inline_control_text() -> Result<(), Box<dy
         ),
         (
             "inline_control",
-            format!(r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent>{text}</w:sdtContent></w:sdt>"#),
+            format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent>{text}</w:sdtContent></w:sdt>"#
+            ),
         ),
     ];
     for (wrapper, leading) in wrappers {
         let source = body("S1").replace(&text_run("SPANEND"), &leading);
-        let saved = save(&package(&source)?, Edit::Text("AFTERSPAN"), WriteRoute::Whole)?;
+        let saved = save(
+            &package(&source)?,
+            Edit::Text("AFTERSPAN"),
+            WriteRoute::Whole,
+        )?;
         let (actual, _, summary) = report_spanning_save(
             &document_xml(&saved)?,
             &source.replace("AFTERSPAN", "AFTERSPAN edited"),
@@ -1970,7 +1997,11 @@ fn selective_save_assigns_a_different_shape_id() -> Result<(), Box<dyn Error>> {
     ]
     .concat();
     let bytes = package(&source)?;
-    let selective = document_xml(&save(&bytes, Edit::Text("SECOND"), WriteRoute::ChangedParaIds)?)?;
+    let selective = document_xml(&save(
+        &bytes,
+        Edit::Text("SECOND"),
+        WriteRoute::ChangedParaIds,
+    )?)?;
     assert_spanning_save(
         &selective,
         &source.replace(">SECOND<", ">SECOND edited<"),
@@ -1983,7 +2014,10 @@ fn selective_save_assigns_a_different_shape_id() -> Result<(), Box<dyn Error>> {
             .map(str::to_owned)
     };
     let whole_id = final_id(&whole);
-    assert!(whole_id.is_some(), "shape in the edited field has no DrawingML ID");
+    assert!(
+        whole_id.is_some(),
+        "shape in the edited field has no DrawingML ID"
+    );
     assert_eq!(scan_story(&whole).unpaired, 0);
     let selective_id = final_id(&selective);
     assert_eq!(selective_id.as_deref(), Some("1085196063"));
