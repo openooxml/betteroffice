@@ -123,6 +123,15 @@ describe('canary set', () => {
     expect(canarySet(workspaces, natives).map(({ name }) => name)).toEqual(['@x/a', '@x/a-i18n', '@x/a-react']);
   });
 
+  test('finds a native dependency through a dependency cycle', () => {
+    const cycle = [
+      entry('@x/a-native', '1.1.0-canary.1', { private: true }),
+      entry('@x/p', '1.1.0-canary.1', { dependencies: { '@x/q': 'workspace:^', '@x/a-native': 'workspace:^' } }),
+      entry('@x/q', '1.1.0-canary.1', { dependencies: { '@x/p': 'workspace:^' } })
+    ];
+    expect([...nativeDependents(cycle, natives)].sort()).toEqual(['@x/p', '@x/q']);
+  });
+
   test('orders dependencies before their dependents', () => {
     const names = canarySet(workspaces, natives).map(({ name }) => name);
     expect(names.indexOf('@x/a')).toBeLessThan(names.indexOf('@x/a-react'));

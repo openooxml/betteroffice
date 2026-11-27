@@ -24,17 +24,17 @@ function internalDependencies(manifest, names) {
 export function nativeDependents(workspaces, nativeNames) {
   const byName = new Map(workspaces.map(({ manifest }) => [manifest.name, manifest]));
   const names = new Set(byName.keys());
-  const needs = new Map();
-  const visit = (name, seen = new Set()) => {
-    if (needs.has(name)) return needs.get(name);
-    if (nativeNames.has(name)) return true;
-    if (seen.has(name)) return false;
-    seen.add(name);
-    const result = internalDependencies(byName.get(name), names).some((dependency) => visit(dependency, seen));
-    needs.set(name, result);
-    return result;
-  };
-  return new Set([...names].filter((name) => !nativeNames.has(name) && visit(name)));
+  const needs = new Set([...names].filter((name) => nativeNames.has(name)));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const name of names) {
+      if (!needs.has(name) && internalDependencies(byName.get(name), names).some((dependency) => needs.has(dependency))) {
+        needs.add(name);
+        grew = true;
+      }
+    }
+  }
+  return new Set([...needs].filter((name) => !nativeNames.has(name)));
 }
 
 /** The canary set, dependencies before dependents: public, versioned as a canary, and installable without a native package. */
@@ -95,9 +95,9 @@ function npm(args, options = {}) {
   return execFileSync('npm', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...options });
 }
 
-function npmView(spec, field) {
+function npmView(spec, field, timeout = 60_000) {
   try {
-    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }).trim();
+    const out = npm(['view', spec, field, '--json'], { stdio: ['ignore', 'pipe', 'pipe'], timeout }).trim();
     return out ? JSON.parse(out) : undefined;
   } catch (error) {
     if (/\bE404\b/.test(`${error.stdout ?? ''}${error.stderr ?? ''}`)) return undefined;
@@ -256,9 +256,14 @@ function publish(destination) {
     if (attempt) pause(10_000);
     problems = [];
     for (const { name, version } of set) {
+      const left = Math.min(60_000, deadline - Date.now());
+      if (left <= 0) {
+        problems.push(`${name}: not checked before the deadline`);
+        continue;
+      }
       let tags;
       try {
-        tags = distTags(name);
+        tags = npmView(name, 'dist-tags', left) ?? {};
       } catch (error) {
         problems.push(`${name}: ${error.message}`);
         continue;
