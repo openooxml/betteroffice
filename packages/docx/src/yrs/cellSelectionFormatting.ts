@@ -1,4 +1,4 @@
-import type { YrsSession, YrsStoryRange, YrsTableRange } from './index';
+import type { YrsAuthor, YrsInlineFormatDelta, YrsSession, YrsStoryRange, YrsTableRange } from './index';
 import { tableAnchors, type TablePayload } from './storyPlainText';
 
 /** A run mark the selection context reports as on, off or mixed. @internal */
@@ -27,21 +27,22 @@ export function cellSelectionRanges(
 }
 
 /**
- * Toggles `mark` over `ranges` as one selection: off where it is set once all their text carries
- * it, otherwise on where it is not. A range whose story holds no text, such as an empty cell,
- * does not keep it from turning off.
+ * Sets the same mark direction in every range, using the direct cell text to choose it.
  * @internal
  */
 export function toggleAcross(
-  session: Pick<YrsSession, 'paragraphs' | 'selectionContext'>,
+  session: Pick<YrsSession, 'paragraphs' | 'selectionContext' | 'formatRange'>,
   ranges: readonly YrsStoryRange[],
   mark: YrsToggledMark,
-  toggle: (range: YrsStoryRange, on: boolean) => void
+  suggesting?: YrsAuthor
 ): void {
   const carried = ranges.map((range) => session.selectionContext(range)[mark] === true);
   const off = carried.some(Boolean) && ranges.every((range, index) =>
     carried[index] || session.paragraphs(range.story).every((paragraph) => paragraph.text === ''));
-  ranges.forEach((range, index) => {
-    if (carried[index] === off) toggle(range, !off);
-  });
+  let delta: YrsInlineFormatDelta = { [mark]: !off };
+  if (mark === 'superscript' || mark === 'subscript') {
+    const counterpart = mark === 'superscript' ? 'subscript' : 'superscript';
+    delta = { other: off ? { [mark]: null } : { [mark]: true, [counterpart]: null } };
+  }
+  for (const range of ranges) session.formatRange(range, delta, suggesting);
 }

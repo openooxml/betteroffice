@@ -6,7 +6,6 @@ import type {
   YrsSelectionContext,
   YrsSession,
   YrsStoryRange,
-  YrsToggledMark,
 } from '@betteroffice/docx/yrs';
 import {
   applyListToggle,
@@ -299,11 +298,12 @@ export function applyYrsToolbarFormatting(
 ): boolean {
   const selection = currentYrsToolbarSelection(session, map);
   if (!selection) return false;
-  const { range } = selection;
-  const cells = selection.tableContext?.hasMultiCellSelection
+  const { context, range } = selection;
+  const collapsed = isCollapsed(range);
+  const cells = collapsed && selection.tableContext?.hasMultiCellSelection
     ? currentYrsTableTarget(session)?.range
     : undefined;
-  const ranges = cells ? cellSelectionRanges(session, cells) : isCollapsed(range) ? [] : [range];
+  const ranges = cells ? cellSelectionRanges(session, cells) : collapsed ? [] : [range];
   const format = (edit: () => void): boolean => {
     if (ranges.length === 0) return false;
     if (cells) inOneUndoStep(session, edit);
@@ -311,8 +311,6 @@ export function applyYrsToolbarFormatting(
     return true;
   };
   const each = (apply: (target: YrsStoryRange) => void) => format(() => ranges.forEach(apply));
-  const toggle = (mark: YrsToggledMark, apply: (target: YrsStoryRange, on: boolean) => void) =>
-    format(() => toggleAcross(session, ranges, mark, apply));
 
   if (
     action === 'bold' ||
@@ -321,10 +319,12 @@ export function applyYrsToolbarFormatting(
     action === 'superscript' ||
     action === 'subscript'
   ) {
-    return toggle(action, (target) => session.toggleMark(target, { type: action }));
+    return cells ? format(() => toggleAcross(session, ranges, action))
+      : each((target) => session.toggleMark(target, { type: action }));
   }
   if (action === 'strikethrough') {
-    return toggle('strike', (target, on) => session.formatRange(target, { strike: on }));
+    return cells ? format(() => toggleAcross(session, ranges, 'strike'))
+      : each((target) => session.formatRange(target, { strike: context.strike !== true }));
   }
   if (action === 'clearFormatting') return each((target) => session.clearFormatting(target));
   if (action === 'bulletList' || action === 'numberedList') {
@@ -363,7 +363,7 @@ export function applyYrsToolbarFormatting(
         session.formatRange(target, { fontFamily: { ascii: action.value, hAnsi: action.value } })
       );
     case 'fontSize':
-      if (ranges.every((target) => session.selectionContext(target).fontSize === action.value * 2)) {
+      if (!cells && ranges.every((target) => session.selectionContext(target).fontSize === action.value * 2)) {
         return false;
       }
       return each((target) => session.formatRange(target, { fontSize: action.value }));
