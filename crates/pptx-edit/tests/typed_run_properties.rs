@@ -1,4 +1,4 @@
-use pptx_edit::{DeckSession, EditCtx, TextCaps, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, TextCaps, TextStyle, TextStylePatch};
 
 const NS: &str = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
 const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -88,6 +88,86 @@ fn text_typed_at_the_end_of_a_no_strike_run_stays_in_that_run() {
         saved,
         source.replace("<a:t>Hello</a:t>", "<a:t>Hello_X_</a:t>")
     );
+}
+
+#[test]
+fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
+    let source = slide(paragraphs);
+    let session = DeckSession::open(&deck(&source), 7101).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let story = snapshot.slides[0]
+        .shapes
+        .iter()
+        .flat_map(|shape| &shape.text_stories)
+        .next()
+        .unwrap();
+    let east_asian = r#"<a:ea typeface="SimSun"/>"#;
+
+    session
+        .format_text(
+            &EditCtx::local("font-family"),
+            &story.id,
+            0,
+            2,
+            &TextStylePatch {
+                font_family: Some("Microsoft YaHei".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let formatted = runs(&saved);
+    assert_eq!(formatted.len(), 1, "{}", paragraph(&saved));
+    let (properties, text) = formatted[0].split_once("<a:t>").unwrap();
+    assert_eq!(text, "中文</a:t>");
+    assert!(
+        properties.contains(r#"<a:latin typeface="Microsoft YaHei"/>"#),
+        "{properties}"
+    );
+    assert!(properties.contains(east_asian), "{properties}");
+
+    let formatted = session.story(&story.id).unwrap();
+    let style = &formatted.paragraphs[0].runs[0].style;
+    session
+        .insert_text(&EditCtx::local("typing"), &story.id, 2, "字", style)
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let typed = runs(&saved)
+        .into_iter()
+        .find(|run| run.ends_with("字</a:t>"))
+        .unwrap();
+    assert!(typed.contains(east_asian), "{typed}");
+
+    let snapshot = session.snapshot().unwrap();
+    let story = snapshot.slides[0]
+        .shapes
+        .iter()
+        .flat_map(|shape| &shape.text_stories)
+        .find(|current| current.id == story.id)
+        .unwrap();
+    assert_eq!(story.plain_text(), "中文字");
+    for run in &story.paragraphs[0].runs {
+        let style = serde_json::to_value(&run.style).unwrap();
+        let mut keys = style
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "bold",
+                "color",
+                "fontFamily",
+                "fontSizePt",
+                "italic",
+                "underline"
+            ]
+        );
+    }
 }
 
 #[test]
