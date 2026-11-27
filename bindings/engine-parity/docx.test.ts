@@ -3688,7 +3688,10 @@ const notYetCovered: string[] = [
 ];
 
 const NO_RASTERIZER = 'the wasm build carries no rasterizer; wasm draws PNG targets through the canvas in packages/docx/src/wasm/enginePng.ts';
+const PROJECTION_DIAGNOSTIC = 'WASM projection diagnostic for the parity harness without a native binding yet';
 const oneEngineOnly: OneEngineOnly[] = [
+  { name: 'EditSession.project_document_json', side: 'wasm', reason: 'PARKED', note: PROJECTION_DIAGNOSTIC },
+  { name: 'EditSession.project_story_json', side: 'wasm', reason: 'PARKED', note: PROJECTION_DIAGNOSTIC },
   { name: 'EditSession.renderPngTarget', side: 'native', reason: 'BY_DESIGN', note: NO_RASTERIZER },
   { name: 'EditSession.renderPngTargetReport', side: 'native', reason: 'BY_DESIGN', note: NO_RASTERIZER },
   { name: '__napiBindingTarget', side: 'native', reason: 'BUILD_METADATA', note: 'napi-rs build target marker' },
