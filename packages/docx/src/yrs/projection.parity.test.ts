@@ -10,6 +10,7 @@ import {
   check,
   checkComposition,
   checkStory,
+  collectProjectionKinds,
   compareSnapshots,
   createEditSession,
   edit,
@@ -21,6 +22,7 @@ import {
   random,
   seedParityFixtures,
   type AllowanceUsage,
+  type Deferral,
   type NativeProjection,
   type ProjectionEdit,
 } from './projectionParity.support';
@@ -102,19 +104,27 @@ describe('Native DOCX projection parity', () => {
         const source = canonicalStories(session, base);
         const next = random(name);
         const failures: string[] = [];
+        const projectionKinds = new Map<string, string>();
+        const deferrals = new Set<string>();
+        const recordDeferrals = (entries: readonly Deferral[]): void => {
+          for (const { family, kind } of entries) deferrals.add(`${family}/${kind}`);
+        };
         const checkState = (label: string, differences: string[]) => {
           if (differences.length) failures.push(`${label}\n${differences.join('\n')}`);
         };
         const checkProjections = (label: string, ts: Document, native: NativeProjection): void => {
+          recordDeferrals(native.deferred);
           checkState(`${label}, document`, check(session, ts, native, source, undefined, used));
           const expected = canonicalStories(session, ts);
           const roots = projectionRootOrder([...expected.keys()].filter((id) => dirtyProjectionStory(id) === id));
           const stories = roots.map((id) => {
             const story = nativeStoryProjection(raw, id);
+            recordDeferrals(story.deferred);
             checkState(`${label}, ${id}`, checkStory(expected, story, source, used));
             return story;
           });
           checkState(`${label}, composed stories versus document`, checkComposition(session, stories, native));
+          collectProjectionKinds(ts, projectionKinds);
         };
 
         let ts = yrsToDocument(session, base);
@@ -141,6 +151,7 @@ describe('Native DOCX projection parity', () => {
           if (roots.size > 0) {
             const incrementalTs = yrsToDocument(session, ts, { storyIds: roots });
             const incrementalNative = nativeProjection(raw, buffer, roots);
+            recordDeferrals(incrementalNative.deferred);
             checkState(`${label}, untouched TypeScript roots`, compareSnapshots(session, ts, incrementalTs, untouched));
             checkState(`${label}, untouched native roots`, compareSnapshots(session, native.document, incrementalNative.document, untouched));
 
@@ -162,6 +173,10 @@ describe('Native DOCX projection parity', () => {
           }
           checkProjections(label, ts, native);
         }
+        const projected = [...new Set([...projectionKinds]
+          .filter(([feature]) => !deferrals.has(feature)).map(([, kind]) => kind))].sort();
+        const deferred = [...deferrals].sort();
+        console.log(`projection ${name}: projected ${projected.length} kinds [${projected.join(', ')}]; deferred ${deferred.length} kinds [${deferred.join(', ')}]`);
         expect(edits.some((outcome) => !outcome.refusal), JSON.stringify(edits)).toBe(true);
         expect(failures, failures.join('\n\n')).toEqual([]);
         if (knownDisagreement) expect(sawDisagreement, knownDisagreement.reason).toBe(true);

@@ -4,7 +4,9 @@ import { join, resolve } from 'node:path';
 
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { assertSafeTree, decodeS9Blocks, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
-import type { BlockContent, Document } from '../types/document';
+import type {
+  BlockContent, Document, ParagraphContent, RunContent, Shape, StructuredFieldContent, StructuredFieldTree,
+} from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import initProjectionWasm, { EditSession } from '../wasm/generated/edit/docx_edit.js';
 import { dirtyProjectionStory } from './dirtyProjectionStories';
@@ -569,6 +571,85 @@ function deferredNode(value: unknown): Feature | undefined {
   }
   const field = DEFERRED_NODE_KINDS[type];
   return field ? { family: 'fields', kind: field } : undefined;
+}
+
+type ProjectionNode = BlockContent | ParagraphContent | RunContent;
+
+function projectionNodeFeature(node: ProjectionNode): Feature | undefined {
+  switch (node.type) {
+    case 'horizontalRule': return { family: 'fields', kind: 'horizontalRule' };
+    case 'footnoteRefMark':
+    case 'endnoteRefMark': return { family: 'fields', kind: 'noteMarks' };
+    case 'moveFromRangeStart':
+    case 'moveFromRangeEnd':
+    case 'moveToRangeStart':
+    case 'moveToRangeEnd': return { family: 'markers', kind: 'revisions' };
+    default: return deferredNode(node);
+  }
+}
+
+export function collectProjectionKinds({ package: pkg }: Document, kinds: Map<string, string>): void {
+  function visitBlock(block: BlockContent): void {
+    if (block.type !== 'rawXml') {
+      visit(block);
+      return;
+    }
+    const kind = /^\s*<w:bookmark(?:Start|End)(?=[\s/>])/.test(block.xml) ? 'bookmarks' : 'rawBlock';
+    kinds.set(`markers/${kind}`, kind);
+  }
+
+  function visitFieldContent(content?: StructuredFieldContent): void {
+    content?.inline?.forEach(visit);
+    content?.blocks?.forEach(visitBlock);
+  }
+
+  function visitFieldTree(tree: StructuredFieldTree): void {
+    visitFieldContent(tree.code);
+    visitFieldContent(tree.result);
+    tree.children?.forEach(visitFieldTree);
+  }
+
+  function visitShape(shape: Shape): void {
+    shape.textBody?.content.forEach(visit);
+    shape.children?.forEach(visitShape);
+  }
+
+  function visit(node: ProjectionNode): void {
+    const feature = projectionNodeFeature(node);
+    if (feature) kinds.set(`${feature.family}/${feature.kind}`, feature.kind);
+    else kinds.set(node.type, node.type);
+
+    if (node.type === 'table') {
+      for (const row of node.rows) for (const cell of row.cells) cell.content.forEach(visitBlock);
+    } else if (node.type === 'blockSdt') {
+      node.content.forEach(visitBlock);
+    } else if (node.type === 'hyperlink') {
+      (node.structuredChildren ?? node.children).forEach(visit);
+    } else if (node.type === 'shape') {
+      visitShape(node.shape);
+    } else if (node.type === 'opaqueDrawing' && node.textBox) {
+      visitShape(node.textBox);
+    } else if ('content' in node) {
+      node.content.forEach(visit);
+    }
+
+    if (node.type === 'complexField') {
+      node.fieldCode.forEach(visit);
+      node.fieldResult.forEach(visit);
+      visitFieldContent(node.structuredCode);
+    }
+    if (node.type === 'simpleField' || node.type === 'complexField') {
+      visitFieldContent(node.structuredResult);
+      if (node.fieldTree) visitFieldTree(node.fieldTree);
+    }
+  }
+
+  pkg.document.content.forEach(visitBlock);
+  pkg.headers?.forEach((part) => part.content.forEach(visitBlock));
+  pkg.footers?.forEach((part) => part.content.forEach(visitBlock));
+  for (const parts of [pkg.footnotes, pkg.endnotes, pkg.footnoteSeparators, pkg.endnoteSeparators, pkg.document.comments]) {
+    parts?.forEach((part) => part.content.forEach(visitBlock));
+  }
 }
 
 function wrapperChildren(node: unknown, kind: string): unknown[] {
