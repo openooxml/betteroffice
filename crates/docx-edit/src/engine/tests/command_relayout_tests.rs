@@ -1993,9 +1993,11 @@ fn cell_edits_across_table_classes_lay_out_as_a_full_recompute_does() {
             let bytes = engine
                 .with_display_list(|display| serde_json::to_vec(&(pages, display)).unwrap())
                 .unwrap();
-            let digest = bytes.into_iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-            });
+            let digest = bytes
+                .into_iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+                });
             println!(
                 "LAYOUT-DIGEST {label} {digest:016x} pages={} full={full}",
                 pages.len()
@@ -2066,12 +2068,12 @@ fn edits_after_a_partial_document_completes_lay_out_as_a_full_recompute_does() {
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
     let body = format!(
         concat!(
-        "{}",
-        r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>"#,
-        r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
-        r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
-        "{}",
-        r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#,
+            "{}",
+            r#"<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="1500"/><w:gridCol w:w="1500"/></w:tblGrid><w:tr>"#,
+            r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc>"#,
+            r#"<w:tc><w:tcPr><w:tcW w:w="1500" w:type="dxa"/></w:tcPr>{}</w:tc></w:tr></w:tbl>"#,
+            "{}",
+            r#"<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#,
         ),
         para("00001901", &run("Body text")),
         para("00001902", &run("Plain cell")),
@@ -2081,8 +2083,8 @@ fn edits_after_a_partial_document_completes_lay_out_as_a_full_recompute_does() {
     let header = format!(
         "<w:hdr {NS}>{}</w:hdr>",
         para(
-        "00001905",
-        r#"<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> pages</w:t></w:r>"#,
+            "00001905",
+            r#"<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> pages</w:t></w:r>"#,
         )
     );
     let bytes = Package::new(&body)
@@ -2133,7 +2135,10 @@ fn edits_after_a_partial_document_completes_lay_out_as_a_full_recompute_does() {
             .0
             + 2;
         engine.set_partial_document(false);
-        assert!(host.command(&story, at, at, Some("x")), "{variant}: the command applied");
+        assert!(
+            host.command(&story, at, at, Some("x")),
+            "{variant}: the command applied"
+        );
         assert_eq!(page_count(&engine), pages, "{variant}: page count");
         host.assert_matches_cold(variant);
     }
