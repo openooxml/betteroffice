@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import { act, fireEvent } from '@testing-library/react';
+import { resizeCursor } from '../interactions';
 import { open } from './peerlessTestHarness';
 import * as wasm from '../../../pptx/src/wasm/loader';
 
@@ -89,10 +90,11 @@ test('hover cursor follows the confirmed geometry under the pointer', async () =
   const word = { x: line.caretStops[2]!.x, y: line.y + line.height / 2 };
   const move = (x: number, y: number, buttons = 0, pointerId = 7) => {
     act(() => { fireEvent.pointerMove(value.stage, { clientX: x, clientY: y, pointerId, isPrimary: true, buttons }); });
-    return value.stage.style.cursor;
+    return value.canvas.style.cursor;
   };
-  expect(value.stage.style.cursor).toBe('default');
+  expect(value.canvas.style.cursor).toBe('default');
   expect(move(word.x, word.y)).toBe('text');
+  expect(value.stage.style.cursor).toBe('');
   expect(move(value.box.x + 1, value.box.y + value.box.h / 2)).toBe('move');
   expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
   expect(move(word.x, word.y, 1)).toBe('default');
@@ -103,28 +105,41 @@ test('hover cursor follows the confirmed geometry under the pointer', async () =
   act(() => { fireEvent.pointerUp(value.stage, value.point()); });
   expect(move(value.list.width - 2, value.list.height - 2)).toBe('default');
   await act(async () => { await value.api.commands!.execute('tool', { value: 'shape:rect' }); });
-  expect(value.stage.style.cursor).toBe('crosshair');
+  expect(value.canvas.style.cursor).toBe('crosshair');
   expect(move(word.x, word.y)).toBe('crosshair');
 });
 
-test('the capturing stage keeps the cursor shown when a press starts', async () => {
+test('the capturing stage shows the press cursor until the press ends', async () => {
   const value = await open();
   const line = value.box.lines[0]!;
-  const word = { clientX: line.caretStops[2]!.x, clientY: line.y + line.height / 2, pointerId: 7, isPrimary: true };
-  act(() => { fireEvent.pointerMove(value.stage, { ...word, buttons: 0 }); });
-  act(() => { fireEvent.pointerDown(value.canvas, { ...word, button: 0, buttons: 1, detail: 1 }); });
+  const word = value.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerDown(value.canvas, { ...word, buttons: 1 }); });
   expect(value.stage.setPointerCapture).toHaveBeenCalled();
   expect(value.stage.style.cursor).toBe('text');
-  act(() => { fireEvent.pointerUp(value.stage, { ...word, button: 0, buttons: 0 }); });
-  expect(value.stage.style.cursor).toBe('text');
+  act(() => { fireEvent.pointerUp(value.stage, word); });
+  expect(value.stage.style.cursor).toBe('');
+  expect(value.canvas.style.cursor).toBe('text');
   await value.select();
-  const handle = value.view.getByTestId('pptx-resize-se');
-  act(() => { fireEvent.pointerDown(handle, value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
-  expect(value.stage.style.cursor).toBe(getComputedStyle(handle).cursor);
-  expect(value.stage.style.cursor).toContain('resize');
-  act(() => { fireEvent.pointerUp(value.stage, value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
+  const corner = value.point(value.box.x + value.box.w, value.box.y + value.box.h);
+  act(() => { fireEvent.pointerDown(value.view.getByTestId('pptx-resize-se'), { ...corner, buttons: 1 }); });
+  expect(value.stage.style.cursor).toBe(resizeCursor('se'));
+  act(() => { fireEvent.pointerCancel(value.stage, corner); });
+  expect(value.stage.style.cursor).toBe('');
   await act(async () => { await value.api.commands!.execute('tool', { value: 'shape:rect' }); });
-  act(() => { fireEvent.pointerDown(value.view.getByTestId('pptx-resize-se'), value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
+  act(() => { fireEvent.pointerDown(value.view.getByTestId('pptx-resize-se'), { ...corner, buttons: 1 }); });
   expect(value.stage.style.cursor).toBe('crosshair');
-  act(() => { fireEvent.pointerCancel(value.stage, value.point(value.box.x + value.box.w, value.box.y + value.box.h)); });
+  act(() => { fireEvent.lostPointerCapture(value.stage, corner); });
+  expect(value.stage.style.cursor).toBe('');
+});
+
+test('a press resolves its cursor at the press point', async () => {
+  const value = await open();
+  const line = value.box.lines[0]!;
+  const word = value.point(line.caretStops[2]!.x, line.y + line.height / 2);
+  act(() => { fireEvent.pointerMove(value.canvas, { ...word, buttons: 0 }); });
+  expect(value.canvas.style.cursor).toBe('text');
+  const body = value.point(value.box.x + 1, value.box.y + value.box.h / 2);
+  act(() => { fireEvent.pointerDown(value.canvas, { ...body, buttons: 1 }); });
+  expect(value.stage.style.cursor).toBe('move');
+  act(() => { fireEvent.pointerUp(value.stage, body); });
 });
