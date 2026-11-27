@@ -12,7 +12,7 @@ use docx_parse::inline::{
 use docx_parse::paragraph::{Paragraph, ParagraphContent, TrackedInline};
 use docx_parse::shape::{DrawingSceneNode, Shape};
 use docx_parse::table::Table;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 mod collect;
 
@@ -63,7 +63,6 @@ fn count_work(count: impl FnOnce(&mut Work)) {
 pub enum RevisionIdsError {
     Exhausted,
     Unassigned(u64),
-    Serialize(String),
 }
 
 impl fmt::Display for RevisionIdsError {
@@ -71,18 +70,11 @@ impl fmt::Display for RevisionIdsError {
         match self {
             Self::Exhausted => formatter.write_str("no Word revision ids left in range"),
             Self::Unassigned(id) => write!(formatter, "unassigned session revision id {id}"),
-            Self::Serialize(message) => formatter.write_str(message),
         }
     }
 }
 
 impl std::error::Error for RevisionIdsError {}
-
-impl serde::ser::Error for RevisionIdsError {
-    fn custom<T: fmt::Display>(message: T) -> Self {
-        Self::Serialize(message.to_string())
-    }
-}
 
 /// Assigns revision IDs in a typed save request in each container's projection order.
 /// `session` holds the placeholders minted by the projection for session revisions.
@@ -219,9 +211,9 @@ impl SessionIds {
         placeholder(number).filter(|id| self.ids.contains(id))
     }
 
-    fn model_placeholder(&self, record: &Map<String, Value>) -> Option<u64> {
-        let id = self.placeholder(record.get("id").and_then(Value::as_f64)?)?;
-        record.get("author").and_then(Value::as_str)?;
+    fn model_placeholder<'v>(&self, mut get: impl FnMut(&str) -> Option<&'v Value>) -> Option<u64> {
+        let id = self.placeholder(get("id").and_then(Value::as_f64)?)?;
+        get("author").and_then(Value::as_str)?;
         Some(id)
     }
 }
@@ -311,6 +303,20 @@ fn push_pointer(pointer: &mut String, key: &str) {
         start = index + 1;
     }
     pointer.push_str(&key[start..]);
+}
+
+fn field_if_not_skipped<'v>(
+    path: &mut String,
+    skipped_views: &BTreeSet<String>,
+    key: &str,
+    value: Option<&'v Value>,
+) -> Option<&'v Value> {
+    let value = value?;
+    let length = path.len();
+    push_pointer(path, key);
+    let skipped = skipped_views.contains(path.as_str());
+    path.truncate(length);
+    (!skipped).then_some(value)
 }
 
 enum Site<'a> {
@@ -749,12 +755,64 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
 
     fn run_content(&mut self, content: &'a mut [RunContent]) {
         self.field_entries("content", content, |walker, child| match child {
-            RunContent::Shape { shape, .. } => walker.at("shape", |walker| walker.shape(shape)),
+            RunContent::Shape {
+                shape,
+                drawing_properties: _,
+            } => walker.at("shape", |walker| walker.shape(shape)),
             RunContent::OpaqueDrawing {
-                text_box: Some(shape),
-                ..
-            } => walker.at("textBox", |walker| walker.shape(shape)),
-            _ => {}
+                kind: _,
+                xml: _,
+                preview: _,
+                previews: _,
+                text_box,
+                drawing_properties: _,
+            } => {
+                if let Some(shape) = text_box {
+                    walker.at("textBox", |walker| walker.shape(shape));
+                }
+            }
+            RunContent::Text {
+                text: _,
+                preserve_space: _,
+            }
+            | RunContent::Tab
+            | RunContent::Break {
+                break_type: _,
+                clear: _,
+            }
+            | RunContent::Symbol { font: _, char: _ }
+            | RunContent::FootnoteRef {
+                id: _,
+                custom_mark_follows: _,
+            }
+            | RunContent::EndnoteRef {
+                id: _,
+                custom_mark_follows: _,
+            }
+            | RunContent::FootnoteRefMark
+            | RunContent::EndnoteRefMark
+            | RunContent::Separator
+            | RunContent::ContinuationSeparator
+            | RunContent::CommentReference { id: _ }
+            | RunContent::FieldChar {
+                char_type: _,
+                fld_lock: _,
+                dirty: _,
+                form_data: _,
+                raw_form_data_xml: _,
+            }
+            | RunContent::InstrText { text: _ }
+            | RunContent::SoftHyphen
+            | RunContent::NoBreakHyphen
+            | RunContent::Drawing {
+                image: _,
+                drawing_properties: _,
+            }
+            | RunContent::HorizontalRule { rule: _ }
+            | RunContent::Chart {
+                chart: _,
+                drawing_properties: _,
+            } => {}
         });
     }
 
@@ -792,7 +850,15 @@ impl<'a, 's, 'p> SiteWalker<'a, 's, 'p> {
     fn model(&mut self, model: &'a mut Value, kind: ModelKind) {
         match model {
             Value::Object(record) => {
-                if let Some(placeholder) = self.session.model_placeholder(record) {
+                let fields = &*record;
+                let placeholder = if !self.skipped_views.is_empty() {
+                    self.session.model_placeholder(|key| {
+                        field_if_not_skipped(&mut self.path, self.skipped_views, key, fields.get(key))
+                    })
+                } else {
+                    self.session.model_placeholder(|key| fields.get(key))
+                };
+                if let Some(placeholder) = placeholder {
                     self.push(placeholder, Site::Model(record.get_mut("id").unwrap()));
                     return;
                 }

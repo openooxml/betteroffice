@@ -93,7 +93,7 @@ fn revision_id_assignment_at_scale() {
             }
         }
         times.sort_by(f64::total_cmp);
-        let [collect, mutate, verify] = pass_times.map(|mut samples| {
+        let [collect_ms, assign_ms, write_ms] = pass_times.map(|mut samples| {
             samples.sort_by(f64::total_cmp);
             samples[2]
         });
@@ -102,7 +102,7 @@ fn revision_id_assignment_at_scale() {
             times[2], times[0], times[4],
         );
         println!(
-            "REVISION-ID-BENCH-PASS native paragraphs={paragraphs} collect_ms={collect:.3} mutate_ms={mutate:.3} verify_ms={verify:.3}",
+            "REVISION-ID-BENCH-PASS native paragraphs={paragraphs} collect_ms={collect_ms:.3} assign_ms={assign_ms:.3} write_ms={write_ms:.3}",
         );
     }
 }

@@ -1474,20 +1474,21 @@ fn stated_difference_arbitrary_model_keys_assign_in_sorted_order() {
     assert_eq!(frame["z"]["id"], json!(2));
 }
 
-#[test]
-fn reserves_parent_id_above_base_when_content_is_a_skipped_view() {
+const MODEL_ENTRIES: &str = "/document/content/0/content/0/content/0/shape/drawingModel/frame/entries";
+
+fn assign_with_skipped_model_field(
+    entry: Value,
+    field: &str,
+) -> (S13SaveRequest, BTreeMap<u64, u32>) {
     let mut shape = model_shape(json!([]));
     shape["drawingModel"] = json!({"frame": {"entries": [
-        {"id": 90, "author": "Source", "content": []},
+        entry,
         {"id": FIRST, "author": "Reviewer"}
     ]}, "otherSha256": ""});
     let mut request = request(json!([{"type": "paragraph", "content": [{
         "type": "run", "content": [{"type": "shape", "shape": shape}]
     }]}]));
-    let skipped_views = BTreeSet::from([
-        "/document/content/0/content/0/content/0/shape/drawingModel/frame/entries/0/content"
-            .to_owned(),
-    ]);
+    let skipped_views = BTreeSet::from([format!("{MODEL_ENTRIES}/0/{field}")]);
     let session = BTreeSet::from([FIRST]);
     let mut paths = Vec::new();
     let ids = assign_session_revision_ids_with_paths_skipping_views(
@@ -1497,7 +1498,47 @@ fn reserves_parent_id_above_base_when_content_is_a_skipped_view() {
         &skipped_views,
     )
     .unwrap();
+    (request, ids)
+}
+
+#[test]
+fn reserves_parent_id_above_base_when_content_is_a_skipped_view() {
+    let (_, ids) = assign_with_skipped_model_field(
+        json!({"id": 90, "author": "Source", "content": []}),
+        "content",
+    );
     assert_eq!(ids, BTreeMap::from([(FIRST, 91)]));
+}
+
+#[test]
+fn ignores_skipped_author_when_classifying_model_ids() {
+    for entry in [
+        json!({"id": 90, "author": "Source"}),
+        json!({"id": 90, "type": "commentRangeStart", "author": "Source"}),
+    ] {
+        let (_, ids) = assign_with_skipped_model_field(entry, "author");
+        assert_eq!(ids, BTreeMap::from([(FIRST, 1)]));
+    }
+}
+
+#[test]
+fn ignores_skipped_type_when_classifying_model_ids() {
+    let (_, ids) =
+        assign_with_skipped_model_field(json!({"id": 90, "type": "bookmarkStart"}), "type");
+    assert_eq!(ids, BTreeMap::from([(FIRST, 1)]));
+}
+
+#[test]
+fn leaves_skipped_placeholder_id_untouched_and_scans_siblings() {
+    let (request, ids) = assign_with_skipped_model_field(
+        json!({"id": FIRST, "author": "Source", "xml": "w:id='40'"}),
+        "id",
+    );
+    assert_eq!(ids, BTreeMap::from([(FIRST, 41)]));
+    let result = serde_json::to_value(request).unwrap();
+    let entries = result.pointer(MODEL_ENTRIES).unwrap();
+    assert_eq!(entries[0]["id"], json!(FIRST));
+    assert_eq!(entries[1]["id"], json!(41));
 }
 
 #[test]

@@ -5,7 +5,7 @@ use docx_parse::paragraph::{CommentRange, RangeEnd, RangeStart, TrackedChangeInf
 
 use super::{
     BlockContent, Collected, MAX_ID, ModelKind, ParagraphContent, RunContent, SessionIds, Value,
-    Write, block_key, push_pointer,
+    Write, block_key, field_if_not_skipped, push_pointer,
 };
 
 #[cfg(test)]
@@ -213,30 +213,52 @@ impl<const PATHS: bool> Collector<'_, PATHS> {
     }
 
     fn json_record<'v>(&mut self, get: impl Fn(&str) -> Option<&'v Value>, model: bool) -> bool {
-        let id = get("id").and_then(Value::as_f64);
-        let revision_id = || get("revisionId").and_then(Value::as_f64);
-        let revision_without_id = if id.is_none() { revision_id() } else { None };
+        if !self.skipped_views.is_empty() {
+            return self.classify_json_record(
+                |collector, key| {
+                    field_if_not_skipped(
+                        &mut collector.path,
+                        collector.skipped_views,
+                        key,
+                        get(key),
+                    )
+                },
+                model,
+            );
+        }
+        self.classify_json_record(|_, key| get(key), model)
+    }
+
+    fn classify_json_record<'v>(
+        &mut self,
+        get: impl Fn(&mut Self, &str) -> Option<&'v Value>,
+        model: bool,
+    ) -> bool {
+        let id = get(self, "id").and_then(Value::as_f64);
+        let revision_id =
+            |collector: &mut Self| get(collector, "revisionId").and_then(Value::as_f64);
+        let revision_without_id = if id.is_none() {
+            revision_id(self)
+        } else {
+            None
+        };
         if id.is_none() && revision_without_id.is_none() {
             return false;
         }
-        if get("author").is_some_and(Value::is_string) {
+        if get(self, "author").is_some_and(Value::is_string) {
             if model && let Some(placeholder) = id.and_then(|id| self.session.placeholder(id)) {
                 self.site(placeholder);
                 return true;
             }
-            let mut comment = get("content").is_some_and(Value::is_array);
-            if comment && !self.skipped_views.is_empty() {
-                comment = false;
-                self.at("content", |_| comment = true);
-            }
+            let comment = get(self, "content").is_some_and(Value::is_array);
             if let Some(id) = id {
                 self.number("id", id, !comment);
             }
-            if let Some(id) = id.map_or(revision_without_id, |_| revision_id()) {
+            if let Some(id) = id.map_or(revision_without_id, |_| revision_id(self)) {
                 self.number("revisionId", id, !comment);
             }
         } else if let Some(id) = id
-            && let Some(node_type) = get("type").and_then(Value::as_str)
+            && let Some(node_type) = get(self, "type").and_then(Value::as_str)
         {
             self.annotation(node_type, id);
         }

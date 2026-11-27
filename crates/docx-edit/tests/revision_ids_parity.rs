@@ -30,7 +30,7 @@ struct Case {
     skipped_views: BTreeSet<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Site {
     path: String,
     placeholder: u64,
@@ -329,7 +329,7 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
         )
     );
 
-    case.sites.remove(0);
+    let header_site = case.sites.remove(0);
     let error = check_case(&case, &mut census).unwrap_err();
     let author = header.replace("/id", "/author");
     assert_eq!(
@@ -337,6 +337,14 @@ fn detects_reordered_and_missing_sites_with_matching_wire_and_ids() {
         format!(
             "string paths differ: first JSON-only path Some({author:?}), first Rust-only path None"
         )
+    );
+
+    case.sites.push(header_site.clone());
+    case.sites.push(header_site);
+    let error = check_case(&case, &mut census).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!("first differing site at index 2: TypeScript Some(({header:?}, 1)), Rust None")
     );
 }
 
