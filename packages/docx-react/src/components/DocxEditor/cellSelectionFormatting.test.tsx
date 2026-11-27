@@ -14,6 +14,7 @@ import type { YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import { useYrsCoreSession, type YrsCoreSession } from './hooks/useYrsCoreSession';
+import type { DocxEditorCollaborationOptions } from './types';
 import { yrsCellStory } from './yrsCommands';
 
 const { act, cleanup, render } = await import('@testing-library/react');
@@ -76,14 +77,16 @@ function Harness({
   editorRef,
   bridgeRef,
   coreRef,
+  collaboration,
 }: {
   editorRef: RefObject<PagedEditorRef | null>;
   bridgeRef: { current: PagedEditorCommandBridge | null };
   coreRef: { current: YrsCoreSession | null };
+  collaboration?: DocxEditorCollaborationOptions;
 }) {
   const [host, setHost] = useState<Document | null>(null);
   const [bytes] = useState(fixture);
-  const core = useYrsCoreSession(true, host, null, bytes, 0, undefined, {
+  const core = useYrsCoreSession(true, host, null, bytes, 0, collaboration, {
     onHostDocument: (next) => setHost(next.document),
   });
   coreRef.current = host ? core : null;
@@ -114,20 +117,20 @@ function whole(session: YrsSession, story: string): YrsStoryRange {
   return { story, start: { paraId: spans[0]!.paraId, offset: 0 }, end: { paraId: last.paraId, offset: last.length } };
 }
 
-async function opened() {
+async function opened(collaboration?: DocxEditorCollaborationOptions) {
   const editorRef = createRef<PagedEditorRef>();
   const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
   const coreRef: { current: YrsCoreSession | null } = { current: null };
-  render(<Harness editorRef={editorRef} bridgeRef={bridgeRef} coreRef={coreRef} />);
+  render(<Harness editorRef={editorRef} bridgeRef={bridgeRef} coreRef={coreRef} collaboration={collaboration} />);
   await until(() => !!coreRef.current?.session && !!editorRef.current?.getYrsSession() && !!bridgeRef.current);
   const session = coreRef.current!.session!;
   const table = { story: 'body', tableIndex: 0 };
   const cells = [[0, 0], [0, 1], [1, 0], [1, 1]].map(([row, column]) => yrsCellStory(session, { ...table, row: row!, column: column! })!);
   const body = session.paragraphs('body').find((paragraph) => paragraph.text === 'Body text')!.paraId;
   const bodyText: YrsStoryRange = { story: 'body', start: { paraId: body, offset: 0 }, end: { paraId: body, offset: 9 } };
-  const caretIn = (story: string) => {
+  const caretIn = (story: string, offset = 0) => {
     act(() => {
-      session.setSelection({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 });
+      session.setSelection({ story, paraId: session.paragraphs(story)[0]!.paraId, offset });
       editorRef.current!.syncYrsInputState(false);
     });
   };
@@ -173,6 +176,51 @@ test('select table, then a toolbar size and bold, format every cell and undo one
   });
   expect(sizes()).toEqual([20, 28, null, null]);
 });
+
+test('table toolbar formatting converges with a concurrent cell insertion and undoes without removing it', async () => {
+  const a = await opened({ clientId: 8101 });
+  const b = await opened({ clientId: 8102, initialUpdate: a.session.encodeState() });
+  const read = ({ session, cells }: typeof a) => cells.map((story) => session.storySegments(story)
+    .filter((segment) => segment.kind === 'text')
+    .flatMap(({ text, attributes }) => Array.from(text, (character) => ({ character, attributes }))));
+  const exchange = () => {
+    const fromA = a.session.encodeStateAsUpdate(b.session.encodeStateVector());
+    const fromB = b.session.encodeStateAsUpdate(a.session.encodeStateVector());
+    act(() => {
+      a.session.applyUpdate(fromB);
+      b.session.applyUpdate(fromA);
+    });
+  };
+
+  a.caretIn(a.cells[0]!);
+  act(() => {
+    expect(a.bridge.command({ type: 'tableSelect', target: 'table' })).toBe(true);
+    expect(a.bridge.format('bold')).toBe(true);
+  });
+  b.caretIn(b.cells[2]!, 2);
+  await act(async () => {
+    b.editor().insertText('X');
+    await b.editor().flushPendingInput();
+  });
+  const typed = read(b);
+
+  exchange();
+  const merged = read(a);
+  expect(read(b)).toEqual(merged);
+  expect(merged.map((cell) => cell.map(({ character }) => character).join('')))
+    .toEqual(['Alpha', 'Beta', 'GaXmma', 'Delta']);
+  for (const { character, attributes } of merged.flat()) {
+    if (character !== 'X') expect(attributes).toMatchObject({ bold: true });
+  }
+
+  act(() => {
+    expect(a.editor().undo()).toBe(true);
+  });
+  expect(read(a)).toEqual(typed);
+  exchange();
+  expect(read(a)).toEqual(typed);
+  expect(read(b)).toEqual(typed);
+}, 20_000);
 
 test('a dragged range of cells takes the toolbar formatting on each of its cells only', async () => {
   const { session, bridge, table, cells, caretIn, sizes, marks } = await opened();

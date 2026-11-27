@@ -349,6 +349,48 @@ test('formatting_commands_cover_every_cell_of_a_multi_cell_range_and_undo_once_p
   expect(body()).toEqual(outside);
 }, TIMEOUT);
 
+test('multi_cell_formatting_converges_with_concurrent_typing_and_undo_preserves_the_insertion', async () => {
+  const bodyXml = paragraph('Before') + table([
+    sized('Alpha', 20) + sized('Beta', 28), cell('Gamma') + cell('Delta'),
+  ]) + paragraph('After');
+  const a = await inCell(bodyXml, 'Alpha');
+  const b = await openEngine([], { bodyXml, clientId: 8102, checkpoint: a.engine.encodeState() });
+  const stories = tableAnchors(payload(a)!).anchors.map(({ story }) => story!);
+  const read = ({ engine }: CommandArm) => stories.map((story) => engine.storySegments(story)
+    .filter((segment) => segment.kind === 'text')
+    .flatMap(({ text, attributes }) => Array.from(text, (character) => ({ character, attributes }))));
+  const exchange = () => {
+    const fromA = a.engine.encodeStateAsUpdate(b.engine.encodeStateVector());
+    const fromB = b.engine.encodeStateAsUpdate(a.engine.encodeStateVector());
+    a.engine.applyUpdate(fromB);
+    b.engine.applyUpdate(fromA);
+  };
+
+  expect(execute(a, command(a, 'selectTableCells', { target: 'table' })).status).toBe('noop');
+  expect(execute(a, command(a, 'formatRange', {
+    selection: a.state.selection!, delta: { bold: true, fontSize: 12 },
+  })).status).toBe('applied');
+  const story = stories[2]!;
+  const paraId = b.engine.paragraphs(story)[0]!.paraId;
+  expect(execute(b, command(b, 'insertText', { selection: selection(paraId, 2, 2, story), text: 'X' })).status).toBe('applied');
+  const typed = read(b);
+
+  exchange();
+  const merged = read(a);
+  expect(read(b)).toEqual(merged);
+  expect(merged.map((cell) => cell.map(({ character }) => character).join('')))
+    .toEqual(['Alpha', 'Beta', 'GaXmma', 'Delta']);
+  for (const { character, attributes } of merged.flat()) {
+    if (character !== 'X') expect(attributes).toMatchObject({ bold: true, fontSize: { size: 24 } });
+  }
+
+  expect(execute(a, command(a, 'undo', {})).status).toBe('applied');
+  expect(read(a)).toEqual(typed);
+  exchange();
+  expect(read(a)).toEqual(typed);
+  expect(read(b)).toEqual(typed);
+}, TIMEOUT);
+
 test('formatting_a_caret_in_one_cell_stores_marks_without_touching_the_cell', async () => {
   const arm = await inCell();
   const read = cellText(arm, ['A', 'B']);
