@@ -181,7 +181,7 @@ describe('Native DOCX projection parity', () => {
     for (const family of Object.keys(owners) as (keyof typeof owners)[]) {
       const entries = projectionAllowlist.filter((entry) => entry.family === family);
       const covered = entries.reduce((count, entry) => count + (used.get(entry) ?? 0), 0);
-      console.log(`${owners[family]} covers ${covered} differences with ${entries.length} allowlist entries`);
+      console.log(`${owners[family]} covers ${covered} differences and deferrals with ${entries.length} allowlist entries`);
     }
     const unused = projectionAllowlist.filter((entry) => !used.has(entry));
     const details = unused.map(({ family, kind, path, reason }) => `${family}/${kind} ${path}: ${reason}`);

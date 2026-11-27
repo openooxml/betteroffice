@@ -1,10 +1,11 @@
+use docx_parse::paragraph::Paragraph;
 use yrs::Any;
 
 use super::{
     Attrs, Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks,
     StoryPosition, runs::AuthoredRuns,
 };
-use crate::StorySegment;
+use crate::{ParagraphProperties, SegmentContent, StorySegment};
 
 pub(super) struct Hooks;
 pub(super) type StoryData = ();
@@ -41,17 +42,30 @@ impl ProjectionHooks for Hooks {
         segment: &StorySegment,
         _lowered: &mut Lowered,
     ) -> Result<(), ProjectionError> {
+        if matches!(segment.content, SegmentContent::Text(_)) {
+            return Ok(());
+        }
         for mark in MARKS
             .iter()
             .copied()
             .filter(|mark| super::story::has_mark(segment, mark))
         {
-            story.result.defer(
-                self.family(),
-                mark,
-                story.id,
-                Some(story.state.paragraph_index),
-            );
+            story.defer_here(self.family(), mark);
+        }
+        Ok(())
+    }
+
+    fn finish_paragraph(
+        &self,
+        _context: &mut ProjectionContext<'_, '_>,
+        story: &mut StoryPosition<'_>,
+        _properties: Option<&ParagraphProperties>,
+        source: Option<&Paragraph>,
+        paragraph: &mut Paragraph,
+    ) -> Result<(), ProjectionError> {
+        if let Some(rendered_break) = source.and_then(|source| source.rendered_page_break_before) {
+            story.defer_here(self.family(), "pageBreak");
+            paragraph.rendered_page_break_before = Some(rendered_break);
         }
         Ok(())
     }

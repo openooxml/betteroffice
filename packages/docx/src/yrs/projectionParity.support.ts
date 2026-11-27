@@ -619,6 +619,16 @@ class Comparison {
     private readonly used?: AllowanceUsage
   ) {}
 
+  checkDeferrals(): void {
+    for (const { family, kind, storyId, paragraph } of this.deferred) {
+      const match = projectionAllowlist.find((entry) =>
+        entry.family === family && entry.kind === kind && entry.path === 'deferred'
+      );
+      if (match) this.recordAllowance(match);
+      else this.differences.push(`story ${storyId}, paragraph ${paragraph ?? '-'}, deferred: ${family}/${kind}`);
+    }
+  }
+
   allow(feature: Feature, path: string, site: Site, count = 1): boolean {
     const match = this.allowance(feature, path, site);
     if (!match) return false;
@@ -979,6 +989,7 @@ export function check(
   used?: AllowanceUsage
 ): string[] {
   const comparison = new Comparison(native.deferred, false, used);
+  comparison.checkDeferrals();
   const expected = canonicalStories(session, ts);
   const actual = canonicalStories(session, native.document);
   compareStories(comparison, expected, actual, source);
@@ -1017,6 +1028,7 @@ export function checkStory(
 ): string[] {
   const { storyId, blocks, deferred, paragraphSessionKeys } = native;
   const comparison = new Comparison(deferred, false, used);
+  comparison.checkDeferrals();
   const actual = new Map<string, Story>();
   collectStory(actual, storyId, blocks);
   compareStories(comparison, expected, actual, source, new Set([storyId]));

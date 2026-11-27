@@ -39,7 +39,7 @@ impl ProjectionHooks for Hooks {
         _context: &mut ProjectionContext<'_, '_>,
         story: &mut StoryPosition<'_>,
         properties: Option<&ParagraphProperties>,
-        _source: Option<&Paragraph>,
+        source: Option<&Paragraph>,
         paragraph: &mut Paragraph,
     ) -> Result<(), ProjectionError> {
         if matches!(
@@ -52,6 +52,10 @@ impl ProjectionHooks for Hooks {
                 story.id,
                 Some(story.state.paragraph_index),
             );
+        }
+        if let Some(section) = source.and_then(|source| source.section_properties.as_ref()) {
+            story.defer_here(self.family(), "sectionRanges");
+            paragraph.section_properties = Some(section.clone());
         }
         if paragraph.section_properties.is_some()
             || properties.is_some_and(|properties| {

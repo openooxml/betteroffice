@@ -64,13 +64,13 @@ pub(super) fn new(
         text_id: source.and_then(|source| source.text_id.clone()),
         extra_attributes: source.map_or_else(Vec::new, |source| source.extra_attributes.clone()),
         formatting,
-        property_changes: source.and_then(|source| source.property_changes.clone()),
-        p_pr_ins: source.and_then(|source| source.p_pr_ins.clone()),
-        p_pr_del: source.and_then(|source| source.p_pr_del.clone()),
+        property_changes: None,
+        p_pr_ins: None,
+        p_pr_del: None,
         content,
         list_rendering: None,
-        rendered_page_break_before: source.and_then(|source| source.rendered_page_break_before),
-        section_properties: source.and_then(|source| source.section_properties.clone()),
+        rendered_page_break_before: None,
+        section_properties: None,
     }
 }
 

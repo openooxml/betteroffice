@@ -9,7 +9,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::paragraph::{good, same_option, set};
-use super::{Attrs, ProjectionContext, ProjectionError, StoryState, decode, json_value};
+use super::{
+    Attrs, ProjectionContext, ProjectionError, ProjectionFamily, StoryPosition, StoryState, decode,
+    json_value,
+};
 
 const ON_OFF: &[&str] = &[
     "bold",
@@ -143,7 +146,7 @@ impl<'a> AuthoredRuns<'a> {
 
 pub(super) fn lower_plain<'a>(
     context: &mut ProjectionContext<'_, '_>,
-    state: &StoryState,
+    story: &mut StoryPosition<'_>,
     paragraph_attrs: &Attrs,
     items: &[(&str, &Attrs)],
     authored: &'a AuthoredRuns<'_>,
@@ -157,7 +160,8 @@ pub(super) fn lower_plain<'a>(
         .map(|(_, attrs)| attributes(attrs))
         .collect::<Result<_, _>>()?;
     if restore_boundaries
-        && let Some(content) = restore(&authored.boundaries, &sources, &live, items, &live_attrs)?
+        && let Some(content) =
+            restore(story, &authored.boundaries, &sources, &live, items, &live_attrs)?
     {
         return Ok(content);
     }
@@ -191,7 +195,7 @@ pub(super) fn lower_plain<'a>(
             let next = span.map_or(end, |span| span.range.end.min(end));
             let text: String = live_chars[offset..next].iter().collect();
             let source = span.and_then(|span| sources[span.index].1);
-            let run = make_run(context, state, paragraph_attrs, &text, &attrs, source)?;
+            let run = make_run(context, &story.state, paragraph_attrs, &text, &attrs, source)?;
             let mut key = attrs.clone();
             for name in ["hyperlink", "ins", "del"] {
                 key.remove(name);
@@ -860,6 +864,7 @@ fn properties_equal(left: &Properties, right: &Properties) -> bool {
 }
 
 fn restore(
+    story: &mut StoryPosition<'_>,
     boundaries: &[OriginalBoundary],
     sources: &[(String, Option<&TextFormatting>)],
     text: &str,
@@ -935,7 +940,15 @@ fn restore(
             direction_scopes: decode(expected.get("directionScopes"))?.unwrap_or_default(),
         }));
     }
-    Ok(current.next().is_none().then_some(result))
+    if current.next().is_some() {
+        return Ok(None);
+    }
+    for boundary in boundaries {
+        if boundary.property_changes.is_some() {
+            story.defer_here(ProjectionFamily::Markers, "rPrChange");
+        }
+    }
+    Ok(Some(result))
 }
 
 struct SourceSpan {
@@ -1120,6 +1133,7 @@ mod tests {
         let attrs = json!({"underline":{"style":"single","color":{"rgb":"FF0000"}}});
         assert!(
             restore(
+                &mut StoryPosition::default(),
                 &[boundary],
                 &[],
                 "A",

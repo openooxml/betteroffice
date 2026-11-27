@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 use std::sync::Arc;
 
 use docx_parse::BlockContent;
@@ -18,6 +19,13 @@ struct PlacedSegment {
     offset: usize,
     segment: StorySegment,
     projected: Option<Vec<ParagraphContent>>,
+}
+
+impl StoryPosition<'_> {
+    pub(super) fn defer_here(&mut self, family: ProjectionFamily, kind: &str) {
+        self.result
+            .defer(family, kind, self.id, Some(self.state.paragraph_index));
+    }
 }
 
 pub(super) fn project(
@@ -69,7 +77,7 @@ pub(super) fn project(
                     .flatten();
                 let source = context.source.paragraphs.get(&properties.para_id).cloned();
                 if let Some(source) = &source {
-                    raw_blocks.before_paragraph(source, &mut story.result.blocks);
+                    raw_blocks.before_paragraph(source, &mut story);
                 }
                 finish_paragraph(
                     context,
@@ -89,7 +97,7 @@ pub(super) fn project(
                 if let Some(id) = &source_id
                     && let Some(block) = context.source.containers.get(id)
                 {
-                    raw_blocks.before_block(block, &mut story.result.blocks);
+                    raw_blocks.before_block(block, &mut story);
                 }
                 let hook = embed_hook(kind, payload);
                 let mut lowered = hook.lower(
@@ -102,9 +110,8 @@ pub(super) fn project(
                     },
                 )?;
                 if matches!(lowered, Lowered::Deferred) {
-                    story
-                        .result
-                        .defer(hook.family(), kind, id, Some(story.state.paragraph_index));
+                    let source = source_id.and_then(|id| context.source.containers.get(&id));
+                    lowered = retain_container(&mut story, hook.family(), kind, source);
                     defer_descendant_containers(
                         context,
                         &mut story.result,
@@ -112,14 +119,6 @@ pub(super) fn project(
                         payload,
                         &mut deferred_stories,
                     )?;
-                    if let Some(source) =
-                        source_id.and_then(|id| context.source.containers.get(&id))
-                    {
-                        lowered = Lowered::Blocks(StoryProjection {
-                            blocks: vec![source.clone()],
-                            ..StoryProjection::default()
-                        });
-                    }
                 }
                 for hook in HOOKS {
                     hook.wrap(context, &mut story, &segment, &mut lowered)?;
@@ -160,7 +159,7 @@ pub(super) fn project(
     if !items.is_empty() {
         finish_paragraph(context, &mut story, &items, None, None, None)?;
     }
-    raw_blocks.finish(&mut story.result.blocks);
+    raw_blocks.finish(&mut story);
     for hook in HOOKS {
         hook.finish_story(context, &mut story)?;
     }
@@ -237,6 +236,22 @@ fn tabs_as_embeds(segments: Vec<StorySegment>) -> Vec<StorySegment> {
 fn container(kind: &str, payload: &Attrs) -> bool {
     (crate::segments::is_block_embed(kind) && matches!(kind, "table" | "blockSdt"))
         || (kind == "opaque" && matches!(opaque_type(payload), Some("blockSdt" | "pageBreak")))
+}
+
+fn retain_container(
+    story: &mut StoryPosition<'_>,
+    family: ProjectionFamily,
+    kind: &str,
+    source: Option<&BlockContent>,
+) -> Lowered {
+    story.defer_here(family, kind);
+    match source {
+        Some(source) => Lowered::Blocks(StoryProjection {
+            blocks: vec![source.clone()],
+            ..StoryProjection::default()
+        }),
+        None => Lowered::Deferred,
+    }
 }
 
 pub(super) fn opaque_type(payload: &Attrs) -> Option<&str> {
@@ -365,7 +380,7 @@ fn finish_paragraph(
         return Ok(());
     }
     if let Some(source) = source {
-        carry_side_markers(&mut content, &source.content);
+        carry_side_markers(story, &mut content, &source.content);
     }
     let formatting = properties
         .map(|properties| {
@@ -406,14 +421,7 @@ fn lower_items(
                 .any(|kind| has_mark(&item.segment, kind))
     };
     if items.iter().all(plain) {
-        return runs::lower_plain(
-            context,
-            &story.state,
-            attrs,
-            &text_items(items),
-            &authored,
-            None,
-        );
+        return runs::lower_plain(context, story, attrs, &text_items(items), &authored, None);
     }
 
     let mut offsets = Vec::with_capacity(items.len() + 1);
@@ -431,7 +439,7 @@ fn lower_items(
     }
     offsets.push(live.len());
     let mapped = runs::MappedSourceRuns::new(&authored, live);
-    let source_slice = |start: usize, end: usize| mapped.slice(offsets[start]..offsets[end]);
+    let live_range = |start: usize, end: usize| offsets[start]..offsets[end];
     let mut fallback = SourceInlines::new(source);
     let mut content = Vec::new();
     let paragraph_end = story.state.offset;
@@ -453,11 +461,11 @@ fn lower_items(
             let text = text_items(&items[index..end]);
             content.extend(runs::lower_plain(
                 context,
-                &story.state,
+                story,
                 attrs,
                 &text,
                 &authored,
-                Some(source_slice(index, end)),
+                Some(mapped.slice(live_range(index, end))),
             )?);
             index = end;
             continue;
@@ -469,6 +477,7 @@ fn lower_items(
                     .into_iter()
                     .find(|kind| has_mark(item, kind));
                 let mut lowered = Lowered::Deferred;
+                let mut deferred_marks = Vec::new();
                 for mark in fields_dispatch::MARKS
                     .iter()
                     .copied()
@@ -483,15 +492,35 @@ fn lower_items(
                             segment: item,
                         },
                     )?;
-                    if !matches!(lowered, Lowered::Deferred) {
+                    if matches!(lowered, Lowered::Deferred) {
+                        deferred_marks.push((fields_dispatch::Hooks.family(), mark));
+                    } else {
                         break;
                     }
                 }
+                deferred_marks.extend(
+                    markers_dispatch::MARKS
+                        .iter()
+                        .copied()
+                        .filter(|mark| has_mark(item, mark))
+                        .map(|mark| (markers_dispatch::Hooks.family(), mark)),
+                );
                 if matches!(lowered, Lowered::Deferred) {
-                    lowered = if let Some(source) = fallback.marked(kind, text) {
+                    let (&first, rest) = deferred_marks
+                        .split_first()
+                        .expect("deferred text has at least one mark");
+                    let deferred = DeferredMarks { first, rest };
+                    lowered = if let Some(source) =
+                        fallback.marked(story, &deferred, kind, text)
+                    {
                         Lowered::Inline(vec![source])
                     } else {
-                        let mut slices = source_slice(index, index + 1);
+                        let mut slices = deferred_text_slice(
+                            story,
+                            &deferred,
+                            &mapped,
+                            live_range(index, index + 1),
+                        );
                         if slices.is_empty() {
                             slices.push((text.clone(), None));
                         }
@@ -504,6 +533,10 @@ fn lower_items(
                             .collect::<Result<_, _>>()?;
                         Lowered::Inline(runs)
                     };
+                } else {
+                    for (family, kind) in deferred_marks {
+                        story.defer_here(family, kind);
+                    }
                 }
                 lowered
             }
@@ -519,20 +552,7 @@ fn lower_items(
                     },
                 )? {
                     Lowered::Deferred => {
-                        story.result.defer(
-                            hook.family(),
-                            kind,
-                            story.id,
-                            Some(story.state.paragraph_index),
-                        );
-                        let source_kind = if kind == "field"
-                            && attr_string(payload, "modelKind") == Some("commentReference")
-                        {
-                            "commentReference"
-                        } else {
-                            kind
-                        };
-                        let mut source = fallback.take(source_kind, payload);
+                        let mut source = fallback.take(story, hook.family(), kind, payload);
                         if kind == "noteRef"
                             && let Some(ParagraphContent::Inline(InlineNode::Run(run))) =
                                 &mut source
@@ -558,6 +578,29 @@ fn lower_items(
     }
     story.state.offset = paragraph_end;
     Ok(content)
+}
+
+struct DeferredMarks<'a> {
+    first: (ProjectionFamily, &'a str),
+    rest: &'a [(ProjectionFamily, &'a str)],
+}
+
+impl DeferredMarks<'_> {
+    fn record(&self, story: &mut StoryPosition<'_>) {
+        for (family, kind) in std::iter::once(self.first).chain(self.rest.iter().copied()) {
+            story.defer_here(family, kind);
+        }
+    }
+}
+
+fn deferred_text_slice<'a>(
+    story: &mut StoryPosition<'_>,
+    marks: &DeferredMarks<'_>,
+    mapped: &runs::MappedSourceRuns<'a>,
+    range: Range<usize>,
+) -> Vec<runs::SourceRun<'a>> {
+    marks.record(story);
+    mapped.slice(range)
 }
 
 fn text_items(items: &[PlacedSegment]) -> Vec<(&str, &Attrs)> {
@@ -598,17 +641,17 @@ impl RawBlocks {
         result
     }
 
-    fn before_paragraph(&mut self, source: &Paragraph, into: &mut Vec<BlockContent>) {
+    fn before_paragraph(&mut self, source: &Paragraph, story: &mut StoryPosition<'_>) {
         for (block, raw) in &mut self.before {
             if matches!(block, BlockContent::Paragraph(paragraph) if std::ptr::eq(paragraph.as_ref(), source))
             {
-                into.append(raw);
+                Self::retain(Some(story.state.paragraph_index), story, raw.drain(..));
                 break;
             }
         }
     }
 
-    fn before_block(&mut self, source: &BlockContent, into: &mut Vec<BlockContent>) {
+    fn before_block(&mut self, source: &BlockContent, story: &mut StoryPosition<'_>) {
         for (block, raw) in &mut self.before {
             let same = match (&*block, source) {
                 (BlockContent::Table(left), BlockContent::Table(right)) => Arc::ptr_eq(left, right),
@@ -618,15 +661,45 @@ impl RawBlocks {
                 _ => false,
             };
             if same {
-                into.append(raw);
+                Self::retain(Some(story.state.paragraph_index), story, raw.drain(..));
                 break;
             }
         }
     }
 
-    fn finish(self, into: &mut Vec<BlockContent>) {
-        into.extend(self.before.into_iter().flat_map(|(_, raw)| raw));
-        into.extend(self.trailing);
+    fn finish(self, story: &mut StoryPosition<'_>) {
+        Self::retain(
+            None,
+            story,
+            self.before
+                .into_iter()
+                .flat_map(|(_, raw)| raw)
+                .chain(self.trailing),
+        );
+    }
+
+    fn retain(
+        paragraph: Option<usize>,
+        story: &mut StoryPosition<'_>,
+        raw: impl IntoIterator<Item = BlockContent>,
+    ) {
+        for block in raw {
+            let kind = match &block {
+                BlockContent::RawXml(raw)
+                    if matches!(
+                        crate::structured::source::element_name(&raw.xml).as_str(),
+                        "w:bookmarkStart" | "w:bookmarkEnd"
+                    ) =>
+                {
+                    "bookmarks"
+                }
+                _ => "rawBlock",
+            };
+            story
+                .result
+                .defer(ProjectionFamily::Markers, kind, story.id, paragraph);
+            story.result.blocks.push(block);
+        }
     }
 }
 
@@ -670,7 +743,20 @@ impl SourceInlines {
         Self { items }
     }
 
-    fn take(&mut self, kind: &str, payload: &Attrs) -> Option<ParagraphContent> {
+    fn take(
+        &mut self,
+        story: &mut StoryPosition<'_>,
+        family: ProjectionFamily,
+        kind: &str,
+        payload: &Attrs,
+    ) -> Option<ParagraphContent> {
+        story.defer_here(family, kind);
+        let kind = if kind == "field" && attr_string(payload, "modelKind") == Some("commentReference")
+        {
+            "commentReference"
+        } else {
+            kind
+        };
         let candidates = self.items.get_mut(kind)?;
         let raw_xml = attr_string(payload, "xml");
         let comment_id = match payload.get("commentId") {
@@ -698,9 +784,15 @@ impl SourceInlines {
             .take()
     }
 
-    fn marked(&mut self, kind: Option<&str>, text: &str) -> Option<ParagraphContent> {
+    fn marked(
+        &mut self,
+        story: &mut StoryPosition<'_>,
+        marks: &DeferredMarks<'_>,
+        kind: Option<&str>,
+        text: &str,
+    ) -> Option<ParagraphContent> {
         let candidates = self.items.get_mut(kind?)?;
-        candidates
+        let source = candidates
             .iter_mut()
             .find(|item| {
                 item.as_ref().is_some_and(|item| match item {
@@ -712,7 +804,9 @@ impl SourceInlines {
                     _ => false,
                 })
             })?
-            .take()
+            .take()?;
+        marks.record(story);
+        Some(source)
     }
 }
 
@@ -764,24 +858,28 @@ fn run_item_kind(content: &RunContent) -> Option<&'static str> {
     }
 }
 
-fn side_marker(inline: &ParagraphContent) -> bool {
-    matches!(
-        inline,
-        ParagraphContent::RangeStart(_)
-            | ParagraphContent::RangeEnd(_)
-            | ParagraphContent::CommentRange(_)
-    ) || matches!(
-        inline.node_type(),
-        "bookmarkStart" | "bookmarkEnd" | "rawXml"
-    )
+fn side_marker_kind(inline: &ParagraphContent) -> Option<&'static str> {
+    match inline {
+        ParagraphContent::RangeStart(_) | ParagraphContent::RangeEnd(_) => Some("revisions"),
+        ParagraphContent::CommentRange(_) => Some("commentRanges"),
+        _ => match inline.node_type() {
+            "bookmarkStart" | "bookmarkEnd" => Some("bookmarks"),
+            "rawXml" => Some("rawInline"),
+            _ => None,
+        },
+    }
 }
 
-fn carry_side_markers(content: &mut Vec<ParagraphContent>, source: &[ParagraphContent]) {
+fn carry_side_markers(
+    story: &mut StoryPosition<'_>,
+    content: &mut Vec<ParagraphContent>,
+    source: &[ParagraphContent],
+) {
     let supported: Vec<_> = source
         .iter()
-        .filter(|inline| !side_marker(inline))
+        .filter(|inline| side_marker_kind(inline).is_none())
         .collect();
-    if supported.len() != content.len() || !source.iter().any(side_marker) {
+    if supported.len() != content.len() || supported.len() == source.len() {
         return;
     }
     let same_units = supported
@@ -800,8 +898,11 @@ fn carry_side_markers(content: &mut Vec<ParagraphContent>, source: &[ParagraphCo
     if same_units {
         let mut projected = std::mem::take(content).into_iter();
         content.extend(source.iter().filter_map(|inline| {
-            if side_marker(inline) {
-                (!projected.as_slice().contains(inline)).then(|| inline.clone())
+            if let Some(kind) = side_marker_kind(inline) {
+                (!projected.as_slice().contains(inline)).then(|| {
+                    story.defer_here(ProjectionFamily::Markers, kind);
+                    inline.clone()
+                })
             } else {
                 projected.next()
             }

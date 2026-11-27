@@ -4,7 +4,7 @@ use yrs::Any;
 use super::{
     Lowered, ProjectionContext, ProjectionError, ProjectionFamily, ProjectionHooks, StoryPosition,
 };
-use crate::{ParagraphProperties, StorySegment};
+use crate::{ParagraphProperties, SegmentContent, StorySegment};
 
 pub(super) struct Hooks;
 pub(super) const MARKS: &[&str] = &["ins", "del", "rPrChange"];
@@ -46,17 +46,15 @@ impl ProjectionHooks for Hooks {
         segment: &StorySegment,
         _content: &mut Lowered,
     ) -> Result<(), ProjectionError> {
+        if matches!(segment.content, SegmentContent::Text(_)) {
+            return Ok(());
+        }
         for kind in MARKS
             .iter()
             .copied()
             .filter(|kind| super::story::has_mark(segment, kind))
         {
-            story.result.defer(
-                self.family(),
-                kind,
-                story.id,
-                Some(story.state.paragraph_index),
-            );
+            story.defer_here(self.family(), kind);
         }
         Ok(())
     }
@@ -79,22 +77,26 @@ impl ProjectionHooks for Hooks {
                     _ => true,
                 })
         };
-        for (kind, marker) in [
-            ("pPrIns", &mut paragraph.p_pr_ins),
-            ("pPrDel", &mut paragraph.p_pr_del),
+        for (kind, marker, retained) in [
+            (
+                "pPrIns",
+                &mut paragraph.p_pr_ins,
+                source.and_then(|source| source.p_pr_ins.as_ref()),
+            ),
+            (
+                "pPrDel",
+                &mut paragraph.p_pr_del,
+                source.and_then(|source| source.p_pr_del.as_ref()),
+            ),
         ] {
             if live(kind) {
-                story.result.defer(self.family(), kind, story.id, index);
-            } else {
-                *marker = None;
+                story.defer_here(self.family(), kind);
+                *marker = retained.cloned();
             }
         }
         if live("pPrChange") {
-            story
-                .result
-                .defer(self.family(), "pPrChange", story.id, index);
-        } else {
-            paragraph.property_changes = None;
+            story.defer_here(self.family(), "pPrChange");
+            paragraph.property_changes = source.and_then(|source| source.property_changes.clone());
         }
         if live("bookmarks") {
             story
