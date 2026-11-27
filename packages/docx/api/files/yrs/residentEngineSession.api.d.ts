@@ -1,6 +1,6 @@
 // @betteroffice/docx declaration yrs/residentEngineSession.d.ts
 // Regenerate: bun scripts/api-surface.ts --write docx
-import type { YrsReplaceReceipt, YrsSession, YrsStorySegment, YrsLoc } from './index';
+import type { YrsReplaceReceipt, YrsSession, YrsStorySegment, YrsStoryRange, YrsLoc, YrsInlineFormatDelta } from './index';
 import type { DocxParagraphIdentitySnapshot } from './paragraphIdentity';
 import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
@@ -27,6 +27,14 @@ export interface ResidentExactPrefixLayout {
 export type ResidentEngineSession = Pick<YrsSession, 'clientId' | 'applyDelete' | 'applyDeleteProfiled' | 'applyInput' | 'applyInputProfiled' | 'applyRawOps' | 'applyUpdate' | 'applyUpdateChunks' | 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'setCellSelection' | 'insertRow' | 'insertColumn' | 'deleteRow' | 'deleteColumn' | 'deleteTable' | 'mergeCells' | 'splitCell' | 'setCellShading' | 'setCellBorders' | 'setTableProperties' | 'insertTable' | 'insertTableFragment' | 'validateTableFragment' | 'insertImage' | 'insertPageBreak' | 'insertSectionBreak' | 'tablePayload' | 'setHyperlink' | 'setImageGeometryAt' | 'setColumnWidth' | 'setRowHeight' | 'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'beginUndoCapture' | 'addUndoBoundary' | 'canUndo' | 'canRedo' | 'undo' | 'redo' | 'addComment' | 'setCommentRanges' | 'listComments' | 'acceptChange' | 'rejectChange' | 'beginRegionLayout' | 'buildDisplayListFrame' | 'buildDisplayPagesFrame' | 'releaseDisplayPagesFrame' | 'clearFonts' | 'destroy' | 'encodeSelection' | 'encodeStateAsUpdate' | 'encodeStateAsUpdateChunks' | 'encodeStateVector' | 'findContentControls' | 'listContentControls' | 'layoutDocumentJson' | 'layoutFontRequirementsJson' | 'layoutDocumentWithRegionsRetainedJson' | 'layoutDocumentWithRegionsRetainedMeta' | 'retainedLayoutJson' | 'loadMediaSources' | 'loadNoteSeparators' | 'loadState' | 'setPartialDocument' | 'measureParagraphJson' | 'onUpdate' | 'outlineGlyphJson' | 'registerFont' | 'updateFontOutlines' | 'registerSubstituteFont' | 'residentCaretSnapshot' | 'residentDeletedUnits' | 'resumeRegionLayout' | 'selection' | 'selectionText' | 'resolveComment' | 'searchText' | 'encodeStickyPosition' | 'resolveStickyPosition' | 'setDisplayRetainBuiltPages' | 'setDisplayWindow' | 'setSelection' | 'readStories' | 'listStories' | 'storiesChangedSince' | 'yrsBlocksForStory'> & {
     /** Moves an inline embed in one transaction. Internal: concurrent moves would duplicate it, so collaboration never reaches it. */
     moveEmbed(at: YrsLoc, to: YrsLoc): YrsReplaceReceipt;
+    /**
+     * Types `text` over `range` (inserts it at a collapsed one) with the cursor formatting `delta`
+     * as one edit, leaving what `replaceRange` or `insertText` and then `formatRange` of the typed
+     * text with `delta` would. `null`, changing nothing, where it cannot (an edit spanning
+     * paragraphs, one whose paragraph resident input is not ready, a delta that sets nothing or is
+     * refused): the caller then types and formats as two edits.
+     */
+    typeWithCaretMarks?(range: YrsStoryRange, text: string, delta: YrsInlineFormatDelta): YrsReplaceReceipt | null;
     setUndoInputTime(span: readonly [first: number, last: number] | null): void;
     splitSection(at: YrsLoc, properties: SectionProperties, start: NonNullable<SectionProperties['sectionStart']>): YrsLoc;
     /**

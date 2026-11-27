@@ -5534,12 +5534,29 @@ impl EngineSession {
         Ok(receipt)
     }
 
+    /// Inserts `text` at a collapsed `range`, types it over `range` as
+    /// [`crate::EditingDoc::replace_range`] does, or deletes `range` when
+    /// `text` is `None`, as one edit the next layout can take resident.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn edit_resident_text(
         &self,
         range: crate::StoryRange,
         text: Option<&str>,
         lower_locally: bool,
+    ) -> crate::OpResult<crate::Receipt> {
+        self.edit_resident_text_marked(range, text, lower_locally, None)
+    }
+
+    /// [`Self::edit_resident_text`], the typed text also taking the cursor's
+    /// `marks`: one edit that leaves what typing it and then
+    /// [`crate::EditingDoc::format_range`] of it with the marks' delta would.
+    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
+    pub(crate) fn edit_resident_text_marked(
+        &self,
+        range: crate::StoryRange,
+        text: Option<&str>,
+        lower_locally: bool,
+        marks: Option<&crate::format::CaretMarks>,
     ) -> crate::OpResult<crate::Receipt> {
         let range = match text {
             Some(_) if range.start == range.end => {
@@ -5573,9 +5590,7 @@ impl EngineSession {
             && seed_epoch_valid
             && range.story == "body"
             && self.pagination.borrow().measured_with_floats
-            && text.is_some()
-            && range.start == range.end
-            && text.is_none_or(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
+            && text.is_some_and(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
         {
             let pending_env = {
                 let render = self.render.borrow();
@@ -5596,15 +5611,17 @@ impl EngineSession {
                 let _ = self.patch_lowered_body(before, &env);
             }
         }
+        let replace = text.is_some() && range.start != range.end;
         let preview_plain = text
-            .is_some_and(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
-            || (text.is_none()
-                && self
+            .is_none_or(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
+            && ((text.is_some() && !replace)
+                || self
                     .doc
                     .segment_index(&range.story)?
                     .is_text_range(range.start, range.end));
-        let index_epoch = (self.local_lowering.get()
-            && (text.is_none() || range.start == range.end))
+        let index_epoch = self
+            .local_lowering
+            .get()
             .then(|| self.doc.committed_epoch());
         let plain_text_delete = if index_epoch.is_some() && text.is_none() {
             let segments = self.doc.segment_index(&range.story)?;
@@ -5630,19 +5647,70 @@ impl EngineSession {
         let measurement_patch = self.measurement_patch().take();
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
-            Some(text) => self.doc.insert_text_observed(
-                &ctx,
-                crate::Position::new(&range.story, range.start),
-                text,
-                crate::FormatPolicy::Inherit,
-                |effective| attrs = Some(effective.clone()),
-            )?,
+            Some(text) if replace => {
+                let observe = |effective: &yrs::types::Attrs| attrs = Some(effective.clone());
+                match marks {
+                    Some(marks) => self.doc.replace_range_marked_observed(
+                        &ctx,
+                        range.clone(),
+                        text,
+                        marks,
+                        observe,
+                    )?,
+                    None => self.doc.replace_range_placed_observed(
+                        &ctx,
+                        range.clone(),
+                        text,
+                        observe,
+                    )?,
+                }
+                .0
+            }
+            Some(text) => {
+                let at = crate::Position::new(&range.story, range.start);
+                let observe = |effective: &yrs::types::Attrs| attrs = Some(effective.clone());
+                match marks {
+                    Some(marks) => self
+                        .doc
+                        .insert_text_marked_observed(&ctx, at, text, marks, observe)?,
+                    None => self.doc.insert_text_observed(
+                        &ctx,
+                        at,
+                        text,
+                        crate::FormatPolicy::Inherit,
+                        observe,
+                    )?,
+                }
+            }
             None => self
                 .doc
                 .delete_range_observed(&ctx, range.clone(), |single| single_delete = single)?,
         };
         if let Some(before) = index_epoch {
             match text {
+                Some(text)
+                    if replace
+                        && preview_plain
+                        && receipt.new_para_ids.is_empty()
+                        && receipt.revision_ids.is_empty()
+                        && length_before
+                            .zip(self.doc.story_len(&range.story).ok())
+                            .is_some_and(|(before, after)| {
+                                i64::from(after) - i64::from(before)
+                                    == i64::from(text.encode_utf16().count() as u32)
+                                        - i64::from(range.end - range.start)
+                            }) =>
+                {
+                    self.doc.advance_indexes_after_text_replace(
+                        &range.story,
+                        before,
+                        self.doc.committed_epoch(),
+                        (range.start, range.end),
+                        text,
+                        attrs.as_ref(),
+                    );
+                }
+                Some(_) if replace => {}
                 Some(text)
                     if length_before
                         .zip(self.doc.story_len(&range.story).ok())
@@ -5692,7 +5760,6 @@ impl EngineSession {
         let mut render = self.render.borrow_mut();
         let eligible = lower_locally
             && self.local_lowering.get()
-            && (text.is_none() || range.start == range.end)
             && preview_plain
             && receipt.new_para_ids.is_empty()
             && receipt.revision_ids.is_empty();
@@ -15337,6 +15404,107 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
         }
     }
 
+    #[test]
+    fn resident_text_replace_takes_the_region_fast_path_and_matches_the_full_pass() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        for local_lowering in [false, true] {
+            docx_layout::clear_measure_fonts();
+            let font_id = docx_layout::register_measure_font(FONT).unwrap();
+            let engine = EngineSession::new(139);
+            engine.set_local_lowering(local_lowering);
+            engine
+                .doc()
+                .create_story("body", "AlphaBravo", "Normal", "left")
+                .unwrap();
+            engine
+                .doc()
+                .split_paragraph(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", 5),
+                    None,
+                )
+                .unwrap();
+            let request = small_page_request(font_id);
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+            engine
+                .build_display_list_frame(
+                    &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                    0,
+                )
+                .unwrap();
+            // A composition as the worker runs it: each step's command, then
+            // the relayout after it. The first step inserts; the next two type
+            // over the step before as one edit, which the relayout takes on
+            // the region fast path, lowering the paragraph locally.
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", 2, 2),
+                    Some("x"),
+                    local_lowering,
+                )
+                .unwrap();
+            engine
+                .layout_document_with_regions_after_edit(&request, Some("body"))
+                .unwrap();
+            for (end, text) in [(3, "y"), (3, "zw")] {
+                let receipt = engine
+                    .edit_resident_text(
+                        crate::StoryRange::new("body", 2, end),
+                        Some(text),
+                        local_lowering,
+                    )
+                    .unwrap();
+                assert!(receipt.range.is_some());
+                let stats_before = engine.stats();
+                engine
+                    .layout_document_with_regions_after_edit(&request, Some("body"))
+                    .unwrap();
+                let stats_after = engine.stats();
+                assert_eq!(
+                    (
+                        stats_after.resident_measure_calls - stats_before.resident_measure_calls,
+                        stats_after.resident_reused_blocks - stats_before.resident_reused_blocks,
+                    ),
+                    (1, 1),
+                    "local lowering {local_lowering}, {text}: only the replaced paragraph re-measures"
+                );
+                if local_lowering {
+                    assert_eq!(
+                        stats_after.lower_cache_misses, stats_before.lower_cache_misses,
+                        "{text}: the replace patches the lowered paragraph"
+                    );
+                }
+            }
+            let fast_json = {
+                let pagination = engine.pagination.borrow();
+                let regions_state = engine.regions.borrow();
+                serialize_region_layout(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    regions_state.as_ref().unwrap().headers_footers.as_ref(),
+                    true,
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                fast_json,
+                engine.layout_document_with_regions_json(&request).unwrap(),
+                "local lowering {local_lowering}: byte-identical to a full pass"
+            );
+            let texts: Vec<String> = engine
+                .doc()
+                .paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .map(|paragraph| paragraph.text)
+                .collect();
+            assert_eq!(texts, ["Alzwpha", "Bravo"]);
+        }
+    }
+
     fn resident_region_fast_path_matches_the_full_pass_in(
         repeated_final: bool,
         local_lowering: bool,
@@ -21155,6 +21323,67 @@ w:tblpY="0" w:leftFromText="150" w:rightFromText="150"/>
                 );
             }
         }
+    }
+
+    #[test]
+    fn resident_certified_float_composition_outpacing_layout_lowers_locally() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) = certified_float_engine(
+            font,
+            40,
+            &[0, 2, 4],
+            false,
+            false,
+            RelayoutTrigger::Interactive,
+        );
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        assert!(engine.pagination.borrow().measured_with_floats);
+        let at = certified_float_offset(&engine, 17);
+        let paragraph = engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_at(at)
+            .unwrap()
+            .para_id
+            .to_string();
+        let text_of = |engine: &EngineSession| {
+            engine
+                .doc()
+                .paragraphs("body")
+                .unwrap()
+                .into_iter()
+                .find(|candidate| candidate.para_id == paragraph)
+                .unwrap()
+                .text
+        };
+        let counts = |text: &str| ['x', 'y', 'z'].map(|ch| text.matches(ch).count());
+        let original = text_of(&engine);
+        let before = engine.stats();
+        // A composition whose steps outpace layout: the first inserts, each
+        // next types over the step before, and one layout takes them all.
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", at, at), Some("x"), true)
+            .unwrap();
+        for text in ["y", "z"] {
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", at, at + 1), Some(text), true)
+                .unwrap();
+        }
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses,
+            "every step patches the lowered paragraph"
+        );
+        let text = text_of(&engine);
+        let [x, y, z] = counts(&original);
+        assert_eq!(counts(&text), [x, y, z + 1], "only the last step stays");
+        assert_eq!(text.chars().count(), original.chars().count() + 1);
+        assert_certified_float_cold(&engine, &request, &mut retained);
     }
 
     #[test]

@@ -1272,6 +1272,7 @@ test('d2b_disposed_composition_recovers_text_and_removes_listeners', () => {
   const input = mount(false, { onRecoverableText: (text) => recovered.push(text) });
   fireEvent.compositionStart(input.textarea);
   fireEvent.compositionUpdate(input.textarea, { data: 'draft' });
+  expect(input.submitted).toEqual(['replaceSelection']);
   const remove = spyOn(input.textarea, 'removeEventListener');
   input.admission.dispose();
   expect(() => input.unmount()).not.toThrow();
@@ -1288,7 +1289,7 @@ test('d2b_disposed_composition_recovers_text_and_removes_listeners', () => {
     fireEvent.compositionEnd(input.textarea, { data: 'draft' });
     fireEvent.blur(input.textarea);
   }).not.toThrow();
-  expect(input.submitted).toEqual([]);
+  expect(input.submitted).toEqual(['replaceSelection']);
   expect(recovered).toEqual(['draft']);
 });
 

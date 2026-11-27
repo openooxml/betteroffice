@@ -488,8 +488,14 @@ export interface DocxCommandPayloads {
     navigate: DocxNavigationIntent;
     selectPoint: DocxSelectionPointIntent;
     extendSelection: DocxSelectionPointIntent;
+    /**
+     * With `replaceBefore`, the text right before a collapsed caret in its paragraph is expected to be exactly that, and
+     * the insertion replaces it in one edit that keeps the caret's stored formatting; the command is refused when other
+     * text is there. An input method's composition is typed this way, a step at a time.
+     */
     insertText: DocxSelectionIntent & {
         text: string;
+        replaceBefore?: string;
     };
     replaceSelection: DocxSelectionIntent & {
         text: string;
@@ -641,6 +647,8 @@ export interface PreparedDocxCommand {
         attrs: YrsParagraphAttrs;
     }>;
     sectionBreakProperties?: SectionProperties;
+    /** The typed text an `insertText` step with `replaceBefore` types over, or undoes when it empties it. */
+    typedOver?: DocxTypedText;
 }
 export type DocxCommandPreflightResult = {
     status: 'ready';
@@ -758,12 +766,25 @@ export interface DocxWorkerCommandState {
         from: number;
         to: number;
     };
+    /** What the last local typing command wrote, until the next local command that edits or selects. */
+    typed?: DocxTypedText;
     /** The range the latest paste replaced and the document version right after it; any later edit makes it stale. */
     lastPaste?: {
         range: YrsStoryRange;
         version: string;
         storedMarks: DocxStoredMarks | null;
     } | null;
+}
+/** Sticky positions of the first and last characters one typing command wrote, and of the caret it left. */
+export interface DocxTypedText {
+    story: string;
+    first: Uint8Array;
+    last: Uint8Array;
+    /** UTF-16 length of the last character. */
+    lastLength: number;
+    caret: Uint8Array;
+    /** The input time of every step since the text replaced a selection as its own undo step; emptying it undoes that step. */
+    undoes?: number;
 }
 export type DocxWorkerCommandEngine = ResidentEngineSession & Pick<YrsSession, 'paragraphs' | 'selectionContext' | 'storySegments' | 'cellSelection' | 'tablePayload' | 'insertText' | 'insertLineBreak' | 'replaceRange' | 'deleteRange' | 'splitParagraph' | 'toggleMark' | 'formatRange' | 'clearFormatting' | 'setParagraphAttrs' | 'applyParagraphStyle' | 'insertColumn' | 'deleteRow' | 'deleteColumn' | 'deleteTable' | 'mergeCells' | 'splitCell' | 'setCellShading' | 'beginUndoCapture' | 'canUndo' | 'canRedo'>;
 export type ResolvedDocxCommandSelection = {

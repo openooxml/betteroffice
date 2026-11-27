@@ -1041,6 +1041,34 @@ test('d1a_real_worker_init_insert_delete_acknowledge_current_layout_and_state', 
   }
 }, TIMEOUT);
 
+test('keys_typed_after_ctrl_b_with_nothing_selected_go_in_bold_as_one_resident_edit', async () => {
+  const { client, engine, point } = await openWorker();
+  const marked = spyOn(engine, 'typeWithCaretMarks');
+  const formatted = spyOn(engine, 'formatRange');
+  try {
+    const toggled = await client.edit(intent(1, 0, 'toggleMark', { mark: { type: 'bold' } }));
+    expect(toggled).toMatchObject({ version: 0, outcomes: [{ status: 'noop' }] });
+    expect(await client.edit(intent(2, 0, 'insertText', { text: 'x' }))).toMatchObject({
+      version: 1, outcomes: [{ status: 'applied' }],
+    });
+    expect(await client.edit(intent(3, 1, 'insertText', { text: 'y' }))).toMatchObject({
+      version: 2, outcomes: [{ status: 'applied' }],
+    });
+    // Each key is one resident edit that goes in bold; none formats the typed text again.
+    expect(marked.mock.results.map(result => result.value === null)).toEqual([false, false]);
+    expect(formatted).not.toHaveBeenCalled();
+    const range = (start: number, end: number) => ({
+      story: 'body', start: { paraId: point.paraId, offset: start }, end: { paraId: point.paraId, offset: end },
+    });
+    expect(engine.selectionContext(range(point.offset, point.offset + 2)).bold).toBe(true);
+    expect(engine.selectionContext(range(0, point.offset)).bold).not.toBe(true);
+  } finally {
+    formatted.mockRestore();
+    marked.mockRestore();
+    client.destroy();
+  }
+}, TIMEOUT);
+
 test('worker scheduler turns go through the turn channel the worker was given', async () => {
   const { client, worker, engine } = await openWorker();
   try {

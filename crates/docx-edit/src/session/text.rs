@@ -87,17 +87,22 @@ impl EditSessionCore {
         writable_story(self.engine.doc(), story)?;
         let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
         let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
-        if text.is_some() && start != end {
-            return Err(EngineError::message(
-                "resident text insertion needs a collapsed range",
-            ));
-        }
         if !self
             .engine
             .takes_resident_text_edit(story, start_para, end_para, text.as_deref())
         {
             self.resident_text_edit.replace(None);
             return match text {
+                Some(text) if start != end => self.replace_range(
+                    story,
+                    start_para,
+                    start_offset,
+                    end_para,
+                    end_offset,
+                    &text,
+                    None,
+                    None,
+                ),
                 Some(text) => self.insert_text(story, start_para, start_offset, &text, None, None),
                 None => self.delete_range(
                     story,
@@ -117,6 +122,53 @@ impl EditSessionCore {
         self.resident_text_edit
             .replace(Some((story.to_owned(), self.engine.doc_epoch())));
         Ok(text_receipt_json(receipt))
+    }
+
+    /// [`Self::edit_text_resident`] of `text` typed at the cursor over the
+    /// collapsed or one-paragraph range with the cursor formatting
+    /// `delta_json` (a [`Self::format_range`] delta): one edit that leaves
+    /// what typing it and then formatting it with the delta would. `None`,
+    /// changing nothing, where the edit cannot go so: the text is empty, the
+    /// delta sets nothing or is refused, or the edit does not take the
+    /// resident path. The caller then types and formats it as two edits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_text_resident_marked(
+        &self,
+        story: &str,
+        start_para: &str,
+        start_offset: u32,
+        end_para: &str,
+        end_offset: u32,
+        text: &str,
+        delta_json: &str,
+    ) -> EngineResult<Option<String>> {
+        writable_story(self.engine.doc(), story)?;
+        let start = loc_index(self.engine.doc(), story, start_para, start_offset)?;
+        let end = loc_index(self.engine.doc(), story, end_para, end_offset)?;
+        let Some(marks) = parse_inline_format_delta(delta_json)
+            .ok()
+            .and_then(|delta| crate::format::CaretMarks::new(&delta))
+        else {
+            return Ok(None);
+        };
+        if !self
+            .engine
+            .takes_resident_text_edit(story, start_para, end_para, Some(text))
+        {
+            return Ok(None);
+        }
+        let receipt = self
+            .engine
+            .edit_resident_text_marked(
+                StoryRange::new(story, start, end),
+                Some(text),
+                true,
+                Some(&marks),
+            )
+            .map_err(EngineError::message)?;
+        self.resident_text_edit
+            .replace(Some((story.to_owned(), self.engine.doc_epoch())));
+        Ok(Some(text_receipt_json(receipt)))
     }
 
     #[allow(clippy::too_many_arguments)]
