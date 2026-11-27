@@ -47,7 +47,7 @@ import {
 } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
-import { RAW_INLINE_KIND, noteYrsStoriesDirty } from './yrsToDocument';
+import { RAW_INLINE_KIND, noteYrsStoriesDirty, unlinkedTocEntryRuns } from './yrsToDocument';
 import { calculateRowSpans, type RowSpanInfo } from './tableRowSpans';
 import { recoverGroupedStorySeeds } from './groupedStorySeed';
 import { sessionMaterializedSource } from './sessionInternals';
@@ -760,7 +760,9 @@ function fieldPayload(
   payload: Attrs;
   marks: MarkDescriptor[];
 } {
-  const runs = projected ? field.structuredResult?.inline ?? [] : flatFieldResult(field);
+  const runs = projected
+    ? (field.type === 'complexField' && unlinkedTocEntryRuns(field) ? [] : field.structuredResult?.inline ?? [])
+    : flatFieldResult(field);
   const ownerRuns = Array.isArray(runs)
     ? runs.flatMap((child) => {
         if (child?.type !== 'run') return [];
@@ -929,6 +931,7 @@ function fieldToUnits(
   const code = value.structuredCode?.inline;
   const resultChildren = Array.isArray(result) ? result : [];
   const codeChildren = Array.isArray(code) ? code : [];
+  const entryRuns = unlinkedTocEntryRuns(value)?.length ?? 0;
   const projectedChildren = [
     ...codeChildren.map((child, index) => ({ child, index: -index - 1 })),
     ...resultChildren.map((child, index) => ({ child, index })),
@@ -936,14 +939,19 @@ function fieldToUnits(
   const units: InlineUnit[] = [];
   const children: Attrs[] = [];
   projectedChildren.forEach(({ child, index }) => {
-    if (child?.type !== 'hyperlink' && child?.type !== 'simpleField') return;
-    opaqueSequences.push(
-      ...(child.type === 'hyperlink' ? hyperlinkSequenceNames(child) : nestedSequenceNames(child))
-    );
-    const nested = child.type === 'simpleField' ? fieldPayload(child, styleFormatting, styleResolver) : null;
-    const projected = child.type === 'hyperlink'
-      ? hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences)
-      : [embedUnit('field', nested!.payload, nested!.marks)];
+    let projected: InlineUnit[];
+    if (child?.type === 'run' && index >= 0 && index < entryRuns) {
+      projected = runToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+    } else if (child?.type === 'hyperlink') {
+      opaqueSequences.push(...hyperlinkSequenceNames(child));
+      projected = hyperlinkToUnits(child, styleFormatting, styleResolver, opaqueSequences);
+    } else if (child?.type === 'simpleField') {
+      opaqueSequences.push(...nestedSequenceNames(child));
+      const nested = fieldPayload(child, styleFormatting, styleResolver);
+      projected = [embedUnit('field', nested.payload, nested.marks)];
+    } else {
+      return;
+    }
     children.push({ index, items: projected.map((unit) => unit.kind === 'text'
       ? { kind: 'text', text: unit.text, attributes: unit.attrs }
       : { kind: 'embed', embedKind: unit.embedKind, payload: unit.payload, attributes: unit.attrs }) });

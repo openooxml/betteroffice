@@ -500,7 +500,7 @@ pub fn write_docx_s13_parts_with_report(
                 context.field_spans = FieldSpans::from_document(
                     &original,
                     &request.document.content,
-                    &[],
+                    None,
                     |_, paragraph| {
                         emitted_paragraph_id(paragraph)
                             .is_some_and(|id| changed.as_ref().is_some_and(|ids| ids.contains(id)))
@@ -525,12 +525,12 @@ pub fn write_docx_s13_parts_with_report(
             .original_bytes(&path)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
         {
-            let removed = stories
-                .spliced
-                .get(&path)
-                .map_or(&[][..], |part| part.removed.as_slice());
-            context.field_spans =
-                FieldSpans::from_document(source, &request.document.content, removed, |_, _| true);
+            context.field_spans = FieldSpans::from_document(
+                source,
+                &request.document.content,
+                stories.spliced.get(&path).copied(),
+                |_, _| true,
+            );
         }
         stories.write(&package, &path, &mut context, |context| {
             serialize_document_part(&request.document, context)
@@ -3944,7 +3944,7 @@ fn build_selective_document_xml(
         .any(|(span, _)| original_xml[span.start..span.end].contains("fldChar"))
     {
         context.field_spans =
-            FieldSpans::from_document(original_xml, &document.content, &[], |_, paragraph| {
+            FieldSpans::from_document(original_xml, &document.content, None, |_, paragraph| {
                 emitted_paragraph_id(paragraph).is_some_and(|id| index.changed.contains(id))
             });
     }

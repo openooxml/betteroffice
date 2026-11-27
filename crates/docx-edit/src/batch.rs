@@ -13,7 +13,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use yrs::updates::decoder::Decode;
-use yrs::{ReadTxn, StateVector, Text, Transact, TransactionMut, Update};
+use yrs::{Any, Map, Out, ReadTxn, StateVector, Text, Transact, TransactionMut, Update};
 
 use crate::content_controls::{
     ContentControlSelector, ControlRecord, ControlValue, Site, ValueUnavailable, content_items,
@@ -26,10 +26,10 @@ use crate::ops::paragraph::{ParagraphRecord, StylePlan, plan_paragraph_style};
 use crate::ops::text::{OverlayRun, RichRun, validate_text};
 use crate::ops::utf16_len;
 use crate::read_types::Anchor;
-use crate::seed::{Restoration, SourceMetadata};
+use crate::seed::{Restoration, SourceMetadata, is_closed_pageref, unlinked_toc_entry_runs};
 use crate::target::{
-    EditTextView, ParagraphTarget, SearchScope, Selection, StoryView, TextRange, TextTarget, Views,
-    comment_spans, field_result_blocks,
+    EditTextView, ParagraphTarget, ParagraphView, SearchScope, Selection, StoryView, TextRange,
+    TextTarget, Views, comment_spans, field_result_blocks,
 };
 use crate::{
     EditCtx, EditError, EditResult, EditingDoc, FormatPolicy, Position, StoryRange, UndoSession,
@@ -1778,6 +1778,30 @@ fn bookmarks_balanced<'a>(
     open == closed
 }
 
+fn unlinked_toc_entry_ids<T: ReadTxn>(openers: &[ParagraphView], txn: &T) -> BTreeSet<String> {
+    let mut entries = BTreeSet::new();
+    for (kind, field) in openers.iter().flat_map(|paragraph| &paragraph.embeds) {
+        let Some(field) = field.as_ref().filter(|_| kind == "field") else {
+            continue;
+        };
+        let Some(Out::Any(Any::Array(blocks))) = field.get(txn, "fieldSpanBlocks") else {
+            continue;
+        };
+        let Some(data) = crate::map_string(field, txn, "fieldData")
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+        else {
+            continue;
+        };
+        if unlinked_toc_entry_runs(&data).is_some() {
+            entries.extend(blocks.iter().filter_map(|block| match block {
+                Any::String(id) => Some(id.to_string()),
+                _ => None,
+            }));
+        }
+    }
+    entries
+}
+
 fn plan_delete_paragraphs<T: ReadTxn>(
     views: &mut Views<'_, T>,
     source: Option<&SourceMetadata>,
@@ -1847,6 +1871,7 @@ fn plan_delete_paragraphs<T: ReadTxn>(
             &requested,
         ));
     }
+    let mut toc_entries = None;
     for (offset, paragraph) in span.iter().enumerate() {
         if offset > 0 && paragraph.node_start > paragraph.start {
             return Err(unsupported(
@@ -1857,7 +1882,26 @@ fn plan_delete_paragraphs<T: ReadTxn>(
         if let Some((kind, _)) = paragraph
             .embeds
             .iter()
-            .find(|(kind, _)| !matches!(kind.as_str(), "break" | "image"))
+            .find(|(kind, field)| {
+                if matches!(kind.as_str(), "break" | "image") {
+                    return false;
+                }
+                let local_page_reference = kind == "field"
+                    && paragraph.embeds.len() == 1
+                    && field.as_ref().is_some_and(|field| {
+                        crate::map_string(field, views.txn(), "fieldType").as_deref()
+                            == Some("PAGEREF")
+                            && toc_entries
+                                .get_or_insert_with(|| {
+                                    unlinked_toc_entry_ids(&story.paragraphs[..first], views.txn())
+                                })
+                                .contains(&paragraph.para_id)
+                            && crate::map_string(field, views.txn(), "fieldData")
+                                .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+                                .is_some_and(|data| is_closed_pageref(&data))
+                    });
+                !local_page_reference
+            })
         {
             return Err(unsupported(
                 format!("deleting the span would destroy a {kind:?} embed"),

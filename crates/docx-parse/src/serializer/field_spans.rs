@@ -4,8 +4,11 @@ use crate::block::{BlockContent, is_bookmark_block, story_block_elements, table_
 use crate::inline::{ComplexField, InlineNode, RunContent, parse_run};
 use crate::paragraph::{Paragraph, ParagraphContent, TrackedInline, parse_tracked_change_info};
 use crate::paragraph_identity::parse_paragraph_id;
+use crate::paragraph_patch::{DonorV1, ParagraphPatchV1};
 use crate::table::Table;
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, parse_xml};
+
+use super::paragraph_ids::S13SplicedPart;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct FieldSpans {
@@ -19,6 +22,12 @@ pub(super) struct FieldSpans {
 pub(super) struct FieldParagraph {
     pub(super) opening: Option<usize>,
     pub(super) closing: Option<Vec<ParagraphContent>>,
+}
+
+#[derive(Default)]
+struct SourceEdits<'a> {
+    removed: HashSet<u32>,
+    patches: HashMap<u32, &'a ParagraphPatchV1>,
 }
 
 pub(super) fn paragraph_key(paragraph: &Paragraph) -> usize {
@@ -742,6 +751,7 @@ fn place_closing(
     closing: &Closing<'_>,
     text: &str,
     removed: bool,
+    patch: Option<&ParagraphPatchV1>,
 ) -> Option<Vec<ParagraphContent>> {
     let mut marker = closing.marker();
     if removed {
@@ -749,9 +759,16 @@ fn place_closing(
         content.push(marker);
         return Some(content);
     }
-    if let Some(boundary) = bookmark_boundary(source, closing, paragraph)
-        .or_else(|| run_boundary(source, closing, paragraph))
-    {
+    if let Some(boundary) = bookmark_boundary(source, closing, paragraph) {
+        let mut content = paragraph.content.clone();
+        content.insert(boundary, marker);
+        return Some(content);
+    }
+    let (before, after) = text.split_at(closing.offset);
+    if let Some(boundary) = run_boundary(source, closing, paragraph) {
+        if let Some(offset) = inserted_before_closing(before, after, paragraph, patch) {
+            return place(paragraph.content.clone(), offset, marker, None);
+        }
         let mut content = paragraph.content.clone();
         content.insert(boundary, marker);
         return Some(content);
@@ -813,16 +830,39 @@ fn place_closing(
         return Some(content);
     }
     let live = visible_text(paragraph);
-    let (before, after) = text.split_at(closing.offset);
     let offset = anchored_offset(before, after, &live)?;
     place(paragraph.content.clone(), offset, marker, shared_run_end)
+}
+
+fn inserted_before_closing(
+    before: &str,
+    after: &str,
+    paragraph: &Paragraph,
+    patch: Option<&ParagraphPatchV1>,
+) -> Option<usize> {
+    let [edit] = patch?.text_edits.as_slice() else {
+        return None;
+    };
+    if edit.from != edit.to
+        || !matches!(&edit.donor, DonorV1::At { at } if *at < edit.from)
+        || before.encode_utf16().count() != edit.from as usize
+    {
+        return None;
+    }
+    let live = visible_text(paragraph);
+    let inserted = live.strip_prefix(before)?.strip_suffix(after)?;
+    let mut remaining = inserted;
+    for run in &edit.insert {
+        remaining = remaining.strip_prefix(run.text.as_str())?;
+    }
+    (!inserted.is_empty() && remaining.is_empty()).then_some(before.len() + inserted.len())
 }
 
 impl FieldSpans {
     pub(super) fn from_document(
         source: &str,
         model: &[BlockContent],
-        removed: &[u32],
+        part: Option<&S13SplicedPart>,
         selected: impl Fn(&XmlElement, &Paragraph) -> bool,
     ) -> Self {
         if !source.contains("fldChar") || !story_has_span(model) {
@@ -838,10 +878,18 @@ impl FieldSpans {
         };
         let mut plan = Self::default();
         if let Some(body) = xml.root().and_then(|root| root.child("w", "body")) {
+            let edits = part.map_or_else(SourceEdits::default, |part| SourceEdits {
+                removed: part.removed.iter().copied().collect(),
+                patches: part
+                    .paragraph_patches
+                    .iter()
+                    .map(|patch| (patch.ordinal, patch))
+                    .collect(),
+            });
             plan.plan_story(
                 &story_block_elements(body),
                 model,
-                &removed.iter().copied().collect(),
+                &edits,
                 &selected,
             );
         }
@@ -855,7 +903,7 @@ impl FieldSpans {
     ) -> Self {
         let mut plan = Self::default();
         if story_has_span(model) {
-            plan.plan_story(source, model, &HashSet::new(), &selected);
+            plan.plan_story(source, model, &SourceEdits::default(), &selected);
         }
         plan
     }
@@ -864,7 +912,7 @@ impl FieldSpans {
         &mut self,
         source: &XmlElement,
         table: &Table,
-        removed: &HashSet<u32>,
+        edits: &SourceEdits<'_>,
         selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
     ) {
         let rows = table_part_elements(source, "tr");
@@ -881,7 +929,7 @@ impl FieldSpans {
                     self.plan_story(
                         &story_block_elements(source_cell),
                         &cell.content,
-                        removed,
+                        edits,
                         selected,
                     );
                 }
@@ -893,7 +941,7 @@ impl FieldSpans {
         &mut self,
         source: &[(Vec<u32>, &XmlElement)],
         model: &[BlockContent],
-        removed: &HashSet<u32>,
+        edits: &SourceEdits<'_>,
         selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
     ) {
         let mut paragraphs: Vec<_> = source
@@ -903,7 +951,7 @@ impl FieldSpans {
                 (element.name == "w:p").then(|| SourceParagraph::read(index, element))
             })
             .collect();
-        let matches = project_paragraphs(source, model, &paragraphs, removed);
+        let matches = project_paragraphs(source, model, &paragraphs, &edits.removed);
         let mut following = vec![None; matches.len()];
         let mut next = None;
         for (index, &matched) in matches.iter().enumerate().rev() {
@@ -932,13 +980,13 @@ impl FieldSpans {
                                 self.plan_story(
                                     &story_block_elements(content),
                                     &sdt.content,
-                                    removed,
+                                    edits,
                                     selected,
                                 );
                             }
                         }
                         BlockContent::Table(table) => {
-                            self.plan_table(element, table, removed, selected);
+                            self.plan_table(element, table, edits, selected);
                         }
                         _ => {}
                     }
@@ -949,10 +997,9 @@ impl FieldSpans {
                 if let (Some(opening), [Some(closing)]) =
                     (pending.take(), entry.closings.as_slice())
                 {
-                    let deleted = source[end]
-                        .1
-                        .paragraph_ordinal
-                        .is_some_and(|id| removed.contains(&id));
+                    let ordinal = source[end].1.paragraph_ordinal;
+                    let deleted = ordinal.is_some_and(|id| edits.removed.contains(&id));
+                    let patch = ordinal.and_then(|id| edits.patches.get(&id).copied());
                     let next = following[end]
                         .or_else(|| (end + 1 == matches.len()).then_some(model.len()));
                     self.pair(
@@ -966,6 +1013,7 @@ impl FieldSpans {
                         deleted,
                         next,
                         &model_groups,
+                        patch,
                         selected,
                     );
                 }
@@ -997,6 +1045,7 @@ impl FieldSpans {
         deleted: bool,
         next: Option<usize>,
         model_groups: &[usize],
+        patch: Option<&ParagraphPatchV1>,
         selected: &impl Fn(&XmlElement, &Paragraph) -> bool,
     ) {
         let Some(owner) = matches[opening.block] else {
@@ -1055,7 +1104,8 @@ impl FieldSpans {
             return;
         }
         if removed || (writes_closer && !has_end(closer)) {
-            let Some(content) = place_closing(source[end].1, closer, closing, text, removed) else {
+            let Some(content) = place_closing(source[end].1, closer, closing, text, removed, patch)
+            else {
                 return;
             };
             let entry = self.paragraphs.entry(paragraph_key(closer)).or_default();

@@ -3479,8 +3479,19 @@ impl<'a> Exporter<'a> {
         } else if !has_result {
             CachedResult::Missing
         } else if let Some(projected) = projected {
+            let entry_runs = data
+                .as_ref()
+                .and_then(crate::seed::unlinked_toc_entry_runs)
+                .map_or(0, |runs| runs.len());
             CachedResult::Inline {
-                inlines: self.projected_result_inlines(ctx, &nodes, projected, &base.anchor, depth),
+                inlines: self.projected_result_inlines(
+                    ctx,
+                    &nodes,
+                    entry_runs,
+                    projected,
+                    &base.anchor,
+                    depth,
+                ),
             }
         } else if simple_result(&nodes) {
             CachedResult::Inline {
@@ -3532,13 +3543,12 @@ impl<'a> Exporter<'a> {
         }
     }
 
-    /// The inlines of a field result whose hyperlinks and nested fields the stream holds before
-    /// the field: those come from the stream as they are now, the other result nodes from the
-    /// field's parsed content, in result order and anchored to the field.
+    /// A field's cached result with its live projected children in source order.
     fn projected_result_inlines(
         &mut self,
         ctx: &StoryCtx,
         nodes: &[Value],
+        entry_runs: usize,
         projected: Vec<(i64, Vec<Inline>)>,
         owner: &Anchor,
         depth: usize,
@@ -3551,7 +3561,7 @@ impl<'a> Exporter<'a> {
         let mut pending: Vec<Value> = Vec::new();
         for (index, node) in nodes.iter().enumerate() {
             let kind = node.get("type").and_then(Value::as_str);
-            if !matches!(kind, Some("hyperlink" | "simpleField")) {
+            if index >= entry_runs && !matches!(kind, Some("hyperlink" | "simpleField")) {
                 pending.push(node.clone());
                 continue;
             }

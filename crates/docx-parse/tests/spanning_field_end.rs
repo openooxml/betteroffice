@@ -452,11 +452,7 @@ fn inspect_story(xml: &str, case: &str) -> Story {
         story.paragraphs.push(visible);
     }
     assert!(open.is_empty(), "{case}: fields without ends: {open:?}");
-    assert_eq!(
-        story.fields.len(),
-        story.ends,
-        "{case}: begin/end count"
-    );
+    assert_eq!(story.fields.len(), story.ends, "{case}: begin/end count");
     story
 }
 
@@ -795,7 +791,12 @@ fn word_toc(
 }
 
 fn word_toc_w1() -> WordToc {
-    word_toc(WORD_TOC_CODE, &WORD_TOC_TITLES, 1, WordTocOptions::default())
+    word_toc(
+        WORD_TOC_CODE,
+        &WORD_TOC_TITLES,
+        1,
+        WordTocOptions::default(),
+    )
 }
 
 fn word_toc_w2() -> WordToc {

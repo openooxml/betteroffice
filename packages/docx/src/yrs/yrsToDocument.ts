@@ -2107,8 +2107,7 @@ function linkChildLength(child: HyperlinkContent): number {
 
 /**
  * The story units projected content spans. Fields, controls and equations
- * are one embed each; a complex field's hyperlinks and simple fields are
- * seeded ahead of it.
+ * are one embed each, with projected complex field children seeded ahead of it.
  */
 function paragraphContentLength(content: ParagraphContent): number {
   switch (content.type) {
@@ -2119,13 +2118,16 @@ function paragraphContentLength(content: ParagraphContent): number {
         (sum, child) => sum + linkChildLength(child),
         0
       );
-    case 'complexField':
+    case 'complexField': {
+      const entry = unlinkedTocEntryRuns(content);
+      if (entry) return entry.reduce((sum, run) => sum + runTextLength(run), 1);
       return [
         ...(content.structuredCode?.inline ?? []),
         ...(content.structuredResult?.inline ?? []),
       ]
         .filter((child) => child.type === 'hyperlink' || child.type === 'simpleField')
         .reduce((sum, child) => sum + paragraphContentLength(child), 1);
+    }
     case 'simpleField':
     case 'inlineSdt':
     case 'mathEquation':
@@ -3664,6 +3666,23 @@ function spansParagraphs(field: ComplexField): boolean {
   return [field.structuredCode, field.structuredResult].some(
     (part) => part?.blockCount != null || part?.blocks != null
   );
+}
+
+/** Editable runs preceding the page reference of an unlinked spanning TOC. @internal */
+export function unlinkedTocEntryRuns(field: ComplexField): Run[] | undefined {
+  const code = field.structuredCode;
+  const result = field.structuredResult;
+  if (field.fieldType !== 'TOC' || code?.blockCount != null || code?.blocks != null ||
+      (result?.blockCount == null && result?.blocks == null)) return undefined;
+  const inline = result?.inline;
+  if (!Array.isArray(inline)) return undefined;
+  const page = inline.at(-1);
+  if (page?.type !== 'complexField' || page.fieldType !== 'PAGEREF' || spansParagraphs(page)) return undefined;
+  const label = inline.slice(0, -1);
+  if (label.every((child): child is Run => child?.type === 'run' &&
+      child.content.every(item => item.type === 'text' || item.type === 'tab')) &&
+      label.at(-1)?.content.at(-1)?.type === 'tab') return label;
+  return undefined;
 }
 
 /** Whether a field embed's payload holds a complex field spanning paragraphs. */
