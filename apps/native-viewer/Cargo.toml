@@ -58,7 +58,7 @@ serde_json = "=1.0.154"
 sha2 = "=0.10.9"
 tokio = { version = "=1.54.1", features = ["macros", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-url = "=2.5.8"
+url = "=2.5.9"
 vello = "=0.10.0"
 wgpu = "=29.0.3"
 winit = "=0.30.13"
