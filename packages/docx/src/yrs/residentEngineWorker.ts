@@ -229,6 +229,19 @@ function reportQueryParseFailure(frame: RetainedFrame, version: string, error: u
   });
 }
 
+function buildPreviewLayoutInput(
+  source: string, layoutWithRegions: boolean, preview: ReturnType<typeof proposalRevisionPreview>,
+): string {
+  const input = JSON.parse(source);
+  const owner = layoutWithRegions ? input : input.workerOwned;
+  if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
+    owner.renderEnv = { ...owner.renderEnv };
+    if (preview) owner.renderEnv.revisionPreview = preview;
+    else delete owner.renderEnv.revisionPreview;
+  }
+  return JSON.stringify(input);
+}
+
 function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
   if (!session) throw new Error('Document worker is not initialized');
   if (!commandHooksFactory) throw new Error('Worker command hooks are not installed');
@@ -266,19 +279,22 @@ function bindResidentCommands(init: DocxCommandInitRequest): DocxCommandHost {
     clearProvisionalFinalPages();
     selectionLayout = undefined;
   };
+  let previewInput: { key: readonly [source: string, layoutWithRegions: boolean, preview: string]; input: string } | undefined;
   const layoutWithPreview = () => {
     laidOutReservations = appliedReservations;
-    const input = JSON.parse(init.layoutWithRegions ? init.layoutInput : layoutInput);
-    const owner = init.layoutWithRegions ? input : input.workerOwned;
+    const { layoutWithRegions } = init;
+    const source = layoutWithRegions ? init.layoutInput : layoutInput;
     const snapshot = registry.snapshot();
     const preview = proposalRevisionPreview(snapshot);
-    if (preview !== undefined || owner.renderEnv?.revisionPreview !== undefined) {
-      owner.renderEnv = { ...owner.renderEnv };
-      if (preview) owner.renderEnv.revisionPreview = preview;
-      else delete owner.renderEnv.revisionPreview;
+    const previewKey = preview === undefined ? '' : JSON.stringify(preview);
+    if (previewInput?.key[0] !== source || previewInput.key[1] !== layoutWithRegions || previewInput.key[2] !== previewKey) {
+      previewInput = {
+        key: [source, layoutWithRegions, previewKey],
+        input: buildPreviewLayoutInput(source, layoutWithRegions, preview),
+      };
     }
-    if (init.layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(JSON.stringify(input));
-    else engine.layoutDocumentJson(JSON.stringify(input));
+    if (layoutWithRegions) engine.layoutDocumentWithRegionsAfterEdit(previewInput.input);
+    else engine.layoutDocumentJson(previewInput.input);
     layoutPreviewVersion = snapshot.previewVersion;
     if (commandFrameChanges) {
       commandFrameChanges.layoutPreviewVersion = layoutPreviewVersion;

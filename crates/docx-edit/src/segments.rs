@@ -26,6 +26,8 @@ pub(crate) struct ParaEntry {
     pub pilcrow: u32,
     /// First content unit after the paragraph's leading block embeds.
     pub node_start: u32,
+    /// Item id of the pilcrow embed.
+    pub pilcrow_id: Option<yrs::ID>,
 }
 
 #[derive(Clone)]
@@ -97,6 +99,11 @@ pub(crate) fn build_indexes<T: ReadTxn>(
                     start: para_start,
                     pilcrow: len,
                     node_start,
+                    pilcrow_id: match <yrs::MapRef as AsRef<yrs::branch::Branch>>::as_ref(map).id()
+                    {
+                        yrs::BranchID::Nested(id) => Some(id),
+                        yrs::BranchID::Root(_) => None,
+                    },
                 });
                 para_start = len + 1;
                 node_start = len + 1;
@@ -196,6 +203,13 @@ impl ParagraphIndex {
 
     pub(crate) fn pilcrow_at(&self, slot: usize) -> Option<u32> {
         self.paras.get(slot).map(|para| para.pilcrow)
+    }
+
+    /// Item id of the pilcrow at story index `index`, if a pilcrow sits there.
+    pub(crate) fn pilcrow_id_at(&self, index: u32) -> Option<yrs::ID> {
+        self.para_at(index)
+            .filter(|para| para.pilcrow == index)
+            .and_then(|para| para.pilcrow_id)
     }
 
     /// How many paragraphs carry `para_id`: 0, 1, or 2 for two or more.
@@ -783,12 +797,14 @@ pub(crate) mod tests {
                     actual.pilcrow,
                     actual.node_start,
                     actual.para_id.as_ref(),
+                    actual.pilcrow_id,
                 ),
                 (
                     expected.start,
                     expected.pilcrow,
                     expected.node_start,
                     expected.para_id.as_ref(),
+                    expected.pilcrow_id,
                 ),
                 "paragraph {slot}"
             );

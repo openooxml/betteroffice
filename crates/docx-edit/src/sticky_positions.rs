@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use yrs::branch::{Branch, BranchPtr};
 use yrs::updates::decoder::Decode;
-use yrs::{Assoc, IndexedSequence, Offset, Out, ReadTxn, StickyIndex, TextRef, Transact};
+use yrs::{
+    Assoc, ID, IndexScope, IndexedSequence, Offset, Out, ReadTxn, StickyIndex, TextRef, Transact,
+};
 
 use crate::{EditError, EditingDoc, story_text};
 
@@ -77,6 +79,16 @@ impl StickyPositions {
 }
 
 impl EditingDoc {
+    /// The pilcrow at `index` of `story`, from a paragraph index already built for this epoch:
+    /// a sticky index after it names its item.
+    fn indexed_pilcrow_id(&self, story: &str, index: u32) -> Option<ID> {
+        self.paragraph_indexes
+            .lock()
+            .unwrap()
+            .get(story, self.committed_epoch())?
+            .pilcrow_id_at(index)
+    }
+
     pub(crate) fn cached_sticky_index(
         &self,
         story: &str,
@@ -93,6 +105,11 @@ impl EditingDoc {
                 None => Err(EditError::StoryNotFound(story.to_owned()).to_string()),
             };
         };
+        if assoc == Assoc::After
+            && let Some(id) = self.indexed_pilcrow_id(story, index)
+        {
+            return Ok(Some(StickyIndex::new(IndexScope::Relative(id), assoc)));
+        }
         let mut cache = self.sticky_positions.lock().unwrap();
         let cache = cache.story(story, self.committed_epoch());
         let key = (index, assoc);
@@ -219,6 +236,13 @@ mod tests {
     }
 
     fn assert_matches_uncached(doc: &EditingDoc, story: &str) {
+        assert_matches_yrs(doc, story);
+        if doc.paragraph_index(story).is_ok() {
+            assert_matches_yrs(doc, story);
+        }
+    }
+
+    fn assert_matches_yrs(doc: &EditingDoc, story: &str) {
         let txn = doc.yrs_doc().transact();
         let text = story_ref(&txn, story).unwrap();
         for index in 0..=text.len(&txn) + 1 {
@@ -339,6 +363,105 @@ mod tests {
         STICKY_OFFSET_WALKS.with(|walks| assert_eq!(walks.get(), 1));
         assert_matches_uncached(&doc, "body");
         assert_retained_positions(&doc, "body", &[position]);
+    }
+
+    fn pilcrow_indexes(doc: &EditingDoc, story: &str) -> Vec<u32> {
+        let paragraphs = doc.paragraph_index(story).unwrap();
+        (0..paragraphs.para_count())
+            .filter_map(|slot| paragraphs.pilcrow_at(slot))
+            .collect()
+    }
+
+    #[test]
+    fn paragraph_end_positions_name_their_pilcrow_without_walking_the_story() {
+        let ctx = EditCtx::local("", "");
+        let doc = EditingDoc::new(1);
+        doc.create_story("body", &"abcdefgh ".repeat(200), "Normal", "left")
+            .unwrap();
+        for at in (1..120).rev() {
+            doc.split_paragraph(&ctx, Position::new("body", at * 15), None)
+                .unwrap();
+        }
+        let peer = EditingDoc::new(2);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        let bold = crate::format::InlineFormatDelta {
+            bold: crate::format::Patch::Set(true),
+            ..Default::default()
+        };
+        let edits: Vec<Box<dyn Fn(&EditingDoc)>> = vec![
+            Box::new(|doc| {
+                doc.insert_text(
+                    &ctx,
+                    Position::new("body", 40),
+                    "typed",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+            }),
+            Box::new(|doc| {
+                doc.delete_range(&ctx, StoryRange::new("body", 41, 43))
+                    .unwrap();
+            }),
+            Box::new(|doc| {
+                let pilcrow = pilcrow_indexes(doc, "body")[3];
+                doc.delete_range(&ctx, StoryRange::new("body", pilcrow - 2, pilcrow + 2))
+                    .unwrap();
+            }),
+            Box::new(|doc| {
+                doc.split_paragraph(&ctx, Position::new("body", 70), None)
+                    .unwrap();
+            }),
+            Box::new(|doc| {
+                let pilcrow = pilcrow_indexes(doc, "body")[6];
+                doc.format_range(
+                    &ctx,
+                    StoryRange::new("body", pilcrow - 3, pilcrow + 3),
+                    &bold,
+                )
+                .unwrap();
+            }),
+            Box::new(|doc| {
+                peer.insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("body", 5),
+                    "remote",
+                    FormatPolicy::Plain,
+                )
+                .unwrap();
+                doc.apply_update_v1(&peer.encode_state_as_update_v1())
+                    .unwrap();
+            }),
+        ];
+        for edit in &edits {
+            edit(&doc);
+            let pilcrows = pilcrow_indexes(&doc, "body");
+            assert!(pilcrows.len() > 100);
+            let txn = doc.yrs_doc().transact();
+            let text = story_ref(&txn, "body").unwrap();
+            let expected: Vec<_> = pilcrows
+                .iter()
+                .map(|&index| {
+                    text.sticky_index(&txn, index, Assoc::After)
+                        .unwrap()
+                        .encode_v1()
+                })
+                .collect();
+            drop(txn);
+            STICKY_INDEX_WALKS.with(|walks| walks.set(0));
+            let actual: Vec<_> = pilcrows
+                .iter()
+                .map(|&index| {
+                    doc.cached_sticky_index("body", index, Assoc::After)
+                        .unwrap()
+                        .unwrap()
+                        .encode_v1()
+                })
+                .collect();
+            STICKY_INDEX_WALKS.with(|walks| assert_eq!(walks.get(), 0));
+            assert_eq!(actual, expected);
+            assert_matches_uncached(&doc, "body");
+        }
     }
 
     #[test]

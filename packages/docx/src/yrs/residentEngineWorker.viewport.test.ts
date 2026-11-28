@@ -13,6 +13,8 @@ import { readCellSelection } from './residentCommandTableSelection';
 import { readResidentCellSelectionRects } from './residentObjectGeometry';
 import { StagedEchoPages } from './residentStagedEcho';
 
+const partEngine = { geometryReader: { headerFooterAliases: () => new Map<string, string>() } } as unknown as Parameters<typeof readPartGeometry>[0];
+
 function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: boolean; queryEngine?: RustDisplayListQueryEngine;
   pageCount?: number; noWindow?: boolean } = {}) {
   const source = readFileSync(`${import.meta.dir}/residentEngineWorker.ts`, 'utf8');
@@ -78,7 +80,7 @@ function commandFrames(options: { cell?: boolean; range?: boolean; splitEnd?: bo
     proposalEngine: { version: () => String(version) }, retainedHeadersFootersJson: () => retainedHeadersFooters,
     partGeometry: (frame: Parameters<typeof readPartGeometry>[1]) => {
       work.partGeometryPageVisits += frame.pages.length;
-      return readPartGeometry({ partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0], frame);
+      return readPartGeometry(partEngine, frame);
     },
     geometryReader: { locateParagraph: () => ({ start: 7, end: 7 + (options.splitEnd ? 20 : 2000) }) },
     setDisplayWindow: (...window: number[]) => { windows.push(window); },
@@ -399,7 +401,7 @@ test('selection_only_boundary_move_materializes_destination_and_updates_its_part
   expect(selected.payload.caret.caretRect).toMatchObject({ pageIndex: 3 });
   expect(selected.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(3);
   expect(selected.payload.parts).toEqual(readPartGeometry(
-    { partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0],
+    partEngine,
     worker.state.retainedFrame as unknown as Parameters<typeof readPartGeometry>[1],
   ));
 });
@@ -532,7 +534,7 @@ test('selection_preflight_page_builds_publish_incrementally_from_the_previous_fr
   expect(selected.payload.caret.caretRect).toMatchObject({ pageIndex: 4 });
   expect(selected.payload.stagedPresentation?.pages.map(({ page }) => page.pageIndex)).toContain(4);
   expect(selected.payload.parts).toEqual(readPartGeometry(
-    { partStory: (id: string) => `header:${id}` } as Parameters<typeof readPartGeometry>[0],
+    partEngine,
     worker.state.retainedFrame as unknown as Parameters<typeof readPartGeometry>[1],
   ));
 });
