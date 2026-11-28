@@ -226,10 +226,7 @@ struct SourceCache {
 }
 
 impl SourceCache {
-    fn new(
-        envelope: Arc<S9WireEnvelope>,
-        materialize_media: bool,
-    ) -> Self {
+    fn new(envelope: Arc<S9WireEnvelope>, materialize_media: bool) -> Self {
         Self {
             envelope,
             roots: OnceLock::new(),
@@ -1442,6 +1439,47 @@ mod tests {
             ),
         ];
         seeded_parts(parts)
+    }
+
+    #[test]
+    fn projection_follows_a_new_opening_of_the_session() {
+        let package = |width: u32| {
+            let document = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="{width}" w:h="15840"/></w:sectPr></w:body></w:document>"#
+            );
+            let parts = [
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), document.into_bytes()),
+            ];
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let page_width = |session: &crate::session::EditSessionCore| {
+            session
+                .engine
+                .doc()
+                .project_document(&ProjectionInput::default())
+                .unwrap()
+                .document
+                .package
+                .document
+                .final_section_properties
+                .and_then(|section| section.page_width)
+        };
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session.open_docx(&package(10_800), true, None, None).unwrap();
+        assert_eq!(page_width(&session), Some(10_800.0));
+        session
+            .open_docx(&package(11_906), false, Some("second".to_owned()), None)
+            .unwrap();
+        assert_eq!(page_width(&session), Some(11_906.0));
     }
 
     fn seeded_parts<const N: usize>(parts: [(&str, &str); N]) -> EditingDoc {

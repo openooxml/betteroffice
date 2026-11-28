@@ -135,27 +135,6 @@ fn projection_after_edit_matches_freshly_opened_copy() {
 }
 
 #[test]
-fn projection_uses_new_source_after_reopening() {
-    let doc = EditingDoc::new(41);
-    let input = ProjectionInput::default();
-    for (label, width) in [("First", 10_800), ("Second", 11_906)] {
-        let body_xml = format!(
-            r#"<w:p w14:paraId="00000011"><w:r><w:t>{label}</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="{width}" w:h="15840"/></w:sectPr>"#,
-        );
-        let bytes = package_with_parts(&body_xml, "", "", &[]);
-        seed_from_docx(&doc, &bytes).unwrap();
-
-        let output = doc.project_document(&input).unwrap();
-        assert_eq!(text(paragraph(&body(&output)[0])), label);
-        let section = output.document.package.document.final_section_properties;
-        assert_eq!(
-            section.and_then(|section| section.page_width),
-            Some(f64::from(width))
-        );
-    }
-}
-
-#[test]
 fn restores_authored_run_properties_and_boundaries() {
     let doc = seeded(concat!(
         r#"<w:p><w:r><w:rPr><w:b w:val="0"/><w:i/><w:sz w:val="26"/><w:rFonts w:ascii="Arial" w:eastAsia="Yu Gothic"/><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr><w:t>First</w:t></w:r>"#,
