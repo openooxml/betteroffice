@@ -227,17 +227,13 @@ struct SourceCache {
 }
 
 impl SourceCache {
-    fn new(
-        envelope: Arc<S9WireEnvelope>,
-        materialize_media: bool,
-        media: Option<docx_parse::media::MediaTable>,
-    ) -> Self {
+    fn new(envelope: Arc<S9WireEnvelope>, materialize_media: bool) -> Self {
         Self {
             envelope,
             roots: OnceLock::new(),
             stories: BTreeMap::new(),
             materialize_media,
-            media: media.map(Arc::new),
+            media: None,
             materialized_document: None,
         }
     }
@@ -417,6 +413,7 @@ impl SourceStory {
 #[derive(Default)]
 pub(crate) struct ProjectionCache {
     source: Option<Result<SourceCache, String>>,
+    source_is_ready: bool,
     generation: Option<String>,
     aliases: crate::header_footer::ProjectionAliases,
     styles: Option<(
@@ -436,31 +433,53 @@ struct CachedStory {
 }
 
 impl ProjectionCache {
-    fn resolve_source(source: &SourcePackage) -> Result<SourceCache, String> {
-        let (bytes, digest) = match source {
+    fn resolve_source(
+        source: &SourcePackage,
+    ) -> Result<(SourceCache, Option<docx_parse::media::MediaTable>), String> {
+        match source {
             SourcePackage::Ready(index) => {
-                if let Some(envelope) = &index.projection_envelope {
-                    return Ok(SourceCache::new(
-                        Arc::clone(envelope),
-                        true,
-                        index.projection_media.clone(),
-                    ));
-                }
-                (index.bytes(), Some(index.package_digest().to_owned()))
+                let (envelope, _, media) = crate::seed::parse_docx_package_with_media(
+                    index.bytes(),
+                    index.package_digest().to_owned(),
+                )?;
+                Ok((SourceCache::new(Arc::new(envelope), true), Some(media)))
             }
-            SourcePackage::Pending(bytes, digest) => (bytes.clone(), digest.clone()),
-        };
-        let digest = digest.unwrap_or_else(|| crate::seed::package_digest(&bytes));
-        crate::seed::parse_docx_package_with_digest(&bytes, digest)
-            .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false, None))
+            SourcePackage::Pending(bytes, digest) => {
+                let digest = digest
+                    .clone()
+                    .unwrap_or_else(|| crate::seed::package_digest(bytes));
+                crate::seed::parse_docx_package_with_digest(bytes, digest)
+                    .map(|(envelope, _)| (SourceCache::new(Arc::new(envelope), false), None))
+            }
+        }
     }
 
-    fn source(&mut self, doc: &EditingDoc) -> Result<&mut SourceCache, ProjectionError> {
-        if self.source.is_none() {
-            let retained = doc.source.lock().unwrap();
-            let source = retained.as_ref().ok_or(ProjectionError::MissingSource)?;
-            self.source = Some(Self::resolve_source(source));
+    fn prepare_source(&mut self, doc: &EditingDoc) -> Result<(), ProjectionError> {
+        let retained = doc.source.lock().unwrap();
+        let Some(source) = retained.as_ref() else {
+            self.reset_opening();
+            return Err(ProjectionError::MissingSource);
+        };
+        let is_ready = matches!(source, SourcePackage::Ready(_));
+        if self.source.is_some() && self.source_is_ready == is_ready {
+            return Ok(());
         }
+        self.reset_opening();
+        let resolved = Self::resolve_source(source);
+        drop(retained);
+        self.source_is_ready = is_ready;
+        self.source = Some(resolved.map(|(mut cache, media)| {
+            if let Some(media) = media
+                && doc.media_table().is_none()
+            {
+                cache.media = Some(Arc::new(media));
+            }
+            cache
+        }));
+        Ok(())
+    }
+
+    fn source(&mut self) -> Result<&mut SourceCache, ProjectionError> {
         self.source
             .as_mut()
             .ok_or(ProjectionError::MissingSource)?
@@ -469,15 +488,7 @@ impl ProjectionCache {
     }
 
     pub(crate) fn reset_opening(&mut self) {
-        let source = self.source.take();
-        *self = Self {
-            source,
-            ..Self::default()
-        };
-        if let Some(Ok(source)) = &mut self.source {
-            source.stories.clear();
-            source.materialized_document = None;
-        }
+        *self = Self::default();
     }
 
     pub(crate) fn invalidate_stories(&mut self) {
@@ -863,10 +874,11 @@ impl EditingDoc {
         }
         let mut cache = self.projection.lock().unwrap();
         let txn = self.doc.transact();
+        cache.prepare_source(self)?;
         cache.begin_generation(projection_generation(&txn));
         let aliases = cache.aliases.active_aliases(self, &txn);
         let (mut document, envelope) = {
-            let source = cache.source(self)?;
+            let source = cache.source()?;
             (source.document(self)?, Arc::clone(&source.envelope))
         };
         apply_host_metadata(&mut document, &input.host);
@@ -884,7 +896,7 @@ impl EditingDoc {
                     *entry = (id, source);
                 }
             }
-            let source = cache.source(self)?;
+            let source = cache.source()?;
             for (id, members) in &self.story_revisions.lock().unwrap().live_projection_roots {
                 if members.contains(id.as_str())
                     && !input
@@ -937,10 +949,11 @@ impl EditingDoc {
         validate_root(story_id)?;
         let mut cache = self.projection.lock().unwrap();
         let txn = self.doc.transact();
+        cache.prepare_source(self)?;
         cache.begin_generation(projection_generation(&txn));
         let group = cache.aliases.group(self, &txn, story_id);
         let id = group.as_ref().map_or(story_id, |group| group[0].as_str());
-        let source = cache.source(self)?;
+        let source = cache.source()?;
         let mut alternate = None;
         let mut override_blocks = None;
         let mut retained = false;
@@ -993,7 +1006,7 @@ impl EditingDoc {
         if let Some(blocks) = override_blocks {
             return Ok(stories_aux_dispatch::project_root(id, blocks));
         }
-        let envelope = Arc::clone(&cache.source(self)?.envelope);
+        let envelope = Arc::clone(&cache.source()?.envelope);
         let package = &envelope.document.package;
         let has_sections = input
             .host
@@ -1044,7 +1057,7 @@ impl EditingDoc {
             return Ok(cached.projection.clone());
         }
 
-        let source = cache.source(self)?.story(self, id)?;
+        let source = cache.source()?.story(self, id)?;
         let projection = if id == "body" {
             cache.stories.remove(id);
             let source_metadata = self.source_metadata();
@@ -1442,6 +1455,131 @@ mod tests {
             ),
         ];
         seeded_parts(parts)
+    }
+
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn projection_resolves_media_when_the_session_cannot_build_its_table() {
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 1),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 4, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        let mut tiff = vec![0u8; 134];
+        tiff[..4].copy_from_slice(b"II\x2a\x00");
+        tiff[4..8].copy_from_slice(&8u32.to_le_bytes());
+        tiff[8..10].copy_from_slice(&9u16.to_le_bytes());
+        for (index, (tag, kind, count, value)) in entries.iter().enumerate() {
+            let at = 10 + index * 12;
+            tiff[at..at + 2].copy_from_slice(&tag.to_le_bytes());
+            tiff[at + 2..at + 4].copy_from_slice(&kind.to_le_bytes());
+            tiff[at + 4..at + 8].copy_from_slice(&count.to_le_bytes());
+            tiff[at + 8..at + 12].copy_from_slice(&value.to_le_bytes());
+        }
+        for index in 0..3 {
+            let at = 122 + index * 2;
+            tiff[at..at + 2].copy_from_slice(&8u16.to_le_bytes());
+        }
+        tiff[128..134].copy_from_slice(&[0xff, 0x00, 0x00, 0x00, 0x80, 0xff]);
+        let parts = [
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="tif" ContentType="image/tiff"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.tif"/></Relationships>"#.to_vec(),
+            ),
+            ("word/media/image1.tif".to_owned(), tiff.clone()),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ];
+        let mut bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let name = b"word/media/image1.tif";
+        let declared = u32::try_from(tiff.len() + 7).unwrap().to_le_bytes();
+        let mut patched = 0;
+        for at in 0..bytes.len().saturating_sub(name.len()) {
+            if &bytes[at..at + name.len()] != name {
+                continue;
+            }
+            if at >= 30 && bytes[at - 30..at - 26] == *b"PK\x03\x04" {
+                bytes[at - 30 + 22..at - 30 + 26].copy_from_slice(&declared);
+                patched += 1;
+            }
+            if at >= 46 && bytes[at - 46..at - 42] == *b"PK\x01\x02" {
+                bytes[at - 46 + 24..at - 46 + 28].copy_from_slice(&declared);
+                patched += 1;
+            }
+        }
+        assert_eq!(patched, 2);
+        let (envelope, parts, _) = crate::seed::parse_docx_package_with_media(
+            bytes.as_slice().into(),
+            crate::seed::package_digest(&bytes),
+        )
+        .unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_parsed_docx(&doc, envelope, parts, &bytes).unwrap();
+        assert!(doc.media_table().is_none());
+
+        let output = doc.project_document(&ProjectionInput::default()).unwrap();
+        let wire = serde_json::to_string(&output.document).unwrap();
+        assert!(wire.contains(r#""type":"image""#), "{wire}");
+        assert!(!wire.contains(r#""media:"#), "{wire}");
+    }
+
+    #[test]
+    fn projection_follows_a_new_opening_of_the_session() {
+        let package = |width: u32| {
+            let document = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Text</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="{width}" w:h="15840"/></w:sectPr></w:body></w:document>"#
+            );
+            let parts = [
+                (
+                    "[Content_Types].xml".to_owned(),
+                    br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+                ),
+                ("word/document.xml".to_owned(), document.into_bytes()),
+            ];
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        };
+        let page_width = |session: &crate::session::EditSessionCore| {
+            session
+                .engine
+                .doc()
+                .project_document(&ProjectionInput::default())
+                .unwrap()
+                .document
+                .package
+                .document
+                .final_section_properties
+                .and_then(|section| section.page_width)
+        };
+        let session =
+            crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
+        session
+            .open_docx(&package(10_800), true, None, None)
+            .unwrap();
+        assert_eq!(page_width(&session), Some(10_800.0));
+        session
+            .open_docx(&package(11_906), false, Some("second".to_owned()), None)
+            .unwrap();
+        assert_eq!(page_width(&session), Some(11_906.0));
     }
 
     fn seeded_parts<const N: usize>(parts: [(&str, &str); N]) -> EditingDoc {

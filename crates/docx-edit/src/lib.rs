@@ -1423,7 +1423,7 @@ impl EditingDoc {
     /// Retains the package the stories were, or will be, seeded from.
     pub(crate) fn retain_source(&self, source: identity::SourcePackage) {
         let mut projection = self.projection.lock().unwrap();
-        **projection = projection::ProjectionCache::default();
+        projection.reset_opening();
         self.save_story_states.lock().unwrap().clear();
         *self.prime_progress.lock().unwrap() = None;
         self.seeded_epoch.store(u64::MAX, Ordering::Relaxed);
