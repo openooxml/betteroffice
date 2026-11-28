@@ -228,7 +228,7 @@ const probe: WorkerEditorProbe = {
     const ctx = expected.getContext('2d')!;
     const scale = devicePixelRatio * (parseFloat(canvas.style.width) / access.layoutSlide(0).width);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
-    ctx.fillStyle = '#1d4ed8';
+    ctx.fillStyle = '#000000';
     const { line, x } = caret(position);
     ctx.fillRect(x, line.y, 1.5, line.height);
     const actual = pixels(canvas);
