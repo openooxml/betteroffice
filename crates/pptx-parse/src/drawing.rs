@@ -110,6 +110,48 @@ pub(crate) fn common_slide_data_with_vml(
     })
 }
 
+pub(crate) fn custom_prompt_shape_ids(root: &XmlElement) -> Vec<u32> {
+    fn collect(parent: &XmlElement, ids: &mut Vec<u32>) {
+        for child in parent.child_elements() {
+            match child.local_name() {
+                "sp" => {
+                    let Some(non_visual) = child.child("nvSpPr") else {
+                        continue;
+                    };
+                    let custom = non_visual
+                        .child("nvPr")
+                        .and_then(|value| value.child("ph"))
+                        .and_then(|value| value.attribute("hasCustomPrompt"))
+                        .is_some_and(parse_bool);
+                    if custom
+                        && let Some(id) = non_visual
+                            .child("cNvPr")
+                            .and_then(|value| value.attribute("id"))
+                            .and_then(|value| value.parse().ok())
+                    {
+                        ids.push(id);
+                    }
+                }
+                "grpSp" => collect(child, ids),
+                "AlternateContent" => {
+                    if let Some(branch) = alternate_content_branch(child) {
+                        collect(branch, ids);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut ids = Vec::new();
+    if let Some(tree) = root.child("cSld").and_then(|common| common.child("spTree")) {
+        collect(tree, &mut ids);
+        ids.sort_unstable();
+        ids.dedup();
+    }
+    ids
+}
+
 pub(crate) fn parse_text_styles(root: &XmlElement) -> TextStyleSet {
     let Some(styles) = root.child("txStyles") else {
         return TextStyleSet::default();

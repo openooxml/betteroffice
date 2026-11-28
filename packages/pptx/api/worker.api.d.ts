@@ -725,6 +725,7 @@ type HitPrimitive = GeometryBounds & {
     kind: SlidePrimitive['kind'];
     shapeId?: string;
     storyId?: string;
+    placeholderType?: string;
     lines?: CaretLine[];
 };
 interface NavigationLine {
@@ -786,7 +787,7 @@ import type { PresentationHandle } from '../wasm/loader';
 import type { PptxPngOptions, PptxPngTarget } from '../wasm/pngOptions';
 import type { PptxEditRequest, PptxEditResult, PptxReadRequest, PptxReadResult, PptxStoryTarget } from '../edits';
 import type { DeckSnapshot, ParagraphAlignment, ShapeRect, ShapeDraft, PresetShapeDraft, ShapeReceipt, SlideDisplayList, TextStyle, TextStyleSnapshot } from '../types';
-import type { PresentationSessionOpenOptions, PresentationSlideSummary, PresentationWireFrame } from './methods';
+import type { PresentationSessionOpenOptions, PresentationSlideLayoutSummary, PresentationSlideSummary, PresentationWireFrame } from './methods';
 import type { SlicedFontRead } from './commandSlicedFonts';
 import type { DefaultFontFace } from '../../../../shared/pptxDefaultFonts';
 export type PresentationCommandAccessMethods = Pick<PresentationHandle, 'snapshot' | 'story' | 'findText' | 'validateEdits' | 'exportStructured' | 'exportMarkdown' | 'searchText' | 'listProposals' | 'comments' | 'previewProposal' | 'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutProposalDiffSlideById' | 'proposalSlideStrip' | 'layoutSlide' | 'encodeStateVector' | 'encodeStateAsUpdate'>;
@@ -874,6 +875,10 @@ export type PresentationCommandPayloads = {
             italic?: boolean;
         };
         fallback?: boolean;
+    };
+    insertSlide: PresentationCommandInput & {
+        index: number;
+        layoutPartPath?: string;
     };
     insertTextBox: PresentationCommandInput & {
         slideId: string;
@@ -1003,6 +1008,7 @@ export declare const PRESENTATION_COMMAND_ADMISSION: Readonly<{
     readonly collabPipe: "remote-update";
     readonly applyEdits: "local-write";
     readonly registerFont: "local-write";
+    readonly insertSlide: "local-write";
     readonly insertTextBox: "local-write";
     readonly insertShape: "local-write";
     readonly insertPicture: "local-write";
@@ -1152,6 +1158,7 @@ export interface PresentationCommandOpenResult extends PresentationCommandAck {
     recoveryEngine?: string;
     recoveryUpdate?: ArrayBuffer;
     slides: PresentationSlideSummary[];
+    layouts?: PresentationSlideLayoutSummary[];
     size: {
         width: number;
         height: number;
@@ -1581,6 +1588,12 @@ export interface PresentationSlideSummary {
     index: number;
     name: string | null;
     layoutPartPath: string | null;
+}
+export interface PresentationSlideLayoutSummary {
+    partPath: string;
+    name: string | null;
+    layoutType: string | null;
+    masterPartPath?: string | null;
 }
 /**
  * Presentation projection; version counts applied batches and size is in EMU.
@@ -3890,6 +3903,7 @@ export interface PositionedTextLine {
 export interface TextBoxPrimitive extends PrimitiveBase {
     kind: 'textBox';
     storyId?: string;
+    placeholderType?: string;
     anchor: 'top' | 'center' | 'bottom';
     paragraphs: Array<{
         align?: 'left' | 'center' | 'right' | 'justify';
@@ -4612,8 +4626,12 @@ export interface PresentationHandle extends CollaborationReplica {
     deleteTableColumn(slideId: string, shapeId: string, index: number): TableReceipt;
     /** Throws the refusal the matching table edit would throw, without changing the deck. */
     checkTableEdit(method: 'insertTableRow' | 'deleteTableRow' | 'insertTableColumn' | 'deleteTableColumn', slideId: string, shapeId: string, index: number, position?: 'before' | 'after', cells?: readonly string[], width?: 'split' | 'copy'): void;
-    insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
-    insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
+    insertSlide(index: number, layoutPartPath?: string, options?: {
+        instantiatePlaceholders?: boolean;
+    }): SlideReceipt;
+    insertSlideProfiled(index: number, layoutPartPath?: string, options?: {
+        instantiatePlaceholders?: boolean;
+    }): Profiled<SlideReceipt>;
     duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
     deleteSlide(slideId: string): SlideReceipt;
     moveSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -4745,6 +4763,12 @@ type PresentationMetadata = {
         name: string | null;
         layoutPartPath: string | null;
     }[];
+    layouts?: {
+        partPath: string;
+        name: string | null;
+        layoutType: string | null;
+        masterPartPath?: string | null;
+    }[];
     size: {
         width: number;
         height: number;
@@ -4811,7 +4835,7 @@ export { DEFAULT_EDITOR_TEXT_STYLE, effectiveStyleFromSelection, selectionFormat
 /** @internal */
 export type { EffectiveTextStyle, SelectionTextFormatting } from './textFormatting';
 /** @internal */
-export { presentationStoryFormatting } from './wasm/loader';
+export { presentationMetadata, presentationStoryFormatting } from './wasm/loader';
 /** @internal */
 export { browserFrameImages } from './render/browserFrameImages';
 export { decodeBrowserPresentationImage } from './render/browserImage';
@@ -4831,7 +4855,7 @@ export { openPresentationSession } from './session/client';
 /** @experimental */
 export type { OpenPresentationSessionOptions, PresentationSession } from './session/client';
 /** @experimental */
-export type { PresentationFrame, PresentationSessionEvents, PresentationSessionFont, PresentationSessionMethods, PresentationSessionOpenOptions, PresentationSessionState, PresentationSlideSummary, } from './session/methods';
+export type { PresentationFrame, PresentationSessionEvents, PresentationSessionFont, PresentationSessionMethods, PresentationSessionOpenOptions, PresentationSessionState, PresentationSlideLayoutSummary, PresentationSlideSummary, } from './session/methods';
 /** @internal */
 export { createPresentationCommandClient } from './session/commandClient';
 /** @internal */

@@ -1,4 +1,5 @@
 import { bentConnectorHit, containsBentConnector } from '../../../../shared/bentConnectorHit';
+import { isTextPlaceholderType } from '../../../../shared/pptxPlaceholders';
 import type { HitTestResult, PositionedTextLine, SlideDisplayList, SlidePrimitive, TextBoxPrimitive } from '../types';
 import type { PresentationCommandFrame, PresentationCommandMotion, PresentationCommandSelected, PresentationCommandSelection } from './commandProtocol';
 import { caretColumnOffset, graphemeBoundaries, verticalCaretMove, wordBoundary } from '../../../../shared/textSelection';
@@ -18,7 +19,7 @@ export interface CommandGeometryIndex {
 
 type GeometryBounds = Pick<SlidePrimitive, 'x' | 'y' | 'w' | 'h' | 'transform'>;
 type CaretLine = Pick<PositionedTextLine, 'columnOffset' | 'x' | 'y' | 'height' | 'start' | 'end' | 'caretStops'>;
-type HitPrimitive = GeometryBounds & { kind: SlidePrimitive['kind']; shapeId?: string; storyId?: string; lines?: CaretLine[] };
+type HitPrimitive = GeometryBounds & { kind: SlidePrimitive['kind']; shapeId?: string; storyId?: string; placeholderType?: string; lines?: CaretLine[] };
 interface NavigationLine { line: CaretLine }
 interface NavigationIndex { lines: Map<string, NavigationLine[]> }
 
@@ -108,6 +109,7 @@ export function indexHitGeometry(list: SlideDisplayList): CommandHitGeometryInde
       }
       if (source.kind === 'textBox' && source.shapeId && source.storyId) {
         primitive.storyId = source.storyId;
+        if (source.placeholderType) primitive.placeholderType = source.placeholderType;
         primitive.lines = source.lines.map((line) => ({ columnOffset: line.columnOffset, x: line.x, y: line.y, height: line.height,
           start: line.start, end: line.end, caretStops: line.caretStops.map((stop) => ({ position: stop.position, x: stop.x })) }));
         const key = targetKey(source.shapeId, source.storyId);
@@ -217,7 +219,11 @@ export function hitGeometry(index: Pick<CommandHitGeometryIndex, 'hits'>, point:
       }
     }
     if (primitive.kind === 'textBox' && primitive.storyId) {
-      const nearest = target || !inside || entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
+      const nearest =
+        target ||
+        !inside ||
+        (entry.textLength === 0 && isTextPlaceholderType(primitive.placeholderType)) ||
+        entry.clips.some((parent) => 'kind' in parent && parent.kind === 'table');
       const columns = primitive.lines?.some((line, index, lines) => index > 0 &&
         (line.columnOffset ?? 0) !== (lines[index - 1].columnOffset ?? 0));
       let nearestDistance = Number.POSITIVE_INFINITY;

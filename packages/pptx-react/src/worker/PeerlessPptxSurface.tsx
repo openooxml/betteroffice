@@ -47,6 +47,7 @@ import { usePeerlessPresentation, type PeerlessPresentation } from './usePeerles
 import { createPeerlessEditorApi, notifyingSaveApi, type PptxAsyncEditorApi } from './createPeerlessEditorApi';
 import { usePeerlessTextSelection } from './usePeerlessTextSelection';
 import { PeerlessResizeHandles, PeerlessShapeOverlay } from './PeerlessShapeOverlay';
+import { PlaceholderGuides } from '../components/PlaceholderGuides';
 import { usePeerlessShapeGestures, type PeerlessShapePreviewStore } from './usePeerlessShapeGestures';
 import { usePeerlessContextMenu } from './usePeerlessContextMenu';
 import { PeerlessShapeResizePreview } from './PeerlessShapeResizePreview';
@@ -103,6 +104,19 @@ function useStageFit(stage: RefObject<HTMLDivElement | null>, run: PeerlessPrese
   return { fit, previewFit, current };
 }
 
+function PeerlessPlaceholderGuides({ displayList, scale, preview, selectedShapeId, editingShapeId }: {
+  displayList: Parameters<typeof PlaceholderGuides>[0]['displayList'];
+  scale: number;
+  preview: PeerlessShapePreviewStore;
+  selectedShapeId: string | null;
+  editingShapeId: string | null;
+}) {
+  const activePreview = useSyncExternalStore(preview.subscribe, preview.getSnapshot, preview.getSnapshot);
+  return <PlaceholderGuides displayList={displayList} scale={scale}
+    selectedShapeId={selectedShapeId} editingShapeId={editingShapeId}
+    hiddenShapeId={activePreview ? selectedShapeId : null} />;
+}
+
 function Overlays({ run, commands, inputRef, preview, insertion, editor, onError }: { run: PeerlessPresentation; commands: PptxCommandStore; inputRef: RefObject<HTMLTextAreaElement | null>; preview: PeerlessShapePreviewStore; insertion: ShapeRect | null; editor: RefObject<HTMLDivElement | null>; onError(error: Error): void }) {
   const { t } = useTranslation();
   const snapshot = useSyncExternalStore(run.subscribeVisual, run.getVisualSnapshot, run.getVisualSnapshot);
@@ -150,6 +164,10 @@ function Overlays({ run, commands, inputRef, preview, insertion, editor, onError
       <PeerlessCaret store={run.visual} />
     </div>
     <PeerlessShapeResizePreview run={run} preview={preview} scale={fit.scale} />
+    {!view.editState.readOnly && <PeerlessPlaceholderGuides displayList={confirmed.displayList} scale={fit.scale}
+      preview={preview}
+      selectedShapeId={onSlide?.kind === 'object' ? onSlide.shapeId : null}
+      editingShapeId={onSlide && onSlide.kind !== 'object' ? onSlide.shapeId : null} />}
     {!insertion && view.selection?.kind === 'object' && <PeerlessShapeOverlay selection={view.selection} preview={preview}
       scale={fit.scale} readOnly={view.editState.readOnly || composing} />}
     {!composing && !insertion && edited && selected && selected.kind !== 'object' &&

@@ -1,7 +1,7 @@
 import { presentationContexts } from '../wasm/presentationContext';
 import type { PptxEditStep } from '../edits';
 import type { ProposalEdit } from '../proposals';
-import type { PresentationHandle } from '../wasm/loader';
+import { presentationMetadata, type PresentationHandle } from '../wasm/loader';
 import type { PresentationCommandMutation } from './commandProtocol';
 import { findTopLevelShape } from './commandShapes';
 
@@ -188,10 +188,27 @@ export function prepareCommandOperation(handle: PresentationHandle, mutation: Pr
     return () => handle.acceptProposal(proposal.id, args[1]);
   }
   if (method === 'insertSlide') {
-    const [index, layout] = args;
-    if (!Number.isSafeInteger(index) || index < 0 || index > snapshot.slides.length ||
-      layout !== undefined && (typeof layout !== 'string' || !snapshot.slides.some((slide) => slide.layoutPartPath === layout))) return null;
-    return () => handle.insertSlide(index, layout);
+    if (args.length < 1 || args.length > 3) return null;
+    const [index, layout, options] = args;
+    if (!Number.isSafeInteger(index) || index < 0 || index > snapshot.slides.length) return null;
+    if (layout !== undefined) {
+      if (typeof layout !== 'string') return null;
+      let metadataLayouts: readonly { partPath: string }[] | undefined;
+      try { metadataLayouts = presentationMetadata(handle).layouts; } catch {}
+      const known = metadataLayouts?.length
+        ? metadataLayouts.some((entry) => entry.partPath === layout)
+        : snapshot.slides.some((slide) => slide.layoutPartPath === layout);
+      if (!known) return null;
+    }
+    if (options !== undefined) {
+      if (!options || typeof options !== 'object' || Array.isArray(options)) return null;
+      const entries = Object.entries(options as Record<string, unknown>);
+      if (entries.some(([key, value]) =>
+        key !== 'instantiatePlaceholders' || value !== undefined && typeof value !== 'boolean')) {
+        return null;
+      }
+    }
+    return () => handle.insertSlide(index, layout, options);
   }
   const slide = snapshot.slides.find((slide) => slide.id === args[0]);
   if (!slide) return null;

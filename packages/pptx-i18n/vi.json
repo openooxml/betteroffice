@@ -43,6 +43,19 @@
     "newSlide": "Trang chiếu mới",
     "newSlideWithLayout": "Trang chiếu mới với bố cục",
     "layoutOption": "Bố cục {number}",
+    "layouts": {
+      "title": "Trang chiếu tiêu đề",
+      "obj": "Tiêu đề và nội dung",
+      "secHead": "Đầu đề mục",
+      "twoObj": "Hai nội dung",
+      "twoTxTwoObj": "So sánh",
+      "titleOnly": "Chỉ tiêu đề",
+      "blank": "Trống",
+      "objTx": "Nội dung có chú thích",
+      "picTx": "Hình ảnh có chú thích",
+      "vertTx": "Tiêu đề và văn bản dọc",
+      "vertTitleAndTx": "Tiêu đề và văn bản theo chiều dọc"
+    },
     "fit": "Vừa",
     "zoomValue": "Thu phóng: {value}",
     "textBoxTool": "Hộp văn bản",
@@ -113,7 +126,12 @@
     "loadError": "Trình chỉnh sửa không thể tải",
     "loadErrorDescription": "Kiểm tra kết nối, rồi tải lại trang.",
     "reloadPage": "Tải lại trang",
-    "showDetails": "Hiển thị chi tiết"
+    "showDetails": "Hiển thị chi tiết",
+    "placeholders": {
+      "title": "Nhấp để thêm tiêu đề",
+      "subtitle": "Nhấp để thêm phụ đề",
+      "body": "Nhấp để thêm văn bản"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Hộp văn bản",

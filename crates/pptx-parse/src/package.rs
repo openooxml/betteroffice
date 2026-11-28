@@ -9,8 +9,9 @@ use crate::comments::{
 };
 use crate::drawing::{
     BasicLayout, DIAGRAM_EXTENT_EMU, classify_layout, common_slide_data,
-    common_slide_data_with_vml, layout_basic_diagram, normalize_text_columns,
-    parse_diagram_drawing, parse_paragraph_properties, parse_style_levels, parse_text_styles,
+    common_slide_data_with_vml, custom_prompt_shape_ids, layout_basic_diagram,
+    normalize_text_columns, parse_diagram_drawing, parse_paragraph_properties, parse_style_levels,
+    parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -249,6 +250,7 @@ fn parse_package(
         "ppt/slideLayouts/",
     );
     let mut layouts = Vec::with_capacity(layout_paths.len());
+    let mut layout_custom_prompt_shapes = BTreeMap::new();
     for part_path in &layout_paths {
         let root = parse_part(&parts, part_path, &mut budget)?;
         let layout_relationships = relationships
@@ -263,6 +265,10 @@ fn parse_package(
             &mut budget,
             shape_elements,
         )?;
+        let custom_prompt_shapes = custom_prompt_shape_ids(&root);
+        if !custom_prompt_shapes.is_empty() {
+            layout_custom_prompt_shapes.insert(part_path.clone(), custom_prompt_shapes);
+        }
         layouts.push(SlideLayout {
             header_footer: header_footer(&root),
             part_path: part_path.clone(),
@@ -386,6 +392,7 @@ fn parse_package(
         comments: deck_comments.comments,
         comment_flavor: deck_comments.flavor,
         relationships,
+        layout_custom_prompt_shapes,
         parts,
         source_container: ooxml_opc::SourceContainer::new(data.to_vec()),
         shape_elements: if has_connectors {

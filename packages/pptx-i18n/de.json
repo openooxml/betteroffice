@@ -43,6 +43,19 @@
     "newSlide": "Neue Folie",
     "newSlideWithLayout": "Neue Folie mit Layout",
     "layoutOption": "Layout {number}",
+    "layouts": {
+      "title": "Titelfolie",
+      "obj": "Titel und Inhalt",
+      "secHead": "Abschnittsüberschrift",
+      "twoObj": "Zwei Inhalte",
+      "twoTxTwoObj": "Vergleich",
+      "titleOnly": "Nur Titel",
+      "blank": "Leer",
+      "objTx": "Inhalt mit Überschrift",
+      "picTx": "Bild mit Überschrift",
+      "vertTx": "Titel und vertikaler Text",
+      "vertTitleAndTx": "Vertikaler Titel und Text"
+    },
     "fit": "Anpassen",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Textfeld",
@@ -113,7 +126,12 @@
     "loadError": "Der Editor konnte nicht geladen werden",
     "loadErrorDescription": "Überprüfen Sie Ihre Verbindung und laden Sie die Seite neu.",
     "reloadPage": "Seite neu laden",
-    "showDetails": "Details anzeigen"
+    "showDetails": "Details anzeigen",
+    "placeholders": {
+      "title": "Klicken, um Titel hinzuzufügen",
+      "subtitle": "Klicken, um Untertitel hinzuzufügen",
+      "body": "Klicken, um Text hinzuzufügen"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Textfeld",

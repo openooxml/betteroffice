@@ -582,6 +582,7 @@ export interface PositionedTextLine {
 export interface TextBoxPrimitive extends PrimitiveBase {
   kind: 'textBox';
   storyId?: string;
+  placeholderType?: string;
   anchor: 'top' | 'center' | 'bottom';
   paragraphs: Array<{
     align?: 'left' | 'center' | 'right' | 'justify';

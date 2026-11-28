@@ -75,7 +75,7 @@ enum Op {
         crate::TableColumnWidth,
     ),
     DeleteTableColumn(String, String, u32),
-    InsertSlide(u32, Option<String>),
+    InsertSlide(u32, Option<String>, bool),
     DuplicateSlide(String, u32),
     DeleteSlide(String),
     MoveSlide(String, u32),
@@ -155,6 +155,13 @@ struct PictureJson {
 struct AcceptOptions {
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InsertSlideOptions {
+    #[serde(default)]
+    instantiate_placeholders: bool,
 }
 
 fn tuple<T: DeserializeOwned>(args: Vec<Value>, min: usize, max: usize) -> Result<T, PeerError> {
@@ -326,6 +333,9 @@ impl WireOp {
             "setShapeStroke" if self.args.len() >= 3 => {
                 fields(&self.args[2], &["color", "widthPt"])?
             }
+            "insertSlide" if self.args.get(2).is_some_and(|value| !value.is_null()) => {
+                fields(&self.args[2], &["instantiatePlaceholders"])?
+            }
             _ => {}
         }
         let a = self.args;
@@ -392,8 +402,13 @@ impl WireOp {
                 Op::DeleteTableColumn(slide, shape, index)
             }
             "insertSlide" => {
-                let (index, layout) = tuple(a, 1, 2)?;
-                Op::InsertSlide(index, layout)
+                let (index, layout, options): (u32, Option<String>, Option<InsertSlideOptions>) =
+                    tuple(a, 1, 3)?;
+                Op::InsertSlide(
+                    index,
+                    layout,
+                    options.unwrap_or_default().instantiate_placeholders,
+                )
             }
             "duplicateSlide" => {
                 let (id, index) = tuple(a, 2, 2)?;
@@ -600,8 +615,12 @@ impl Op {
             Self::DeleteTableColumn(slide, shape, index) => {
                 value(session.delete_table_column(&ctx, slide, shape, *index)?)
             }
-            Self::InsertSlide(at, layout) => {
-                value(session.insert_slide(&ctx, *at, layout.as_deref())?)
+            Self::InsertSlide(at, layout, instantiate_placeholders) => {
+                if *instantiate_placeholders {
+                    value(session.insert_slide_with_placeholders(&ctx, *at, layout.as_deref())?)
+                } else {
+                    value(session.insert_slide(&ctx, *at, layout.as_deref())?)
+                }
             }
             Self::DuplicateSlide(id, at) => value(session.duplicate_slide(&ctx, id, *at)?),
             Self::DeleteSlide(id) => value(session.delete_slide(&ctx, id)?),
@@ -854,6 +873,30 @@ mod tests {
         let copied = reply["outcome"]["result"]["slideId"].as_str().unwrap();
         assert_ne!(copied, slide.id);
         assert_eq!(reply["outcome"]["changedTargets"], json!([copied]));
+    }
+
+    #[test]
+    fn insert_slide_with_placeholders_replays_identically_and_rejects_unknown_options() {
+        let (worker, peer) = pair();
+        let reply = apply_pair(
+            &worker,
+            &peer,
+            &json!({"method":"insertSlide","args":[1, null, {"instantiatePlaceholders": true}]}),
+        );
+        assert_eq!(reply["outcome"]["applied"], true);
+        assert_observable(&worker, &peer, "insertSlide with instantiatePlaceholders");
+
+        let bad = worker
+            .replay_json(
+                &json!({
+                    "sequence": 2,
+                    "baseVersion": worker.version().as_str(),
+                    "op": {"method": "insertSlide", "args": [1, null, {"unknown": true}]}
+                })
+                .to_string(),
+            )
+            .unwrap_err();
+        assert_eq!(bad.code, "arguments");
     }
 
     fn assert_observable(worker: &DeckSession, peer: &DeckSession, prefix: &str) {

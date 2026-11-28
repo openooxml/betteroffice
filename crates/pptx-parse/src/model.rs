@@ -61,6 +61,8 @@ pub struct PptxPackage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_flavor: Option<CommentFlavor>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) layout_custom_prompt_shapes: BTreeMap<String, Vec<u32>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
     /// Source bytes for verbatim member passthrough on save.
@@ -77,6 +79,13 @@ pub struct PptxPackage {
 }
 
 impl PptxPackage {
+    #[doc(hidden)]
+    pub fn layout_placeholder_has_custom_prompt(&self, part_path: &str, shape_id: u32) -> bool {
+        self.layout_custom_prompt_shapes
+            .get(part_path)
+            .is_some_and(|ids| ids.binary_search(&shape_id).is_ok())
+    }
+
     pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
         self.parts
             .iter()

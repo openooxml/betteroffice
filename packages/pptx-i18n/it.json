@@ -43,6 +43,19 @@
     "newSlide": "Nuova diapositiva",
     "newSlideWithLayout": "Nuova diapositiva con layout",
     "layoutOption": "Layout {number}",
+    "layouts": {
+      "title": "Diapositiva titolo",
+      "obj": "Titolo e contenuto",
+      "secHead": "Intestazione sezione",
+      "twoObj": "Due contenuti",
+      "twoTxTwoObj": "Confronto",
+      "titleOnly": "Solo titolo",
+      "blank": "Vuota",
+      "objTx": "Contenuto con didascalia",
+      "picTx": "Immagine con didascalia",
+      "vertTx": "Titolo e testo verticale",
+      "vertTitleAndTx": "Titolo e testo verticali"
+    },
     "fit": "Adatta",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Casella di testo",
@@ -113,7 +126,12 @@
     "loadError": "Impossibile caricare l'editor",
     "loadErrorDescription": "Controlla la connessione, quindi ricarica la pagina.",
     "reloadPage": "Ricarica pagina",
-    "showDetails": "Mostra dettagli"
+    "showDetails": "Mostra dettagli",
+    "placeholders": {
+      "title": "Fare clic per aggiungere il titolo",
+      "subtitle": "Fare clic per aggiungere il sottotitolo",
+      "body": "Fare clic per aggiungere testo"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Casella di testo",

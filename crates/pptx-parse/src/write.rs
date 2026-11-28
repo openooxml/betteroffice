@@ -189,9 +189,13 @@ pub struct ShapeAdd {
     pub y: i64,
     pub width: i64,
     pub height: i64,
+    pub rotation_deg: f64,
+    pub flip_h: bool,
+    pub flip_v: bool,
     pub adjust_values: BTreeMap<String, f64>,
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
+    pub placeholder: Option<crate::Placeholder>,
     pub paragraphs: Option<Vec<ParagraphWrite>>,
     /// A picture instead of an autoshape; mints its own media part and relationship.
     pub picture: Option<PictureAdd>,
@@ -3866,6 +3870,23 @@ fn shape_element(
     if add.text_box {
         non_visual_properties.set_attribute("txBox", "1");
     }
+    let mut nv_pr = XmlElement::new(prefixes.presentation("nvPr"));
+    if let Some(placeholder) = &add.placeholder {
+        let mut ph = XmlElement::new(prefixes.presentation("ph"));
+        if let Some(kind) = &placeholder.placeholder_type {
+            ph.set_attribute("type", kind.clone());
+        }
+        if let Some(index) = placeholder.index {
+            ph.set_attribute("idx", index.to_string());
+        }
+        if let Some(orientation) = &placeholder.orientation {
+            ph.set_attribute("orient", orientation.clone());
+        }
+        if let Some(size) = &placeholder.size {
+            ph.set_attribute("sz", size.clone());
+        }
+        nv_pr = nv_pr.with_child(ph);
+    }
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
@@ -3873,32 +3894,24 @@ fn shape_element(
                 .with_attribute("name", add.name.clone()),
         )
         .with_child(non_visual_properties)
-        .with_child(XmlElement::new(prefixes.presentation("nvPr")));
-    let transform = XmlElement::new(prefixes.drawing("xfrm"))
-        .with_child(
-            XmlElement::new(prefixes.drawing("off"))
-                .with_attribute("x", add.x.to_string())
-                .with_attribute("y", add.y.to_string()),
-        )
-        .with_child(
-            XmlElement::new(prefixes.drawing("ext"))
-                .with_attribute("cx", add.width.to_string())
-                .with_attribute("cy", add.height.to_string()),
-        );
-    let mut adjust_list = XmlElement::new(prefixes.drawing("avLst"));
-    for (name, value) in &add.adjust_values {
-        adjust_list = adjust_list.with_child(
-            XmlElement::new(prefixes.drawing("gd"))
-                .with_attribute("name", name.clone())
-                .with_attribute("fmla", format!("val {}", format_fixed(value * 100_000.0))),
-        );
+        .with_child(nv_pr);
+    let mut properties = XmlElement::new(prefixes.presentation("spPr"));
+    if add.placeholder.is_none() || !add.geometry.is_empty() {
+        let mut adjust_list = XmlElement::new(prefixes.drawing("avLst"));
+        for (name, value) in &add.adjust_values {
+            adjust_list = adjust_list.with_child(
+                XmlElement::new(prefixes.drawing("gd"))
+                    .with_attribute("name", name.clone())
+                    .with_attribute("fmla", format!("val {}", format_fixed(value * 100_000.0))),
+            );
+        }
+        let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
+            .with_attribute("prst", add.geometry.clone())
+            .with_child(adjust_list);
+        properties = properties
+            .with_child(shape_add_transform(add, prefixes))
+            .with_child(geometry);
     }
-    let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
-        .with_attribute("prst", add.geometry.clone())
-        .with_child(adjust_list);
-    let mut properties = XmlElement::new(prefixes.presentation("spPr"))
-        .with_child(transform)
-        .with_child(geometry);
     if let Some(fill) = &add.fill {
         properties = properties.with_child(fill_element(fill, prefixes, part)?);
     }
@@ -3924,6 +3937,30 @@ fn shape_element(
 }
 
 /// A new shape, or a picture that also needs a media part and relationship.
+fn shape_add_transform(add: &ShapeAdd, prefixes: &Prefixes) -> XmlElement {
+    let mut transform = XmlElement::new(prefixes.drawing("xfrm"))
+        .with_child(
+            XmlElement::new(prefixes.drawing("off"))
+                .with_attribute("x", add.x.to_string())
+                .with_attribute("y", add.y.to_string()),
+        )
+        .with_child(
+            XmlElement::new(prefixes.drawing("ext"))
+                .with_attribute("cx", add.width.to_string())
+                .with_attribute("cy", add.height.to_string()),
+        );
+    if add.rotation_deg != 0.0 {
+        transform.set_attribute("rot", format_fixed(add.rotation_deg * 60_000.0));
+    }
+    if add.flip_h {
+        transform.set_attribute("flipH", "1");
+    }
+    if add.flip_v {
+        transform.set_attribute("flipV", "1");
+    }
+    transform
+}
+
 fn add_shape_element(
     add: &ShapeAdd,
     next_shape_id: &mut Option<u32>,
@@ -4105,17 +4142,7 @@ fn picture_shape_element(
             XmlElement::new(prefixes.drawing("stretch"))
                 .with_child(XmlElement::new(prefixes.drawing("fillRect"))),
         );
-    let transform = XmlElement::new(prefixes.drawing("xfrm"))
-        .with_child(
-            XmlElement::new(prefixes.drawing("off"))
-                .with_attribute("x", add.x.to_string())
-                .with_attribute("y", add.y.to_string()),
-        )
-        .with_child(
-            XmlElement::new(prefixes.drawing("ext"))
-                .with_attribute("cx", add.width.to_string())
-                .with_attribute("cy", add.height.to_string()),
-        );
+    let transform = shape_add_transform(add, prefixes);
     let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
         .with_attribute("prst", "rect")
         .with_child(XmlElement::new(prefixes.drawing("avLst")));
@@ -4236,9 +4263,13 @@ mod tests {
             y: 0,
             width: 1_000_000,
             height: 500_000,
+            rotation_deg: 0.0,
+            flip_h: false,
+            flip_v: false,
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
+            placeholder: None,
             paragraphs: Some(vec![ParagraphWrite {
                 source_paragraphs: Vec::new(),
                 source_index: None,

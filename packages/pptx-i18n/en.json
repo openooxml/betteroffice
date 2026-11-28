@@ -43,6 +43,19 @@
     "newSlide": "New slide",
     "newSlideWithLayout": "New slide with layout",
     "layoutOption": "Layout {number}",
+    "layouts": {
+      "title": "Title Slide",
+      "obj": "Title and Content",
+      "secHead": "Section Header",
+      "twoObj": "Two Content",
+      "twoTxTwoObj": "Comparison",
+      "titleOnly": "Title Only",
+      "blank": "Blank",
+      "objTx": "Content with Caption",
+      "picTx": "Picture with Caption",
+      "vertTx": "Title and Vertical Text",
+      "vertTitleAndTx": "Vertical Title and Text"
+    },
     "fit": "Fit",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Text box",
@@ -113,7 +126,12 @@
     "loadError": "The editor couldn't load",
     "loadErrorDescription": "Check your connection, then reload the page.",
     "reloadPage": "Reload page",
-    "showDetails": "Show details"
+    "showDetails": "Show details",
+    "placeholders": {
+      "title": "Click to add title",
+      "subtitle": "Click to add subtitle",
+      "body": "Click to add text"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Text Box",

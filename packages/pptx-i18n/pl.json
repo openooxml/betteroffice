@@ -43,6 +43,19 @@
     "newSlide": "Nowy slajd",
     "newSlideWithLayout": "Nowy slajd z układem",
     "layoutOption": "Układ {number}",
+    "layouts": {
+      "title": "Slajd tytułowy",
+      "obj": "Tytuł i zawartość",
+      "secHead": "Nagłówek sekcji",
+      "twoObj": "Dwie zawartości",
+      "twoTxTwoObj": "Porównanie",
+      "titleOnly": "Tylko tytuł",
+      "blank": "Pusty",
+      "objTx": "Zawartość z podpisem",
+      "picTx": "Obraz z podpisem",
+      "vertTx": "Tytuł i tekst pionowy",
+      "vertTitleAndTx": "Pionowy tytuł i tekst"
+    },
     "fit": "Dopasuj",
     "zoomValue": "Powiększenie: {value}",
     "textBoxTool": "Pole tekstowe",
@@ -113,7 +126,12 @@
     "loadError": "Nie udało się załadować edytora",
     "loadErrorDescription": "Sprawdź połączenie, a następnie odśwież stronę.",
     "reloadPage": "Odśwież stronę",
-    "showDetails": "Pokaż szczegóły"
+    "showDetails": "Pokaż szczegóły",
+    "placeholders": {
+      "title": "Kliknij, aby dodać tytuł",
+      "subtitle": "Kliknij, aby dodać podtytuł",
+      "body": "Kliknij, aby dodać tekst"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Pole tekstowe",

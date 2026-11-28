@@ -43,6 +43,19 @@
     "newSlide": "Novo slide",
     "newSlideWithLayout": "Novo slide com layout",
     "layoutOption": "Layout {number}",
+    "layouts": {
+      "title": "Slide de Título",
+      "obj": "Título e Conteúdo",
+      "secHead": "Cabeçalho da Seção",
+      "twoObj": "Duas Partes de Conteúdo",
+      "twoTxTwoObj": "Comparação",
+      "titleOnly": "Somente Título",
+      "blank": "Em Branco",
+      "objTx": "Conteúdo com Legenda",
+      "picTx": "Imagem com Legenda",
+      "vertTx": "Título e Texto Vertical",
+      "vertTitleAndTx": "Título e Texto Verticais"
+    },
     "fit": "Ajustar",
     "zoomValue": "Zoom: {value}",
     "textBoxTool": "Caixa de texto",
@@ -113,7 +126,12 @@
     "loadError": "O editor não pôde ser carregado",
     "loadErrorDescription": "Verifique sua conexão e recarregue a página.",
     "reloadPage": "Recarregar página",
-    "showDetails": "Mostrar detalhes"
+    "showDetails": "Mostrar detalhes",
+    "placeholders": {
+      "title": "Clique para adicionar um título",
+      "subtitle": "Clique para adicionar um subtítulo",
+      "body": "Clique para adicionar texto"
+    }
   },
   "objects": {
     "defaultTextBoxName": "Caixa de texto",
