@@ -2913,11 +2913,39 @@ fn structured_field_result(field_value: &Value) -> Option<&[Value]> {
         .map(Vec::as_slice)
 }
 
+pub(crate) fn is_closed_pageref(value: &Value) -> bool {
+    value["type"] == "complexField"
+        && value["fieldType"] == "PAGEREF"
+        && ["structuredCode", "structuredResult"]
+            .into_iter()
+            .all(|key| part_block_count(value, key) == Some(None))
+}
+
+pub(crate) fn unlinked_toc_entry_runs(value: &Value) -> Option<&[Value]> {
+    if value["type"] != "complexField"
+        || value["fieldType"] != "TOC"
+        || part_block_count(value, "structuredCode")?.is_some()
+        || part_block_count(value, "structuredResult")?.is_none()
+    {
+        return None;
+    }
+    let (page, label) = structured_field_result(value)?.split_last()?;
+    (is_closed_pageref(page)
+        && label.last()?.get("content")?.as_array()?.last()?["type"] == "tab"
+        && label.iter().all(|run| {
+            run["type"] == "run"
+                && array(run.get("content"))
+                    .iter()
+                    .all(|item| matches!(item["type"].as_str(), Some("text" | "tab")))
+        }))
+    .then_some(label)
+}
+
 fn field_result_runs(field_value: &Value, projected: bool) -> &[Value] {
-    if projected {
-        structured_field_result(field_value).unwrap_or(&[])
-    } else {
-        flat_field_result(field_value)
+    match projected {
+        true if unlinked_toc_entry_runs(field_value).is_some() => &[],
+        true => structured_field_result(field_value).unwrap_or(&[]),
+        false => flat_field_result(field_value),
     }
 }
 
@@ -3733,6 +3761,7 @@ fn field_to_units(
     }
     let result = structured_field_result(value).unwrap_or(&[]);
     let code = array(field(field(Some(value), "structuredCode"), "inline"));
+    let entry_runs = unlinked_toc_entry_runs(value).map_or(0, |runs| runs.len());
     let projected_children = code
         .iter()
         .enumerate()
@@ -3747,6 +3776,9 @@ fn field_to_units(
     let mut children = Vec::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
+            Some("run") if index >= 0 && (index as usize) < entry_runs => {
+                run_to_units(child, style_formatting, styles, &[], source)
+            }
             Some("hyperlink") => {
                 opaque_sequences.extend(hyperlink_sequence_names(child));
                 hyperlink_to_units(
@@ -3806,6 +3838,17 @@ fn field_to_units(
             "resultProjection".to_owned(),
             json!({"id":projection_id, "children":children}),
         );
+    }
+    if ["structuredCode", "structuredResult"]
+        .iter()
+        .any(|key| matches!(part_block_count(value, key), Some(Some(_))))
+    {
+        let projection = if entry_runs > 0 {
+            "unlinkedToc"
+        } else {
+            "standard"
+        };
+        payload.insert("spanningFieldProjection".to_owned(), json!(projection));
     }
     units.push(embed_unit("field", payload, &marks, 1));
     units

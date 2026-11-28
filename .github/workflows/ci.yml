@@ -546,6 +546,8 @@ jobs:
           workspaces: bindings
 
       - name: Build and install the extensions
+        env:
+          MATURIN_PEP517_ARGS: --profile gate
         run: |
           python -m pip install --upgrade pip pytest
           python -I scripts/python_font_packs.py --out "$RUNNER_TEMP/font-packs"

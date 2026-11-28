@@ -181,6 +181,8 @@ pub struct SerializerContext {
     paragraph_ids: BTreeSet<u32>,
     pub(crate) deletion: bool,
     pub(crate) in_control: bool,
+    pub(super) field_spans: super::field_spans::FieldSpans,
+    pub(super) in_spanning_result: bool,
     pub(crate) in_revision: bool,
     pub(crate) vmerge_continuation: u32,
     pub(crate) direction: DirectionScopes,
@@ -222,6 +224,9 @@ pub(crate) struct RecordedParagraphs {
     /// `sourceOrdinal` the part does not address was written; only the first is recorded.
     pub(crate) conflict: bool,
     pub(crate) token_prefix: Option<String>,
+    pub(super) paired_fields: BTreeSet<u32>,
+    pub(super) moved_field_ends: BTreeSet<u32>,
+    pub(super) carried_field_ends: BTreeSet<u32>,
     /// The empty paragraph written for each table cell without content, as the number of
     /// `order` entries written before it.
     pub(crate) placeholders: Vec<usize>,
@@ -244,6 +249,8 @@ impl SerializerContext {
             paragraph_ids: BTreeSet::new(),
             deletion: false,
             in_control: false,
+            field_spans: super::field_spans::FieldSpans::default(),
+            in_spanning_result: false,
             in_revision: false,
             vmerge_continuation: 0,
             direction: DirectionScopes::default(),
@@ -443,6 +450,9 @@ impl SerializerContext {
             expected: expected.into_iter().collect(),
             recorded: RecordedParagraphs {
                 token_prefix,
+                paired_fields: self.field_spans.paired.clone(),
+                moved_field_ends: self.field_spans.moved.clone(),
+                carried_field_ends: self.field_spans.carried.clone(),
                 ..RecordedParagraphs::default()
             },
             ..SpliceRecorder::default()

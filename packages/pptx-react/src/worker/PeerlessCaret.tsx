@@ -1,13 +1,13 @@
 import { findLine, indexGeometry, transformedRect } from '@betteroffice/pptx/worker';
 import type { SlidePrimitive } from '@betteroffice/pptx';
 import type { CommandRect } from '@betteroffice/pptx/worker';
-import { useMemo, useSyncExternalStore } from 'react';
+import { useMemo, useSyncExternalStore, type RefObject } from 'react';
 import { useCaretBlink } from '../useCaretBlink';
 import { echoLineClip, measureEchoPosition } from './localEchoPainter';
-import { pptxCaretColors } from './caretColor';
+import { paintedCaretInk, pptxCaretColors } from './caretColor';
 import type { PeerlessVisualStore } from './usePeerlessPresentation';
 
-export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
+export function PeerlessCaret({ store, canvas, scale }: { store: PeerlessVisualStore; canvas?: RefObject<HTMLCanvasElement | null>; scale?: number }) {
   const view = useSyncExternalStore(store.subscribePresentation, store.getSnapshot, store.getSnapshot);
   const eligible = view.focused && view.caret !== null && view.selection !== null &&
     view.selection.anchor === view.selection.focus;
@@ -16,14 +16,15 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     ? findLine(indexGeometry(view.confirmed.displayList), view.selection) : null),
     [view.activeLine, view.confirmed, view.selection]);
   const insertion = view.editState?.toolbar?.formatting?.color;
-  const { color, halo } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
+  const { caret: estimate } = useMemo(() => pptxCaretColors(view.confirmed?.displayList, active?.line,
     view.selection && view.selection.kind !== 'object' ? view.selection.focus : null, view.caret, insertion),
     [view.confirmed, active, view.selection, view.caret, insertion]);
-  if (!view.confirmed) return null;
   let x = view.caret?.x ?? 0;
   let y = view.caret?.y ?? 0;
   let height = view.caret?.height ?? 0;
   let transform = 'none';
+  let across = { x: 1, y: 0 };
+  let along = { x: 0, y: 1 };
   if (active && view.selection) {
     const position = view.selection.focus;
     const first = active.line.caretStops[0];
@@ -42,7 +43,18 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     y = origin.y;
     height = active.line.height;
     transform = `matrix(${horizontal.x - x}, ${horizontal.y - y}, ${vertical.x - x}, ${vertical.y - y}, 0, 0)`;
+    across = { x: horizontal.x - x, y: horizontal.y - y };
+    along = { x: vertical.x - x, y: vertical.y - y };
   }
+  const fromX = x + across.x / 2;
+  const fromY = y + across.y / 2;
+  const toX = fromX + along.x * height;
+  const toY = fromY + along.y * height;
+  const painted = useMemo(() => eligible ? paintedCaretInk(canvas?.current, view.confirmed?.displayList,
+    { x: fromX, y: fromY }, { x: toX, y: toY }) : null,
+    [eligible, canvas, scale, view.confirmed, fromX, fromY, toX, toY]);
+  const color = painted ?? estimate;
+  if (!view.confirmed) return null;
 
   let overlay = <div aria-hidden="true" data-testid="pptx-caret-clip" style={{
     position: 'absolute', left: 0, top: 0, pointerEvents: 'none', overflow: 'hidden',
@@ -50,7 +62,7 @@ export function PeerlessCaret({ store }: { store: PeerlessVisualStore }) {
     clipPath: view.echo && active ? clipPolygon(active.transforms, echoLineClip(active)) : undefined,
   }}>
     <div data-testid="pptx-caret" aria-hidden="true" style={{
-      position: 'absolute', pointerEvents: 'none', background: color, boxShadow: halo ? `0 0 0 1px ${halo}` : undefined,
+      position: 'absolute', pointerEvents: 'none', background: color,
       left: x, top: y, width: 1, height, transform, transformOrigin: '0 0',
       visibility: eligible && visible ? 'visible' : 'hidden',
     }} />
