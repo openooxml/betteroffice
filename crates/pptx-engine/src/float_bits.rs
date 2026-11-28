@@ -595,6 +595,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
             strike,
             caps,
             font_family,
+            east_asian_font_family,
             color,
             language,
             hyperlink_relationship_id,
@@ -611,6 +612,7 @@ impl FloatBitsWalk for pptx_parse::RunProperties {
         strike.float_bits(out);
         caps.float_bits(out);
         font_family.float_bits(out);
+        east_asian_font_family.float_bits(out);
         color.float_bits(out);
         language.float_bits(out);
         hyperlink_relationship_id.float_bits(out);

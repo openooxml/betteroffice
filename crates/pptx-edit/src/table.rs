@@ -530,6 +530,11 @@ impl DeckSession {
                 }
             }
             if let Some(text) = text {
+                let donor_east_asian = crate::story::story_east_asian_fonts(&story, &txn)
+                    .into_iter()
+                    .next()
+                    .and_then(|paragraph| paragraph.into_iter().next())
+                    .flatten();
                 let mut offset = 0;
                 let mut strings = Vec::new();
                 for diff in story.diff(&txn, YChange::identity) {
@@ -556,12 +561,14 @@ impl DeckSession {
                         .and_then(|paragraph| paragraph.runs.first())
                         .map(|run| run.style.clone())
                         .unwrap_or_default();
-                    let east_asian = style
-                        .font_family
-                        .as_deref()
-                        .filter(|_| crate::story::uses_east_asian_slot(text));
                     crate::story::insert_styled_text(
-                        &story, &mut txn, 0, text, &style, false, east_asian,
+                        &story,
+                        &mut txn,
+                        0,
+                        text,
+                        &style,
+                        false,
+                        donor_east_asian.as_deref(),
                     );
                 }
                 let snapshot = snapshot_story(&story, &txn, key)?;
