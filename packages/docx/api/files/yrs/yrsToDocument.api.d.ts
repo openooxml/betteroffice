@@ -1,6 +1,6 @@
 // @betteroffice/docx declaration yrs/yrsToDocument.d.ts
 // Regenerate: bun scripts/api-surface.ts --write docx
-import type { Document, BlockContent, Paragraph, RunContent, TextFormatting } from '../types/document';
+import type { Document, BlockContent, Paragraph, Run, RunContent, TextFormatting, ComplexField } from '../types/document';
 import type { YrsSession } from './index';
 type Attrs = Record<string, unknown>;
 /** @internal */
@@ -18,6 +18,8 @@ export interface RevisionNumbers {
 export declare const RAW_INLINE_KIND = "rawInline";
 export declare function assertCommentBookmarkReplacement(blocks: readonly BlockContent[]): void;
 export declare function restoreBlockBookmarks(projected: BlockContent[], base: readonly BlockContent[], storyId: string): BlockContent[];
+/** Editable runs preceding the page reference of an unlinked spanning TOC. @internal */
+export declare function unlinkedTocEntryRuns(field: ComplexField): Run[] | undefined;
 /** The session key of the pilcrow a projected paragraph was built from. @internal */
 export declare function projectedSessionKey(paragraph: Paragraph): string | undefined;
 /**
