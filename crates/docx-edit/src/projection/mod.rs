@@ -1457,6 +1457,88 @@ mod tests {
         seeded_parts(parts)
     }
 
+    #[cfg(feature = "tiff")]
+    #[test]
+    fn projection_resolves_media_when_the_session_cannot_build_its_table() {
+        let entries: [(u16, u16, u32, u32); 9] = [
+            (256, 3, 1, 2),
+            (257, 3, 1, 1),
+            (258, 3, 3, 122),
+            (259, 3, 1, 1),
+            (262, 3, 1, 2),
+            (273, 4, 1, 128),
+            (277, 3, 1, 3),
+            (278, 4, 1, 1),
+            (279, 4, 1, 6),
+        ];
+        let mut tiff = vec![0u8; 134];
+        tiff[..4].copy_from_slice(b"II\x2a\x00");
+        tiff[4..8].copy_from_slice(&8u32.to_le_bytes());
+        tiff[8..10].copy_from_slice(&9u16.to_le_bytes());
+        for (index, (tag, kind, count, value)) in entries.iter().enumerate() {
+            let at = 10 + index * 12;
+            tiff[at..at + 2].copy_from_slice(&tag.to_le_bytes());
+            tiff[at + 2..at + 4].copy_from_slice(&kind.to_le_bytes());
+            tiff[at + 4..at + 8].copy_from_slice(&count.to_le_bytes());
+            tiff[at + 8..at + 12].copy_from_slice(&value.to_le_bytes());
+        }
+        for index in 0..3 {
+            let at = 122 + index * 2;
+            tiff[at..at + 2].copy_from_slice(&8u16.to_le_bytes());
+        }
+        tiff[128..134].copy_from_slice(&[0xff, 0x00, 0x00, 0x00, 0x80, 0xff]);
+        let parts = [
+            (
+                "[Content_Types].xml".to_owned(),
+                br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="tif" ContentType="image/tiff"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+            ),
+            (
+                "_rels/.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.tif"/></Relationships>"#.to_vec(),
+            ),
+            ("word/media/image1.tif".to_owned(), tiff.clone()),
+            (
+                "word/document.xml".to_owned(),
+                br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec(),
+            ),
+        ];
+        let mut bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let name = b"word/media/image1.tif";
+        let declared = u32::try_from(tiff.len() + 7).unwrap().to_le_bytes();
+        let mut patched = 0;
+        for at in 0..bytes.len().saturating_sub(name.len()) {
+            if &bytes[at..at + name.len()] != name {
+                continue;
+            }
+            if at >= 30 && bytes[at - 30..at - 26] == *b"PK\x03\x04" {
+                bytes[at - 30 + 22..at - 30 + 26].copy_from_slice(&declared);
+                patched += 1;
+            }
+            if at >= 46 && bytes[at - 46..at - 42] == *b"PK\x01\x02" {
+                bytes[at - 46 + 24..at - 46 + 28].copy_from_slice(&declared);
+                patched += 1;
+            }
+        }
+        assert_eq!(patched, 2);
+        let (envelope, parts, _) = crate::seed::parse_docx_package_with_media(
+            bytes.as_slice().into(),
+            crate::seed::package_digest(&bytes),
+        )
+        .unwrap();
+        let doc = EditingDoc::new(41);
+        crate::seed_from_parsed_docx(&doc, envelope, parts, &bytes).unwrap();
+        assert!(doc.media_table().is_none());
+
+        let output = doc.project_document(&ProjectionInput::default()).unwrap();
+        let wire = serde_json::to_string(&output.document).unwrap();
+        assert!(wire.contains(r#""type":"image""#), "{wire}");
+        assert!(!wire.contains(r#""media:"#), "{wire}");
+    }
+
     #[test]
     fn projection_follows_a_new_opening_of_the_session() {
         let package = |width: u32| {
