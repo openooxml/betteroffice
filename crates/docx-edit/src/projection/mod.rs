@@ -1474,7 +1474,9 @@ mod tests {
         };
         let session =
             crate::session::EditSessionCore::new(41, crate::session::Host::deterministic());
-        session.open_docx(&package(10_800), true, None, None).unwrap();
+        session
+            .open_docx(&package(10_800), true, None, None)
+            .unwrap();
         assert_eq!(page_width(&session), Some(10_800.0));
         session
             .open_docx(&package(11_906), false, Some("second".to_owned()), None)
