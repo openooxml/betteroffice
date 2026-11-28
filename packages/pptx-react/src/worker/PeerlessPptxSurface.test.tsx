@@ -3247,8 +3247,9 @@ describe('peerless stage fit', () => {
     const images = heldBitmaps();
     const loading = deferred<void>();
     const installed = new Set<FontFace>();
+    let loads = 0;
     class HeldFontFace {
-      load() { return loading.promise.then(() => this as unknown as FontFace); }
+      load() { loads += 1; return loading.promise.then(() => this as unknown as FontFace); }
     }
     override(globalThis, 'FontFace', { value: HeldFontFace });
     override(window, 'FontFace', { value: HeldFontFace });
@@ -3265,6 +3266,7 @@ describe('peerless stage fit', () => {
       await flushStage(() => { view.rerender(<PptxEditor fonts={fonts} file={file} onReady={ready} />); });
       await flushStage(value.admit);
       expect(value.client.sent[0]).toMatchObject({ kind: 'setReadOnly', payload: { readOnly: false } });
+      await waitFor(() => expect(loads).toBe(1));
       await flushStage(() => {
         value.client.ack(1, { ...coveringFrame(value.client, 'abc', 1), media: [] });
       });
