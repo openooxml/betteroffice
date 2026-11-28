@@ -2183,6 +2183,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .child("latin")
             .and_then(|value| value.attribute("typeface"))
             .map(str::to_owned),
+        east_asian_font_family: element
+            .child("ea")
+            .and_then(|value| value.attribute("typeface"))
+            .map(str::to_owned),
         color: element
             .child("solidFill")
             .and_then(parse_color_container)

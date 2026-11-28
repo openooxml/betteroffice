@@ -55,16 +55,76 @@ impl DeckSession {
             )));
         }
         let baseline = baseline_snapshot(&self.package)?;
-        if current == baseline {
+        let east_asian_fonts = collect_east_asian_fonts(&self.doc, &current)?;
+        if current == baseline && east_asian_fonts.is_empty() {
             return pptx_parse::write_pptx(&self.package)
                 .map_err(|error| EditError::Write(error.to_string()));
         }
         let autofit = resolve(&current, &baseline)?;
         let copy_origins = comment_copy_origins(&self.doc.transact())?;
-        let deck = deck_write(&current, &baseline, self, &autofit, &copy_origins)?;
+        let deck = deck_write(
+            &current,
+            &baseline,
+            self,
+            &autofit,
+            &copy_origins,
+            &east_asian_fonts,
+        )?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
+}
+
+pub(crate) type EastAsianFonts = HashMap<String, Vec<Vec<Option<String>>>>;
+
+pub(crate) fn collect_east_asian_fonts(
+    doc: &yrs::Doc,
+    snapshot: &DeckSnapshot,
+) -> EditResult<EastAsianFonts> {
+    let txn = doc.transact();
+    let mut fonts = HashMap::new();
+    for slide in &snapshot.slides {
+        collect_shape_east_asian_fonts(&txn, &slide.shapes, &mut fonts)?;
+    }
+    Ok(fonts)
+}
+
+fn collect_shape_east_asian_fonts(
+    txn: &yrs::Transaction<'_>,
+    shapes: &[ShapeSnapshot],
+    fonts: &mut EastAsianFonts,
+) -> EditResult<()> {
+    for shape in shapes {
+        for story in &shape.text_stories {
+            let story_fonts = crate::story::story_east_asian_fonts_by_id(txn, &story.id)?;
+            if story_fonts
+                .iter()
+                .any(|paragraph| paragraph.iter().any(Option::is_some))
+            {
+                fonts.insert(story.id.clone(), story_fonts);
+            }
+        }
+        collect_shape_east_asian_fonts(txn, &shape.children, fonts)?;
+    }
+    Ok(())
+}
+
+fn shape_has_east_asian_fonts(shape: &ShapeSnapshot, fonts: &EastAsianFonts) -> bool {
+    shape
+        .text_stories
+        .iter()
+        .any(|story| fonts.contains_key(&story.id))
+        || shape
+            .children
+            .iter()
+            .any(|child| shape_has_east_asian_fonts(child, fonts))
+}
+
+fn slide_has_east_asian_fonts(slide: &SlideSnapshot, fonts: &EastAsianFonts) -> bool {
+    slide
+        .shapes
+        .iter()
+        .any(|shape| shape_has_east_asian_fonts(shape, fonts))
 }
 
 fn deck_write(
@@ -73,6 +133,7 @@ fn deck_write(
     session: &DeckSession,
     autofit: &HashMap<String, TextAutofit>,
     copy_origins: &HashMap<String, String>,
+    east_asian_fonts: &EastAsianFonts,
 ) -> EditResult<DeckWrite> {
     let package = session.package();
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
@@ -88,9 +149,13 @@ fn deck_write(
             slide.layout_part_path.as_deref(),
         );
         let write = match baseline_slides.get(slide.id.as_str()) {
-            Some(base) if *base == slide => SlideWrite::Keep {
-                part_path: source_part_path(slide)?,
-            },
+            Some(base)
+                if *base == slide && !slide_has_east_asian_fonts(slide, east_asian_fonts) =>
+            {
+                SlideWrite::Keep {
+                    part_path: source_part_path(slide)?,
+                }
+            }
             Some(base) => SlideWrite::Patch {
                 part_path: source_part_path(slide)?,
                 shapes: shape_writes(
@@ -100,6 +165,7 @@ fn deck_write(
                     autofit,
                     &context,
                     session,
+                    east_asian_fonts,
                 )?,
                 background: background_write(slide, base),
                 layout_part_path: changed_layout(slide, base),
@@ -124,6 +190,7 @@ fn deck_write(
                         autofit,
                         &context,
                         session,
+                        east_asian_fonts,
                     )?,
                     background: background_write(slide, &base),
                     layout_part_path: changed_layout(slide, &base),
@@ -135,7 +202,7 @@ fn deck_write(
                 shapes: slide
                     .shapes
                     .iter()
-                    .map(shape_add)
+                    .map(|shape| shape_add(shape, east_asian_fonts))
                     .collect::<EditResult<Vec<_>>>()?,
                 background: slide.background.clone().map(Box::new),
             },
@@ -517,6 +584,7 @@ fn shape_writes(
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
     session: &DeckSession,
+    east_asian_fonts: &EastAsianFonts,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -525,9 +593,13 @@ fn shape_writes(
     let mut writes = Vec::with_capacity(current.len());
     for shape in current {
         let write = match baseline_shapes.get(shape.id.as_str()) {
-            Some(base) if *base == shape => ShapeWrite::Keep {
-                source_index: addressed_source_index(shape, source)?,
-            },
+            Some(base)
+                if *base == shape && !shape_has_east_asian_fonts(shape, east_asian_fonts) =>
+            {
+                ShapeWrite::Keep {
+                    source_index: addressed_source_index(shape, source)?,
+                }
+            }
             Some(base) => {
                 let index = addressed_source_index(shape, source)?;
                 ShapeWrite::Patch {
@@ -540,10 +612,11 @@ fn shape_writes(
                         autofit,
                         context,
                         session,
+                        east_asian_fonts,
                     )?),
                 }
             }
-            None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
+            None => ShapeWrite::Add(Box::new(shape_add(shape, east_asian_fonts)?)),
         };
         writes.push(write);
     }
@@ -579,6 +652,7 @@ fn source_index(shape_id: &str) -> EditResult<usize> {
         .ok_or_else(|| EditError::Write(format!("shape {shape_id} has no source index")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
@@ -587,6 +661,7 @@ fn shape_patch(
     autofit: &HashMap<String, TextAutofit>,
     context: &SlideParents<'_>,
     session: &DeckSession,
+    east_asian_fonts: &EastAsianFonts,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     if shape.placeholder != base.placeholder {
@@ -668,7 +743,8 @@ fn shape_patch(
         let base_story = mapped_base
             .as_ref()
             .or_else(|| baseline_stories.get(story.id.as_str()).copied());
-        if base_story == Some(story) {
+        let story_ea_fonts = east_asian_fonts.get(&story.id).map(Vec::as_slice);
+        if base_story == Some(story) && story_ea_fonts.is_none() {
             continue;
         }
         let target = text_target(&story.id, &shape.id)?;
@@ -685,10 +761,15 @@ fn shape_patch(
         patch.texts.push(TextWrite {
             target,
             autofit,
-            paragraphs: paragraph_writes(story, base_story)?,
+            paragraphs: paragraph_writes(story, base_story, story_ea_fonts)?,
         });
     }
-    if shape.children != base.children {
+    if shape.children != base.children
+        || shape
+            .children
+            .iter()
+            .any(|child| shape_has_east_asian_fonts(child, east_asian_fonts))
+    {
         patch.children = shape_writes(
             &shape.children,
             &base.children,
@@ -696,6 +777,7 @@ fn shape_patch(
             autofit,
             context,
             session,
+            east_asian_fonts,
         )?;
     }
     Ok(patch)
@@ -756,6 +838,7 @@ pub(crate) fn text_target(story_id: &str, shape_id: &str) -> EditResult<TextTarg
 fn paragraph_writes(
     story: &StorySnapshot,
     baseline: Option<&StorySnapshot>,
+    east_asian_fonts: Option<&[Vec<Option<String>>]>,
 ) -> EditResult<Vec<ParagraphWrite>> {
     let baseline_paragraphs: HashMap<&str, &ParagraphSnapshot> = baseline
         .into_iter()
@@ -764,14 +847,18 @@ fn paragraph_writes(
         .collect();
     let prefix = format!("para:{}:", story.id);
     let mut writes = Vec::with_capacity(story.paragraphs.len());
-    for paragraph in &story.paragraphs {
+    for (paragraph_index, paragraph) in story.paragraphs.iter().enumerate() {
         let source_index = paragraph
             .id
             .strip_prefix(&prefix)
             .and_then(|index| index.parse::<usize>().ok())
             .filter(|_| paragraph.preserved_xml.is_none());
+        let paragraph_ea_fonts = east_asian_fonts
+            .and_then(|paragraphs| paragraphs.get(paragraph_index))
+            .map(Vec::as_slice);
+        let has_ea_fonts = paragraph_ea_fonts.is_some_and(|runs| runs.iter().any(Option::is_some));
         let base = baseline_paragraphs.get(paragraph.id.as_str()).copied();
-        if base == Some(paragraph) && source_index.is_some() {
+        if base == Some(paragraph) && source_index.is_some() && !has_ea_fonts {
             writes.push(ParagraphWrite {
                 source_index,
                 source_paragraphs: Vec::new(),
@@ -812,13 +899,23 @@ fn paragraph_writes(
             alignment: paragraph.alignment.clone(),
             level: paragraph.level,
             bullet,
-            runs: paragraph.runs.iter().map(run_write).collect(),
+            runs: paragraph
+                .runs
+                .iter()
+                .enumerate()
+                .map(|(run_index, run)| {
+                    let ea = paragraph_ea_fonts
+                        .and_then(|runs| runs.get(run_index))
+                        .and_then(Clone::clone);
+                    run_write(run, ea)
+                })
+                .collect(),
         });
     }
     Ok(writes)
 }
 
-fn run_write(run: &TextRunSnapshot) -> RunWrite {
+fn run_write(run: &TextRunSnapshot, east_asian_font_family: Option<String>) -> RunWrite {
     RunWrite {
         text: run.text.clone(),
         properties: RunProperties {
@@ -832,6 +929,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
             strike: run.style.strike.clone(),
             caps: run.style.caps,
             font_family: run.style.font_family.clone(),
+            east_asian_font_family,
             color: run.style.color.as_deref().map(color_from_hex),
             language: None,
             hyperlink_relationship_id: None,
@@ -853,7 +951,7 @@ fn color_from_hex(color: &str) -> ColorValue {
     }
 }
 
-fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+fn shape_add(shape: &ShapeSnapshot, east_asian_fonts: &EastAsianFonts) -> EditResult<ShapeAdd> {
     if shape.kind == ShapeKind::Picture {
         return picture_shape_add(shape);
     }
@@ -866,7 +964,13 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     let paragraphs = shape
         .text_stories
         .first()
-        .map(|story| paragraph_writes(story, None))
+        .map(|story| {
+            paragraph_writes(
+                story,
+                None,
+                east_asian_fonts.get(&story.id).map(Vec::as_slice),
+            )
+        })
         .transpose()?;
     Ok(ShapeAdd {
         name: shape.name.clone(),

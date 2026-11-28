@@ -91,7 +91,7 @@ fn text_typed_at_the_end_of_a_no_strike_run_stays_in_that_run() {
 }
 
 #[test]
-fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
+fn east_asian_typeface_persists_through_font_picks_and_typing() {
     let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
     let source = slide(paragraphs);
     let session = DeckSession::open(&deck(&source), 7101).unwrap();
@@ -102,7 +102,7 @@ fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
         .flat_map(|shape| &shape.text_stories)
         .next()
         .unwrap();
-    let east_asian = r#"<a:ea typeface="SimSun"/>"#;
+    let updated_ea = r#"<a:ea typeface="Microsoft YaHei"/>"#;
 
     session
         .format_text(
@@ -125,7 +125,7 @@ fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
         properties.contains(r#"<a:latin typeface="Microsoft YaHei"/>"#),
         "{properties}"
     );
-    assert!(properties.contains(east_asian), "{properties}");
+    assert!(properties.contains(updated_ea), "{properties}");
 
     let formatted = session.story(&story.id).unwrap();
     let style = &formatted.paragraphs[0].runs[0].style;
@@ -137,7 +137,7 @@ fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
         .into_iter()
         .find(|run| run.ends_with("字</a:t>"))
         .unwrap();
-    assert!(typed.contains(east_asian), "{typed}");
+    assert!(typed.contains(updated_ea), "{typed}");
 
     let snapshot = session.snapshot().unwrap();
     let story = snapshot.slides[0]
@@ -168,6 +168,311 @@ fn east_asian_typeface_is_left_as_authored_by_font_picks_and_typing() {
             ]
         );
     }
+}
+
+#[test]
+fn non_font_edits_and_untouched_runs_preserve_east_asian_typeface() {
+    let paragraphs = concat!(
+        r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#,
+        r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="+mn-ea"/></a:rPr><a:t>保留</a:t></a:r></a:p>"#,
+    );
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7102).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    session
+        .format_text(
+            &EditCtx::local("bold"),
+            &story_id,
+            0,
+            2,
+            &TextStylePatch {
+                bold: Some(true),
+                font_size_pt: Some(24.0),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    assert!(
+        saved.contains(r#"<a:rPr b="1" sz="2400"><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t>"#),
+        "{saved}"
+    );
+    assert!(
+        saved.contains(
+            r#"<a:rPr><a:latin typeface="Arial"/><a:ea typeface="+mn-ea"/></a:rPr><a:t>保留</a:t>"#
+        ),
+        "{saved}"
+    );
+}
+
+#[test]
+fn latin_only_selection_preserves_east_asian_typeface_while_mixed_updates_it() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>Hello中文</a:t></a:r></a:p>"#;
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7103).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+
+    session
+        .format_text(
+            &EditCtx::local("latin-only"),
+            &story_id,
+            0,
+            5,
+            &TextStylePatch {
+                font_family: Some("Georgia".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs = runs(&saved);
+    assert_eq!(saved_runs.len(), 2, "{}", paragraph(&saved));
+    assert!(
+        saved_runs[0].contains(r#"<a:latin typeface="Georgia"/>"#)
+            && saved_runs[0].contains(r#"<a:ea typeface="SimSun"/>"#),
+        "{}",
+        saved_runs[0]
+    );
+    assert!(
+        saved_runs[1].contains(r#"<a:latin typeface="Arial"/>"#)
+            && saved_runs[1].contains(r#"<a:ea typeface="SimSun"/>"#),
+        "{}",
+        saved_runs[1]
+    );
+
+    session
+        .format_text(
+            &EditCtx::local("ea-only"),
+            &story_id,
+            5,
+            7,
+            &TextStylePatch {
+                font_family: Some("Microsoft YaHei".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs = runs(&saved);
+    assert_eq!(saved_runs.len(), 2, "{}", paragraph(&saved));
+    assert!(
+        saved_runs[0].contains(r#"<a:ea typeface="SimSun"/>"#),
+        "{}",
+        saved_runs[0]
+    );
+    assert!(
+        saved_runs[1].contains(r#"<a:latin typeface="Microsoft YaHei"/>"#)
+            && saved_runs[1].contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{}",
+        saved_runs[1]
+    );
+}
+
+#[test]
+fn font_pick_inserts_ea_when_absent_and_replaces_theme_ea_with_metrics() {
+    let paragraphs = concat!(
+        r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:cs typeface="Arial"/></a:rPr><a:t>无东亚</a:t></a:r></a:p>"#,
+        r#"<a:p><a:r><a:rPr><a:latin typeface="+mn-lt"/><a:ea typeface="+mn-ea" panose="02010600030101010101" pitchFamily="34" charset="-122"/></a:rPr><a:t>主题字</a:t></a:r></a:p>"#,
+    );
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7104).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    session
+        .format_text(
+            &EditCtx::local("font-family"),
+            &story_id,
+            0,
+            7,
+            &TextStylePatch {
+                font_family: Some("Microsoft YaHei".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs: Vec<&str> = saved
+        .split("<a:r>")
+        .skip(1)
+        .map(|part| part.split("</a:r>").next().unwrap())
+        .collect();
+    assert_eq!(saved_runs.len(), 2, "{saved}");
+
+    let first = &saved_runs[0];
+    let latin_pos = first
+        .find(r#"<a:latin typeface="Microsoft YaHei"/>"#)
+        .unwrap();
+    let ea_pos = first.find(r#"<a:ea typeface="Microsoft YaHei"/>"#).unwrap();
+    let cs_pos = first.find(r#"<a:cs typeface="Arial"/>"#).unwrap();
+    assert!(latin_pos < ea_pos && ea_pos < cs_pos, "{first}");
+
+    let second = &saved_runs[1];
+    assert!(
+        second.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{second}"
+    );
+    assert!(!second.contains("panose="), "{second}");
+    assert!(!second.contains("pitchFamily="), "{second}");
+    assert!(!second.contains("charset="), "{second}");
+}
+
+#[test]
+fn picking_same_latin_face_for_east_asian_text_still_updates_ea_on_save() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7105).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    session
+        .format_text(
+            &EditCtx::local("same-latin"),
+            &story_id,
+            0,
+            2,
+            &TextStylePatch {
+                font_family: Some("Arial".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs = runs(&saved);
+    assert_eq!(saved_runs.len(), 1, "{}", paragraph(&saved));
+    assert!(
+        saved_runs[0].contains(r#"<a:latin typeface="Arial"/>"#)
+            && saved_runs[0].contains(r#"<a:ea typeface="Arial"/>"#),
+        "{}",
+        saved_runs[0]
+    );
+}
+
+#[test]
+fn typing_in_unedited_east_asian_run_keeps_authored_ea_while_new_font_pick_sets_it() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7106).unwrap();
+    let story_id = session.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+    let inherited = session.story(&story_id).unwrap().paragraphs[0].runs[0]
+        .style
+        .clone();
+    session
+        .insert_text(&EditCtx::local("typing"), &story_id, 2, "字", &inherited)
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let saved_runs = runs(&saved);
+    assert_eq!(saved_runs.len(), 1, "{}", paragraph(&saved));
+    assert!(
+        saved_runs[0].contains(r#"<a:ea typeface="SimSun"/>"#),
+        "{}",
+        saved_runs[0]
+    );
+
+    let new_font = TextStyle {
+        font_family: Some("Microsoft YaHei".to_owned()),
+        ..inherited
+    };
+    session
+        .insert_text(&EditCtx::local("new-font"), &story_id, 3, "体", &new_font)
+        .unwrap();
+    let saved = slide_xml(&session.save().unwrap());
+    let typed = runs(&saved)
+        .into_iter()
+        .find(|run| run.ends_with("体</a:t>"))
+        .unwrap();
+    assert!(
+        typed.contains(r#"<a:latin typeface="Microsoft YaHei"/>"#)
+            && typed.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{typed}"
+    );
+}
+
+#[test]
+fn east_asian_font_pick_syncs_across_collaborative_peers_and_reopens() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
+    let source_bytes = deck(&slide(paragraphs));
+    let peer_a = DeckSession::open(&source_bytes, 7107).unwrap();
+    let peer_b = DeckSession::open(&source_bytes, 7108).unwrap();
+    let story_id = peer_a.snapshot().unwrap().slides[0].shapes[0].text_stories[0]
+        .id
+        .clone();
+
+    peer_a
+        .format_text(
+            &EditCtx::local("peer-a"),
+            &story_id,
+            0,
+            2,
+            &TextStylePatch {
+                font_family: Some("Microsoft YaHei".to_owned()),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let update = peer_a.encode_state_as_update_v1();
+    peer_b.apply_update_v1(&update).unwrap();
+
+    let saved_bytes = peer_b.save().unwrap();
+    let saved = slide_xml(&saved_bytes);
+    assert!(
+        saved.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{saved}"
+    );
+
+    let reopened = DeckSession::open(&saved_bytes, 7109).unwrap();
+    reopened
+        .format_text(
+            &EditCtx::local("bold-after-reopen"),
+            &story_id,
+            0,
+            2,
+            &TextStylePatch {
+                bold: Some(true),
+                ..TextStylePatch::default()
+            },
+        )
+        .unwrap();
+    let resaved = slide_xml(&reopened.save().unwrap());
+    assert!(
+        resaved.contains(r#"<a:ea typeface="Microsoft YaHei"/>"#),
+        "{resaved}"
+    );
+}
+
+#[test]
+fn batch_format_text_updates_east_asian_typeface_even_when_latin_matches() {
+    let paragraphs = r#"<a:p><a:r><a:rPr><a:latin typeface="Arial"/><a:ea typeface="SimSun"/></a:rPr><a:t>中文</a:t></a:r></a:p>"#;
+    let session = DeckSession::open(&deck(&slide(paragraphs)), 7110).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide_id = snapshot.slides[0].id.clone();
+    let shape_id = snapshot.slides[0].shapes[0].id.clone();
+    let story_id = snapshot.slides[0].shapes[0].text_stories[0].id.clone();
+    let request: pptx_edit::EditRequest = serde_json::from_value(serde_json::json!({
+        "expectVersion": session.version(),
+        "steps": [
+            {
+                "op": "formatText",
+                "target": {
+                    "kind": "range",
+                    "slideId": slide_id,
+                    "shapeId": shape_id,
+                    "storyId": story_id,
+                    "start": 0,
+                    "end": 2
+                },
+                "patch": {
+                    "fontFamily": "Arial"
+                }
+            }
+        ]
+    }))
+    .unwrap();
+    let applied = session.apply_edits(&request).unwrap().unwrap();
+    assert!(applied.applied);
+    let saved = slide_xml(&session.save().unwrap());
+    assert!(saved.contains(r#"<a:ea typeface="Arial"/>"#), "{saved}");
 }
 
 #[test]
