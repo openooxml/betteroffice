@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/docx",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "sideEffects": [
     "**/docxWorker.*"
   ],

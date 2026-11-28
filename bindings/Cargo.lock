@@ -83,11 +83,11 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "betteroffice-base-latin"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "betteroffice-docx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-docx-edit",
  "betteroffice-docx-layout",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-edit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-docx-layout",
  "betteroffice-docx-parse",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-layout"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-native"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "betteroffice-docx-engine",
  "betteroffice-docx-layout",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-parse"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "betteroffice-docx",
  "betteroffice-python-common",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-docx-raster"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-drawingml"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-fonts"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "cc",
  "quick-xml",
@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-metafile"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -247,11 +247,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-diff"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "betteroffice-ooxml-font-preflight"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-ooxml-text",
  "miniz_oxide 0.9.1",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-raster"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-ooxml-text"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-base-latin",
  "betteroffice-drawingml",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-opc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "js-sys",
  "quick-xml",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-pptx-edit",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-edit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-native"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-parse"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "betteroffice-pptx",
  "betteroffice-python-common",
@@ -381,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-raster"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-pptx-render"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-metafile",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-vsdx-edit",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-edit"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-eval"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-formula",
@@ -461,11 +461,11 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-formula"
-version = "0.6.0"
+version = "0.6.1"
 
 [[package]]
 name = "betteroffice-vsdx-parse"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-raster"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-raster",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-render"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-resolve"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-formula",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-validate"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-vsdx-formula",
  "betteroffice-vsdx-parse",
@@ -536,7 +536,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-fonts",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-calc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-xlsx-model",
  "libm",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-model"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "libm",
  "serde",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-native"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "betteroffice-fonts",
  "betteroffice-ooxml-font-preflight",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-ops"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-parse"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-calc",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "betteroffice-python-common",
  "betteroffice-xlsx",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-raster"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-xlsx-render"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-xlsx-model",

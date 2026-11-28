@@ -1,5 +1,25 @@
 # @betteroffice/docx-native
 
+## 0.6.2
+
+### Patch Changes
+
+- bee9d4d: Typing in a table cell of a document with one section no longer lays out the whole document again on most keystrokes. Documents with section breaks keep the full layout for cell edits.
+- c9a261c: Editing next to text-wrapped floating objects in DOCX lays out faster, because layout after the edit stops once the following text is unchanged. Section grid changes beside such objects are respected.
+- 94e792d: Reduces repeated work when updating selections, page objects, headers and footers while typing in long DOCX documents.
+- ea9805e: Displays cached values from nested DOCX fields in document text.
+- 5f07dd7: Keeps tables of contents and other fields that span paragraphs intact when their entries are edited, inserted or deleted before saving a DOCX file, so page numbers stay updatable in Word.
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- 305d381: A font picked for Chinese, Japanese or Korean text in a document now stays after saving and reopening in Word, and Latin text keeps its East Asian font. Spreadsheet cells given a font no longer follow the theme font in Excel.
+- 8475b31: The Linux GNU binaries load again on glibc 2.17 and newer on both supported architectures.
+- a42798b: Documents saved on Windows are now byte-identical to the same documents saved on Linux and macOS. Saved content does not change.
+- Updated dependencies [e163044]
+- Updated dependencies [662a971]
+  - @betteroffice/fonts@0.5.1
+  - @betteroffice/fonts-cjk@0.5.1
+  - @betteroffice/fonts-intl@0.5.1
+  - @betteroffice/fonts-latin@0.5.1
+
 ## 0.6.1
 
 ### Patch Changes

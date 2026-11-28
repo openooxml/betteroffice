@@ -1,5 +1,15 @@
 # @betteroffice/python-docx
 
+## 0.3.1
+
+### Patch Changes
+
+- ea9805e: Displays cached values from nested DOCX fields in document text.
+- 5f07dd7: Keeps tables of contents and other fields that span paragraphs intact when their entries are edited, inserted or deleted before saving a DOCX file, so page numbers stay updatable in Word.
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- 305d381: A font picked for Chinese, Japanese or Korean text in a document now stays after saving and reopening in Word, and Latin text keeps its East Asian font. Spreadsheet cells given a font no longer follow the theme font in Excel.
+- a42798b: Documents saved on Windows are now byte-identical to the same documents saved on Linux and macOS. Saved content does not change.
+
 ## 0.3.0
 
 ### Minor Changes

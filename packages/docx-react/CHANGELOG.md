@@ -1,5 +1,25 @@
 # @betteroffice/docx-react
 
+## 0.6.2
+
+### Patch Changes
+
+- 721a04b: Toolbar character formatting (size, font, bold, italic, underline, strikethrough, superscript, subscript, color, highlight, clear) now applies to every cell of a multi-cell table selection. Mixed sizes take the chosen size, and each action undoes in one step.
+- Updated dependencies [0069752]
+- Updated dependencies [bee9d4d]
+- Updated dependencies [721a04b]
+- Updated dependencies [212e046]
+- Updated dependencies [c9a261c]
+- Updated dependencies [94e792d]
+- Updated dependencies [9cd8351]
+- Updated dependencies [ea9805e]
+- Updated dependencies [5f07dd7]
+- Updated dependencies [504f163]
+- Updated dependencies [305d381]
+- Updated dependencies [662a971]
+  - @betteroffice/docx@0.6.2
+  - @betteroffice/docx-i18n@0.6.2
+
 ## 0.6.1
 
 ### Patch Changes
