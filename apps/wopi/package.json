@@ -1,7 +1,7 @@
 {
   "name": "@betteroffice/wopi",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "scripts": {
     "test": "bun test src test web/src",

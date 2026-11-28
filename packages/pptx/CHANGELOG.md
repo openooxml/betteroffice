@@ -1,5 +1,18 @@
 # @betteroffice/pptx
 
+## 0.6.2
+
+### Patch Changes
+
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- e163044: The presentation editor loads fallback fonts for scripts like Hebrew, Thai and Devanagari, using the same faces as PNG export. When a font pack is unavailable, it warns once and skips repeated downloads.
+- fc72c4a: Text that overflows its text box can now be clicked, hovered and drag-selected where it spills past the box, not only inside it.
+- 08094a4: PowerPoint editors load Chinese, Japanese, and Korean fonts in slices by default in Chromium and Firefox with worker rendering, and use whole fonts in other browsers. If slices fail, browser fallback keeps text visible.
+- 662a971: Arabic text in Latin fonts uses bundled Noto Naskh Arabic in document, presentation, and spreadsheet editors and in PNG exports, bringing its appearance closer to Office.
+- Updated dependencies [e163044]
+- Updated dependencies [662a971]
+  - @betteroffice/fonts@0.5.1
+
 ## 0.6.1
 
 ## 0.6.0

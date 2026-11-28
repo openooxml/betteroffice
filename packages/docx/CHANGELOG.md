@@ -1,5 +1,25 @@
 # @betteroffice/docx
 
+## 0.6.2
+
+### Patch Changes
+
+- 0069752: Accepting a proposed replacement now keeps the formatting and runs of the words the change did not touch, in the tracked markup and in the saved document.
+- bee9d4d: Typing in a table cell of a document with one section no longer lays out the whole document again on most keystrokes. Documents with section breaks keep the full layout for cell edits.
+- 721a04b: Toolbar character formatting (size, font, bold, italic, underline, strikethrough, superscript, subscript, color, highlight, clear) now applies to every cell of a multi-cell table selection. Mixed sizes take the chosen size, and each action undoes in one step.
+- 212e046: Floating text boxes that do not wrap text now sit at their own position inside table cells that fit on one page, as in Word, instead of over the start of the cell's text.
+- c9a261c: Editing next to text-wrapped floating objects in DOCX lays out faster, because layout after the edit stops once the following text is unchanged. Section grid changes beside such objects are respected.
+- 94e792d: Reduces repeated work when updating selections, page objects, headers and footers while typing in long DOCX documents.
+- 9cd8351: `repackDocx` and Rust `Document::save` return the original package for an unchanged model when the save leaves its core properties, content types and relationships as they were. `repackDocxWithWarnings` names the parts rewritten after a model edit.
+- ea9805e: Displays cached values from nested DOCX fields in document text.
+- 5f07dd7: Keeps tables of contents and other fields that span paragraphs intact when their entries are edited, inserted or deleted before saving a DOCX file, so page numbers stay updatable in Word.
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- 305d381: A font picked for Chinese, Japanese or Korean text in a document now stays after saving and reopening in Word, and Latin text keeps its East Asian font. Spreadsheet cells given a font no longer follow the theme font in Excel.
+- 662a971: Arabic text in Latin fonts uses bundled Noto Naskh Arabic in document, presentation, and spreadsheet editors and in PNG exports, bringing its appearance closer to Office.
+- Updated dependencies [e163044]
+- Updated dependencies [662a971]
+  - @betteroffice/fonts@0.5.1
+
 ## 0.6.1
 
 ## 0.6.0

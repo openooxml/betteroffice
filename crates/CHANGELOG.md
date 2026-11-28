@@ -1,5 +1,29 @@
 # @betteroffice/rust-crates
 
+## 0.6.1
+
+### Patch Changes
+
+- 0069752: Accepting a proposed replacement now keeps the formatting and runs of the words the change did not touch, in the tracked markup and in the saved document.
+- bee9d4d: Typing in a table cell of a document with one section no longer lays out the whole document again on most keystrokes. Documents with section breaks keep the full layout for cell edits.
+- 212e046: Floating text boxes that do not wrap text now sit at their own position inside table cells that fit on one page, as in Word, instead of over the start of the cell's text.
+- 43b15ea: Opening a DOCX with `betteroffice-docx-edit` uses less memory by avoiding a duplicate copy of the parsed document.
+- bda0473: Internal groundwork in `betteroffice-docx-edit`: a native projection of the edit session with a parity harness. Nothing calls it yet, so opening, editing and saving documents is unchanged.
+- 0d2d58e: Internal groundwork: `betteroffice-docx-edit` gains a hidden native section edit plan for the DOCX save. No save calls it yet, so saved documents and every public API are unchanged.
+- c9a261c: Editing next to text-wrapped floating objects in DOCX lays out faster, because layout after the edit stops once the following text is unchanged. Section grid changes beside such objects are respected.
+- 94e792d: Reduces repeated work when updating selections, page objects, headers and footers while typing in long DOCX documents.
+- 9cd8351: `repackDocx` and Rust `Document::save` return the original package for an unchanged model when the save leaves its core properties, content types and relationships as they were. `repackDocxWithWarnings` names the parts rewritten after a model edit.
+- 5695456: Adds internal groundwork for native DOCX saves. No user-visible changes.
+- ea9805e: Displays cached values from nested DOCX fields in document text.
+- 5f07dd7: Keeps tables of contents and other fields that span paragraphs intact when their entries are edited, inserted or deleted before saving a DOCX file, so page numbers stay updatable in Word.
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- 305d381: A font picked for Chinese, Japanese or Korean text in a document now stays after saving and reopening in Word, and Latin text keeps its East Asian font. Spreadsheet cells given a font no longer follow the theme font in Excel.
+- 662a971: Arabic text in Latin fonts uses bundled Noto Naskh Arabic in document, presentation, and spreadsheet editors and in PNG exports, bringing its appearance closer to Office.
+- a42798b: Documents saved on Windows are now byte-identical to the same documents saved on Linux and macOS. Saved content does not change.
+- 287ef07: Collaborative spreadsheet sessions keep the authored height or width of hidden rows and columns: saving writes it instead of zero, and unhiding restores it on every replica.
+- 372e1e3: Printed sheets keep their stored row heights when the default row height is below the font's natural height, so they paginate closer to Excel.
+- d28d5c9: Editing a table header cell now renames the table column as Excel does, so saved workbooks open in Excel without repair; duplicate or cleared headers become unique names such as `Name2` or `Column1`.
+
 ## 0.6.0
 
 ### Minor Changes

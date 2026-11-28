@@ -1,5 +1,39 @@
 # @betteroffice/agents
 
+## 0.4.1
+
+### Patch Changes
+
+- 0069752: Accepting a proposed replacement now keeps the formatting and runs of the words the change did not touch, in the tracked markup and in the saved document.
+- Updated dependencies [0069752]
+- Updated dependencies [bee9d4d]
+- Updated dependencies [721a04b]
+- Updated dependencies [212e046]
+- Updated dependencies [c9a261c]
+- Updated dependencies [94e792d]
+- Updated dependencies [9cd8351]
+- Updated dependencies [ea9805e]
+- Updated dependencies [5f07dd7]
+- Updated dependencies [504f163]
+- Updated dependencies [305d381]
+- Updated dependencies [8475b31]
+- Updated dependencies [e163044]
+- Updated dependencies [fc72c4a]
+- Updated dependencies [08094a4]
+- Updated dependencies [662a971]
+- Updated dependencies [a42798b]
+- Updated dependencies [287ef07]
+- Updated dependencies [372e1e3]
+- Updated dependencies [3bafc1a]
+- Updated dependencies [d28d5c9]
+  - @betteroffice/docx@0.6.2
+  - @betteroffice/docx-native@0.6.2
+  - @betteroffice/pptx@0.6.2
+  - @betteroffice/pptx-native@0.6.2
+  - @betteroffice/xlsx@0.6.2
+  - @betteroffice/xlsx-native@0.6.2
+  - @betteroffice/fonts@0.5.1
+
 ## 0.4.0
 
 ### Minor Changes

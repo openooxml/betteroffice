@@ -1,5 +1,22 @@
 # @betteroffice/xlsx-react
 
+## 0.6.2
+
+### Patch Changes
+
+- 662a971: Arabic text in Latin fonts uses bundled Noto Naskh Arabic in document, presentation, and spreadsheet editors and in PNG exports, bringing its appearance closer to Office.
+- 3bafc1a: The spreadsheet editor uses bundled fallbacks for missing glyphs in scripts such as Hebrew, Thai and Devanagari, with immediate retries after an editor closes mid-load. PNG exports also load script fallbacks for characters introduced by number formats.
+- Updated dependencies [305d381]
+- Updated dependencies [e163044]
+- Updated dependencies [662a971]
+- Updated dependencies [287ef07]
+- Updated dependencies [372e1e3]
+- Updated dependencies [3bafc1a]
+- Updated dependencies [d28d5c9]
+  - @betteroffice/xlsx@0.6.2
+  - @betteroffice/fonts@0.5.1
+  - @betteroffice/xlsx-i18n@0.6.2
+
 ## 0.6.1
 
 ### Patch Changes

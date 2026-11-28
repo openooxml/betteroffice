@@ -1,5 +1,19 @@
 # @betteroffice/xlsx
 
+## 0.6.2
+
+### Patch Changes
+
+- 305d381: A font picked for Chinese, Japanese or Korean text in a document now stays after saving and reopening in Word, and Latin text keeps its East Asian font. Spreadsheet cells given a font no longer follow the theme font in Excel.
+- 662a971: Arabic text in Latin fonts uses bundled Noto Naskh Arabic in document, presentation, and spreadsheet editors and in PNG exports, bringing its appearance closer to Office.
+- 287ef07: Collaborative spreadsheet sessions keep the authored height or width of hidden rows and columns: saving writes it instead of zero, and unhiding restores it on every replica.
+- 372e1e3: Printed sheets keep their stored row heights when the default row height is below the font's natural height, so they paginate closer to Excel.
+- 3bafc1a: The spreadsheet editor uses bundled fallbacks for missing glyphs in scripts such as Hebrew, Thai and Devanagari, with immediate retries after an editor closes mid-load. PNG exports also load script fallbacks for characters introduced by number formats.
+- d28d5c9: Editing a table header cell now renames the table column as Excel does, so saved workbooks open in Excel without repair; duplicate or cleared headers become unique names such as `Name2` or `Column1`.
+- Updated dependencies [e163044]
+- Updated dependencies [662a971]
+  - @betteroffice/fonts@0.5.1
+
 ## 0.6.1
 
 ## 0.6.0

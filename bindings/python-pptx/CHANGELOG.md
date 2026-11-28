@@ -1,5 +1,12 @@
 # @betteroffice/python-pptx
 
+## 0.3.1
+
+### Patch Changes
+
+- 504f163: Word and PowerPoint draw corrected bent connector paths and preserve dash alignment and opacity in PNG exports. Word arrowheads follow the connector’s direction, and PowerPoint bent connectors are selectable along the path, including mitered corners.
+- a42798b: Documents saved on Windows are now byte-identical to the same documents saved on Linux and macOS. Saved content does not change.
+
 ## 0.3.0
 
 ### Minor Changes
