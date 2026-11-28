@@ -441,6 +441,20 @@ globalThis.fetch = async (url) => {
     expect(steps).not.toContain('--publish');
   });
 
+  test('CI builds the bindings without LTO, and the release wheels with it are installed and tested', () => {
+    const python = Bun.YAML.parse(readFileSync(ciWorkflow, 'utf8')) as any;
+    const build = python.jobs.python.steps.find((step: any) => step.name === 'Build and install the extensions');
+    expect(build.env.MATURIN_PEP517_ARGS).toBe('--profile gate');
+    const profiles = (Bun.TOML.parse(readFileSync(join(repository, 'bindings/Cargo.toml'), 'utf8')) as any).profile;
+    expect(profiles.release.lto).toBe(true);
+    expect(profiles.gate).toEqual({ inherits: 'release', lto: false });
+    const dist = Bun.YAML.parse(readFileSync(distWorkflow, 'utf8')) as any;
+    const wheel = dist.jobs.wheels.steps.find((step: any) => step.uses === 'PyO3/maturin-action@v1');
+    expect(wheel.with.args).toContain('--release');
+    expect(dist.jobs.load.needs).toBe('wheels');
+    expect(dist.jobs.load.steps.map((step: any) => step.run ?? '').join('\n')).toContain('python -m pytest');
+  });
+
   test('CI installs the font pack wheels built from this commit before any binding', () => {
     const python = Bun.YAML.parse(readFileSync(ciWorkflow, 'utf8')) as any;
     const steps = python.jobs.python.steps.map((step: any) => step.run ?? '').join('\n');

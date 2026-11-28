@@ -133,9 +133,17 @@ interface EmbedItem {
   embedKind: string;
   payload: Attrs;
   attributes: Attrs;
+  projectedFieldLengths?: ProjectedFieldLengths;
 }
 
 type InlineItem = TextItem | EmbedItem;
+
+interface ProjectedFieldLengths {
+  live: number;
+  seeded: number;
+}
+
+const projectedFieldLengths = new WeakMap<ComplexField, ProjectedFieldLengths>();
 
 const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   paraId: null,
@@ -774,11 +782,8 @@ function hyperlinkKey(attributes: Attrs): string | null {
   return link ? asString(link.href) || '' : null;
 }
 
-function fieldFromPayload(
-  payload: Attrs,
-  attributes: Attrs,
-  format: RunFormatter
-): SimpleField | ComplexField {
+function fieldFromPayload(item: EmbedItem, format: RunFormatter): SimpleField | ComplexField {
+  const { payload, attributes } = item;
   const fieldData = asString(payload.fieldData);
   if (fieldData && fieldData.length <= 2_000_000) {
     try {
@@ -792,6 +797,9 @@ function fieldFromPayload(
       ) {
         const displayMode = asString(payload.displayMode) as 'result' | 'code' | undefined;
         if (stored.fieldTree && displayMode) stored.fieldTree.displayMode = displayMode;
+        if (stored.type === 'complexField' && payload.spanningFieldProjection !== undefined) {
+          projectedFieldLengths.set(stored, item.projectedFieldLengths ?? { live: 1, seeded: 1 });
+        }
         return stored;
       }
     } catch {
@@ -1316,7 +1324,7 @@ function inlineContentForItem(
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ??
-        fieldFromPayload(item.payload, item.attributes, format)
+        fieldFromPayload(item, format)
       );
     case 'math':
       return mathFromPayload(item.payload);
@@ -1422,7 +1430,7 @@ function addToHyperlink(
   else if (item.embedKind === 'field') {
     child =
       commentReferenceFromPayload(item.payload) ??
-      fieldFromPayload(item.payload, item.attributes, format);
+      fieldFromPayload(item, format);
   } else if (item.embedKind === 'math') child = mathFromPayload(item.payload);
   else if (item.embedKind === 'sdt') {
     const control = inlineSdtFromPayload(item.payload, recovery, format);
@@ -1485,21 +1493,34 @@ function restoreProjectedFieldResults(
     return false;
   });
   for (const { owner } of owners) {
-    const stored = fieldFromPayload(owner.payload, owner.attributes, format);
+    const stored = fieldFromPayload(owner, format);
     if (stored.type !== 'complexField') continue;
+    const marked = owner.payload.spanningFieldProjection !== undefined;
     const projection = asObject(owner.payload.resultProjection);
     const originals = Array.isArray(projection?.children) ? projection.children : [];
     const replacements = new Map<number, FieldInlineContent[]>();
+    const currentGroups = groups.get(owner);
+    const units = (length: number, item: InlineItem) => length + (item.kind === 'text' ? item.text.length : 1);
+    if (marked) {
+      const lengths = { live: 1, seeded: 1 };
+      for (const group of currentGroups?.values() ?? []) {
+        lengths.live = group.reduce(units, lengths.live);
+      }
+      owner.projectedFieldLengths = lengths;
+    }
     for (const raw of originals) {
       const child = asObject(raw);
       const index = asFiniteNumber(child?.index);
       if (index === undefined || !Array.isArray(child?.items)) continue;
-      const current = groups.get(owner)?.get(index) ?? [];
+      const lengths = owner.projectedFieldLengths;
+      if (lengths) lengths.seeded = (child.items as InlineItem[]).reduce(units, lengths.seeded);
+      const current = currentGroups?.get(index) ?? [];
       if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
       const rebuilt = fieldInlineContent(buildParagraphContent(current, recovery, format));
       const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
       if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
-        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+        const link = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+        rebuilt[0] = marked ? restorePageReference(link, original) : link;
       }
       replacements.set(index, rebuilt);
     }
@@ -1766,11 +1787,14 @@ function inlineSpanText(child: ParagraphContent): string | null {
     case 'inlineSdt':
     case 'mathEquation':
       return '￼';
-    case 'complexField':
+    case 'complexField': {
+      const lengths = projectedFieldLengths.get(child);
+      if (lengths && lengths.live > 1) return null;
       return [...(child.structuredCode?.inline ?? []), ...(child.structuredResult?.inline ?? [])]
         .some((nested) => nested.type === 'hyperlink' || nested.type === 'simpleField')
         ? null
         : '￼';
+    }
     case 'hyperlink':
       return plainRunsText(child.structuredChildren ?? child.children);
     case 'insertion':
@@ -2106,8 +2130,7 @@ function linkChildLength(child: HyperlinkContent): number {
 
 /**
  * The story units projected content spans. Fields, controls and equations
- * are one embed each; a complex field's hyperlinks and simple fields are
- * seeded ahead of it.
+ * are one embed each, with projected complex field children seeded ahead of it.
  */
 function paragraphContentLength(content: ParagraphContent): number {
   switch (content.type) {
@@ -2118,13 +2141,16 @@ function paragraphContentLength(content: ParagraphContent): number {
         (sum, child) => sum + linkChildLength(child),
         0
       );
-    case 'complexField':
+    case 'complexField': {
+      const lengths = projectedFieldLengths.get(content);
+      if (lengths) return lengths.live;
       return [
         ...(content.structuredCode?.inline ?? []),
         ...(content.structuredResult?.inline ?? []),
       ]
         .filter((child) => child.type === 'hyperlink' || child.type === 'simpleField')
         .reduce((sum, child) => sum + paragraphContentLength(child), 1);
+    }
     case 'simpleField':
     case 'inlineSdt':
     case 'mathEquation':
@@ -2360,10 +2386,16 @@ function baseRawInlineUnits(raw: RawXml): number {
 function restoreForeignInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
   if (!base) return content;
   const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const fields = content.filter((child): child is ComplexField => child.type === 'complexField');
+  const hasProjectedFields = fields.some(field => projectedFieldLengths.has(field));
   const boundaries: CommentBoundary[] = [];
   let offset = 0;
   for (const [index, child] of base.content.entries()) {
-    if (child.type !== 'rawXml') {
+    if (hasProjectedFields && child.type === 'complexField') {
+      const match = fields.findIndex(field => field.instruction === child.instruction);
+      const field = match < 0 ? undefined : fields.splice(match, 1)[0];
+      offset += (field && projectedFieldLengths.get(field)?.seeded) ?? paragraphContentLength(child);
+    } else if (child.type !== 'rawXml') {
       offset += paragraphContentLength(child);
     } else if (KEPT_WORD_INLINE.test(child.xml)) {
       offset += baseRawInlineUnits(child);
@@ -3665,6 +3697,23 @@ function spansParagraphs(field: ComplexField): boolean {
   );
 }
 
+/** Editable runs preceding the page reference of an unlinked spanning TOC. @internal */
+export function unlinkedTocEntryRuns(field: ComplexField): Run[] | undefined {
+  const code = field.structuredCode;
+  const result = field.structuredResult;
+  if (field.fieldType !== 'TOC' || code?.blockCount != null || code?.blocks != null ||
+      (result?.blockCount == null && result?.blocks == null)) return undefined;
+  const inline = result?.inline;
+  if (!Array.isArray(inline)) return undefined;
+  const page = inline.at(-1);
+  if (page?.type !== 'complexField' || page.fieldType !== 'PAGEREF' || spansParagraphs(page)) return undefined;
+  const label = inline.slice(0, -1);
+  if (label.every((child): child is Run => child?.type === 'run' &&
+      child.content.every(item => item.type === 'text' || item.type === 'tab')) &&
+      label.at(-1)?.content.at(-1)?.type === 'tab') return label;
+  return undefined;
+}
+
 /** Whether a field embed's payload holds a complex field spanning paragraphs. */
 function payloadSpansParagraphs(payload: Attrs): boolean {
   const data = payload.fieldData;
@@ -3744,6 +3793,8 @@ function withBlockCounts(field: ComplexField, span: FieldBlockSpan): ComplexFiel
     if (field.fieldTree.code) next.fieldTree.code = structuredCode;
     if (field.fieldTree.result) next.fieldTree.result = structuredResult;
   }
+  const lengths = projectedFieldLengths.get(field);
+  if (lengths) projectedFieldLengths.set(next, lengths);
   return next;
 }
 
@@ -3775,6 +3826,103 @@ function replaceFields(
     return replaced;
   });
   return changed ? next : content;
+}
+
+function pageReferenceTabs(children: readonly HyperlinkContent[]): number[] | undefined {
+  let offset = 0;
+  const tabs: number[] = [];
+  for (const child of children) {
+    if (child.type !== 'run') return undefined;
+    for (const item of child.content) {
+      if (item.type === 'fieldChar' || item.type === 'instrText') return undefined;
+      offset += runContentLength(item);
+      if (item.type === 'tab') tabs.push(offset);
+    }
+  }
+  return tabs;
+}
+
+function restorePageReference(link: Hyperlink, source: Hyperlink): Hyperlink {
+  const live = (link.structuredChildren ?? link.children).map((child): HyperlinkContent => {
+    if (child.type !== 'run' || !child.content.some(item => item.type === 'text' && item.text.includes('\t'))) return child;
+    return { ...child, content: child.content.flatMap((item): RunContent[] => {
+      if (item.type !== 'text' || !item.text.includes('\t')) return [item];
+      return item.text.split(/(\t)/).filter(Boolean).map(text =>
+        text === '\t' ? { type: 'tab' } : { ...item, text }
+      );
+    }) };
+  });
+  const children = source.structuredChildren ?? source.children;
+  const start = children.findIndex(child => child.type === 'run' &&
+    child.content.some(item => item.type === 'fieldChar'));
+  if (start < 1) return link;
+  const markers = children.slice(start).flatMap((child): Run[] => {
+    if (child.type !== 'run') return [];
+    const [first, ...rest] = child.content;
+    if (first?.type === 'fieldChar' && first.charType === 'separate' &&
+      rest.length > 0 && rest.every(item => item.type === 'text')) {
+      return [{ ...child, content: [first] }];
+    }
+    return child.content.length > 0 &&
+      child.content.every(item => item.type === 'fieldChar' || item.type === 'instrText') ? [child] : [];
+  });
+  const types = markers.flatMap(run => run.content.flatMap(item => item.type === 'fieldChar' ? [item.charType] : []));
+  const instruction = markers.flatMap(run => run.content.flatMap(item => item.type === 'instrText' ? [item.text] : [])).join('');
+  const label = children.slice(0, start);
+  const labelTabs = pageReferenceTabs(label);
+  const tabs = pageReferenceTabs(live);
+  const separator = tabs?.at(-1);
+  const length = live.reduce((sum, child) => sum + linkChildLength(child), 0);
+  if (
+    separator === undefined || tabs?.length !== labelTabs?.length ||
+    labelTabs?.at(-1) !== label.reduce((sum, child) => sum + linkChildLength(child), 0) ||
+    types.join(',') !== 'begin,separate,end' || !/^\s*PAGEREF\b/i.test(instruction) ||
+    children[start] !== markers[0] || children.at(-1) !== markers.at(-1) ||
+    !markers.at(-1)!.content.every(item => item.type === 'fieldChar' && item.charType === 'end')
+  ) return link;
+  const restored = insertBoundaries(live, markers.map((_, id) => ({
+    id, kind: 'start', offset: id === markers.length - 1 ? length : separator,
+  })), boundary => markers[boundary.id]!);
+  return linkPart(link, restored as HyperlinkContent[])!;
+}
+
+function restoreSpanningPageReferences(
+  blocks: BlockContent[], base: readonly BlockContent[], storyId: string,
+): BlockContent[] {
+  const liveKeys = storyBlockKeys(blocks, storyId);
+  const live = new Map(liveKeys.map((key, index) => [key, blocks[index]!]));
+  const keys = storyBlockKeys(base, storyId);
+  const sources = new Map<string, Paragraph>();
+  let end = -1;
+  for (const [index, block] of base.entries()) {
+    const key = keys[index];
+    if (key === undefined || block.type !== 'paragraph') continue;
+    const current = live.get(key);
+    if (current?.type !== 'paragraph') continue;
+    for (const field of spanningFields(block.content)) {
+      if (current.content.some(child => child.type === 'complexField' &&
+        projectedFieldLengths.has(child) && child.instruction === field.instruction)) {
+        end = Math.max(end, index + parsedBlockCount(field.structuredCode) + parsedBlockCount(field.structuredResult));
+      }
+    }
+    if (index <= end && current !== block) sources.set(key, block);
+  }
+  if (sources.size === 0) return blocks;
+  return blocks.map((block, index) => {
+    const source = sources.get(liveKeys[index] ?? '');
+    if (!source || block.type !== 'paragraph') return block;
+    const links = source.content.filter((child): child is Hyperlink => child.type === 'hyperlink');
+    const content = block.content.map(child => {
+      if (child.type !== 'hyperlink') return child;
+      const index = links.findIndex(link => link.anchor
+        ? link.anchor === child.anchor
+        : link.href === child.href && link.rId === child.rId);
+      const source = index < 0 ? undefined : links.splice(index, 1)[0];
+      return source ? restorePageReference(child, source) : child;
+    });
+    return content.some((child, index) => child !== block.content[index])
+      ? cloneProjectedParagraph(block, { content }) : block;
+  });
 }
 
 /**
@@ -4601,6 +4749,7 @@ class SaveContext {
     const segments = this.session.storySegments(storyId);
     const trailingByParagraph = new Map<string, BlockBreakKind[]>();
     const spanningEmbeds = new Map<string, Attrs[]>();
+    let hasSpanningFieldProjection = false;
     let paragraphSpanning: Attrs[] = [];
     let closing: string | undefined;
     for (const segment of segments) {
@@ -4612,6 +4761,7 @@ class SaveContext {
       } else {
         if (segment.kind === 'embed' && segment.embedKind === 'field' && payloadSpansParagraphs(segment.payload)) {
           paragraphSpanning.push(segment.payload);
+          if (segment.payload.spanningFieldProjection !== undefined) hasSpanningFieldProjection = true;
         }
         const kind = segment.kind === 'embed' ? blockBreakKind(segment.embedKind) : null;
         if (kind && closing !== undefined) trailingByParagraph.get(closing)!.push(kind);
@@ -4923,8 +5073,9 @@ class SaveContext {
         blocks.push({ type: 'paragraph', content: pendingBreaks });
       }
     }
+    const restored = restoreRawBlocks(blocks, baseBlocks ?? [], storyId);
     const projected = withKeptBlockCounts(
-      restoreRawBlocks(blocks, baseBlocks ?? [], storyId),
+      baseBlocks && hasSpanningFieldProjection ? restoreSpanningPageReferences(restored, baseBlocks, storyId) : restored,
       storyId,
       spanningEmbeds
     );

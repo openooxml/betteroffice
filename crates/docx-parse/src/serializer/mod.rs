@@ -3,6 +3,7 @@
 pub(crate) mod comment_references;
 mod comment_splice;
 pub mod context;
+mod field_spans;
 pub mod foundation;
 pub mod numbering;
 pub mod paragraph;

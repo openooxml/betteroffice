@@ -9,6 +9,7 @@ use crate::formatting::{
 use crate::inline::{
     BookmarkEnd, BookmarkStart, ComplexField, DirectionScope, Hyperlink, InlineNode, InlineSdt,
     MathEquation, Run, RunContent, SdtProperties, SimpleField, field_run_digest, field_runs,
+    inline_holds_field,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -19,6 +20,7 @@ use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
 use super::context::{DeferredFormData, SerializerContext, shared_direction_prefix};
+use super::field_spans::{paragraph_key, spans_paragraphs};
 use super::foundation::{BorderSide, write_border};
 use super::raw::{
     validate_form_field_data, validate_math_subtree, validate_raw_subtree,
@@ -47,8 +49,22 @@ pub fn serialize_paragraph(
 ) -> Result<String, ParseError> {
     context.enter_paragraph(paragraph.rendered_page_break_before == Some(true));
     let enclosing = std::mem::take(&mut context.direction);
-    let result = serialize_paragraph_inner(paragraph, context);
+    let spanning = std::mem::take(&mut context.in_spanning_result);
+    let plan = context
+        .field_spans
+        .paragraphs
+        .get(&paragraph_key(paragraph))
+        .cloned();
+    let result = serialize_paragraph_inner(
+        paragraph,
+        plan.as_ref()
+            .and_then(|plan| plan.closing.as_deref())
+            .unwrap_or(&paragraph.content),
+        plan.as_ref().and_then(|plan| plan.opening),
+        context,
+    );
     context.direction = enclosing;
+    context.in_spanning_result = spanning;
     context.leave_paragraph();
     result.map(
         |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
@@ -91,6 +107,8 @@ fn word_2010_prefix(attributes: &[RawAttribute]) -> (String, bool) {
 
 fn serialize_paragraph_inner(
     paragraph: &Paragraph,
+    contents: &[ParagraphContent],
+    opening: Option<usize>,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(512);
@@ -133,16 +151,28 @@ fn serialize_paragraph_inner(
     append_generated(&mut writer, &properties);
     let mut generated_comment_references = Vec::new();
     let mut upcoming = None;
-    for (index, content) in paragraph.content.iter().enumerate() {
+    let mut fields = 0;
+    for (index, content) in contents.iter().enumerate() {
         if paragraph_content_zero_width(content) && context.direction.any_open() {
             if upcoming.is_none() {
-                upcoming = Some(upcoming_paragraph_scopes(paragraph, Within::of(context)));
+                upcoming = Some(upcoming_paragraph_scopes(
+                    paragraph,
+                    contents,
+                    Within::of(context),
+                ));
             }
             if let Some(scopes) = &upcoming {
                 context.direction.look_ahead(scopes[index]);
             }
         }
-        append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
+        let xml = if let ParagraphContent::Inline(InlineNode::ComplexField(field)) = content {
+            let end_later = opening == Some(fields);
+            fields += 1;
+            serialize_complex_field_with_end(field, end_later, context)?
+        } else {
+            serialize_paragraph_content(content, context)?
+        };
+        append_generated(&mut writer, &xml);
         if let ParagraphContent::CommentRange(marker) = content
             && !generated_comment_references.contains(&marker.id)
             && needs_comment_reference(paragraph, content)
@@ -257,12 +287,11 @@ fn paragraph_content_zero_width(content: &ParagraphContent) -> bool {
     }
 }
 
-/// Whether a node is written inside a content control and inside a tracked change, which decides
-/// the children a hyperlink there writes.
 #[derive(Clone, Copy)]
 struct Within {
     control: bool,
     revision: bool,
+    spanning_result: bool,
 }
 
 impl Within {
@@ -270,6 +299,7 @@ impl Within {
         Self {
             control: context.in_control,
             revision: context.in_revision,
+            spanning_result: context.in_spanning_result,
         }
     }
 }
@@ -277,7 +307,7 @@ impl Within {
 /// Whether a hyperlink written `within` writes its child `child`.
 fn link_writes(child: &InlineNode, within: Within) -> bool {
     match child {
-        _ if within.control && within.revision => true,
+        _ if within.spanning_result || (within.control && within.revision) => true,
         InlineNode::Run(_)
         | InlineNode::BookmarkStart(_)
         | InlineNode::BookmarkEnd(_)
@@ -289,7 +319,7 @@ fn link_writes(child: &InlineNode, within: Within) -> bool {
 
 /// The children a hyperlink written `within` writes, in order.
 fn written_link_children(hyperlink: &Hyperlink, within: Within) -> Vec<&InlineNode> {
-    let expanded = within.control && within.revision;
+    let expanded = within.spanning_result || (within.control && within.revision);
     let nested = hyperlink.structured_children.as_ref().filter(|children| {
         expanded
             || children
@@ -365,17 +395,18 @@ fn upcoming_scopes<'a, N: Borrow<InlineNode>>(
 /// The scopes the first paragraph content with width from each index on keeps open where it
 /// starts, written `within`, found in one pass from the end; `None` where a reference run is
 /// written before it or none follows.
-fn upcoming_paragraph_scopes(
+fn upcoming_paragraph_scopes<'a>(
     paragraph: &Paragraph,
+    contents: &'a [ParagraphContent],
     within: Within,
-) -> Vec<Option<&[DirectionScope]>> {
+) -> Vec<Option<&'a [DirectionScope]>> {
     let revision = Within {
         revision: true,
         ..within
     };
     let mut next = None;
-    let mut upcoming = vec![None; paragraph.content.len()];
-    for (index, content) in paragraph.content.iter().enumerate().rev() {
+    let mut upcoming = vec![None; contents.len()];
+    for (index, content) in contents.iter().enumerate().rev() {
         match content {
             ParagraphContent::Inline(node) if !zero_width(node) => {
                 next = Some(leading_scopes(node, within));
@@ -923,8 +954,17 @@ fn serialize_complex_field(
     field: &ComplexField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
+    serialize_complex_field_with_end(field, false, context)
+}
+
+fn serialize_complex_field_with_end(
+    field: &ComplexField,
+    end_later: bool,
+    context: &mut SerializerContext,
+) -> Result<String, ParseError> {
     let shared = complex_field_direction_scopes(field);
     if let Some(source) = field.source_run_xml.as_deref()
+        && !end_later
         && !context.deletion
         && !context.in_revision
         && field.source_run_digest.as_deref() == Some(field_run_digest(field).as_str())
@@ -1028,18 +1068,20 @@ fn serialize_complex_field(
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
-    let structured = field
-        .structured_result
-        .as_ref()
-        .filter(|content| !content.spans_paragraphs())
-        .and_then(|content| content.inline.as_ref());
-    if let Some(nodes) = structured {
-        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), Within::of(context));
-        for (index, node) in nodes.iter().enumerate() {
+    if let Some((nodes, spanning)) = written_field_result(field, end_later) {
+        let within = Within {
+            spanning_result: spanning || context.in_spanning_result,
+            ..Within::of(context)
+        };
+        let mut upcoming = Upcoming::new(nodes, Some(result_scopes), within);
+        let previous = std::mem::replace(&mut context.in_spanning_result, within.spanning_result);
+        let result = nodes.iter().enumerate().try_for_each(|(index, node)| {
             upcoming.look_ahead(index, context);
             output.push_str(&serialize_inline_node(node, context)?);
-        }
+            Ok::<_, ParseError>(())
+        });
+        context.in_spanning_result = previous;
+        result?;
     } else {
         let mut bookmarks = field_result_bookmarks(field).into_iter().peekable();
         for (index, run) in field.field_result.iter().enumerate() {
@@ -1060,11 +1102,91 @@ fn serialize_complex_field(
             output.push_str(&serialize_inline_node(node, context)?);
         }
     }
-    output.push_str(&context.direction.transition(result_scopes));
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    if !end_later {
+        output.push_str(&context.direction.transition(result_scopes));
+        output.push_str("<w:r>");
+        output.push_str(&properties);
+        output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    }
     Ok(output)
+}
+
+fn written_field_result(field: &ComplexField, end_later: bool) -> Option<(&[InlineNode], bool)> {
+    let part = field.structured_result.as_ref()?;
+    let nodes = part.inline.as_deref()?;
+    if !part.spans_paragraphs() {
+        return Some((nodes, false));
+    }
+    let runs = |node: &&InlineNode| matches!(node, InlineNode::Run(_));
+    (end_later
+        && nodes.iter().flat_map(field_runs).eq(&field.field_result)
+        && closed_inline_fields(nodes)
+        && (!result_has_unprojected_fields(nodes) || field_result_bookmarks(field).is_empty())
+        && nodes.iter().all(|node| match node {
+            InlineNode::Hyperlink(link) => {
+                link.structured_children.as_ref().is_none_or(|children| {
+                    children
+                        .iter()
+                        .filter(runs)
+                        .eq(link.children.iter().filter(runs))
+                })
+            }
+            _ => true,
+        })
+        && !super::splice::spanning_result_has_unprojected_comments(nodes))
+    .then_some((nodes, true))
+}
+
+fn result_has_unprojected_fields(nodes: &[InlineNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        InlineNode::Run(_) => false,
+        InlineNode::Hyperlink(link) => link
+            .structured_children
+            .as_deref()
+            .unwrap_or(&link.children)
+            .iter()
+            .any(|child| {
+                !matches!(child, InlineNode::Run(_))
+                    && inline_holds_field(std::slice::from_ref(child))
+            }),
+        _ => inline_holds_field(std::slice::from_ref(node)),
+    })
+}
+
+fn closed_inline_fields(nodes: &[InlineNode]) -> bool {
+    let mut depth = 0;
+    for node in nodes {
+        match node {
+            InlineNode::Run(run) => {
+                for item in &run.content {
+                    if let RunContent::FieldChar { char_type, .. } = item {
+                        match char_type.as_str() {
+                            "begin" => depth += 1,
+                            "separate" if depth > 0 => {}
+                            "end" if depth > 0 => depth -= 1,
+                            _ => return false,
+                        }
+                    }
+                }
+            }
+            InlineNode::Hyperlink(link) => {
+                if !closed_inline_fields(
+                    link.structured_children
+                        .as_deref()
+                        .unwrap_or(&link.children),
+                ) {
+                    return false;
+                }
+            }
+            InlineNode::InlineSdt(sdt) if !closed_inline_fields(&sdt.content) => return false,
+            InlineNode::Tracked(change) if !closed_inline_fields(&change.content) => {
+                return false;
+            }
+            InlineNode::ComplexField(field) if spans_paragraphs(field) => return false,
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 pub fn serialize_inline_sdt(

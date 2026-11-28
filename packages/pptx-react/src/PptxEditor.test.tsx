@@ -1320,6 +1320,30 @@ describe('PptxEditor caret painting', () => {
     expect(calls).toEqual([[120, 10, 1.5, 20]]);
   });
 
+  it('paints the caret black or white against the fill', () => {
+    const fills: string[] = [];
+    const ctx = {
+      save: () => undefined,
+      restore: () => undefined,
+      setTransform: () => undefined,
+      fillRect: () => fills.push(String(ctx.fillStyle)),
+      fillStyle: '',
+    } as unknown as CanvasRenderingContext2D;
+    const withRun = (color: string, background: string): SlideDisplayList => ({
+      ...frame,
+      background: { kind: 'solid', color: background },
+      primitives: frame.primitives.map((primitive) => primitive.kind === 'textBox'
+        ? { ...primitive, lines: primitive.lines.map((line) => ({ ...line, runs: [{ start: line.start, end: line.end, text: 'xxxxx', color }] as typeof line.runs })) }
+        : primitive),
+    });
+    const caret = { shapeId: 'shape', storyId: 'story', anchor: 2, focus: 2, focusLine: 0 };
+
+    paintSelection(ctx, withRun('#ffffff', '#101828'), caret, 1, 1);
+    paintSelection(ctx, withRun('#101828', '#ffffff'), caret, 1, 1);
+
+    expect(fills).toEqual(['#ffffff', '#000000']);
+  });
+
   it('stops caret blinking while blurred or hidden', async () => {
     const originalSetInterval = window.setInterval;
     const originalClearInterval = window.clearInterval;

@@ -1481,33 +1481,36 @@ fn keeps_ranges(source: &str, written: &str) -> Option<bool> {
     Some(unwrapped(source)? && unwrapped(written)? && crossing(source)? == crossing(written)?)
 }
 
-fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
-    fn without_local_fields(xml: &str) -> Option<String> {
-        let mut depth = 0usize;
-        let mut cursor = 0;
-        let mut output = String::new();
-        for tag in tags(xml)? {
-            if tag.name != "w:fldChar" {
-                continue;
-            }
-            if !tag.empty || tag.end {
-                return None;
-            }
+fn without_field_characters(xml: &str, local_only: bool) -> Option<String> {
+    let mut depth = 0usize;
+    let mut cursor = 0;
+    let mut output = String::new();
+    for tag in tags(xml)? {
+        if tag.name != "w:fldChar" {
+            continue;
+        }
+        if !tag.empty || tag.end {
+            return None;
+        }
+        if local_only {
             match unescaped(xml, attribute(&tag, "w:fldCharType")?)?.as_str() {
                 "begin" => depth += 1,
                 "end" => depth = depth.checked_sub(1)?,
                 "separate" if depth > 0 => {}
                 _ => return None,
             }
-            output.push_str(&xml[cursor..tag.range.start]);
-            cursor = tag.range.end;
         }
-        output.push_str(&xml[cursor..]);
-        (depth == 0).then_some(output)
+        output.push_str(&xml[cursor..tag.range.start]);
+        cursor = tag.range.end;
     }
+    output.push_str(&xml[cursor..]);
+    (depth == 0).then_some(output)
+}
+
+fn keeps_local_field_ranges(source: &str, written: &str) -> Option<bool> {
     keeps_ranges(
-        &without_local_fields(source)?,
-        &without_local_fields(written)?,
+        &without_field_characters(source, true)?,
+        &without_field_characters(written, true)?,
     )
 }
 
@@ -1551,14 +1554,63 @@ fn field_character_types(xml: &str) -> Option<Vec<&'static str>> {
         if tag.end || local_name(tag.name) != "fldChar" {
             continue;
         }
-        types.push(match &*unescaped(xml, attribute(&tag, "w:fldCharType")?)? {
-            "begin" => "begin",
-            "separate" => "separate",
-            "end" => "end",
-            _ => return None,
-        });
+        types.push(field_character_type(xml, &tag)?);
     }
     Some(types)
+}
+
+fn field_character_type(xml: &str, tag: &Tag<'_>) -> Option<&'static str> {
+    match &*unescaped(xml, attribute(tag, "w:fldCharType")?)? {
+        "begin" => Some("begin"),
+        "separate" => Some("separate"),
+        "end" => Some("end"),
+        _ => None,
+    }
+}
+
+fn spanning_field_boundaries(xml: &str) -> Option<HashSet<usize>> {
+    let mut boundaries = HashSet::new();
+    let mut paragraphs = Vec::new();
+    let mut stories = vec![Vec::new()];
+    for tag in tags(xml)? {
+        match tag.name {
+            "w:p" if tag.end => {
+                paragraphs.pop();
+            }
+            "w:p" if !tag.empty => paragraphs.push(tag.range.start),
+            "w:txbxContent" | "w:footnote" | "w:endnote" | "w:comment" if tag.end => {
+                stories.pop();
+            }
+            "w:txbxContent" | "w:footnote" | "w:endnote" | "w:comment" if !tag.empty => {
+                stories.push(Vec::new());
+            }
+            _ if !tag.end && local_name(tag.name) == "fldChar" => {
+                let Some(&paragraph) = paragraphs.last() else {
+                    continue;
+                };
+                let fields = stories.last_mut()?;
+                match field_character_type(xml, &tag) {
+                    Some("begin") => fields.push((paragraph, Vec::new())),
+                    Some("separate") => {
+                        if let Some((_, separates)) = fields.last_mut() {
+                            separates.push(paragraph);
+                        }
+                    }
+                    Some("end") => {
+                        if let Some((begin, separates)) = fields.pop()
+                            && begin != paragraph
+                        {
+                            boundaries.extend([begin, paragraph]);
+                            boundaries.extend(separates);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(boundaries)
 }
 
 /// How many fields `xml` begins and ends outside every other field before the first field it
@@ -2230,6 +2282,24 @@ fn inline_comment_markers(node: &InlineNode, keys: &mut CommentKeys) {
         InlineNode::RawXml(raw) => xml_comment_markers(&raw.xml, keys),
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => {}
     }
+}
+
+pub(super) fn spanning_result_has_unprojected_comments(nodes: &[InlineNode]) -> bool {
+    let mut keys = CommentKeys::new();
+    for node in nodes {
+        match node {
+            InlineNode::Run(_) | InlineNode::SimpleField(_) => {}
+            InlineNode::Hyperlink(link) => {
+                for child in link.structured_children.iter().flatten() {
+                    if !matches!(child, InlineNode::Run(_)) {
+                        inline_comment_markers(child, &mut keys);
+                    }
+                }
+            }
+            _ => inline_comment_markers(node, &mut keys),
+        }
+    }
+    !keys.is_empty()
 }
 
 fn run_comment_markers(run: &Run, keys: &mut CommentKeys) {
@@ -2986,11 +3056,22 @@ fn splice_story_part_inner(
                             .paragraph_patches
                             .iter()
                             .any(|entry| entry.ordinal == *ordinal));
-                if legacy {
+                if recorded.carried_field_ends.contains(ordinal)
+                    || (recorded.paired_fields.contains(ordinal)
+                        && keeps_field_characters(paragraph, xml))
+                {
+                    keeps_ranges(
+                        &without_field_characters(paragraph, false)?,
+                        &without_field_characters(xml, false)?,
+                    )?
+                } else if legacy {
                     keeps_local_field_ranges(paragraph, xml)?
                 } else {
                     keeps_ranges(paragraph, xml)?
                 }
+            }
+            None if recorded.moved_field_ends.contains(ordinal) => {
+                simple(&without_field_characters(paragraph, false)?)?
             }
             None => simple(paragraph)?,
         };
@@ -3177,8 +3258,12 @@ fn splice_story_part_inner(
     if !unique_ranges(&source, fragments.iter().copied())? {
         return None;
     }
+    let output = fragments.concat();
+    if !recorded.moved_field_ends.is_empty() && !keeps_field_characters(&source, &output) {
+        return None;
+    }
     options.replace_reasons.extend(tables.reasons);
-    Some(fragments.concat())
+    Some(output)
 }
 
 fn admit_fragment_namespaces(
@@ -3523,11 +3608,19 @@ pub(crate) fn replace_story_part(
         let rank = u8::from(matches!(anchor, S13SpliceAnchor::Before(_)));
         edits.push((at..at, rank, xml));
     }
-    if edits
+    let changed_boundaries: Vec<_> = edits
         .iter()
-        .any(|(range, _, xml)| !keeps_field_characters(&source[range.clone()], xml))
-        && unpaired_field_characters(&source)
+        .filter(|(range, _, xml)| !keeps_field_characters(&source[range.clone()], xml))
+        .map(|(range, _, _)| range)
+        .collect();
+    if !changed_boundaries.is_empty()
+        && (unpaired_field_characters(&source)
             .is_some_and(|unpaired| unpaired.iter().all(|kind| *kind == "separate"))
+            || spanning_field_boundaries(&source).is_some_and(|boundaries| {
+                changed_boundaries
+                    .iter()
+                    .any(|range| !range.is_empty() && boundaries.contains(&range.start))
+            }))
     {
         reasons.push("field: replacement changes the field characters around it".to_owned());
         return None;
@@ -7610,17 +7703,22 @@ mod tests {
     }
 
     #[test]
-    fn a_stray_field_separate_leaves_a_closing_paragraph_edit_declined() {
+    fn a_stray_field_character_leaves_a_closing_paragraph_edit_declined() {
         let opening = "<w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText xml:space=\"preserve\"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>First entry</w:t></w:r></w:p>";
         let closing = "<w:p><w:r><w:t>Second entry</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r><w:r><w:t>After the end</w:t></w:r></w:p>";
-        let stray = "<w:p><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Stray</w:t></w:r></w:p>";
         let outside = "<w:p><w:r><w:t>Outside the field</w:t></w:r></w:p>";
-        let source = body(&format!("{opening}{closing}{stray}{outside}"));
         let edited_closing = "<w:p><w:r><w:t>Second entry, edited</w:t></w:r><w:r><w:t>After the end</w:t></w:r></w:p>";
-        assert_eq!(
-            replaced(&source, &[opening, edited_closing, stray, outside], &[1]),
-            None
-        );
+        for kind in ["separate", "begin", "end"] {
+            let stray = format!(
+                "<w:p><w:r><w:fldChar w:fldCharType=\"{kind}\"/></w:r><w:r><w:t>Stray</w:t></w:r></w:p>"
+            );
+            let source = body(&format!("{opening}{closing}{stray}{outside}"));
+            assert_eq!(
+                replaced(&source, &[opening, edited_closing, &stray, outside], &[1]),
+                None,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
