@@ -139,7 +139,7 @@ pub(crate) fn seed_story(
             if !run.text.is_empty() {
                 let style = style_from_run_properties(&run.properties, theme);
                 let index = story.len(txn);
-                insert_styled_text(&story, txn, index, &run.text, &style, false);
+                insert_styled_text(&story, txn, index, &run.text, &style, false, None);
             }
         }
         let bullet_json = paragraph
@@ -171,7 +171,11 @@ pub(crate) fn seed_plain_story(
 ) -> TextRef {
     let story = stories.insert(txn, story_id, TextPrelim::new(""));
     if !text.is_empty() {
-        insert_styled_text(&story, txn, 0, text, style, false);
+        let east_asian = style
+            .font_family
+            .as_deref()
+            .filter(|_| uses_east_asian_slot(text));
+        insert_styled_text(&story, txn, 0, text, style, false, east_asian);
     }
     append_pilcrow(&story, txn, paragraph_id, None, 0, None);
     story
@@ -743,8 +747,8 @@ impl DeckSession {
         }
         if !text.is_empty() {
             let mut style = style.clone();
+            let diffs = story.diff(&txn, YChange::identity);
             let clear_strike = style.strike.as_deref() == Some("noStrike") && {
-                let diffs = story.diff(&txn, YChange::identity);
                 let paragraph = markers_in(&diffs)
                     .iter()
                     .position(|(offset, _)| *offset >= index)
@@ -755,6 +759,7 @@ impl DeckSession {
             if clear_strike {
                 style.strike = None;
             }
+            let east_asian = inserted_east_asian_font(&diffs, index, text, &style);
             insert_styled_text(
                 &story,
                 &mut txn,
@@ -762,6 +767,7 @@ impl DeckSession {
                 text,
                 &style,
                 inherit_strike && !clear_strike,
+                east_asian.as_deref(),
             );
         }
         let length = text.encode_utf16().count() as u32;
@@ -941,6 +947,14 @@ impl DeckSession {
                         value
                     };
                     let attrs = Attrs::from([(Arc::from(key), value)]);
+                    story.format(&mut txn, segment_start, segment_end - segment_start, attrs);
+                }
+            }
+            if let Some(family) = patch.font_family.as_deref() {
+                let segment_text = text_in_range(&story, &txn, segment_start, segment_end);
+                if uses_east_asian_slot(&segment_text) {
+                    let attrs =
+                        Attrs::from([(Arc::from(EAST_ASIAN_FONT_FAMILY), Any::from(family))]);
                     story.format(&mut txn, segment_start, segment_end - segment_start, attrs);
                 }
             }
@@ -1640,6 +1654,83 @@ fn text_in_range<T: ReadTxn>(story: &TextRef, txn: &T, start: u32, end: u32) -> 
     output
 }
 
+const EAST_ASIAN_FONT_FAMILY: &str = "eastAsianFontFamily";
+
+pub(crate) fn uses_east_asian_slot(text: &str) -> bool {
+    !text.is_ascii()
+        && ooxml_text::font_slot_characters(text, false, false).any(|(_, slot)| slot == 2)
+}
+
+pub(crate) fn story_east_asian_fonts_by_id<T: ReadTxn>(
+    txn: &T,
+    story_id: &str,
+) -> EditResult<Vec<Vec<Option<String>>>> {
+    let story = story_ref(txn, story_id)?;
+    Ok(story_east_asian_fonts(&story, txn))
+}
+
+pub(crate) fn story_east_asian_fonts<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+) -> Vec<Vec<Option<String>>> {
+    let mut paragraphs = Vec::new();
+    let mut runs = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        match diff.insert {
+            Out::Any(Any::String(_)) => runs.push(
+                diff.attributes
+                    .as_deref()
+                    .and_then(|attrs| any_string(attrs.get(EAST_ASIAN_FONT_FAMILY))),
+            ),
+            Out::YMap(map) => {
+                if runs.is_empty() && map_string(&map, txn, "emptyStyleJson").is_some() {
+                    runs.push(None);
+                }
+                paragraphs.push(std::mem::take(&mut runs));
+            }
+            _ => {}
+        }
+    }
+    paragraphs
+}
+
+fn font_beside(diffs: &[Diff<YChange>], index: u32) -> Option<(Option<String>, Option<String>)> {
+    let mut offset = 0;
+    for diff in diffs {
+        let length = out_len(&diff.insert);
+        if index <= offset + length {
+            if matches!(diff.insert, Out::Any(Any::String(_))) {
+                let attrs = diff.attributes.as_deref();
+                return Some((
+                    attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
+                    attrs.and_then(|attrs| any_string(attrs.get(EAST_ASIAN_FONT_FAMILY))),
+                ));
+            }
+            if index == offset {
+                return None;
+            }
+        }
+        offset += length;
+    }
+    None
+}
+
+fn inserted_east_asian_font(
+    diffs: &[Diff<YChange>],
+    index: u32,
+    text: &str,
+    style: &TextStyle,
+) -> Option<String> {
+    let family = style.font_family.as_deref()?;
+    match font_beside(diffs, index) {
+        Some((beside_latin, Some(beside_ea))) if beside_latin.as_deref() == Some(family) => {
+            Some(beside_ea)
+        }
+        Some((beside_latin, None)) if beside_latin.as_deref() == Some(family) => None,
+        _ => uses_east_asian_slot(text).then(|| family.to_owned()),
+    }
+}
+
 pub(crate) fn insert_styled_text(
     story: &TextRef,
     txn: &mut TransactionMut<'_>,
@@ -1647,6 +1738,7 @@ pub(crate) fn insert_styled_text(
     text: &str,
     style: &TextStyle,
     inherit_strike: bool,
+    east_asian_font_family: Option<&str>,
 ) {
     story.insert(txn, index, text);
     let length = text.encode_utf16().count() as u32;
@@ -1656,6 +1748,13 @@ pub(crate) fn insert_styled_text(
         }
         story.format(txn, index, length, Attrs::from([(Arc::from(key), value)]));
     }
+    let east_asian = east_asian_font_family.map(Any::from).unwrap_or(Any::Null);
+    story.format(
+        txn,
+        index,
+        length,
+        Attrs::from([(Arc::from(EAST_ASIAN_FONT_FAMILY), east_asian)]),
+    );
 }
 
 fn style_values(style: &TextStyle) -> [(&'static str, Any); 11] {

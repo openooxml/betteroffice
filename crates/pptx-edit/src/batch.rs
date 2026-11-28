@@ -920,6 +920,8 @@ fn patch_changes(
                     || differs(&style.font_size_pt, &patch.font_size_pt)
                     || differs(&style.color, &patch.color)
                     || differs(&style.font_family, &patch.font_family)
+                    || (patch.font_family.is_some()
+                        && crate::story::uses_east_asian_slot(&run.text))
                     || differs(&style.underline, &patch.underline)
                     || strike_changed
                     || differs(&style.spacing_pt, &patch.spacing_pt)
@@ -1629,7 +1631,10 @@ impl DeckSession {
                 );
             }
         };
-        if staged == plan.before {
+        if staged == plan.before
+            && crate::save::collect_east_asian_fonts(&stage.doc, &staged)?
+                == crate::save::collect_east_asian_fonts(&self.doc, &plan.before)?
+        {
             return Ok(Ok(None));
         }
         for planned in plan.steps.iter().filter(|planned| planned.effect.is_some()) {

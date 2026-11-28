@@ -1043,6 +1043,8 @@ pub struct RunProperties {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asian_font_family: Option<String>,
     pub color: Option<ColorValue>,
     pub language: Option<String>,
     pub hyperlink_relationship_id: Option<String>,
