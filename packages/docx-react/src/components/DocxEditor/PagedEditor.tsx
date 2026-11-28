@@ -132,6 +132,7 @@ import { HyperlinkPopup, type HyperlinkPopupData } from '../ui/HyperlinkPopup';
 import {
   applyYrsToolbarFormatting,
   currentYrsToolbarSelection,
+  selectedYrsToolbarCells,
   storedYrsToolbarFormatting,
   withStoredYrsFormatting,
   type FormattingAction,
@@ -1173,7 +1174,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             }
             return syncYrsInputState(true);
           }
-          if (selection && !selection.context.hasSelection) {
+          if (
+            selection &&
+            !selection.context.hasSelection &&
+            !selectedYrsToolbarCells(yrsCore.session, selection.range)
+          ) {
             const storedAction = storedYrsToolbarFormatting(selection.context, action);
             if (storedAction) {
               yrsInputRef.current?.applyStoredFormatting(storedAction);

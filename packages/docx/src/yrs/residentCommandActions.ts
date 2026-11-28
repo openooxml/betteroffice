@@ -15,7 +15,9 @@ import {
 import { projectDocxEditState, withStoredMarks } from './residentCommandEditState';
 import { resolveDocxSelectionIntent, selectResidentPartPage } from './residentCommandSelection';
 import { applyCellNavigation, resolveCellNavigation } from './residentCommandCells';
-import { cellsForCaret, readCellSelection, resolveLiveCell, tableRangeFor } from './residentCommandTableSelection';
+import { cellsForCaret, readCellSelection, resolveLiveCell, selectedCellRanges, tableRangeFor } from './residentCommandTableSelection';
+import { toggleAcross } from './cellSelectionFormatting';
+import { tableAnchors } from './storyPlainText';
 import {
   applyTableCommand, isTableCommandKind, liveTableAncestors, nearTable,
   preflightTableCommand, syncCellSelectionWithCaret, type TableCommandIntent,
@@ -50,6 +52,7 @@ import type {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const PROTECTED_MARKS = new Set(['ins', 'del', 'hyperlink', 'rPrChange']);
 const IDENTITY_KEYS = new Set(['paraId', '_kind', 'ooxmlParaId', 'sourceParaId', 'paraOrigin']);
+const INLINE_FORMATTING = new Set(['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting']);
 
 /** Whether `engine` can put a paragraph on a list, which the list toggle needs. */
 function ensuresLists(
@@ -58,8 +61,29 @@ function ensuresLists(
   return typeof engine.ensureListDefinition === 'function';
 }
 
-function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range: YrsStoryRange): boolean {
+function formattingRangeContainsContainer(
+  engine: DocxWorkerCommandEngine, range: YrsStoryRange, includeChildren: boolean
+): boolean {
   if (collapsed(range)) return false;
+  const visited = new Set([range.story]);
+  function storyContainsContainer(story: string): boolean {
+    if (visited.has(story) || !engine.geometryReader.hasStory(story)) return false;
+    visited.add(story);
+    return engine.storySegments(story).some(segmentContainsContainer);
+  }
+  function segmentContainsContainer(segment: YrsStorySegment): boolean {
+    if (includeChildren && segment.kind === 'embed') {
+      const { embedKind, payload } = segment;
+      if (embedKind === 'table' && Array.isArray(payload.rows)) {
+        return tableAnchors({ rows: payload.rows }).anchors.some(({ story }) => storyContainsContainer(story));
+      }
+      if (embedKind === 'blockSdt' && typeof payload.story === 'string') {
+        return storyContainsContainer(payload.story);
+      }
+    }
+    return Object.hasOwn(segment.attributes, 'fieldResult') || segment.kind === 'embed' &&
+      (segment.embedKind === 'sdt' || segment.embedKind === 'field' && segment.payload.modelKind === 'field');
+  }
   const spans = engine.geometryReader.paragraphSpans(range.story);
   const first = spans.findIndex(span => span.paraId === range.start.paraId);
   const last = spans.findIndex(span => span.paraId === range.end.paraId);
@@ -71,9 +95,7 @@ function formattingRangeContainsContainer(engine: DocxWorkerCommandEngine, range
     return segments.some(segment => {
       const at = offset;
       offset += segment.kind === 'text' ? segment.text.length : 1;
-      return Math.min(offset, end) > Math.max(at, start) &&
-        (Object.hasOwn(segment.attributes, 'fieldResult') || segment.kind === 'embed' &&
-          (segment.embedKind === 'sdt' || segment.embedKind === 'field' && segment.payload.modelKind === 'field'));
+      return Math.min(offset, end) > Math.max(at, start) && segmentContainsContainer(segment);
     });
   });
 }
@@ -767,9 +789,11 @@ export function preflightDocxCommand(
   }
   if (readOnly) return refuse('read-only');
   if (breakRefusedWhileSuggesting(command.kind, 'suggesting' in command.payload && command.payload.suggesting !== undefined)) return refuse('unsupported-suggesting');
-  if (['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind) &&
+  const cellRanges = INLINE_FORMATTING.has(command.kind) && collapsed(resolved.range)
+    ? selectedCellRanges(engine, resolved.selection.focus) : null;
+  if (INLINE_FORMATTING.has(command.kind) &&
     'suggesting' in command.payload && command.payload.suggesting !== undefined &&
-    formattingRangeContainsContainer(engine, resolved.range)) return refuse('unsupported-suggesting');
+    (cellRanges ?? [resolved.range]).some(range => formattingRangeContainsContainer(engine, range, cellRanges !== null))) return refuse('unsupported-suggesting');
   if (command.kind === 'insertPageBreak' || command.kind === 'insertSectionBreak') {
     if (resolved.range.story !== 'body') return refuse('invalid-selection');
     const index = engine.geometryReader.paragraphSpans('body').findIndex(span => span.paraId === resolved.range.start.paraId);
@@ -823,7 +847,7 @@ export function preflightDocxCommand(
     range = expanded;
   }
   return { status: 'ready', prepared: {
-    command: structuredClone(command), selection: resolved.selection, range,
+    command: structuredClone(command), selection: resolved.selection, range, ...(cellRanges ? { cellRanges } : {}),
   } };
 }
 
@@ -1237,11 +1261,15 @@ function applyPreparedDocxCommand(
     publish(selection, true);
     return result('noop');
   }
-  if (state.storedMarks && (state.storedMarks.story !== selection.focus.story ||
+  if (prepared.cellRanges?.length === 0) {
+    publish(selection);
+    return result('noop');
+  }
+  if (state.storedMarks && (prepared.cellRanges || state.storedMarks.story !== selection.focus.story ||
     state.storedMarks.paraId !== selection.focus.paraId || !sameSelection(priorSelection, selection) ||
     selection.anchor.paraId !== selection.focus.paraId || selection.anchor.offset !== selection.focus.offset)) state.storedMarks = null;
   publish(selection);
-  if (collapsed(range) && ['toggleMark', 'toggleStrike', 'formatRange', 'formatSelection', 'clearFormatting'].includes(command.kind)) {
+  if (!prepared.cellRanges && collapsed(range) && INLINE_FORMATTING.has(command.kind)) {
     const current = state.storedMarks;
     const toolbar = command.kind === 'toggleMark' || command.kind === 'toggleStrike' ? engine.selectionContext(range) : undefined;
     const delta = command.kind === 'toggleStrike' ? { strike: withStoredMarks(toolbar!, current).strike !== true } : command.kind === 'toggleMark' ? markDelta(command.payload.mark, withStoredMarks(toolbar!, current)) :
@@ -1269,6 +1297,7 @@ function applyPreparedDocxCommand(
   let replacePasteRefused: 'nothing-to-undo' | 'paste-changed' | null = null;
   let pastedOver: YrsStoryRange | null = null;
   let pastedMarks: DocxStoredMarks | null = null;
+  const ranges = prepared.cellRanges ?? [range];
   switch (command.kind) {
     case 'setTabStops':
       engine.setParagraphAttrs(range, { tabs: command.payload.tabs });
@@ -1390,7 +1419,10 @@ function applyPreparedDocxCommand(
         { caret, repair: () => repairCommandSelection(engine, state) });
       break;
     }
-    case 'toggleStrike': engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting); break;
+    case 'toggleStrike':
+      if (prepared.cellRanges) toggleAcross(engine, ranges, 'strike', command.payload.suggesting);
+      else engine.formatRange(range, { strike: engine.selectionContext(range).strike !== true }, command.payload.suggesting);
+      break;
     case 'pasteFragment': {
       pastedMarks = state.storedMarks ? structuredClone(state.storedMarks) : null;
       state.storedMarks = null;
@@ -1420,9 +1452,17 @@ function applyPreparedDocxCommand(
       }
       break;
     }
-    case 'toggleMark': engine.toggleMark(range, command.payload.mark, command.payload.suggesting); break;
-    case 'formatSelection': case 'formatRange': engine.formatRange(range, command.payload.delta, command.payload.suggesting); break;
-    case 'clearFormatting': engine.clearFormatting(range, command.payload.suggesting); break;
+    case 'toggleMark': {
+      const { mark, suggesting } = command.payload;
+      if (!prepared.cellRanges || mark.type === 'fontFamily' || mark.type === 'fontSize' || mark.type === 'color') {
+        for (const target of ranges) engine.toggleMark(target, mark, suggesting);
+      } else toggleAcross(engine, ranges, mark.type, suggesting);
+      break;
+    }
+    case 'formatSelection': case 'formatRange':
+      for (const target of ranges) engine.formatRange(target, command.payload.delta, command.payload.suggesting);
+      break;
+    case 'clearFormatting': for (const target of ranges) engine.clearFormatting(target, command.payload.suggesting); break;
     case 'setParagraphAttrs': engine.setParagraphAttrs(range, paragraphAttrs(command.payload.attrs), command.payload.suggesting); break;
     case 'applyParagraphStyle': engine.applyParagraphStyle(range, command.payload.styleId, command.payload.suggesting); break;
   }
