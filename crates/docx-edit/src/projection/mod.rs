@@ -222,7 +222,6 @@ struct SourceCache {
     roots: OnceLock<BTreeMap<String, SourceRoot>>,
     stories: BTreeMap<String, Arc<SourceStory>>,
     materialize_media: bool,
-    media: Option<Arc<docx_parse::media::MediaTable>>,
     materialized_document: Option<Arc<S9DocumentWire>>,
 }
 
@@ -230,14 +229,12 @@ impl SourceCache {
     fn new(
         envelope: Arc<S9WireEnvelope>,
         materialize_media: bool,
-        media: Option<docx_parse::media::MediaTable>,
     ) -> Self {
         Self {
             envelope,
             roots: OnceLock::new(),
             stories: BTreeMap::new(),
             materialize_media,
-            media: media.map(Arc::new),
             materialized_document: None,
         }
     }
@@ -256,9 +253,7 @@ impl SourceCache {
         if !self.materialize_media {
             return None;
         }
-        doc.media_table()
-            .or_else(|| self.media.clone())
-            .filter(|table| !table.is_empty())
+        doc.media_table().filter(|table| !table.is_empty())
     }
 
     fn document(&mut self, doc: &EditingDoc) -> Result<S9DocumentWire, ProjectionError> {
@@ -440,18 +435,18 @@ impl ProjectionCache {
     fn resolve_source(source: &SourcePackage) -> Result<SourceCache, String> {
         match source {
             SourcePackage::Ready(index) => {
-                let (envelope, _, media) = crate::seed::parse_docx_package_with_media(
+                let (envelope, _, _) = crate::seed::parse_docx_package_with_media(
                     index.bytes(),
                     index.package_digest().to_owned(),
                 )?;
-                Ok(SourceCache::new(Arc::new(envelope), true, Some(media)))
+                Ok(SourceCache::new(Arc::new(envelope), true))
             }
             SourcePackage::Pending(bytes, digest) => {
                 let digest = digest
                     .clone()
                     .unwrap_or_else(|| crate::seed::package_digest(bytes));
                 crate::seed::parse_docx_package_with_digest(bytes, digest)
-                    .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false, None))
+                    .map(|(envelope, _)| SourceCache::new(Arc::new(envelope), false))
             }
         }
     }
